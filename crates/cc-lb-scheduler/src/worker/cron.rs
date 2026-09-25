@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::SchedulerConfig;
-use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -216,11 +215,7 @@ fn singleton_cron_specs(config: &SchedulerConfig, clock: ClockHandle) -> Vec<Sin
         config,
         &clock,
         "anthropic_compat_refresh",
-        |_| {
-            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
-                CLAUDE_CODE_STABLE_VERSION_KEY,
-            ))
-        },
+        |_| CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::all()),
     );
     push_singleton_spec(&mut specs, config, &clock, "warmup_watchdog", |tick_secs| {
         CronJob::WarmupWatchdog(WarmupWatchdogJob::new(tick_secs))

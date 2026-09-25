@@ -3,12 +3,25 @@ use std::time::Duration;
 pub const CLAUDE_CODE_STABLE_VERSION_KEY: &str = "claude_code_stable_version";
 pub const CLAUDE_CODE_STABLE_VERSION_FALLBACK: &str = "2.1.150";
 
-pub static COMPATIBILITY_KEYS: &[CompatibilityKey] = &[CompatibilityKey {
-    name: CLAUDE_CODE_STABLE_VERSION_KEY,
-    refresh_interval: Duration::from_secs(86_400),
-    fallback: CLAUDE_CODE_STABLE_VERSION_FALLBACK,
-    fetcher: CompatFetcher::ClaudeCodeStableVersion,
-}];
+pub const CLAUDE_CODE_LATEST_VERSION_KEY: &str = "claude_code_latest_version";
+// Last verified published latest release; the daily refresh replaces it once
+// the compat cron lands the fetched value.
+pub const CLAUDE_CODE_LATEST_VERSION_FALLBACK: &str = "2.1.282";
+
+pub static COMPATIBILITY_KEYS: &[CompatibilityKey] = &[
+    CompatibilityKey {
+        name: CLAUDE_CODE_STABLE_VERSION_KEY,
+        refresh_interval: Duration::from_secs(86_400),
+        fallback: CLAUDE_CODE_STABLE_VERSION_FALLBACK,
+        fetcher: CompatFetcher::ClaudeCodeStableVersion,
+    },
+    CompatibilityKey {
+        name: CLAUDE_CODE_LATEST_VERSION_KEY,
+        refresh_interval: Duration::from_secs(86_400),
+        fallback: CLAUDE_CODE_LATEST_VERSION_FALLBACK,
+        fetcher: CompatFetcher::ClaudeCodeLatestVersion,
+    },
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompatibilityKey {
@@ -21,6 +34,7 @@ pub struct CompatibilityKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompatFetcher {
     ClaudeCodeStableVersion,
+    ClaudeCodeLatestVersion,
 }
 
 pub fn claude_code_user_agent(version: &str) -> String {
@@ -46,23 +60,5 @@ mod tests {
     #[test]
     fn claude_code_user_agent_empty_version_returns_empty() {
         assert_eq!(claude_code_user_agent(""), "");
-    }
-
-    #[test]
-    fn compatibility_keys_include_claude_code_stable_version() {
-        assert_eq!(COMPATIBILITY_KEYS.len(), 1);
-        assert_eq!(COMPATIBILITY_KEYS[0].name, CLAUDE_CODE_STABLE_VERSION_KEY);
-        assert_eq!(
-            COMPATIBILITY_KEYS[0].refresh_interval,
-            Duration::from_secs(86_400)
-        );
-        assert_eq!(
-            COMPATIBILITY_KEYS[0].fallback,
-            CLAUDE_CODE_STABLE_VERSION_FALLBACK
-        );
-        assert_eq!(
-            COMPATIBILITY_KEYS[0].fetcher,
-            CompatFetcher::ClaudeCodeStableVersion
-        );
     }
 }

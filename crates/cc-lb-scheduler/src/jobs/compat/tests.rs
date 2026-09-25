@@ -1,8 +1,10 @@
-use cc_lb_control::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
+use cc_lb_control::anthropic_compat::{
+    CLAUDE_CODE_LATEST_VERSION_KEY, CLAUDE_CODE_STABLE_VERSION_KEY, COMPATIBILITY_KEYS,
+};
 
 use crate::state_stores::AnthropicCompatEtagsStore;
 
-use super::test_support::RecordingCompatibilityKv;
+use super::test_support::{RecordingCompatEtags, RecordingCompatibilityKv};
 use super::*;
 
 const INITIAL_TIME: u64 = 1_000;
@@ -89,6 +91,140 @@ where
     assert_eq!(row.last_value_hash, stored_hash);
     assert_eq!(compatibility_kv.value_write_count(), 0);
     Ok(())
+}
+
+#[tokio::test]
+async fn refresh_all_keys_writes_each_key_independently() {
+    let etags = RecordingCompatEtags::default();
+    let compatibility_kv = RecordingCompatibilityKv::default();
+
+    let outcome = handle_anthropic_compat_refresh_job(
+        AnthropicCompatRefreshJob::all(),
+        &etags,
+        &compatibility_kv,
+        |compatibility_key, _stored_etag| async move {
+            Ok(CompatFetch::Modified {
+                value: format!("value-for-{}", compatibility_key.name),
+                etag: Some(format!("etag-for-{}", compatibility_key.name)),
+                source_url: None,
+            })
+        },
+        UPDATED_TIME,
+    )
+    .await
+    .expect("all-keys refresh");
+
+    assert_eq!(outcome, JobOutcome::Done);
+    assert_eq!(
+        compatibility_kv.value_write_count(),
+        COMPATIBILITY_KEYS.len()
+    );
+    for key in COMPATIBILITY_KEYS {
+        let record = compatibility_kv
+            .record(key.name)
+            .unwrap_or_else(|| panic!("{} record persisted", key.name));
+        assert_eq!(record.value, format!("value-for-{}", key.name));
+        let row = etags
+            .read_compat_etag(key.name)
+            .await
+            .expect("etag read")
+            .unwrap_or_else(|| panic!("{} etag row", key.name));
+        assert_eq!(
+            row.etag.as_deref(),
+            Some(format!("etag-for-{}", key.name).as_str())
+        );
+        assert_eq!(
+            row.last_value_hash,
+            compatibility_value_hash(&format!("value-for-{}", key.name))
+        );
+    }
+}
+
+#[tokio::test]
+async fn refresh_all_keys_failed_fetch_does_not_block_other_keys() {
+    let etags = RecordingCompatEtags::default();
+    let compatibility_kv = RecordingCompatibilityKv::default();
+
+    let outcome = handle_anthropic_compat_refresh_job(
+        AnthropicCompatRefreshJob::all(),
+        &etags,
+        &compatibility_kv,
+        |compatibility_key, _stored_etag| async move {
+            if compatibility_key.name == CLAUDE_CODE_STABLE_VERSION_KEY {
+                Err(crate::error::SchedulerError::Job(
+                    "fetch blew up".to_owned(),
+                ))
+            } else {
+                Ok(CompatFetch::Modified {
+                    value: "9.9.9".to_owned(),
+                    etag: None,
+                    source_url: None,
+                })
+            }
+        },
+        UPDATED_TIME,
+    )
+    .await
+    .expect("all-keys refresh");
+
+    // The failed key reschedules the job; the healthy key still persisted.
+    assert_eq!(
+        outcome,
+        JobOutcome::Retry {
+            delay: COMPAT_REFRESH_RETRY_DELAY
+        }
+    );
+    assert_eq!(
+        compatibility_kv
+            .record(CLAUDE_CODE_LATEST_VERSION_KEY)
+            .map(|record| record.value),
+        Some("9.9.9".to_owned())
+    );
+    assert!(
+        compatibility_kv
+            .record(CLAUDE_CODE_STABLE_VERSION_KEY)
+            .is_none()
+    );
+    assert_eq!(compatibility_kv.failure_writes().len(), 1);
+}
+
+#[tokio::test]
+async fn refresh_all_keys_starts_every_fetch_before_any_completes() {
+    let etags = RecordingCompatEtags::default();
+    let compatibility_kv = RecordingCompatibilityKv::default();
+    // Every fetch parks on the barrier until all keys' fetches have started, so
+    // a sequential dispatch loop deadlocks on the first key and trips the guard.
+    let barrier = tokio::sync::Barrier::new(COMPATIBILITY_KEYS.len());
+    let barrier = &barrier;
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle_anthropic_compat_refresh_job(
+            AnthropicCompatRefreshJob::all(),
+            &etags,
+            &compatibility_kv,
+            move |compatibility_key, _stored_etag| async move {
+                barrier.wait().await;
+                Ok(CompatFetch::Modified {
+                    value: format!("value-for-{}", compatibility_key.name),
+                    etag: None,
+                    source_url: None,
+                })
+            },
+            UPDATED_TIME,
+        ),
+    )
+    .await
+    .expect("key fetches must run concurrently")
+    .expect("all-keys refresh");
+
+    assert_eq!(outcome, JobOutcome::Done);
+    for key in COMPATIBILITY_KEYS {
+        assert_eq!(
+            compatibility_kv.record(key.name).map(|record| record.value),
+            Some(format!("value-for-{}", key.name))
+        );
+    }
 }
 
 #[cfg(feature = "sqlite")]

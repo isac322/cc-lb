@@ -20,14 +20,27 @@ pub const COMPAT_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AnthropicCompatRefreshJob {
-    pub key: String,
+    /// `Some(key)` refreshes that registered compatibility key; `None`
+    /// refreshes every key in `COMPATIBILITY_KEYS`. Serialized jobs written by
+    /// older binaries always carry `Some` and keep their keyed semantics.
+    pub key: Option<String>,
     pub traceparent: Option<String>,
 }
 
 impl AnthropicCompatRefreshJob {
+    /// Recurring-cron payload: refresh every registered compatibility key in
+    /// one queued job so the singleton idempotency key stays unique per tick.
+    pub fn all() -> Self {
+        Self {
+            key: None,
+            traceparent: None,
+        }
+    }
+
+    /// Keyed payload: refresh one registered compatibility key.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
-            key: key.into(),
+            key: Some(key.into()),
             traceparent: None,
         }
     }
@@ -65,20 +78,90 @@ pub async fn handle_anthropic_compat_refresh_job<E, K, Fetch, Fetched>(
 where
     E: CompatEtagRepository + Sync,
     K: AnthropicCompatibilityKvStore + ?Sized,
-    Fetch: FnOnce(CompatibilityKey, Option<String>) -> Fetched,
+    Fetch: Fn(CompatibilityKey, Option<String>) -> Fetched,
     Fetched: Future<Output = Result<CompatFetch>>,
 {
-    let Some(compatibility_key) = compatibility_key(&job.key) else {
-        return Ok(JobOutcome::Skip);
+    let single_key;
+    let keys: &[CompatibilityKey] = match job.key.as_deref() {
+        Some(name) => {
+            let Some(compatibility_key) = compatibility_key(name) else {
+                return Ok(JobOutcome::Skip);
+            };
+            single_key = [compatibility_key];
+            &single_key
+        }
+        None => COMPATIBILITY_KEYS,
     };
 
-    let stored = etags.read_compat_etag(&job.key).await?;
+    // Keys refresh concurrently and independently: each channel's fetch can
+    // take up to its full primary+npm timeout budget, so running them in
+    // sequence would overrun the singleton job timeout, and one key's fetch
+    // failure or storage error never blocks the others.
+    let results = futures_util::future::join_all(keys.iter().map(|compatibility_key| {
+        refresh_compat_key(
+            compatibility_key,
+            etags,
+            compatibility_kv,
+            &fetch,
+            now_unix_secs,
+        )
+    }))
+    .await;
+
+    let mut outcome = JobOutcome::Skip;
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(next) => outcome = merge_compat_outcome(outcome, next),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(outcome),
+    }
+}
+
+fn merge_compat_outcome(current: JobOutcome, next: JobOutcome) -> JobOutcome {
+    // A pending retry dominates: failed keys reschedule the job while
+    // refreshed keys re-run as cheap no-ops through the unchanged-hash guard.
+    match (&current, &next) {
+        (JobOutcome::Retry { .. }, _) => current,
+        (_, JobOutcome::Retry { .. }) => next,
+        (JobOutcome::Done, _) | (_, JobOutcome::Done) => JobOutcome::Done,
+        (JobOutcome::Noop, _) | (_, JobOutcome::Noop) => JobOutcome::Noop,
+        _ => next,
+    }
+}
+
+async fn refresh_compat_key<E, K, Fetch, Fetched>(
+    compatibility_key: &CompatibilityKey,
+    etags: &E,
+    compatibility_kv: &K,
+    fetch: &Fetch,
+    now_unix_secs: u64,
+) -> Result<JobOutcome>
+where
+    E: CompatEtagRepository + Sync,
+    K: AnthropicCompatibilityKvStore + ?Sized,
+    Fetch: Fn(CompatibilityKey, Option<String>) -> Fetched,
+    Fetched: Future<Output = Result<CompatFetch>>,
+{
+    let stored = etags.read_compat_etag(compatibility_key.name).await?;
     let stored_etag = stored.as_ref().and_then(|row| row.etag.clone());
-    let fetched = match fetch(compatibility_key, stored_etag).await {
+    let fetched = match fetch(*compatibility_key, stored_etag).await {
         Ok(fetched) => fetched,
         Err(error) => {
             compatibility_kv
-                .put_compatibility_kv_failure(&job.key, now_unix_secs, &error.to_string())
+                .put_compatibility_kv_failure(
+                    compatibility_key.name,
+                    now_unix_secs,
+                    &error.to_string(),
+                )
                 .await
                 .map_err(storage_error)?;
             return Ok(JobOutcome::Retry {
@@ -93,7 +176,7 @@ where
                 let next_etag = etag.as_deref().or(stored.etag.as_deref());
                 etags
                     .upsert_compat_value(
-                        &job.key,
+                        compatibility_key.name,
                         next_etag,
                         &stored.last_value_hash,
                         now_unix_secs,
@@ -113,7 +196,7 @@ where
                 source_url,
             };
             handle_modified(
-                job,
+                compatibility_key.name,
                 etags,
                 compatibility_kv,
                 stored.as_ref(),
@@ -132,7 +215,7 @@ struct ModifiedCompatFetch {
 }
 
 async fn handle_modified<E, K>(
-    job: AnthropicCompatRefreshJob,
+    key_name: &str,
     etags: &E,
     compatibility_kv: &K,
     stored: Option<&AnthropicCompatEtag>,
@@ -149,14 +232,14 @@ where
     {
         let next_etag = modified.etag.as_deref().or(stored.etag.as_deref());
         etags
-            .upsert_compat_value(&job.key, next_etag, &next_hash, now_unix_secs)
+            .upsert_compat_value(key_name, next_etag, &next_hash, now_unix_secs)
             .await?;
         return Ok(JobOutcome::Noop);
     }
 
     compatibility_kv
         .put_compatibility_kv_value(
-            &job.key,
+            key_name,
             &modified.value,
             now_unix_secs,
             modified.source_url.as_deref(),
@@ -165,7 +248,7 @@ where
         .map_err(storage_error)?;
     etags
         .upsert_compat_value(
-            &job.key,
+            key_name,
             modified.etag.as_deref(),
             &next_hash,
             now_unix_secs,

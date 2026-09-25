@@ -57,7 +57,7 @@ The table below lists every job type registered in the scheduler. This list is d
 |---|---|---|---|---|---|---|
 | **UpstreamWarmupJob** | Entity | `adaptive:warmup:<upstream_id>:<cycle_key>` | Entity | Enqueued by watchdog when warmup is due (every 5 hours) | `apalis.jobs` full unique idempotency key | 10s |
 | **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
-| **AnthropicCompatRefreshJob** | Entity | `entity:anthropic_compat_refresh:<key>` | Entity | Enqueued via Reconcile for each compatibility key | `anthropic_compat_refresh_claims` | 10s |
+| **AnthropicCompatRefreshJob** | Singleton | `cron:anthropic_compat_refresh:<tick_unix_secs>` | Maintenance | Every 24h by default; refreshes all registered compatibility keys concurrently | `anthropic_compat_etags` and `anthropic_compatibility_kv_v1` | 60s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
 | **CacheKeepaliveJob** | Entity | `cache_keepalive:<session_key_hash>:<generation>` | Maintenance (`max_attempts=1`) | Enqueued after an eligible Anthropic response begins at `message_start` / first response event | `cache_keepalive_sessions` generation fence + `apalis.jobs` idempotency key | TTL lead time |
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
@@ -69,6 +69,23 @@ The table below lists every job type registered in the scheduler. This list is d
 | **OAuthUsagePollCronJob** | Singleton | `cron:oauth_usage_poll:<tick_unix_secs>` | Maintenance | Every 60s (no jitter) | `oauth_usage_poll_cursors` | 60s |
 | **WarmupWatchdogJob** | Singleton | `maintenance:warmup_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 | **OAuthRefreshWatchdogJob** | Singleton | `maintenance:oauth_refresh_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
+
+### Claude Code compatibility channels
+
+The daily compatibility tick independently refreshes `claude_code_stable_version`
+and `claude_code_latest_version` in `anthropic_compatibility_kv_v1`. Each channel
+uses `https://downloads.claude.ai/claude-code-releases/<channel>` and falls back
+to the matching npm dist-tag if that request fails. A failed channel does not
+prevent the other channel from refreshing or replace its own last successful value.
+
+Usage polling and its associated account-identity lookup use `latest`; before
+the first successful latest refresh, they use `2.1.282`, not the stored stable
+version. Other metadata requests and coupon claims continue using `stable`.
+This adds a KV entry, not a database migration or a configuration key.
+
+Existing keyed job payloads remain readable. New daily jobs encode `key: null`
+to refresh all registered channels; older binaries cannot decode that payload,
+which must be considered before rolling back a worker.
 
 ### Upstream-affinity retention
 
