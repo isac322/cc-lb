@@ -4,18 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
 ### Changed
 
-- Adding an upstream and connecting a Claude account now share one step-by-step dialog in the admin dashboard. "New upstream" starts by choosing a Claude subscription or an Anthropic API key and continues in the same window. Connect and Reconnect on an OAuth upstream open that dialog at the sign-in step, from the detail page, the reconnect notice, and the Overview summary.
+- Adding an upstream and connecting a Claude account now share one step-by-step dialog in the admin dashboard. "New upstream" starts by choosing a Claude subscription or an Anthropic API key and continues in the same window. Connect and Reconnect on an OAuth upstream open that dialog at the sign-in step, from the detail page, the reconnect notice, the Overview summary, and `?action=` deep links. The previous separate create and reconnect windows are gone. ([#867](https://github.com/isac322/cc-lb/pull/867))
 - The Claude sign-in button is now a plain link prepared in advance, so browsers no longer block it as a popup. The code field accepts the value Claude shows (`code#state`), the bare code, or the whole callback address. It flags a code copied from an older sign-in and submits as soon as a valid value is pasted. A countdown shows the 15-minute sign-in window, with a one-click new link once it expires, and the internal state token is no longer displayed.
 - Reconnect shows which Claude account to sign in with, then reports whether the same account came back. If a different account was connected, the dialog shows the before and after accounts. The message after a fallback to a renewing credential now explains that the connection works and renews itself.
 - Claude sign-in failures are shown in the dialog next to the code field instead of in a separate error toast.
-- Track Claude Code `stable` and `latest` independently in the compatibility store. Usage polling and its account-identity lookup use `latest`, with a `2.1.282` fallback before the first refresh; existing metadata and coupon-claim consumers continue using `stable`.
-- The daily compatibility job refreshes both channels concurrently, preserving each channel's last successful value if its refresh fails. Existing keyed jobs remain readable; newly queued all-channel jobs are not readable by older binaries.
+- The compatibility store now tracks the Claude Code `stable` and `latest` release channels independently. Usage polling and its account-identity lookup identify as `latest`, falling back to `2.1.282` until the first refresh; other metadata requests and coupon claims keep using `stable`. ([#866](https://github.com/isac322/cc-lb/pull/866))
+- The daily compatibility job refreshes both channels concurrently from the official Claude Code release endpoint, falling back to the matching npm dist-tag. A channel whose refresh fails keeps its last successful value without affecting the other.
 
 ### Fixed
 
-- The Admin Logs `errors` filter now paginates over matching requests: HTTP statuses of 400 or higher and abnormally completed requests with an `error_code` are selected before the page limit, so older errors are no longer hidden behind pages of successful requests and the row range stays valid. The live tail still applies this filter in the browser, so a request whose upstream status is corrected by a retry (for example 401 followed by 200) leaves the list immediately. ([#862](https://github.com/isac322/cc-lb/issues/862))
+- The Admin Logs `errors` filter now paginates over matching requests: HTTP statuses of 400 or higher and abnormally completed requests with an `error_code` are selected before the page limit, so older errors are no longer hidden behind pages of successful requests and the row range stays valid. The live tail still applies this filter in the browser, so a request whose upstream status is corrected by a retry (for example 401 followed by 200) leaves the list immediately. ([#862](https://github.com/isac322/cc-lb/issues/862), [#864](https://github.com/isac322/cc-lb/pull/864))
+
+### Upgrade notes
+
+- Upgrading from 0.7.0 requires only a restart: no new configuration keys and no database migrations. The `latest` channel value is stored in the existing compatibility table and appears after the next daily compatibility refresh; until then usage polling uses the `2.1.282` fallback.
+- Rollback caution: compatibility-refresh jobs queued by 0.8.0 cover all channels in one payload, which 0.7.0 and older workers cannot decode. Jobs queued by earlier releases remain readable by 0.8.0.
 
 ## [0.7.0] - 2026-09-25
 
@@ -262,5 +269,6 @@ All notable changes to this project will be documented in this file.
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...HEAD
+[0.8.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...cc-lb-v0.8.0
 [0.7.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.6.0...cc-lb-v0.7.0
