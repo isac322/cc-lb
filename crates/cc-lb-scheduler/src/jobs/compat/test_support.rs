@@ -3,6 +3,10 @@ use std::sync::Mutex;
 
 use cc_lb_storage_api::{AnthropicCompatibilityKvStore, CompatibilityKvRecord, StorageResult};
 
+use super::{CompatEtagRepository, CompatJobFuture};
+use crate::error::Result;
+use crate::state_stores::AnthropicCompatEtag;
+
 #[derive(Default)]
 pub(super) struct RecordingCompatibilityKv {
     records: Mutex<HashMap<String, CompatibilityKvRecord>>,
@@ -13,6 +17,17 @@ pub(super) struct RecordingCompatibilityKv {
 impl RecordingCompatibilityKv {
     pub(super) fn value_write_count(&self) -> usize {
         self.value_writes.lock().expect("value writes lock").len()
+    }
+
+    pub(super) fn record(&self, key: &str) -> Option<CompatibilityKvRecord> {
+        self.records.lock().expect("records lock").get(key).cloned()
+    }
+
+    pub(super) fn failure_writes(&self) -> Vec<String> {
+        self.failure_writes
+            .lock()
+            .expect("failure writes lock")
+            .clone()
     }
 }
 
@@ -71,5 +86,49 @@ impl AnthropicCompatibilityKvStore for RecordingCompatibilityKv {
             .values()
             .cloned()
             .collect())
+    }
+}
+
+/// In-memory etag repository for exercising the all-keys dispatch loop without
+/// standing up a database.
+#[derive(Default)]
+pub(super) struct RecordingCompatEtags {
+    rows: Mutex<HashMap<String, AnthropicCompatEtag>>,
+}
+
+impl CompatEtagRepository for RecordingCompatEtags {
+    fn read_compat_etag<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> CompatJobFuture<'a, Result<Option<AnthropicCompatEtag>>> {
+        Box::pin(async move {
+            Ok(self
+                .rows
+                .lock()
+                .expect("compat etags lock")
+                .get(key)
+                .cloned())
+        })
+    }
+
+    fn upsert_compat_value<'a>(
+        &'a self,
+        key: &'a str,
+        etag: Option<&'a str>,
+        hash: &'a str,
+        now_unix_secs: u64,
+    ) -> CompatJobFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.rows.lock().expect("compat etags lock").insert(
+                key.to_owned(),
+                AnthropicCompatEtag {
+                    key: key.to_owned(),
+                    etag: etag.map(str::to_owned),
+                    last_applied_at_unix_secs: now_unix_secs,
+                    last_value_hash: hash.to_owned(),
+                },
+            );
+            Ok(())
+        })
     }
 }

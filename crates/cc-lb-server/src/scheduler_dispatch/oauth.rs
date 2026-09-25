@@ -14,7 +14,7 @@ use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AnthropicCompatibilityKvStore, UpstreamRecord, UpstreamStore};
 
 use cc_lb_control::anthropic_compat::{
-    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+    CLAUDE_CODE_LATEST_VERSION_FALLBACK, CLAUDE_CODE_LATEST_VERSION_KEY, claude_code_user_agent,
 };
 
 use cc_lb_control::anthropic_metadata::{
@@ -449,17 +449,18 @@ impl SchedulerDispatch {
         }
     }
 
-    /// Mirrors the metadata-refresh runner: the daily compat-refreshed Claude
-    /// Code stable version, or the pinned fallback before the first refresh.
+    /// Mirrors the metadata-refresh runner but reads the latest channel: the
+    /// daily compat-refreshed Claude Code latest version, or the pinned
+    /// latest-release fallback before the first refresh.
     async fn claude_code_user_agent(&self) -> SchedulerResult<String> {
         let version = AnthropicCompatibilityKvStore::get_compatibility_kv(
             self.storage.as_ref(),
-            CLAUDE_CODE_STABLE_VERSION_KEY,
+            CLAUDE_CODE_LATEST_VERSION_KEY,
         )
         .await
         .map_err(storage_scheduler_error)?
         .map(|record| record.value)
-        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+        .unwrap_or_else(|| CLAUDE_CODE_LATEST_VERSION_FALLBACK.to_owned());
         Ok(claude_code_user_agent(&version))
     }
 

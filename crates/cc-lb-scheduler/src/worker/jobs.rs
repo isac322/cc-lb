@@ -184,6 +184,40 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_compat_refresh_all_keys_payload_round_trips() {
+        let serialized = serde_json::to_string(&CronJob::AnthropicCompatRefresh(
+            AnthropicCompatRefreshJob::all(),
+        ))
+        .expect("serialize all-keys compat refresh");
+        assert_eq!(
+            serialized,
+            r#"{"type":"anthropic_compat_refresh","payload":{"key":null,"traceparent":null}}"#
+        );
+        let deserialized: CronJob =
+            serde_json::from_str(&serialized).expect("deserialize all-keys compat refresh");
+        assert!(matches!(
+            deserialized,
+            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob { key: None, .. })
+        ));
+    }
+
+    #[test]
+    fn anthropic_compat_refresh_keyed_payload_from_older_binary_decodes() {
+        // Jobs enqueued before `key` became optional carry a plain string.
+        let deserialized: CronJob = serde_json::from_str(
+            r#"{"type":"anthropic_compat_refresh","payload":{"key":"claude_code_stable_version","traceparent":null}}"#,
+        )
+        .expect("deserialize legacy keyed compat refresh");
+        assert!(matches!(
+            &deserialized,
+            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob {
+                key: Some(key),
+                ..
+            }) if key == "claude_code_stable_version"
+        ));
+    }
+
+    #[test]
     fn upstream_affinity_purge_payload_contains_only_trace_context() {
         let default_payload = serde_json::to_value(CronJob::UpstreamAffinityPurge(
             UpstreamAffinityPurgeJob::default(),
