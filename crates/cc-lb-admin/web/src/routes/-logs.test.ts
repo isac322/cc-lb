@@ -172,9 +172,4 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
   });
-  it('applies the errors filter before server pagination', () => {
-    const filters = { status: 'errors' as const };
-    expect(buildLiveFilters(filters)).toEqual({ status_class: 'errors' });
-    expect(buildHistoricalFilters(filters)).toEqual({ status_class: 'errors' });
-  });
 });

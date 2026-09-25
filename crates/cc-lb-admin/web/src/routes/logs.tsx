@@ -123,6 +123,12 @@ export function buildHistoricalFilters(
 ) {
   const { since_unix_secs, until_unix_secs } = filters;
   const base = buildLiveFilters(filters);
+  // `errors` is expressible only as `status_class`, which the list and
+  // histogram endpoints apply before pagination; the live stream must not
+  // receive it (see `buildLiveFilters`), so it is added here instead.
+  if (filters.status === 'errors') {
+    base.status_class = 'errors';
+  }
 
   if (since_unix_secs != null) {
     base.since_unix_secs = since_unix_secs.toString();
@@ -143,7 +149,10 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   if (filters.upstream_id) base.upstream_id = filters.upstream_id;
   if (filters.session) base.thread_id = filters.session;
   if (filters.model) base.model = filters.model;
-  if (filters.status) {
+  // `errors` stays client-side (`isErrorLogRow` in filterLogRows): a partial
+  // whose upstream status is corrected downward — e.g. a 401 followed by a
+  // retried 200 on the same event — must keep streaming so the row updates.
+  if (filters.status && filters.status !== 'errors') {
     base.status_class = filters.status;
   }
   if (filters.event_kind) base.event_kind = filters.event_kind;
@@ -182,7 +191,7 @@ function LogsPage() {
   // Absent means unfiltered: the list shows every endpoint category until the
   // operator picks one. Tests that stub useSearch get the same behavior.
   const eventKindFilter = filters.event_kind;
-  const serverFilters = buildLiveFilters(filters);
+  const liveFilters = buildLiveFilters(filters);
   const historicalFilters = buildHistoricalFilters(filters);
   const nextPaginationIdentity = JSON.stringify([
     filters.principal_id,
@@ -330,7 +339,7 @@ function LogsPage() {
     });
   }, [clampedPage, recent.data, recent.isPlaceholderData]);
 
-  const live = useLiveEventStream(serverFilters, { enabled: effectiveTailing });
+  const live = useLiveEventStream(liveFilters, { enabled: effectiveTailing });
   const initialRowsLoading =
     (recent.isPending || recent.isPlaceholderData) && live.eventsMap.size === 0;
   const tailStatus = effectiveTailing
@@ -501,7 +510,7 @@ function LogsPage() {
     }
     return { sinceSecs, untilSecs, bucketMs: histogramBucketMs };
   }, [view, histogramBucketMs]);
-  const histogram = useEventsHistogram(serverFilters, histogramRange, {
+  const histogram = useEventsHistogram(historicalFilters, histogramRange, {
     poll: followRight,
   });
 

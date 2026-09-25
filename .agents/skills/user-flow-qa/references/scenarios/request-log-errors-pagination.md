@@ -46,8 +46,10 @@ error in either the API or UI. Capture before/after payloads and screenshots.
 
 Storage conformance `request_event_list_projects_rows_and_preserves_detail`
 tests sparse matching and cursor continuation for SQLite and Postgres;
-`src/routes/-logs.test.ts` tests the UI-to-API filter contract. Browser,
-authenticated API and state transitions remain manual.
+`src/routes/-logs-polling.test.tsx` checks that a live 401 partial corrected
+to 200 leaves the `errors` view. List and histogram requests send
+`status_class=errors`; the live stream omits it so such corrections still
+arrive. Browser, authenticated API and state transitions remain manual.
 
 | Layer | Point-in-time | Transition | Evidence |
 |---|---|---|---|
