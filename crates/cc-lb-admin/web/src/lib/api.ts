@@ -932,8 +932,10 @@ export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';
 
 // Why a long-lived 365-day request fell back to a refreshing credential:
 // 'rejected' = the token endpoint refused the custom expires_in outright,
-// 'clamped' = it accepted but granted a materially shorter lifetime.
-export type OAuthFallbackReason = 'rejected' | 'clamped';
+// 'clamped' = it accepted but granted a materially shorter lifetime,
+// 'scope_rejected' = refused because oauth.anthropic.scopes asks for a scope
+// Anthropic will not issue a year-long token for.
+export type OAuthFallbackReason = 'rejected' | 'clamped' | 'scope_rejected';
 
 export interface UpstreamOAuthStatusResponse {
   upstream_id: string;

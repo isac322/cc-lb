@@ -71,9 +71,6 @@ async function installAppFixtures(
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
-    // The wizard opens the Anthropic authorize page in a new tab; keep the
-    // test on the modal instead of following a real popup.
-    window.open = () => null;
   });
 
   await page.route('**/admin/**', async (route) => {
@@ -287,7 +284,7 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(refreshExpiry).toContainText('expires');
   });
 
-  test('Scenario: create wizard starts the OAuth flow without a credential-mode choice', async ({
+  test('Scenario: create dialog starts the OAuth flow without a credential-mode choice', async ({
     page,
   }) => {
     const draftStartRequests: unknown[] = [];
@@ -304,12 +301,25 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Continue' }).click();
 
-    // Authorizing posts an empty body to the draft-start endpoint: cc-lb
-    // always requests the long-lived grant and decides the outcome itself.
-    await dialog
-      .getByRole('button', { name: 'Authorize with Anthropic' })
-      .click();
-    await expect(dialog.getByPlaceholder('paste code...')).toBeVisible();
+    // Choosing the Claude path posts an empty body to the draft-start endpoint
+    // when the sign-in step mounts: cc-lb always requests the long-lived grant
+    // and decides the outcome itself.
+    const signIn = dialog.getByRole('link', { name: 'Sign in with Claude' });
+    await expect(signIn).toHaveAttribute(
+      'href',
+      'https://claude.ai/oauth/authorize?mock=1',
+    );
     expect(draftStartRequests).toEqual([{}]);
+
+    // The code comes back on the paste step; the dialog never shows the raw
+    // authorize URL or the state token.
+    await dialog
+      .getByRole('button', { name: 'I already have a code' })
+      .click();
+    await expect(
+      dialog.getByRole('textbox', { name: 'Authorization code' }),
+    ).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Connect' })).toBeVisible();
+    await expect(dialog.getByText('mock-state-token')).toHaveCount(0);
   });
 });

@@ -14,7 +14,6 @@ import {
   useQueryClient,
 } from '@tanstack/react-query';
 import { useMemo } from 'react';
-import { toast } from 'sonner';
 import {
   type AggregateResponse,
   type AnalysisResponse,
@@ -1158,6 +1157,8 @@ export function useOAuthStart() {
         },
         Record<string, never>
       >(`/admin/v1/upstreams/${id}/oauth/start`, {}),
+    // The connect dialog renders start failures inline with a retry.
+    meta: { inlineError: true },
   });
 }
 export function useOAuthComplete() {
@@ -1197,15 +1198,8 @@ export function useOAuthComplete() {
         }),
       ]);
     },
-    onError: (error) => {
-      const message =
-        error instanceof ApiError
-          ? error.message || `Request failed (${error.status})`
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      toast.error(`OAuth verification failed: ${message}`);
-    },
+    // The connect dialog maps failures to inline guidance next to the code.
+    meta: { inlineError: true },
   });
 }
 export function useCreatePrincipal() {
