@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Track Claude Code `stable` and `latest` independently in the compatibility store. Usage polling and its account-identity lookup use `latest`, with a `2.1.282` fallback before the first refresh; existing metadata and coupon-claim consumers continue using `stable`.
+- The daily compatibility job refreshes both channels concurrently, preserving each channel's last successful value if its refresh fails. Existing keyed jobs remain readable; newly queued all-channel jobs are not readable by older binaries.
+
 ## [0.7.0] - 2026-09-25
 
 ### Added

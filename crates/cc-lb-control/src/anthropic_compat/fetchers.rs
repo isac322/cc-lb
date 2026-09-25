@@ -16,6 +16,9 @@ use super::keys::CompatFetcher;
 const CLAUDE_CODE_STABLE_URL: &str = "https://downloads.claude.ai/claude-code-releases/stable";
 const CLAUDE_CODE_NPM_STABLE_URL: &str =
     "https://registry.npmjs.org/@anthropic-ai/claude-code/stable";
+const CLAUDE_CODE_LATEST_URL: &str = "https://downloads.claude.ai/claude-code-releases/latest";
+const CLAUDE_CODE_NPM_LATEST_URL: &str =
+    "https://registry.npmjs.org/@anthropic-ai/claude-code/latest";
 const COMPAT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 type CompatHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
@@ -43,49 +46,75 @@ pub async fn run_compat_fetcher(
     cancel: &CancellationToken,
 ) -> Result<CompatFetchOutcome, CompatFetchError> {
     match fetcher {
-        CompatFetcher::ClaudeCodeStableVersion => fetch_claude_code_stable_version(cancel).await,
+        CompatFetcher::ClaudeCodeStableVersion => {
+            fetch_claude_code_version(
+                "stable",
+                CLAUDE_CODE_STABLE_URL,
+                CLAUDE_CODE_NPM_STABLE_URL,
+                cancel,
+            )
+            .await
+        }
+        CompatFetcher::ClaudeCodeLatestVersion => {
+            fetch_claude_code_version(
+                "latest",
+                CLAUDE_CODE_LATEST_URL,
+                CLAUDE_CODE_NPM_LATEST_URL,
+                cancel,
+            )
+            .await
+        }
     }
 }
 
-async fn fetch_claude_code_stable_version(
+/// Fetches a Claude Code version channel from the public release endpoint,
+/// falling back to the npm registry tag when the primary endpoint errors.
+async fn fetch_claude_code_version(
+    channel: &str,
+    primary_url: &'static str,
+    npm_url: &'static str,
     cancel: &CancellationToken,
 ) -> Result<CompatFetchOutcome, CompatFetchError> {
     let client = compat_http_client();
-    match fetch_text(&client, CLAUDE_CODE_STABLE_URL, cancel).await {
+    match fetch_text(&client, primary_url, cancel).await {
         Ok(body) => {
             let version = body.trim();
             if version.is_empty() {
-                Err(CompatFetchError::Parse(
-                    "stable version response is empty".to_owned(),
-                ))
+                Err(CompatFetchError::Parse(format!(
+                    "{channel} version response is empty"
+                )))
             } else {
                 Ok(CompatFetchOutcome {
                     value: version.to_owned(),
-                    source_url: CLAUDE_CODE_STABLE_URL.to_owned(),
+                    source_url: primary_url.to_owned(),
                 })
             }
         }
         Err(CompatFetchError::Cancelled) => Err(CompatFetchError::Cancelled),
-        Err(_primary_error) => fetch_claude_code_stable_version_from_npm(&client, cancel).await,
+        Err(_primary_error) => {
+            fetch_claude_code_version_from_npm(channel, &client, npm_url, cancel).await
+        }
     }
 }
 
-async fn fetch_claude_code_stable_version_from_npm(
+async fn fetch_claude_code_version_from_npm(
+    channel: &str,
     client: &CompatHttpClient,
+    npm_url: &'static str,
     cancel: &CancellationToken,
 ) -> Result<CompatFetchOutcome, CompatFetchError> {
-    let body = fetch_text(client, CLAUDE_CODE_NPM_STABLE_URL, cancel).await?;
-    let response: NpmStableResponse =
+    let body = fetch_text(client, npm_url, cancel).await?;
+    let response: NpmVersionResponse =
         serde_json::from_str(&body).map_err(|error| CompatFetchError::Parse(error.to_string()))?;
     let version = response.version.trim();
     if version.is_empty() {
-        return Err(CompatFetchError::Parse(
-            "npm stable version is empty".to_owned(),
-        ));
+        return Err(CompatFetchError::Parse(format!(
+            "npm {channel} version is empty"
+        )));
     }
     Ok(CompatFetchOutcome {
         value: version.to_owned(),
-        source_url: CLAUDE_CODE_NPM_STABLE_URL.to_owned(),
+        source_url: npm_url.to_owned(),
     })
 }
 
@@ -132,6 +161,6 @@ async fn fetch_text(
 }
 
 #[derive(Deserialize)]
-struct NpmStableResponse {
+struct NpmVersionResponse {
     version: String,
 }
