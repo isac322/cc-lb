@@ -135,6 +135,9 @@ pub(super) async fn list_request_events(
         builder.push(" AND ");
         builder.push_bind(status_max);
     }
+    if query.filters.errors_only {
+        builder.push(" AND (r.list_status >= 400 OR r.error_code IS NOT NULL)");
+    }
 
     match query.source_kind.as_deref() {
         Some("all") => {}

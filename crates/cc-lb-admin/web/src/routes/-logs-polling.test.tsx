@@ -712,4 +712,35 @@ describe('logs polling surfaces', () => {
     }
     expect(routeState.liveCalls.length).toBeGreaterThan(0);
   });
+
+  test('removes a live error row promptly when its partial corrects to 200', async () => {
+    routeState.search = { status: 'errors' };
+    const partialAt = (status: number) => ({
+      eventsMap: new Map([
+        [
+          'live-retry',
+          {
+            phase: 'partial' as const,
+            event: {
+              event_id: 'live-retry',
+              request_id: 'live-retry',
+              ts: 1_700_000_002,
+              ts_ms: 1_700_000_002_000,
+              upstream_response_status: status,
+            },
+          },
+        ],
+      ]),
+    });
+    const { rerenderLogs } = renderLogs();
+    await waitFor(() => expect(screen.getByTestId('logs-table')).toBeDefined());
+
+    routeState.live = { ...routeState.live, ...partialAt(401), version: 1 };
+    rerenderLogs();
+    await waitFor(() => expect(screen.getByText('live-retry')).toBeDefined());
+
+    routeState.live = { ...routeState.live, ...partialAt(200), version: 2 };
+    rerenderLogs();
+    await waitFor(() => expect(screen.queryByText('live-retry')).toBeNull());
+  });
 });

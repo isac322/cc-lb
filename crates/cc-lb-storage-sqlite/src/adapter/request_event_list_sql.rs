@@ -97,6 +97,7 @@ WHERE ts >= ?1 AND ts <= ?2 \
   AND (?14 IS NULL OR thread_id = ?14) \
   AND (?6 IS NULL OR list_upstream = ?6) \
   AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) \
+  AND (?16 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
   AND ( \
         ?12 = 1 \
      OR (?13 IS NOT NULL AND source_kind = ?13) \
@@ -269,6 +270,7 @@ pub(super) async fn list_request_events(
         .bind(source_kind_exact)
         .bind(query.filters.thread_id.as_deref())
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
+        .bind(i64::from(query.filters.errors_only))
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

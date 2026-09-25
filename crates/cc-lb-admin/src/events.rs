@@ -38,6 +38,7 @@ pub struct RecentEventsParams {
     pub upstream_id: Option<Uuid>,
     pub upstream: Option<RequestEventUpstream>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     pub source_kind: Option<String>,
     pub event_kind: Option<RequestEventKind>,
 }
@@ -59,6 +60,7 @@ pub struct StreamFilters {
     pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     pub source_kind: Option<String>,
     pub event_kind: Option<RequestEventKind>,
 }
@@ -165,6 +167,7 @@ pub fn parse_recent_params(
         upstream_id: filters.upstream_id,
         upstream: filters.upstream,
         status_class: filters.status_class,
+        errors_only: filters.errors_only,
         source_kind: filters.source_kind,
         event_kind: filters.event_kind,
     })
@@ -309,9 +312,13 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             None => None,
         },
         status_class: match map.get("status_class") {
+            Some(value) if value == "errors" => None,
             Some(value) => Some(parse_status_class(value)?),
             None => None,
         },
+        errors_only: map
+            .get("status_class")
+            .is_some_and(|value| value == "errors"),
         source_kind: map.get("source_kind").cloned(),
         event_kind: match map.get("event_kind") {
             Some(value) => Some(
@@ -353,6 +360,9 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
+        return false;
+    }
+    if filters.errors_only && event.status < 400 && event.error_code.is_none() {
         return false;
     }
     if let Some(event_kind) = filters.event_kind
@@ -415,6 +425,7 @@ impl RecentEventsParams {
             upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+            errors_only: self.errors_only,
             source_kind: self.source_kind.clone(),
             event_kind: self.event_kind,
         }
@@ -455,6 +466,7 @@ impl StreamFilters {
             upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+            errors_only: self.errors_only,
             event_kind: self.event_kind,
         }
     }

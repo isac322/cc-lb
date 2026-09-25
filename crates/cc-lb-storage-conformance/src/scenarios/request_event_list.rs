@@ -74,6 +74,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             upstream_id: Some(upstream_id),
             event_kind: None,
             status_class: Some(StatusClass::TwoXx),
+            errors_only: false,
         };
 
         let default_page = storage
@@ -135,6 +136,56 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             .await?
             .expect("stored request event detail");
         assert_eq!(serde_json::to_vec(&detail)?, serde_json::to_vec(&matching)?);
+
+        for index in 0..60 {
+            let mut event = request_event(
+                &format!("sparse-{index}"),
+                &format!("req-sparse-{index}"),
+                20_000 + index * 1_000,
+                200,
+                "principal-sparse",
+                upstream_id,
+            );
+            event.error_code = None;
+            if index == 0 {
+                event.status = 429;
+            } else if index == 1 {
+                event.error_code = Some("stream_error".to_owned());
+            } else if index == 2 {
+                event.status = 500;
+            }
+            storage.append_request_event(&event).await?;
+        }
+
+        let errors = RequestEventStreamFilters {
+            principal_id: Some("principal-sparse".to_owned()),
+            errors_only: true,
+            ..Default::default()
+        };
+        let first = storage
+            .list_request_events(&list_query(errors.clone(), None, 2, None, None))
+            .await?;
+        assert_event_ids(&first, &["sparse-2", "sparse-1"]);
+        let second = storage
+            .list_request_events(&list_query(
+                errors.clone(),
+                None,
+                2,
+                first[1].ts_ms,
+                first[1].event_id.clone(),
+            ))
+            .await?;
+        assert_event_ids(&second, &["sparse-0"]);
+        let third = storage
+            .list_request_events(&list_query(
+                errors,
+                None,
+                2,
+                second[0].ts_ms,
+                second[0].event_id.clone(),
+            ))
+            .await?;
+        assert!(third.is_empty());
 
         Ok(())
     })

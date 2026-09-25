@@ -700,6 +700,7 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
    AND (?14 IS NULL OR thread_id = ?14) \
    AND (?9 IS NULL OR list_upstream = ?9) \
    AND (?10 IS NULL OR list_status BETWEEN ?10 AND ?11) \
+   AND (?18 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
    AND ( \
          ?12 = 1 \
       OR (?13 IS NOT NULL AND source_kind = ?13) \
@@ -818,6 +819,7 @@ async fn request_event_histogram(
                 .saturating_add(HISTOGRAM_INDEX_HINT_SLACK_MS),
         ))
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
+        .bind(i64::from(query.filters.errors_only))
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -1364,6 +1366,9 @@ fn request_event_matches_filters(
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
+        return false;
+    }
+    if filters.errors_only && event.status < 400 && event.error_code.is_none() {
         return false;
     }
     if let Some(event_kind) = filters.event_kind
