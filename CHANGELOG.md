@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-26
+
+### Fixed
+
+- Subscription routing no longer treats an approaching five-hour reset as a reason to pull traffic toward an account that is already at or ahead of its weekly pace. Previously the five-hour window was scored as an independent use-it-or-lose-it deadline, so near every five-hour reset such accounts took new requests from accounts that could still lose unused weekly quota, and prompt-cache affinity then kept those conversations there. Five-hour pressure now counts only while leaving the current window unused could actually forfeit weekly quota. If the five-hour or shared weekly quota data is stale or missing, routing behaves as before; a model-specific weekly window can keep the pressure but never removes it on its own. ([#878](https://github.com/isac322/cc-lb/pull/878), [ADR 0013](https://github.com/isac322/cc-lb/blob/master/docs/adr/0013-weekly-pace-gate-for-five-hour-pressure.md))
+
+### Changed
+
+- Routing traces now report the within-tier selection formula as `cost-first-v2` (previously `cost-first-v1`). Among candidates with equal effective urgency, the raw five-hour pressure is used as the next tiebreak, so refill-order spreading between otherwise equal accounts is preserved. Dashboards or alerts that match on the formula version string should be updated; the bundled `deploy/alerts/routing-anomaly.yml` already is.
+
+### Upgrade notes
+
+- Upgrading from 0.8.0 requires only a restart: no new configuration keys and no database migrations. Rolling back to 0.8.0 is safe.
+
 ## [0.8.0] - 2026-09-26
 
 ### Changed
@@ -269,6 +283,7 @@ All notable changes to this project will be documented in this file.
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.1...HEAD
+[0.8.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...cc-lb-v0.8.1
 [0.8.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...cc-lb-v0.8.0
 [0.7.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.6.0...cc-lb-v0.7.0
