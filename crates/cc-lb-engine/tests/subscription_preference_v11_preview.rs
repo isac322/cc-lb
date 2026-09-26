@@ -32,7 +32,7 @@ async fn preview_selects_use_it_or_lose_it_candidate_and_traces_all_candidates()
     assert_eq!(terminal_upstream(&before), Some(fixture.urgent_id));
     assert_eq!(
         before_trace.formula_version.as_deref(),
-        Some("cost-first-v1")
+        Some("cost-first-v2")
     );
     assert_eq!(before_trace.candidates.len(), 2);
     assert!(urgent_before.quota_urgency_5h.expect("urgent 5h") > 0.0);
@@ -96,7 +96,7 @@ async fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     // Then: v11 uses uniform neutral factors and a stable WRH winner.
     assert_eq!(first.winner_upstream_id, second.winner_upstream_id);
     assert_eq!(first.winner_upstream_name, second.winner_upstream_name);
-    assert_eq!(trace.formula_version.as_deref(), Some("cost-first-v1"));
+    assert_eq!(trace.formula_version.as_deref(), Some("cost-first-v2"));
     assert_eq!(trace.candidates.len(), 2);
     for assessed in &trace.candidates {
         assert_eq!(assessed.quota_urgency_5h, Some(0.0));

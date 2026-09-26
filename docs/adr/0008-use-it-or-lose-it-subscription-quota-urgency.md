@@ -1,6 +1,6 @@
 # ADR 0008 — Use-it-or-lose-it subscription quota urgency
 
-- Status: Accepted
+- Status: Accepted (five-hour pressure amended by ADR 0013 weekly pace gate)
 - Date: 2026-07-09
 - Ships with: pending
 - Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency. ADR 0010 keeps this pressure formula but makes base-tier warning signals ranking-neutral; the existing `0.20` warning multiplier remains active only in `Overage`.
