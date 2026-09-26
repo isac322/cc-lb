@@ -5,11 +5,11 @@
 //! 1. A strict tier ordering (KnownBase > PartialBase > Overage > UnknownProbe)
 //!    that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
-//! 2. Within the winning tier, deterministic cost-first-v1 selection. Candidates
-//!    within five percent of the lowest known input cost use urgency, the
-//!    overage-only warning multiplier, upstream ID, and original position as
-//!    stable tiebreaks. Base-tier warning signals remain observable but do not
-//!    affect ranking.
+//! 2. Within the winning tier, deterministic cost-first-v2 selection. Candidates
+//!    within five percent of the lowest known input cost use urgency, the raw
+//!    five-hour pressure, the overage-only warning multiplier, upstream ID, and
+//!    original position as stable tiebreaks. Base-tier warning signals remain
+//!    observable but do not affect ranking.
 //!
 //! ## Design rationale
 //!
@@ -18,6 +18,30 @@
 //! positive pressure ranks ahead of zero-pressure, on-pace candidates.
 //! The candidate `plan_capacity_ratio` remains available as metadata for
 //! analytics but does not affect pressure, tiering, or winner selection.
+//!
+//! ## Weekly pace gate for five-hour pressure
+//!
+//! The five-hour window refills inside the shared weekly window, so leaving a
+//! five-hour window unused only forfeits quota when the weekly quota cannot be
+//! consumed by the five-hour windows that still follow before the weekly
+//! reset. One full five-hour window can never consume less than
+//! `L5 / L7 = 1 / 33.6` of the weekly quota and still let the weekly quota
+//! bind, so when the remaining shared weekly fraction is at most
+//! `(T7 - T5) / L7` (usage at or ahead of linear weekly pace, measured to the
+//! end of the current five-hour window) the five-hour pressure is not a real
+//! use-it-or-lose-it loss and is suppressed to zero. The gate uses only the
+//! snapshot and structural window lengths, with no plan-size or demand input.
+//! When one five-hour window drains less than `L5 / L7` of the weekly quota,
+//! weekly usage built by the account's own five-hour windows cannot reach
+//! linear pace, so the gate stays open; only pre-loaded weekly usage (for
+//! example after a plan change) on such plans can suppress a real five-hour
+//! loss. It keeps the original pressure whenever the five-hour or shared
+//! weekly snapshot is unusable (stale, missing, non-finite, or past reset).
+//! A relevant model-scoped weekly window that is behind pace keeps the
+//! pressure, but a model-scoped window never suppresses on its own because
+//! its drain rate has no structural lower bound. The raw five-hour pressure
+//! remains a tiebreak so suppressed candidates keep the current refill-order
+//! spreading among otherwise equal peers.
 //!
 //! ## Windows
 //!
@@ -95,7 +119,7 @@ pub(crate) const OVERAGE_UNKNOWN_WEIGHT: f64 = 0.5;
 pub(crate) const CACHE_COST_BASIS_VERSION: &str = "v1";
 const OVERAGE_WARNING_MULTIPLIER: f64 = 0.20;
 
-const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v1";
+const COST_FIRST_FORMULA_VERSION: &str = "cost-first-v2";
 
 // -- Config knobs (compiled defaults today; expose per-principal later). ----
 
@@ -357,7 +381,12 @@ struct Assessment<'a> {
     candidate: &'a UpstreamCandidate,
     original_index: usize,
     tier: Tier,
+    /// Five-hour pressure after the weekly pace gate; this is the value that
+    /// feeds `quota_urgency_combined` and the trace.
     quota_urgency_5h: f64,
+    /// Five-hour pressure before the weekly pace gate, used only as a
+    /// selection tiebreak after effective urgency.
+    five_hour_pressure_raw: f64,
     quota_urgency_7d: f64,
     quota_urgency_combined: f64,
     overage_urgency: f64,
@@ -445,6 +474,10 @@ fn assess_candidate<'a>(
             BaseSignal::Unknown => {}
         }
     }
+    let five_hour_pressure_raw = five_hour_pressure;
+    if !five_hour_pressure_can_forfeit_weekly_quota(candidate, base_windows, now_secs) {
+        five_hour_pressure = 0.0;
+    }
     let effective_weekly_pressure =
         weekly_smoothmax(shared_weekly_pressure, model_scoped_weekly_pressure);
     let base_urgency = weighted_smoothmax(five_hour_pressure, effective_weekly_pressure);
@@ -492,6 +525,11 @@ fn assess_candidate<'a>(
         original_index,
         tier,
         quota_urgency_5h,
+        five_hour_pressure_raw: if matches!(tier, Tier::KnownBase | Tier::PartialBase) {
+            five_hour_pressure_raw
+        } else {
+            0.0
+        },
         quota_urgency_7d,
         quota_urgency_combined,
         overage_urgency,
@@ -503,6 +541,63 @@ fn assess_candidate<'a>(
     })
 }
 
+/// Remaining ratio and seconds until reset for a snapshot that can drive
+/// pressure: fresh, finite utilization, and a future `resets_at`.
+fn usable_window(
+    snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
+    now_secs: u64,
+) -> Option<(f64, u64)> {
+    let snap = snapshot?;
+    if snap.state != SubscriptionQuotaDataState::Fresh {
+        return None;
+    }
+    let util = snap.utilization?;
+    if !util.is_finite() {
+        return None;
+    }
+    let resets_at = snap.resets_at_unix_secs?;
+    if resets_at <= now_secs {
+        return None;
+    }
+    Some((1.0 - util.clamp(0.0, 1.0), resets_at - now_secs))
+}
+
+/// Weekly pace gate (see module docs). Returns `false` only when the
+/// five-hour and shared weekly snapshots are usable, the remaining shared
+/// weekly fraction is at or below `(T7 - T5) / L7`, and every usable
+/// model-scoped weekly window relevant to the request is also at or ahead of
+/// that pace. Model-scoped windows can only keep the pressure, never suppress
+/// it on their own.
+fn five_hour_pressure_can_forfeit_weekly_quota(
+    candidate: &UpstreamCandidate,
+    base_windows: &[&'static str],
+    now_secs: u64,
+) -> bool {
+    let Some((_, five_hour_secs)) =
+        usable_window(find_snapshot(candidate, WINDOW_FIVE_HOUR), now_secs)
+    else {
+        return true;
+    };
+    let behind_weekly_pace = |window: &str| {
+        usable_window(find_snapshot(candidate, window), now_secs).map(
+            |(remaining_ratio, weekly_secs)| {
+                let secs_after_current_five_hour = weekly_secs.saturating_sub(five_hour_secs);
+                remaining_ratio
+                    > secs_after_current_five_hour as f64 / SEVEN_DAY_WINDOW_LEN_SECS as f64
+            },
+        )
+    };
+    match behind_weekly_pace(WINDOW_SEVEN_DAY) {
+        None | Some(true) => true,
+        Some(false) => base_windows.iter().copied().any(|window| {
+            matches!(
+                window,
+                WINDOW_SEVEN_DAY_FABLE | WINDOW_SEVEN_DAY_SONNET | WINDOW_SEVEN_DAY_OPUS
+            ) && behind_weekly_pace(window) == Some(true)
+        }),
+    }
+}
+
 fn base_window_pressure(
     snapshot: Option<&SubscriptionQuotaCandidateSnapshot>,
     now_secs: u64,
@@ -510,28 +605,14 @@ fn base_window_pressure(
     let Some(snap) = snapshot else {
         return 0.0;
     };
-    if snap.state != SubscriptionQuotaDataState::Fresh {
-        return 0.0;
-    }
-    let Some(util) = snap.utilization else {
+    let Some((remaining_ratio, secs_to_reset)) = usable_window(Some(snap), now_secs) else {
         return 0.0;
     };
-    if !util.is_finite() {
-        return 0.0;
-    }
-    let Some(resets_at) = snap.resets_at_unix_secs else {
-        return 0.0;
-    };
-    if resets_at <= now_secs {
-        return 0.0;
-    }
     let Some(pressure_config) = base_window_pressure_config(snap.window.as_str()) else {
         return 0.0;
     };
-
-    let remaining_ratio = 1.0 - util.clamp(0.0, 1.0);
     let time_ratio =
-        ((resets_at - now_secs) as f64 / pressure_config.window_len_secs as f64).clamp(0.0, 1.0);
+        (secs_to_reset as f64 / pressure_config.window_len_secs as f64).clamp(0.0, 1.0);
     pressure_from_ratios(remaining_ratio, time_ratio, pressure_config)
 }
 
@@ -1017,6 +1098,11 @@ impl CostFirstCandidate<'_, '_> {
             other.assessment.tier_urgency() * other.assessment.warning_multiplier;
         effective_urgency
             .total_cmp(&other_effective_urgency)
+            .then_with(|| {
+                self.assessment
+                    .five_hour_pressure_raw
+                    .total_cmp(&other.assessment.five_hour_pressure_raw)
+            })
             .then_with(|| {
                 self.assessment
                     .warning_multiplier

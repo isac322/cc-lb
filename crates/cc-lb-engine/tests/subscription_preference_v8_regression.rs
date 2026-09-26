@@ -288,6 +288,8 @@ fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
 #[test]
 fn near_full_allowed_quota_remains_smooth_positive_weight() {
     // Given: a cache-warm candidate with high but still allowed 7d utilization.
+    // The weekly window resets before the current 5h window, so its remaining
+    // quota is a real use-it-or-lose-it loss.
     let cache_warm_near_full_7d = with_live_cache(
         oauth_at_t0(
             "cache-warm-near-full-7d",
@@ -301,7 +303,7 @@ fn near_full_allowed_quota_remains_smooth_positive_weight() {
                 fresh(WINDOW_SEVEN_DAY)
                     .status("allowed")
                     .util(0.995)
-                    .reset_at(T0_SECS + 604_800)
+                    .reset_at(T0_SECS + 1_800)
                     .build(),
             ],
         ),
