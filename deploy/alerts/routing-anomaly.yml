@@ -20,7 +20,7 @@ groups:
           description: |
             Upstream '{{ $labels.upstream }}' is capturing {{ $value | humanizePercentage }} of routing
             decisions in tier '{{ $labels.tier }}' over the last 15 minutes (threshold 70%).
-            This is a regression signal for cost-first-v1 within-tier selection. Investigate:
+            This is a regression signal for cost-first-v2 within-tier selection. Investigate:
               1. Query cc_lb_routing_tier_selections_total{tier="{{ $labels.tier }}"} to see the current spread.
               2. POST /admin/v1/router/preview with a known request_id to inspect the RoutingTrace
                  and the SubscriptionPreferenceTrace formula_version plus urgency/cost values driving the selection.

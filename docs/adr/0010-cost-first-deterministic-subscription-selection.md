@@ -1,6 +1,6 @@
 # ADR 0010: Cost-first deterministic subscription selection
 
-- Status: Accepted
+- Status: Accepted (selection key and formula version amended by ADR 0013)
 - Date: 2026-07-16
 
 ## Context
