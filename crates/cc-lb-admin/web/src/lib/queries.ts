@@ -1345,13 +1345,22 @@ export function useIssueKey() {
       qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
   });
 }
-export function useRevokeKey() {
+/**
+ * `inlineError` opts out of the global failure toast, for callers that report
+ * failures themselves (bulk revoke summarizes every failed key in one toast).
+ */
+export function useRevokeKey({
+  inlineError = false,
+}: {
+  inlineError?: boolean;
+} = {}) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, key_id }: { id: string; key_id: string }) =>
       postJson(`/admin/v1/principals/${id}/keys/${key_id}/revoke`, {}),
     onSuccess: (_d, vars) =>
       qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
+    meta: inlineError ? { inlineError: true } : undefined,
   });
 }
 export interface UploadWasmResponse {

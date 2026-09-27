@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight, Lock } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
 import { Badge, cx, Skeleton } from '../../ui/primitives';
@@ -65,8 +65,14 @@ function SessionDetailHeader({ onClose }: Pick<Props, 'onClose'>) {
         aria-label="Back to sessions"
         className="-my-1 min-h-8 px-2 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 text-xs inline-flex items-center gap-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
-        <span className="max-[960px]:hidden">Close ▶</span>
-        <span className="hidden max-[960px]:inline">◀ Back</span>
+        <span className="inline-flex items-center gap-1 max-[960px]:hidden">
+          Close
+          <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" />
+        </span>
+        <span className="hidden items-center gap-1 max-[960px]:inline-flex">
+          <ChevronLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+          Back
+        </span>
       </button>
     </div>
   );

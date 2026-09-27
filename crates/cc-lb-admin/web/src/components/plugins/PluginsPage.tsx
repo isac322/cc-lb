@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePluginRegistry, useUploadWasm } from '../../lib/queries';
 import { Route } from '../../routes/plugins';
 import {
+  Badge,
   Card,
   CardBody,
   Modal,
@@ -16,7 +17,7 @@ import { PluginCatalog } from './PluginCatalog';
 import { PluginDetail } from './PluginDetail';
 import { PluginUploadCard } from './PluginUploadCard';
 
-function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
+function PluginDetailSkeleton() {
   return (
     <div
       aria-busy="true"
@@ -24,11 +25,6 @@ function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
       className="space-y-8"
       role="status"
     >
-      <div>
-        <BackToCatalogLink onBack={onBack} />
-        <Skeleton className="mt-1 h-7 w-52 max-w-full" />
-      </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-8">
         <div className="lg:col-span-2 space-y-8">
           <Section title="What this plugin does">
@@ -157,19 +153,42 @@ export function PluginsPage() {
     setSelectedPluginId(id);
   };
 
+  const detailLoading = Boolean(selectedPluginId) && reg.isLoading;
+  const backToCatalog = () => setSelectedPluginId(null);
+
   return (
     <PageContainer>
-      <PageHeader
-        title="Plugins"
-        description="Upload and manage WebAssembly plugins. Apply them to Principals or Upstreams to customize behavior."
-      />
-      {selectedPluginId && reg.isLoading ? (
-        <PluginDetailSkeleton onBack={() => setSelectedPluginId(null)} />
-      ) : selectedPlugin ? (
-        <PluginDetail
-          plugin={selectedPlugin}
-          onBack={() => setSelectedPluginId(null)}
+      {detailLoading || selectedPlugin ? (
+        <div>
+          <BackToCatalogLink onBack={backToCatalog} />
+          <PageHeader
+            title={
+              selectedPlugin ? (
+                <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="break-all">{selectedPlugin.name}</span>
+                  {selectedPlugin.is_builtin && (
+                    <Badge tone="neutral">Built-in</Badge>
+                  )}
+                </span>
+              ) : (
+                <>
+                  <span className="sr-only">Loading plugin</span>
+                  <Skeleton as="span" className="block h-7 w-52 max-w-full" />
+                </>
+              )
+            }
+          />
+        </div>
+      ) : (
+        <PageHeader
+          title="Plugins"
+          description="Upload and manage WebAssembly plugins. Apply them to Principals or Upstreams to customize behavior."
         />
+      )}
+      {detailLoading ? (
+        <PluginDetailSkeleton />
+      ) : selectedPlugin ? (
+        <PluginDetail plugin={selectedPlugin} onBack={backToCatalog} />
       ) : (
         <div className="space-y-8">
           <div hidden={uploadOpen}>

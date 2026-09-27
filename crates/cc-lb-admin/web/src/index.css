@@ -568,3 +568,17 @@
 .rdp-root.cclb-calendar .rdp-day_button:hover:not(:disabled) {
   background-color: var(--color-overlay-5);
 }
+.rdp-root.cclb-calendar .rdp-caption_label {
+  font-size: var(--text-title-card);
+  line-height: var(--text-title-card--line-height);
+  font-weight: var(--text-title-card--font-weight);
+}
+.rdp-root.cclb-calendar .rdp-weekday {
+  font-size: var(--text-label);
+  font-weight: var(--text-label--font-weight);
+  color: var(--color-text-faint);
+  opacity: 1;
+}
+.rdp-root.cclb-calendar .rdp-chevron {
+  fill: var(--color-text-muted);
+}

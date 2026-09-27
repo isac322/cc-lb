@@ -210,11 +210,10 @@ export function TimeRangeStrip({
     for (let t = Math.ceil(view.a / tickMs) * tickMs; t < view.b; t += tickMs) {
       const x = Math.round(t2x(t));
       const label = formatInTimezone(t, tz);
-      ctx.fillText(
-        showDateOnly ? label.slice(5, 10) : label.slice(11),
-        x + 2,
-        AXIS_TEXT_Y,
-      );
+      const text = showDateOnly ? label.slice(5, 10) : label.slice(11);
+      // A label that would run past the right edge is dropped, not clipped.
+      if (x + 2 + ctx.measureText(text).width > width) continue;
+      ctx.fillText(text, x + 2, AXIS_TEXT_Y);
     }
 
     if (buckets.length > 0) {

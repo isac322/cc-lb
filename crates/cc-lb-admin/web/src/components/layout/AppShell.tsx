@@ -1,19 +1,42 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { useRouterState } from '@tanstack/react-router';
-import { Command, Menu, UserRound, X } from 'lucide-react';
+import { Command, HelpCircle, Menu, UserRound, X } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { useAuthSessionContext } from '../../lib/authSession';
 import { useHealth } from '../../lib/queries';
 import { ThemeToggle } from '../ThemeToggle';
-import { cx } from '../ui/primitives';
+import { cx, Hint } from '../ui/primitives';
 import { navItemForPath } from './navItems';
-import { SidebarBrand, SidebarFooter, SidebarNav } from './Sidebar';
+import {
+  SidebarBrand,
+  SidebarFooter,
+  SidebarNav,
+  useUpstreamOAuthAttention,
+} from './Sidebar';
 
 const SIDEBAR_KEY = 'cclb.sidebar.collapsed';
 const MAIN_ID = 'main-content';
 
 type Connection = 'live' | 'connecting' | 'down';
+
+const BREAK_GLASS_HELP =
+  'Signed in with the shared admin token, not a personal identity-provider login. Audit entries record the token, not a person.';
+
+/**
+ * `Page · cc-lb`, prefixed with `(n)` while n upstreams need reconnecting so
+ * a background tab still signals the incident.
+ */
+function useDocumentTitle() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const pageLabel = navItemForPath(pathname)?.label ?? null;
+  const attention = useUpstreamOAuthAttention().nudges.size;
+
+  useEffect(() => {
+    const base = pageLabel ? `${pageLabel} · cc-lb` : 'cc-lb';
+    document.title = attention > 0 ? `(${attention}) ${base}` : base;
+  }, [pageLabel, attention]);
+}
 
 /** Display and size are set per button so responsive variants never collide. */
 const TOPBAR_ICON_BUTTON =
@@ -31,6 +54,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
   });
   const [mobileOpen, setMobileOpen] = useState(false);
   const health = useHealth();
+  useDocumentTitle();
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0');
@@ -64,7 +88,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
           e.preventDefault();
           document.getElementById(MAIN_ID)?.focus();
         }}
-        className="fixed left-3 top-2 z-[60] inline-flex items-center h-9 px-3 rounded-sm bg-bg-sub border border-subtle-strong text-sm text-text shadow-overlay -translate-y-16 focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="fixed left-3 top-2 z-[60] inline-flex items-center h-9 px-3 rounded-sm bg-bg-sub border border-subtle-strong text-body-sm text-text shadow-overlay -translate-y-16 focus:translate-y-0 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
         Skip to content
       </a>
@@ -144,8 +168,7 @@ function Topbar({
   connection: Connection;
 }) {
   const authSession = useAuthSessionContext();
-  const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const pageName = navItemForPath(pathname)?.label ?? null;
+  const isBreakGlass = authSession?.kind === 'break_glass';
   const identityLabel =
     authSession?.email ??
     authSession?.display_name ??
@@ -176,13 +199,6 @@ function Topbar({
         >
           <Menu className="w-4 h-4" aria-hidden="true" />
         </button>
-        {/* From `lg` the page's own h1 names the view; the topbar only
-            repeats it where the sidebar is hidden. */}
-        {pageName ? (
-          <span className="truncate text-sm font-medium text-text lg:hidden">
-            {pageName}
-          </span>
-        ) : null}
       </div>
       <div className="flex items-center gap-1 md:gap-3 min-w-0">
         <button
@@ -204,15 +220,35 @@ function Topbar({
           <Command className="w-4 h-4" aria-hidden="true" />
         </button>
         <div
-          className="hidden min-w-0 max-w-56 flex-col items-end leading-tight sm:flex"
+          className="hidden min-w-0 max-w-56 flex-col items-end sm:flex"
           data-testid="admin-identity"
           title={`${identityLabel} (${identityKind})`}
         >
-          <span className="max-w-full truncate text-xs text-text">
+          <span className="max-w-full truncate text-label text-text">
             {identityLabel}
           </span>
-          <span className="max-w-full truncate text-2xs text-text-faint">
-            {identityKind}
+          <span className="flex max-w-full min-w-0 items-center gap-1">
+            <span className="truncate text-caption text-text-faint">
+              {identityKind}
+            </span>
+            {isBreakGlass ? (
+              <Hint
+                label={
+                  <span className="block max-w-72 whitespace-normal leading-5">
+                    {BREAK_GLASS_HELP}
+                  </span>
+                }
+                side="bottom"
+              >
+                <button
+                  type="button"
+                  aria-label="What is break glass?"
+                  className="inline-flex h-4 w-4 shrink-0 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                >
+                  <HelpCircle size={12} strokeWidth={1.75} aria-hidden="true" />
+                </button>
+              </Hint>
+            ) : null}
           </span>
         </div>
         <BasePopover.Root>
@@ -239,6 +275,11 @@ function Topbar({
                 <div className="text-caption text-text-faint">
                   {identityKind}
                 </div>
+                {isBreakGlass ? (
+                  <p className="mt-1 max-w-64 text-caption text-text-muted">
+                    {BREAK_GLASS_HELP}
+                  </p>
+                ) : null}
               </BasePopover.Popup>
             </BasePopover.Positioner>
           </BasePopover.Portal>

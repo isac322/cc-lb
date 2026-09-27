@@ -24,8 +24,9 @@ const REQUEST_EVENT_ROW_STYLE = {
   height: `${REQUEST_EVENT_ROW_HEIGHT_REM}rem`,
 } satisfies React.CSSProperties;
 
+/** Healthy by omission: a 2xx reads in muted ink; only exceptions carry tone. */
 const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
-  ok: 'text-success-text',
+  ok: 'text-text-muted',
   warn: 'text-warn-text',
   danger: 'text-danger-text',
   neutral: 'text-text',
@@ -135,6 +136,7 @@ const RequestEventRow = memo(function RequestEventRow({
     event._phase === 'final' ? event.error_code : undefined,
     event._phase === 'final' ? event.upstream_error_type : undefined,
   );
+  const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const requestKindBadge = requestKindBadgeText(event.request_kind);
   const hit = showCacheHit ? cacheHitPercent(event) : null;
@@ -171,14 +173,17 @@ const RequestEventRow = memo(function RequestEventRow({
           MOBILE_AT.time,
         )}
       >
-        <span
-          className={cx(
-            'status-dot mr-2',
-            outcome.type === 'partial'
-              ? 'neutral animate-pulse'
-              : requestOutcomeTone(outcome),
-          )}
-        />
+        {/* Errors and in-flight rows get a dot in the cell's leading inset, so
+        the time text stays aligned with its header whether or not a dot shows.
+        Successful rows carry no dot at all. */}
+        {tone === 'ok' ? null : (
+          <span
+            className={cx(
+              'status-dot absolute top-1/2 left-1.5 -translate-y-1/2 max-md:-left-3',
+              outcome.type === 'partial' ? 'neutral animate-pulse' : tone,
+            )}
+          />
+        )}
         <RelativeTime compact ts={at} />
         {onAnchorRange != null && at != null ? (
           <span className="absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 max-md:hidden">
@@ -269,7 +274,7 @@ const RequestEventRow = memo(function RequestEventRow({
           MOBILE_AT.status,
           outcome.type === 'partial'
             ? 'text-text-faint'
-            : STATUS_TONE_TEXT[requestOutcomeTone(outcome)],
+            : STATUS_TONE_TEXT[tone],
         )}
       >
         <RequestOutcomeTableCell outcome={outcome} />

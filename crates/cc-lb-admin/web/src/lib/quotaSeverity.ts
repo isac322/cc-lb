@@ -17,6 +17,19 @@ export function quotaSeverity(pct: number | null): QuotaSeverity {
   return 'ok';
 }
 
+/**
+ * The one display rule for a quota utilization figure (0-100): whole
+ * percent everywhere, lists, cards and chart tooltips alike. A reading that
+ * is not yet exhausted never rounds up to `100%`, and a non-zero reading
+ * never rounds down to `0%`.
+ */
+export function formatQuotaPercent(pct: number | null | undefined): string {
+  if (pct == null || !Number.isFinite(pct)) return '—';
+  if (pct > 0 && pct < 1) return '<1%';
+  if (pct >= 99 && pct < 100) return '99%';
+  return `${Math.round(pct)}%`;
+}
+
 /** Text color for a quota percentage or label. Uses the AA-safe `*-text` tokens. */
 export const QUOTA_SEVERITY_TEXT_CLASS: Record<QuotaSeverity, string> = {
   none: 'text-text-faint',

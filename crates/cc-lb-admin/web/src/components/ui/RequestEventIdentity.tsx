@@ -365,17 +365,16 @@ export function RequestEventIdentity({
           />
         ) : null}
         {event._phase === 'final' && event.error_code ? (
-          <KvRow
-            label="Error"
-            value={
-              <ErrorExplanation
-                code={event.error_code}
-                warn={outcome.type === 'client_disconnected'}
-                principalId={event.principal_id ?? null}
-                upstreamId={event.upstream_id ?? null}
-              />
-            }
-          />
+          // Prose reads left-aligned on its own full-width row under the key.
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-text-muted">Error</span>
+            <ErrorExplanation
+              code={event.error_code}
+              warn={outcome.type === 'client_disconnected'}
+              principalId={event.principal_id ?? null}
+              upstreamId={event.upstream_id ?? null}
+            />
+          </div>
         ) : null}
       </div>
     </DetailSection>
@@ -417,7 +416,7 @@ function ErrorExplanation({
           }
         : null;
   return (
-    <span className="flex flex-col items-end gap-0.5 min-w-0 text-right">
+    <span className="flex flex-col items-start gap-0.5 min-w-0 text-left">
       <span
         className={cx(
           'break-words min-w-0',

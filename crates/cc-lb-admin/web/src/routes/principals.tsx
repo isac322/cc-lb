@@ -19,6 +19,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ArrowDown,
@@ -82,6 +83,7 @@ import {
   type PluginEntry,
   type Principal,
   type PrincipalDefaultLimit,
+  qk,
   useCreatePrincipal,
   useDeleteChainEntry,
   useDeletePrincipal,
@@ -1204,7 +1206,7 @@ function SlotRadioCard({
     <li role="radio" aria-checked={isActive}>
       <label
         className={cx(
-          'flex items-start gap-3 p-3 border rounded-sm cursor-pointer transition-colors',
+          'relative flex items-start gap-3 p-3 border rounded-sm cursor-pointer transition-colors',
           isActive
             ? 'border-accent/60 bg-accent-dim'
             : 'border-subtle hover:bg-overlay-2',
@@ -1449,7 +1451,7 @@ function TerminalStrategyRadioGroup({
             <div key={opt.value} className="h-full">
               <label
                 className={cx(
-                  'flex items-start gap-3 p-3 border rounded-sm transition-colors h-full',
+                  'relative flex items-start gap-3 p-3 border rounded-sm transition-colors h-full',
                   isActive
                     ? 'border-accent/60 bg-accent-dim'
                     : 'border-subtle hover:bg-overlay-2',
@@ -2520,6 +2522,7 @@ function SortableChainItem({
 }
 
 const API_KEY_SKELETON_CELL_CLASSES = [
+  'px-3 w-10',
   'px-3',
   'px-3',
   'px-3',
@@ -2530,6 +2533,7 @@ const API_KEY_SKELETON_CELL_CLASSES = [
 ] as const;
 
 const API_KEY_SKELETON_CLASSES = [
+  'w-4',
   'w-24',
   'w-48',
   'w-12',
@@ -2539,10 +2543,22 @@ const API_KEY_SKELETON_CLASSES = [
   'w-4',
 ] as const;
 
+const API_KEY_CHECKBOX_CLASS =
+  'size-4 cursor-pointer align-middle accent-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1';
+
+/** How a key is named in bulk confirm copy: its last 4, else its ID. */
+function apiKeyTail(key: { key_id: string; last_4: string }): string {
+  return key.last_4 ? `···${key.last_4}` : key.key_id;
+}
+
 export function ApiKeysCard({ principal }: { principal: Principal }) {
   const keys = usePrincipalKeys(principal.id);
   const issue = useIssueKey();
   const revoke = useRevokeKey();
+  // Same revoke endpoint, but failures skip the global per-request toast:
+  // bulk revoke reports every failed key in one summary toast instead.
+  const bulkRevoke = useRevokeKey({ inlineError: true });
+  const queryClient = useQueryClient();
   const { copy } = useCopyButton();
   const [issueOpen, setIssueOpen] = useState(false);
   const [label, setLabel] = useState('');
@@ -2554,6 +2570,16 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
     key_id: string;
     label: string;
   } | null>(null);
+  const [selectedKeyIds, setSelectedKeyIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+  // Snapshot of the keys the open bulk dialog names, so its copy stays intact
+  // through the close transition after the selection is cleared.
+  const [bulkTargets, setBulkTargets] = useState<
+    { key_id: string; last_4: string }[]
+  >([]);
+  const [bulkPending, setBulkPending] = useState(false);
   // Issuance mints a plaintext key the server can never show again, so a
   // duplicate request from one synchronous burst of clicks would strand a live
   // secret nobody can read; revoke is the matching destructive one-shot. React
@@ -2563,7 +2589,32 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
   const issueInFlight = React.useRef(false);
   const revokeInFlight = React.useRef(false);
   const issuePending = issue.isPending;
-  const revokePending = revoke.isPending;
+  const revokePending = revoke.isPending || bulkPending;
+
+  const activeKeys = (keys.data?.keys ?? []).filter(
+    (k) => !k.revoked_at_unix_secs,
+  );
+  // Selection only ever covers keys that are still active; a key revoked
+  // elsewhere drops out of the count without a stale entry lingering.
+  const selectedKeys = activeKeys.filter((k) => selectedKeyIds.has(k.key_id));
+  const allActiveSelected =
+    activeKeys.length > 0 && selectedKeys.length === activeKeys.length;
+  const someActiveSelected = selectedKeys.length > 0 && !allActiveSelected;
+
+  const toggleKeySelected = (keyId: string) => {
+    setSelectedKeyIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(keyId)) next.delete(keyId);
+      else next.add(keyId);
+      return next;
+    });
+  };
+
+  const toggleAllActive = () => {
+    setSelectedKeyIds(
+      allActiveSelected ? new Set() : new Set(activeKeys.map((k) => k.key_id)),
+    );
+  };
 
   const submitIssue = () => {
     if (issueInFlight.current || issuePending) return;
@@ -2598,19 +2649,72 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
     );
   };
 
+  const submitBulkRevoke = async () => {
+    if (revokeInFlight.current || revokePending) return;
+    const targets = bulkTargets;
+    if (targets.length === 0) return;
+    revokeInFlight.current = true;
+    setBulkPending(true);
+    try {
+      const results = await Promise.allSettled(
+        targets.map((k) =>
+          bulkRevoke.mutateAsync({ id: principal.id, key_id: k.key_id }),
+        ),
+      );
+      const failed = targets.filter(
+        (_, idx) => results[idx]?.status === 'rejected',
+      );
+      const revokedCount = targets.length - failed.length;
+      if (failed.length === 0) {
+        toast.success(
+          revokedCount === 1 ? 'Key revoked' : `${revokedCount} keys revoked`,
+        );
+      } else {
+        toast.error(
+          `Revoked ${revokedCount} of ${targets.length} keys. Failed: ${failed.map(apiKeyTail).join(', ')}`,
+        );
+      }
+    } finally {
+      revokeInFlight.current = false;
+      setBulkPending(false);
+      setSelectedKeyIds(new Set());
+      setBulkConfirmOpen(false);
+      void queryClient.invalidateQueries({
+        queryKey: qk.principalKeys(principal.id),
+      });
+    }
+  };
+
+  const bulkCount = selectedKeys.length;
+
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
       <CardHeader
         title="API keys"
         subtitle="Authenticates as this DB principal; routing selects a DB upstream"
         action={
-          <Button
-            size="sm"
-            iconLeft={<KeyRound className="w-3 h-3" />}
-            onClick={() => setIssueOpen(true)}
-          >
-            Issue key
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {bulkCount > 0 ? (
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={revokePending}
+                onClick={() => {
+                  setBulkTargets(selectedKeys);
+                  setBulkConfirmOpen(true);
+                }}
+              >
+                Revoke selected ({bulkCount})
+              </Button>
+            ) : null}
+            <Button
+              size="sm"
+              iconLeft={<KeyRound className="w-3 h-3" />}
+              onClick={() => setIssueOpen(true)}
+            >
+              Issue key
+            </Button>
+          </div>
         }
       />
       <div
@@ -2620,6 +2724,19 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         <Table className="min-w-[760px] whitespace-nowrap">
           <TableHead>
             <tr>
+              <TableHeadCell className="w-10">
+                <input
+                  type="checkbox"
+                  aria-label="Select all active keys"
+                  className={API_KEY_CHECKBOX_CLASS}
+                  checked={allActiveSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = someActiveSelected;
+                  }}
+                  disabled={activeKeys.length === 0 || revokePending}
+                  onChange={toggleAllActive}
+                />
+              </TableHeadCell>
               <TableHeadCell>Label</TableHeadCell>
               <TableHeadCell>Key ID</TableHeadCell>
               <TableHeadCell>Last 4</TableHeadCell>
@@ -2636,7 +2753,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
               Array.from({ length: 3 }).map((_, i) => (
                 <SkeletonRow
                   key={i}
-                  cols={7}
+                  cols={8}
                   cellClassNames={API_KEY_SKELETON_CELL_CLASSES}
                   skeletonClassNames={API_KEY_SKELETON_CLASSES}
                 />
@@ -2649,6 +2766,18 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                     key={k.key_id}
                     className={revoked ? 'text-text-faint' : undefined}
                   >
+                    <TableCell className="w-10">
+                      {!revoked ? (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select key ${k.label ? `${k.label} (${k.key_id})` : k.key_id}`}
+                          className={API_KEY_CHECKBOX_CLASS}
+                          checked={selectedKeyIds.has(k.key_id)}
+                          disabled={revokePending}
+                          onChange={() => toggleKeySelected(k.key_id)}
+                        />
+                      ) : null}
+                    </TableCell>
                     <TableCell>
                       {k.label ?? <EmptyValue label="No label" />}
                     </TableCell>
@@ -2705,7 +2834,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
               })
             ) : (
               <tr>
-                <td colSpan={7} className="px-4 py-8 text-center">
+                <td colSpan={8} className="px-4 py-8 text-center">
                   <p className="text-body-sm text-text-muted">
                     No API keys issued.
                   </p>
@@ -2824,6 +2953,32 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         pending={revokePending}
         closeOnConfirm={false}
         onConfirm={submitRevoke}
+      />
+
+      <ConfirmDialog
+        open={bulkConfirmOpen}
+        onOpenChange={setBulkConfirmOpen}
+        title={
+          bulkTargets.length === 1
+            ? 'Revoke 1 key?'
+            : `Revoke ${bulkTargets.length} keys?`
+        }
+        description={
+          <>
+            Clients using{' '}
+            <span className="font-medium text-text">
+              {bulkTargets.map(apiKeyTail).join(', ')}
+            </span>{' '}
+            will get 401 immediately.
+          </>
+        }
+        confirmLabel="Revoke"
+        destructive
+        pending={bulkPending}
+        closeOnConfirm={false}
+        onConfirm={() => {
+          void submitBulkRevoke();
+        }}
       />
     </Card>
   );

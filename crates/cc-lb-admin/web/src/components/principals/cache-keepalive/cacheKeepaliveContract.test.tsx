@@ -21,13 +21,15 @@ test('freezes Cache keepalive card, drawer, settings, money, and animation contr
       ['Cost saved', 'net, after renewal spend'],
     ],
     caption: 'Renews the prompt-cache TTL during idle gaps.',
+    offLine: 'Off. Turn on to renew the prompt-cache TTL for idle sessions.',
     actions: ['Sessions', 'Settings'],
   });
   expect(cacheKeepaliveDrawerCopy.closeHistoryAriaLabel).toBe('Close history');
   expect(cacheKeepaliveDrawerCopy.closeSettingsAriaLabel).toBe(
     'Close settings',
   );
-  expect(cacheKeepaliveDrawerCopy.closeDetail).toBe('Close ▶');
+  expect(cacheKeepaliveDrawerCopy.closeDetail).toBe('Close');
+  expect(cacheKeepaliveDrawerCopy.backDetail).toBe('Back');
   expect(cacheKeepaliveDrawerCopy.turnTimeline).toEqual([
     'Message-by-message',
     'Current turn · Live',

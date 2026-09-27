@@ -547,7 +547,7 @@ describe('Overview quota headroom', () => {
     render(<PoolQuotaStackedBar window="7d" w={aggregate.windows[1]} />);
 
     const trigger = screen.getByRole('button', {
-      name: '7d pool 60.0%, show upstream breakdown',
+      name: '7d pool 60%, show upstream breakdown',
     });
     expect(screen.queryByText('Upstream Two')).toBeNull();
 
@@ -560,7 +560,7 @@ describe('Overview quota headroom', () => {
       expect.stringContaining('Upstream One'),
       expect.stringContaining('Upstream Two'),
     ]);
-    expect(rows[1]?.textContent).toContain('97.0%');
+    expect(rows[1]?.textContent).toContain('97%');
   });
 
   it('ranks upstreams by their most-used window and links each to its detail', () => {
@@ -581,7 +581,7 @@ describe('Overview quota headroom', () => {
 });
 
 describe('PoolQuotaLegend', () => {
-  it('renders Fable only when the selected range has Fable data', () => {
+  it('renders 7d (Fable) only when the selected range has Fable data', () => {
     const { rerender } = render(
       <PoolQuotaLegend
         latest={{ '5h': 20, '7d': 40, '7d_fable': null }}
@@ -596,7 +596,7 @@ describe('PoolQuotaLegend', () => {
         showFable
       />,
     );
-    expect(screen.getByText(/Fable/).textContent).toBe('Fable · 28%');
+    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 28%');
   });
 });
 
@@ -710,7 +710,7 @@ describe('Overview loading geometry', () => {
     expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
   });
 
-  it('keeps the principal card shell stable across loading and loaded states, collapsing when empty', () => {
+  it('keeps the principal card shell stable across loading and loaded states', () => {
     const { container, rerender } = render(
       <TopPrincipalsCard loading principals={[]} range="24h" />,
     );
@@ -736,7 +736,6 @@ describe('Overview loading geometry', () => {
       expect(skeletons[3]?.className).toContain('h-5');
       expect(skeletons[4]?.className).toContain('h-3');
     }
-    expect(listClassName).toContain('min-h-80');
     expect(screen.queryByText('Loading top principals…')).toBeNull();
 
     rerender(<TopPrincipalsCard loading={false} principals={[]} range="24h" />);
@@ -744,11 +743,9 @@ describe('Overview loading geometry', () => {
     expect(
       screen.getByText('Top principals').closest('.glass')?.className,
     ).toBe(cardClassName);
-    // An empty window drops the reserved list height instead of leaving a
-    // tall blank card.
     expect(
       container.querySelector('[data-slot="principal-list"]')?.className,
-    ).not.toContain('min-h-80');
+    ).toBe(listClassName);
     expect(screen.getByText('No usage in the last 24h')).toBeDefined();
 
     rerender(
@@ -854,7 +851,7 @@ describe('Overview loading geometry', () => {
       expect(legendSlots).toHaveLength(3);
       expect(
         Array.from(legendSlots, (slot) => slot.textContent?.trim()),
-      ).toEqual(['5h', '7d', 'Fable']);
+      ).toEqual(['5h', '7d', '7d (Fable)']);
       for (const slot of legendSlots) {
         expect(slot.querySelector('.skeleton')).not.toBeNull();
       }
@@ -940,7 +937,7 @@ describe('Overview loading geometry', () => {
         quotaCard.querySelectorAll(
           '[data-testid="pool-quota-snapshot-slot"]',
         )[0]?.textContent,
-      ).toContain('20.0%');
+      ).toContain('20%');
       expect(principalRow.textContent).toContain('Principal Alpha');
       expect(principalRow.textContent).toContain('$3.00');
 
@@ -1016,7 +1013,7 @@ describe('Overview loading geometry', () => {
         quotaCard.querySelectorAll(
           '[data-testid="pool-quota-snapshot-slot"]',
         )[0]?.textContent,
-      ).toContain('55.0%');
+      ).toContain('55%');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(principalRow.textContent).toContain('$9.00');
     } finally {
@@ -1182,51 +1179,60 @@ describe('Overview loading geometry', () => {
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
-  it('keeps the Recent Requests scroll box height fixed while data resolves', () => {
+  it('previews the ten newest requests at their natural height with a link to Logs', () => {
     mockPendingOverviewQueries();
-    vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
-      data: undefined,
-      fetchNextPage: vi.fn(),
-      hasNextPage: false,
-      isFetchingNextPage: false,
-      isLoading: true,
-    } as never);
-
-    const { container, rerender } = render(<OverviewPage />);
-    const loadingScrollBox = container.querySelector('.scroll-fade-right');
-
-    expect(loadingScrollBox?.className).toContain('h-[50vh]');
-    expect(loadingScrollBox?.className).not.toContain('max-h-[50vh]');
-
     vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
       data: {
         pages: [
           {
-            events: [
-              {
-                duration_ms: 10,
-                event_kind: 'messages',
-                model: 'test-model',
-                request_id: 'request-1',
-                status: 200,
-                ts: 1,
-              },
-            ],
+            events: Array.from({ length: 12 }, (_, index) => ({
+              duration_ms: 10,
+              event_kind: 'messages',
+              model: 'test-model',
+              request_id: `request-${index + 1}`,
+              status: 200,
+              ts: index + 1,
+            })),
           },
         ],
       },
       fetchNextPage: vi.fn(),
-      hasNextPage: false,
+      hasNextPage: true,
       isFetchingNextPage: false,
       isLoading: false,
     } as never);
 
-    rerender(<OverviewPage />);
+    render(<OverviewPage />);
 
-    expect(container.querySelector('.scroll-fade-right')?.className).toBe(
-      loadingScrollBox?.className,
+    const rows = screen.getAllByLabelText(/^View request request-/);
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual(
+      Array.from(
+        { length: 10 },
+        (_, index) => `View request request-${12 - index}`,
+      ),
     );
-    expect(screen.getByText('test-model')).toBeDefined();
+    // A preview has no infinite-scroll footer; the full history is on Logs.
+    expect(screen.queryByText('No more entries')).toBeNull();
+    expect(
+      screen.getByRole('link', { name: 'See all' }).getAttribute('href'),
+    ).toBe('/logs');
+  });
+
+  it('collapses the traffic strip to one line when the range has no requests', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: {
+        ...SUMMARY_FIXTURE,
+        totals: { ...SUMMARY_FIXTURE.totals, request_count: 0 },
+      },
+      isPending: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const strip = screen.getByTestId('overview-kpi-strip');
+    expect(strip.textContent).toBe('No requests in the last 24h');
+    expect(strip.querySelector('[data-slot="kpi-tile"]')).toBeNull();
   });
 
   it('requests only messages events and shows no other categories from mixed data', () => {
@@ -1337,8 +1343,12 @@ describe('Overview loading geometry', () => {
 
   it('flashes the newest live row after the twentieth insertion', () => {
     mockResolvedKpiQueries();
+    // live-1 is inserted first but carries the newest timestamp, so it stays
+    // inside the ten-row preview while it ages out of the flash window.
+    const firstEvent = { ...finalLiveEvent(1), ts: 100 };
     const eventsMap: LiveEventMap = new Map();
-    for (let index = 1; index <= 20; index += 1) {
+    eventsMap.set('live-1', { phase: 'final', event: firstEvent });
+    for (let index = 2; index <= 20; index += 1) {
       eventsMap.set(`live-${index}`, {
         phase: 'final',
         event: finalLiveEvent(index),
@@ -1366,7 +1376,7 @@ describe('Overview loading geometry', () => {
 
     eventsMap.set('live-1', {
       phase: 'final',
-      event: { ...finalLiveEvent(1), status: 201 },
+      event: { ...firstEvent, status: 201 },
     });
     mockLiveStream(eventsMap, 22);
     rerender(<OverviewPage />);

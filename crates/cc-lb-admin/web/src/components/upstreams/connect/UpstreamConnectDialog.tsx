@@ -404,7 +404,7 @@ function ConnectDialogBody({
                 )}
                 <button
                   type="button"
-                  className="-mt-1 w-fit text-xs text-text-faint underline underline-offset-2 hover:text-text disabled:opacity-50"
+                  className="-mt-1 w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:opacity-50"
                   disabled={saving}
                   onClick={() => setUseEnvVar((v) => !v)}
                 >
@@ -478,9 +478,9 @@ function ConnectDialogBody({
                     href={session.authorizeUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex w-fit items-center gap-1 text-xs text-text-faint underline underline-offset-2 hover:text-text"
+                    className="inline-flex w-fit items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
                   >
-                    <ExternalLink className="w-3 h-3" />
+                    <ExternalLink className="w-3 h-3" strokeWidth={1.75} />
                     Open the sign-in page again
                   </a>
                 ) : null}
@@ -617,7 +617,7 @@ function KindStep({
         <KindOption
           value="anthropic_oauth"
           selected={kind === 'anthropic_oauth'}
-          icon={<UserRound className="w-4 h-4" />}
+          icon={<UserRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Claude subscription"
           badge="Recommended"
           description="Sign in with a Claude Pro, Max, Team or Enterprise account. cc-lb detects the plan and tracks its quota automatically."
@@ -626,7 +626,7 @@ function KindStep({
         <KindOption
           value="anthropic_api_key"
           selected={kind === 'anthropic_api_key'}
-          icon={<KeyRound className="w-4 h-4" />}
+          icon={<KeyRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Anthropic API key"
           description="Use a workspace API key (sk-ant-…). Billed per token."
           onActivate={onContinue}
@@ -742,7 +742,11 @@ function StepRail({
                     : 'border-subtle-strong text-text-faint',
               )}
             >
-              {done ? <Check className="w-3 h-3" /> : index + 1}
+              {done ? (
+                <Check className="w-3 h-3" strokeWidth={1.75} />
+              ) : (
+                index + 1
+              )}
             </span>
             <span className="min-w-0">
               <span
@@ -810,9 +814,7 @@ function WhatYouWillSee() {
         </div>
         {/* Miniature callback page */}
         <div className="flex flex-col gap-1.5 p-3">
-          <div className="text-[12px] font-semibold text-text">
-            Authentication Code
-          </div>
+          <div className="text-label text-text">Authentication code</div>
           <div className="text-2xs text-text-faint">
             Paste this into Claude Code
           </div>
@@ -820,14 +822,14 @@ function WhatYouWillSee() {
             aB3x…#eyJ1…
           </div>
           <div className="mt-0.5">
-            <span className="inline-flex items-center rounded-sm bg-[color:var(--color-text)] px-2 py-1 text-2xs font-medium text-[color:var(--color-bg)] ring-1 ring-[color:var(--color-accent)] ring-offset-1 ring-offset-[color:var(--color-bg)]">
+            <span className="inline-flex items-center rounded-sm bg-text px-2 py-1 text-2xs font-medium text-bg ring-1 ring-accent ring-offset-1 ring-offset-bg">
               Copy Code
             </span>
           </div>
         </div>
       </div>
       <p className="mt-1.5 flex items-center gap-1 text-caption text-accent-text">
-        <CornerUpLeft className="w-3 h-3" />
+        <CornerUpLeft className="w-3 h-3" strokeWidth={1.75} />
         Click Copy Code, then come back here
       </p>
     </div>

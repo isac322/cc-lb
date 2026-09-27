@@ -539,7 +539,12 @@ test('shows catalog and opens detail view', async () => {
 
   fireEvent.click(screen.getByRole('button', { name: 'Inspect My Plugin' }));
 
-  expect(await screen.findByText('Back to catalog')).toBeDefined();
+  expect(
+    await screen.findByRole('button', { name: 'Back to plugins' }),
+  ).toBeDefined();
+  const headings = screen.getAllByRole('heading', { level: 1 });
+  expect(headings).toHaveLength(1);
+  expect(headings[0]?.textContent).toContain('My Plugin');
   expect(screen.getByText('What this plugin does')).toBeDefined();
   expect(screen.getByText('Test usage')).toBeDefined();
   expect(screen.getByText('test_hook')).toBeDefined();

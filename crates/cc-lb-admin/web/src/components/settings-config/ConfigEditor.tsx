@@ -45,8 +45,10 @@ import {
   type ConfigEditorModel,
   type ConfigEditorSection as ConfigEditorSectionModel,
   type ConfigFieldGuidance,
+  type ConfigScalarCheck,
   type ConfigSchema,
   type ConfigSearchResult,
+  checkConfigScalar,
   classifyConfigLeaf,
   configKeyLabel,
   configPathToString,
@@ -2911,10 +2913,12 @@ function ScalarField({
   const storageUrlReplacement = useContext(StorageUrlReplacementContext);
   const [replacingOpaque, setReplacingOpaque] = useState(false);
   const [clearedWhileEditing, setClearedWhileEditing] = useState(false);
+  const [blurred, setBlurred] = useState(false);
   const current = getConfigValue(value, path);
   const fileValue = getConfigValue(fileConfig, path);
   const configured = current !== undefined && current !== null;
   const modified = configured && !isSameJson(current, fileValue);
+  const draftDiffers = !isSameJson(current ?? null, fileValue ?? null);
   const error = issues.find((issue) => issue.severity === 'error');
   const isSensitive =
     Boolean(override?.sensitive) || path === OPAQUE_STORAGE_URL_PATH;
@@ -2997,6 +3001,24 @@ function ScalarField({
     typeof concrete.minimum === 'number' ? concrete.minimum : undefined;
   const maximum =
     typeof concrete.maximum === 'number' ? concrete.maximum : undefined;
+  const scalarCheck: ConfigScalarCheck | null =
+    path === OPAQUE_STORAGE_URL_PATH
+      ? null
+      : classification.presentation === 'address'
+        ? { kind: 'address' }
+        : leafKind === 'integer' || leafKind === 'number'
+          ? { kind: leafKind, minimum, maximum }
+          : leafKind === 'string'
+            ? {
+                kind: 'string',
+                required:
+                  typeof concrete.minLength === 'number' &&
+                  concrete.minLength >= 1,
+              }
+            : null;
+  const localError =
+    blurred && scalarCheck ? checkConfigScalar(current, scalarCheck) : null;
+  const localErrorId = `${inputId}-local-error`;
   const hints = [
     numeric && minimum !== undefined && maximum !== undefined
       ? `Allowed range ${minimum}–${maximum}.`
@@ -3023,10 +3045,10 @@ function ScalarField({
   }, [storageUrlReplacement.value]);
 
   const reset = () => {
-    if (defaultValue !== undefined) {
-      onChange(setConfigValue(value, path, cloneJson(defaultValue)));
-    } else {
+    if (fileValue === undefined || fileValue === null) {
       onChange(unsetConfigValue(value, path));
+    } else {
+      onChange(setConfigValue(value, path, cloneJson(fileValue)));
     }
   };
 
@@ -3084,22 +3106,26 @@ function ScalarField({
               </>
             ) : (
               <>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  iconLeft={<RotateCcw className="h-3 w-3" />}
-                  onClick={reset}
-                >
-                  Reset
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  iconLeft={<X className="h-3 w-3" />}
-                  onClick={() => onChange(unsetConfigValue(value, path))}
-                >
-                  Unset
-                </Button>
+                {draftDiffers ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    iconLeft={<RotateCcw className="h-3 w-3" />}
+                    onClick={reset}
+                  >
+                    Reset
+                  </Button>
+                ) : null}
+                {configured ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    iconLeft={<X className="h-3 w-3" />}
+                    onClick={() => onChange(unsetConfigValue(value, path))}
+                  >
+                    Unset
+                  </Button>
+                ) : null}
               </>
             )}
           </div>
@@ -3213,7 +3239,8 @@ function ScalarField({
                   ? 'numeric'
                   : undefined
               }
-              aria-invalid={Boolean(error)}
+              aria-invalid={Boolean(error) || localError !== null}
+              aria-describedby={localError !== null ? localErrorId : undefined}
               value={
                 path === OPAQUE_STORAGE_URL_PATH
                   ? (storageUrlReplacement.value ?? '')
@@ -3246,6 +3273,7 @@ function ScalarField({
               }}
               onBlur={() => {
                 if (numeric) setClearedWhileEditing(false);
+                setBlurred(true);
               }}
             />
             {classification.unit ? (
@@ -3256,6 +3284,11 @@ function ScalarField({
           </div>
         )}
       </div>
+      {localError !== null ? (
+        <p id={localErrorId} className="mt-1.5 text-caption text-danger-text">
+          {localError}
+        </p>
+      ) : null}
       {issues.map((issue, index) => (
         <IssueLine key={`${issue.code}-${index}`} issue={issue} />
       ))}
@@ -3894,6 +3927,8 @@ function RecurringJobRow({
   const jobFile = getConfigValue(fileConfig, jobPath);
   const jobModified =
     jobCurrent !== undefined && !isSameJson(jobCurrent, jobFile);
+  const jobDraftDiffers = !isSameJson(jobCurrent ?? null, jobFile ?? null);
+  const jobConfigured = jobCurrent !== undefined && jobCurrent !== null;
   const jobClassification = classifyConfigLeaf(jobPath);
   const enabledCurrent = getConfigValue(value, enabledPath);
   const enabledEffective = getConfigValue(effectiveConfig, enabledPath);
@@ -3937,27 +3972,32 @@ function RecurringJobRow({
               onChange(setConfigValue(value, enabledPath, event.target.checked))
             }
           />
-          <Button
-            size="sm"
-            variant="ghost"
-            iconLeft={<RotateCcw />}
-            disabled={!hasDefault}
-            onClick={() =>
-              onChange(
-                setConfigValue(value, jobPath, cloneJson(defaultJobValue)),
-              )
-            }
-          >
-            Reset
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            iconLeft={<X />}
-            onClick={() => onChange(unsetConfigValue(value, jobPath))}
-          >
-            Unset
-          </Button>
+          {jobDraftDiffers ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              iconLeft={<RotateCcw />}
+              onClick={() =>
+                onChange(
+                  jobFile === undefined || jobFile === null
+                    ? unsetConfigValue(value, jobPath)
+                    : setConfigValue(value, jobPath, cloneJson(jobFile)),
+                )
+              }
+            >
+              Reset
+            </Button>
+          ) : null}
+          {jobConfigured ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              iconLeft={<X />}
+              onClick={() => onChange(unsetConfigValue(value, jobPath))}
+            >
+              Unset
+            </Button>
+          ) : null}
         </div>
       </div>
       <p className="mt-1 text-caption text-text-muted">

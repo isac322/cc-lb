@@ -231,12 +231,17 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         variant="compact"
         role="switch"
         aria-label="Toggle cache keepalive"
+        label={
+          <span className="text-text-muted">
+            {enabled ? 'Enabled' : 'Disabled'}
+          </span>
+        }
         aria-busy={togglePending || undefined}
         checked={enabled}
         data-testid="cache-keepalive-switch"
         disabled={toggleLocked}
         onChange={handleToggle}
-        className="ml-1"
+        className="ml-1 flex-row-reverse"
       />
     </div>
   );
@@ -261,55 +266,64 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
           align="center"
         />
         <CardBody className="flex-1">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MetricTile
-              label="Renewing now"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : (summary?.renewing_now ?? 0).toLocaleString('en-US')
-              }
-              subtext="scheduled or mid-renewal"
-            />
-            <MetricTile
-              label="Sessions (last 5m)"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
-              }
-              subtext="seen in last 5 min"
-            />
-            <MetricTile
-              label="Renewals fired"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
-              }
-              subtext="all-time"
-            />
-            <MetricTile
-              label="Cost saved"
-              isLoading={summaryQ.isLoading}
-              value={
-                summaryQ.isLoading
-                  ? undefined
-                  : summary
-                    ? formatMoney(summary.cost_saved)
-                    : '$0.00'
-              }
-              subtext="net, after renewal spend"
-              valueClassName={
-                (summary?.cost_saved ?? 0) > 0
-                  ? 'text-success-text'
-                  : 'text-text'
-              }
-            />
-          </div>
+          {!enabled ? (
+            <p
+              className="text-body-sm text-text-muted"
+              data-testid="cache-keepalive-off"
+            >
+              Off. Turn on to renew the prompt-cache TTL for idle sessions.
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <MetricTile
+                label="Renewing now"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : (summary?.renewing_now ?? 0).toLocaleString('en-US')
+                }
+                subtext="scheduled or mid-renewal"
+              />
+              <MetricTile
+                label="Sessions (last 5m)"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
+                }
+                subtext="seen in last 5 min"
+              />
+              <MetricTile
+                label="Renewals fired"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
+                }
+                subtext="all-time"
+              />
+              <MetricTile
+                label="Cost saved"
+                isLoading={summaryQ.isLoading}
+                value={
+                  summaryQ.isLoading
+                    ? undefined
+                    : summary
+                      ? formatMoney(summary.cost_saved)
+                      : '$0.00'
+                }
+                subtext="net, after renewal spend"
+                valueClassName={
+                  (summary?.cost_saved ?? 0) > 0
+                    ? 'text-success-text'
+                    : 'text-text'
+                }
+              />
+            </div>
+          )}
         </CardBody>
       </Card>
 

@@ -12,6 +12,7 @@ import type React from 'react';
 import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
+import { queryClient as appQueryClient } from '../lib/queryClient';
 import {
   ApiKeysCard,
   RecentRequestsCard,
@@ -398,14 +399,14 @@ test('API key loading keeps the table header and per-column skeleton rows', () =
   expect(screen.queryByText('No API keys issued.')).toBeNull();
   const slot = screen.getByTestId('api-keys-table-slot');
   expect(slot.className).toContain('min-h-32');
-  expect(slot.querySelectorAll('thead th')).toHaveLength(7);
+  expect(slot.querySelectorAll('thead th')).toHaveLength(8);
   const rows = slot.querySelectorAll('tbody tr');
   expect(rows).toHaveLength(3);
   for (const row of rows) {
     expect(row.getAttribute('aria-hidden')).toBe('true');
     expect(row.className).toContain('border-row');
-    expect(row.querySelectorAll('td')).toHaveLength(7);
-    expect(row.querySelectorAll('.skeleton')).toHaveLength(7);
+    expect(row.querySelectorAll('td')).toHaveLength(8);
+    expect(row.querySelectorAll('.skeleton')).toHaveLength(8);
   }
   expect(container.textContent).not.toContain('—');
 });
@@ -1905,4 +1906,154 @@ test('API-key revoke pending preserves confirmation and locks row action', () =>
   expect(
     screen.getByRole('alertdialog', { name: 'Revoke API key?' }),
   ).toBeDefined();
+});
+
+const BULK_KEYS = [
+  {
+    key_id: 'key-1',
+    label: 'CI',
+    last_4: '1a2b',
+    issued_at_unix_secs: 1,
+    last_used_at_unix_secs: null,
+    revoked_at_unix_secs: null,
+  },
+  {
+    key_id: 'key-2',
+    label: 'Laptop',
+    last_4: '9f00',
+    issued_at_unix_secs: 1,
+    last_used_at_unix_secs: null,
+    revoked_at_unix_secs: null,
+  },
+  {
+    key_id: 'key-3',
+    label: 'Old',
+    last_4: 'c3d4',
+    issued_at_unix_secs: 1,
+    last_used_at_unix_secs: null,
+    revoked_at_unix_secs: 5,
+  },
+];
+
+function renderBulkRevoke(
+  mutateAsync: (vars: { id: string; key_id: string }) => Promise<unknown>,
+) {
+  vi.mocked(queries.usePrincipalKeys).mockReturnValue({
+    data: { keys: BULK_KEYS },
+    isLoading: false,
+  } as never);
+  vi.mocked(queries.useIssueKey).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  vi.mocked(queries.useRevokeKey).mockReturnValue({
+    mutate: vi.fn(),
+    mutateAsync,
+    isPending: false,
+  } as never);
+  renderWithProviders(<ApiKeysCard principal={principal} />);
+}
+
+test('bulk revoke confirms the selected keys, then revokes each one', async () => {
+  const mutateAsync = vi.fn().mockResolvedValue({});
+  const success = vi.spyOn(toast, 'success');
+  renderBulkRevoke(mutateAsync);
+
+  // Revoked keys cannot be selected.
+  expect(
+    screen.queryByRole('checkbox', { name: 'Select key Old (key-3)' }),
+  ).toBe(null);
+  expect(screen.queryByRole('button', { name: /Revoke selected/ })).toBeNull();
+
+  fireEvent.click(
+    screen.getByRole('checkbox', { name: 'Select key CI (key-1)' }),
+  );
+  fireEvent.click(
+    screen.getByRole('checkbox', { name: 'Select key Laptop (key-2)' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Revoke selected (2)' }));
+
+  const dialog = screen.getByRole('alertdialog', { name: 'Revoke 2 keys?' });
+  expect(dialog.textContent).toContain(
+    'Clients using ···1a2b, ···9f00 will get 401 immediately.',
+  );
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+
+  await waitFor(() => expect(success).toHaveBeenCalledWith('2 keys revoked'));
+  expect(mutateAsync).toHaveBeenCalledTimes(2);
+  expect(mutateAsync).toHaveBeenCalledWith({ id: 'p-1', key_id: 'key-1' });
+  expect(mutateAsync).toHaveBeenCalledWith({ id: 'p-1', key_id: 'key-2' });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('button', { name: /Revoke selected/ }),
+    ).toBeNull(),
+  );
+});
+
+test('bulk revoke cancel revokes nothing', () => {
+  const mutateAsync = vi.fn().mockResolvedValue({});
+  renderBulkRevoke(mutateAsync);
+
+  fireEvent.click(
+    screen.getByRole('checkbox', { name: 'Select all active keys' }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Revoke selected (2)' }));
+  const dialog = screen.getByRole('alertdialog', { name: 'Revoke 2 keys?' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+  expect(mutateAsync).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole('button', { name: 'Revoke selected (2)' }),
+  ).toBeDefined();
+});
+
+test('bulk revoke reports partial failures in exactly one toast', async () => {
+  // Real revoke hook on the app client, so the global MutationCache error
+  // toast is live: a per-key failure toast would show up as a second call.
+  const actual = await vi.importActual<typeof queries>('../lib/queries');
+  vi.mocked(queries.useRevokeKey).mockImplementation(actual.useRevokeKey);
+  vi.mocked(queries.usePrincipalKeys).mockReturnValue({
+    data: { keys: BULK_KEYS },
+    isLoading: false,
+  } as never);
+  vi.mocked(queries.useIssueKey).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as never);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = input instanceof Request ? input.url : String(input);
+    return url.endsWith('/keys/key-2/revoke')
+      ? new Response(JSON.stringify({ message: 'boom' }), { status: 500 })
+      : new Response('{}', { status: 200 });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  const error = vi.spyOn(toast, 'error');
+
+  try {
+    render(
+      <QueryClientProvider client={appQueryClient}>
+        <ApiKeysCard principal={principal} />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole('checkbox', { name: 'Select all active keys' }),
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Revoke selected (2)' }),
+    );
+    const dialog = screen.getByRole('alertdialog', { name: 'Revoke 2 keys?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Revoke' }));
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith(
+        'Revoked 1 of 2 keys. Failed: ···9f00',
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllGlobals();
+    appQueryClient.clear();
+  }
 });

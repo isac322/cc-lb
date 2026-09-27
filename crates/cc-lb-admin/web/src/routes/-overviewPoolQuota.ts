@@ -92,7 +92,7 @@ export type ClosestToLimitEntry = {
 /**
  * Ranks upstreams by their highest window utilization, descending. Each
  * upstream appears once, with the window that is closest to its limit; ties
- * inside an upstream keep the window order (5h before 7d before Fable).
+ * inside an upstream keep the window order (5h before 7d before 7d (Fable)).
  * Lots without a utilization reading are skipped.
  */
 export function closestToLimit(

@@ -6,6 +6,7 @@ import {
   screen,
   within,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveApiRows } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
@@ -297,7 +298,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('Session detail')).toBeDefined();
   });
 
-  it('status filter exposes selected state via aria-checked', () => {
+  it('status filter is a select that narrows the sessions query', async () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -306,19 +307,24 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const filter = within(
-      screen.getByRole('radiogroup', { name: 'Session status' }),
+    expect(screen.queryByRole('radiogroup', { name: 'Session status' })).toBe(
+      null,
     );
-    const allBtn = filter.getByRole('radio', { name: 'All' });
-    const renewedBtn = filter.getByRole('radio', { name: 'Renewed' });
+    const trigger = screen.getByRole('combobox', { name: 'Session status' });
+    expect(trigger.textContent).toContain('All statuses');
 
-    expect(allBtn.getAttribute('aria-checked')).toBe('true');
-    expect(renewedBtn.getAttribute('aria-checked')).toBe('false');
+    const user = userEvent.setup();
+    await user.click(trigger);
+    await user.click(await screen.findByRole('option', { name: 'Renewed' }));
 
-    fireEvent.click(renewedBtn);
-
-    expect(allBtn.getAttribute('aria-checked')).toBe('false');
-    expect(renewedBtn.getAttribute('aria-checked')).toBe('true');
+    expect(trigger.textContent).toContain('Renewed');
+    expect(
+      vi.mocked(queries.useCacheKeepaliveSessions),
+    ).toHaveBeenLastCalledWith(
+      'p-123',
+      { horizon: '24h', status: 'renewed', error: undefined },
+      true,
+    );
   });
 
   it('applies responsive layout classes when a row is selected', () => {
@@ -394,7 +400,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
   });
 
-  it('renders the status filter with every status label', () => {
+  it('lists every status in the status filter', async () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -403,20 +409,18 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const filter = within(
-      screen.getByRole('radiogroup', { name: 'Session status' }),
-    );
-    for (const label of [
-      'All',
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: 'Session status' }));
+    const options = await screen.findAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual([
+      'All statuses',
       'Renewed',
       'Scheduled',
       'Capped',
       'Expired',
       'Not tracked',
       'Error',
-    ]) {
-      expect(filter.getByRole('radio', { name: label })).toBeDefined();
-    }
+    ]);
   });
 
   it('renders row full session id first, not truncated, with status badge, optional Error chip, Net P&L, reason-only second line', () => {
@@ -430,13 +434,19 @@ describe('CacheKeepaliveSessionsDrawer', () => {
 
     // Check first row (Renewed)
     expect(screen.getByText('a1f39c2b7e04')).toBeDefined();
-    expect(screen.getAllByText('Renewed')[1]).toBeDefined(); // 0 is filter
+    const renewedRow = screen.getByText('a1f39c2b7e04').closest('li');
+    expect(renewedRow).not.toBeNull();
+    expect(
+      within(renewedRow as HTMLElement).getByText('Renewed'),
+    ).toBeDefined();
     expect(screen.getByText('+$0.102')).toBeDefined();
     expect(screen.getByText('agent-in-turn (tool_use: `bash`)')).toBeDefined();
 
     // Check error row
     expect(screen.getByText('error-overlaps-reason')).toBeDefined();
-    expect(screen.getAllByText('Error')[1]).toBeDefined(); // 0 is filter
+    const errorRow = screen.getByText('error-overlaps-reason').closest('li');
+    expect(errorRow).not.toBeNull();
+    expect(within(errorRow as HTMLElement).getByText('Error')).toBeDefined();
     expect(screen.getByText('−$0.006')).toBeDefined();
   });
 
@@ -551,7 +561,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('Loading older sessions...')).toBeDefined();
   });
 
-  it('renders disabled empty state', () => {
+  it('replaces the filters with one line when keepalive is off', () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
       data: {
         pages: [
@@ -579,15 +589,20 @@ describe('CacheKeepaliveSessionsDrawer', () => {
         onOpenChange={() => {}}
         principal={{
           ...mockPrincipal,
-          cache_keepalive: {
-            ...mockPrincipal.cache_keepalive!,
+          cache_keepalive: mockPrincipal.cache_keepalive && {
+            ...mockPrincipal.cache_keepalive,
             enabled: false,
           },
         }}
       />,
     );
 
-    expect(screen.getByText('Cache keepalive disabled')).toBeDefined();
+    expect(screen.getByTestId('cache-keepalive-sessions-off')).toBeDefined();
+    expect(screen.queryByRole('combobox', { name: 'Session status' })).toBe(
+      null,
+    );
+    expect(screen.queryByRole('radiogroup', { name: 'Time range' })).toBe(null);
+    expect(screen.getByText('No sessions recorded')).toBeDefined();
   });
 
   it('renders no sessions empty state', () => {
@@ -626,7 +641,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     ).toContain('min-h-[340px]');
   });
 
-  it('renders no matching sessions empty state', () => {
+  it('renders no matching sessions empty state', async () => {
     vi.spyOn(queries, 'useCacheKeepaliveSessions').mockReturnValue({
       data: {
         pages: [
@@ -656,8 +671,9 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const filterBtn = screen.getAllByText('Renewed')[0];
-    fireEvent.click(filterBtn);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('combobox', { name: 'Session status' }));
+    await user.click(await screen.findByRole('option', { name: 'Renewed' }));
 
     expect(screen.getByText('No matching sessions')).toBeDefined();
   });

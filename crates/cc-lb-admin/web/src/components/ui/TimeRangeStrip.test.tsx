@@ -23,6 +23,7 @@ interface CanvasContextMock {
   fillRect: Mock;
   fillText: Mock;
   lineTo: Mock;
+  measureText: Mock;
   moveTo: Mock;
   setTransform: Mock;
   stroke: Mock;
@@ -64,6 +65,7 @@ beforeEach(() => {
     fillRect: vi.fn(),
     fillText: vi.fn(),
     lineTo: vi.fn(),
+    measureText: vi.fn((text: string) => ({ width: text.length * 6 })),
     moveTo: vi.fn(),
     setTransform: vi.fn(),
     stroke: vi.fn(),

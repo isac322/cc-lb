@@ -23,6 +23,7 @@ import {
   Spinner,
 } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
+import { Select, type SelectOption } from '../../ui/Select';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { mergeLiveSessions } from './liveMergeSessions';
 
@@ -46,15 +47,21 @@ const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
   { value: 'all', label: 'All' },
 ];
 
-const FILTERS: { key: CacheKeepaliveStatusFilter; label: string }[] = [
-  { key: 'all', label: 'All' },
-  { key: 'renewed', label: 'Renewed' },
-  { key: 'scheduled', label: 'Scheduled' },
-  { key: 'capped', label: 'Capped' },
-  { key: 'expired', label: 'Expired' },
-  { key: 'not_tracked', label: 'Not tracked' },
-  { key: 'error', label: 'Error' },
+/** Status filter items; the `''` "All statuses" item comes from `allLabel`. */
+const STATUS_OPTIONS: SelectOption[] = [
+  { value: 'renewed', label: 'Renewed' },
+  { value: 'scheduled', label: 'Scheduled' },
+  { value: 'capped', label: 'Capped' },
+  { value: 'expired', label: 'Expired' },
+  { value: 'not_tracked', label: 'Not tracked' },
+  { value: 'error', label: 'Error' },
 ];
+
+function isStatusFilter(value: string): value is CacheKeepaliveStatusFilter {
+  return (
+    value === 'all' || STATUS_OPTIONS.some((option) => option.value === value)
+  );
+}
 
 const STATE_TONE: Record<
   CacheKeepaliveState,
@@ -92,11 +99,13 @@ function OverviewStrip({
   summary,
   isLoading,
   onHorizonChange,
+  showHorizon,
 }: {
   horizon: CacheKeepaliveHorizon;
   summary: CacheKeepaliveSummary | undefined;
   isLoading: boolean;
   onHorizonChange: (h: CacheKeepaliveHorizon) => void;
+  showHorizon: boolean;
 }) {
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
@@ -122,13 +131,15 @@ function OverviewStrip({
           </>
         )}
       </div>
-      <SegmentedControl
-        ariaLabel="Time range"
-        size="sm"
-        value={horizon}
-        onChange={onHorizonChange}
-        options={HORIZON_OPTIONS}
-      />
+      {showHorizon ? (
+        <SegmentedControl
+          ariaLabel="Time range"
+          size="sm"
+          value={horizon}
+          onChange={onHorizonChange}
+          options={HORIZON_OPTIONS}
+        />
+      ) : null}
     </div>
   );
 }
@@ -348,10 +359,15 @@ export function CacheKeepaliveSessionsDrawer({
   onOpenChange,
   principal,
 }: Props) {
-  const [filter, setFilter] = useState<CacheKeepaliveStatusFilter>('all');
+  const [filterChoice, setFilter] = useState<CacheKeepaliveStatusFilter>('all');
   const [horizon, setHorizon] = useState<CacheKeepaliveHorizon>('24h');
   const [selected, setSelected] = useState<CacheKeepaliveRow | null>(null);
   const [listElement, setListElement] = useState<HTMLUListElement | null>(null);
+
+  const enabled = principal.cache_keepalive?.enabled ?? false;
+  // The status filter is hidden while keepalive is off, so a stale choice
+  // must not keep narrowing the list the operator can no longer see filtered.
+  const filter: CacheKeepaliveStatusFilter = enabled ? filterChoice : 'all';
 
   const query = useCacheKeepaliveSessions(
     principal.id,
@@ -382,8 +398,6 @@ export function CacheKeepaliveSessionsDrawer({
     onOpenChange(o);
   };
 
-  const enabled = principal.cache_keepalive?.enabled ?? false;
-
   return (
     <Drawer
       open={open}
@@ -401,17 +415,33 @@ export function CacheKeepaliveSessionsDrawer({
           summary={summary}
           isLoading={query.isLoading}
           onHorizonChange={setHorizon}
+          showHorizon={enabled}
         />
 
-        <div className="px-4 py-2.5 border-b border-subtle shrink-0 overflow-x-auto no-scrollbar">
-          <SegmentedControl
-            ariaLabel="Session status"
-            size="sm"
-            value={filter}
-            onChange={setFilter}
-            options={FILTERS.map((f) => ({ value: f.key, label: f.label }))}
-          />
-        </div>
+        {enabled ? (
+          <div className="px-4 py-2.5 border-b border-subtle shrink-0">
+            <Select
+              aria-label="Session status"
+              size="sm"
+              className="w-44"
+              allLabel="All statuses"
+              value={filter === 'all' ? '' : filter}
+              options={STATUS_OPTIONS}
+              onChange={(next) => {
+                const value = next === '' ? 'all' : next;
+                if (isStatusFilter(value)) setFilter(value);
+              }}
+            />
+          </div>
+        ) : (
+          <p
+            className="px-4 py-2.5 border-b border-subtle shrink-0 text-body-sm text-text-muted"
+            data-testid="cache-keepalive-sessions-off"
+          >
+            Cache keepalive is off for this principal, so no new sessions are
+            tracked. Turn it on from the Cache keepalive card.
+          </p>
+        )}
 
         <div className="flex-1 flex min-h-0">
           <div
@@ -430,10 +460,7 @@ export function CacheKeepaliveSessionsDrawer({
               {query.isLoading ? (
                 <SessionListSkeleton />
               ) : !enabled && allRows.length === 0 ? (
-                <EmptyState
-                  title="Cache keepalive disabled"
-                  description="Enable cache keepalive to start tracking sessions."
-                />
+                <EmptyState title="No sessions recorded" />
               ) : allRows.length === 0 ? (
                 <EmptyState
                   title={

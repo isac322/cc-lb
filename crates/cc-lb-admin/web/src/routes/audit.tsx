@@ -540,7 +540,10 @@ function AuditPage() {
                             {parsed.name}
                           </span>
                           {changed ? (
-                            <span className="truncate" title={changed}>
+                            <span
+                              className="min-w-0 line-clamp-2 break-words"
+                              title={changed}
+                            >
                               · {changed}
                             </span>
                           ) : null}
@@ -658,7 +661,12 @@ function AuditPage() {
                           {parsed.name}
                         </span>
                         {changed ? (
-                          <span className="truncate">· {changed}</span>
+                          <span
+                            className="min-w-0 line-clamp-2 break-words"
+                            title={changed}
+                          >
+                            · {changed}
+                          </span>
                         ) : null}
                       </span>
                       {target ? (

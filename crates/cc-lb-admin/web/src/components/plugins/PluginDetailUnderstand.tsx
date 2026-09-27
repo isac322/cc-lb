@@ -139,12 +139,7 @@ export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
                       </div>
                       <div className="mt-1 text-caption text-text-faint">
                         {getSlotForHook(hookName)} · wire v{meta.wire_version}
-                        {' · '}
-                        {meta.mode ? (
-                          meta.mode.charAt(0).toUpperCase() + meta.mode.slice(1)
-                        ) : (
-                          <EmptyValue label="No mode" />
-                        )}
+                        {meta.mode === 'noop' ? ' · No-op' : null}
                       </div>
                     </TableCell>
                     <TableCell className="py-3 align-top text-text-muted">

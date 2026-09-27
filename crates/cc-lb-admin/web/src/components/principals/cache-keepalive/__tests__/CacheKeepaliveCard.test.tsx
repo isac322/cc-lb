@@ -140,13 +140,43 @@ describe('CacheKeepaliveCard', () => {
     });
   });
 
-  it('switch has role switch and reflects the enabled state', () => {
+  it('switch has role switch and shows its state as visible text', () => {
     renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
 
     const toggle = screen.getByRole('switch', {
       name: 'Toggle cache keepalive',
     }) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
+    expect(toggle.closest('label')?.textContent).toBe('Enabled');
+  });
+
+  it('replaces the metric row with one line when keepalive is off', () => {
+    renderWithProviders(
+      <CacheKeepaliveCard
+        principal={{
+          ...mockPrincipal,
+          cache_keepalive: mockPrincipal.cache_keepalive && {
+            ...mockPrincipal.cache_keepalive,
+            enabled: false,
+          },
+        }}
+      />,
+    );
+
+    const toggle = screen.getByRole('switch', {
+      name: 'Toggle cache keepalive',
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+    expect(toggle.closest('label')?.textContent).toBe('Disabled');
+    expect(
+      screen.getByText(
+        'Off. Turn on to renew the prompt-cache TTL for idle sessions.',
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText('Renewing now')).toBeNull();
+    expect(screen.queryByText('$4.56')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sessions' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeDefined();
   });
 
   it('locks the toggle during another write to the same principal', () => {

@@ -77,7 +77,9 @@ import {
   ApiError,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
+  type SubscriptionQuotaWindow,
   type UpstreamOAuthStatusResponse,
+  WINDOW_LABELS,
 } from '../lib/api';
 import { getWindowColor, SERIES_FILL_OPACITY } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
@@ -108,6 +110,7 @@ import {
   useUsage,
 } from '../lib/queries';
 import {
+  formatQuotaPercent,
   QUOTA_SEVERITY_FILL_CLASS,
   QUOTA_SEVERITY_TEXT_CLASS,
   quotaSeverity,
@@ -340,7 +343,7 @@ function UpstreamsPage() {
                     ) : null}
                   </div>
                   {u.kind === 'anthropic_oauth' ? (
-                    <div className="flex flex-col gap-1.5 w-full">
+                    <div className="flex w-full flex-col gap-1.5 pl-3.5">
                       {barWindows.map((windowName) => {
                         const snap = latest?.windows.find(
                           (w) => w.window === windowName,
@@ -358,10 +361,9 @@ function UpstreamsPage() {
                             snap.extra_usage_used_credits /
                             snap.extra_usage_monthly_limit;
                         }
-                        const pct =
-                          utilization == null
-                            ? '—%'
-                            : `${(utilization * 100).toFixed(0)}%`;
+                        const pct = formatQuotaPercent(
+                          utilization == null ? null : utilization * 100,
+                        );
                         const severity = quotaSeverity(
                           utilization == null ? null : utilization * 100,
                         );
@@ -370,12 +372,8 @@ function UpstreamsPage() {
                             key={windowName}
                             className="flex items-center gap-2 w-full text-caption"
                           >
-                            <div className="w-10 shrink-0 text-text-faint truncate">
-                              {windowName === 'overage'
-                                ? 'Extra'
-                                : windowName === '7d_fable'
-                                  ? 'Fable'
-                                  : label}
+                            <div className="w-16 shrink-0 truncate text-text-faint">
+                              {windowName === 'overage' ? 'Extra' : label}
                             </div>
                             {quotaLatestPending ? (
                               <>
@@ -407,7 +405,7 @@ function UpstreamsPage() {
                                 </BaseMeter.Root>
                                 <div
                                   className={cx(
-                                    'w-8 shrink-0 text-right tabular-nums',
+                                    'w-9 shrink-0 text-right tabular-nums',
                                     QUOTA_SEVERITY_TEXT_CLASS[severity],
                                   )}
                                 >
@@ -436,7 +434,7 @@ function UpstreamsPage() {
                       />
                     </div>
                   ) : (
-                    <div className="flex min-h-4 items-center gap-2 text-caption text-text-faint">
+                    <div className="flex min-h-4 items-center gap-2 pl-3.5 text-caption text-text-faint">
                       {listUsagePending ? (
                         <Skeleton className="h-3 w-32" />
                       ) : (
@@ -703,19 +701,15 @@ function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   return { tone: 'ok', label: 'Connected' };
 }
 
+function isQuotaWindow(name: string): name is SubscriptionQuotaWindow {
+  return name in WINDOW_LABELS;
+}
+
+/** Canonical window names come from `WINDOW_LABELS`; the overage window is
+ *  spelled in sentence case here. */
 function windowLabel(windowName: string): string {
-  switch (windowName) {
-    case '7d_sonnet':
-      return '7d (Sonnet)';
-    case '7d_opus':
-      return '7d (Opus)';
-    case '7d_fable':
-      return '7d (Fable)';
-    case 'overage':
-      return 'Extra usage';
-    default:
-      return windowName;
-  }
+  if (windowName === 'overage') return 'Extra usage';
+  return isQuotaWindow(windowName) ? WINDOW_LABELS[windowName] : windowName;
 }
 
 /** Card-header caption: when the reading was taken, with a warn dot only
@@ -728,7 +722,7 @@ function SnapshotStatusComposite({ snap }: { snap: QuotaSnapshot }) {
     <Hint label={`Source: ${source}`}>
       <span
         tabIndex={0}
-        className="inline-flex cursor-help items-center gap-1.5 self-start whitespace-nowrap rounded-sm text-caption text-text-faint"
+        className="relative inline-flex cursor-help items-center gap-1.5 self-start whitespace-nowrap rounded-sm text-caption text-text-faint"
       >
         {snap.state === 'stale' ? (
           <>
@@ -1465,7 +1459,7 @@ function DetailView({
                           </span>
                           {current != null ? (
                             <span className="tabular-nums text-text">
-                              {(current * 100).toFixed(0)}%
+                              {formatQuotaPercent(current * 100)}
                             </span>
                           ) : null}
                         </button>
@@ -1573,7 +1567,7 @@ function DetailView({
                                       </span>
                                       <span className="tabular-nums">
                                         {typeof p.value === 'number'
-                                          ? `${p.value.toFixed(1)}%`
+                                          ? formatQuotaPercent(p.value)
                                           : '—'}
                                       </span>
                                     </div>
@@ -1828,12 +1822,11 @@ function DetailView({
                                         QUOTA_SEVERITY_TEXT_CLASS[severity],
                                       )}
                                     >
-                                      {(
+                                      {formatQuotaPercent(
                                         (snap.extra_usage_used_credits /
                                           snap.extra_usage_monthly_limit) *
-                                        100
-                                      ).toFixed(1)}
-                                      %
+                                          100,
+                                      )}
                                     </div>
                                     <div className="text-body-sm tabular-nums text-text-muted">
                                       $
@@ -1872,7 +1865,7 @@ function DetailView({
                                     QUOTA_SEVERITY_TEXT_CLASS[severity],
                                   )}
                                 >
-                                  {`${(snap.utilization * 100).toFixed(1)}%`}
+                                  {formatQuotaPercent(snap.utilization * 100)}
                                 </div>
                               )}
                               {meterPct != null ? (

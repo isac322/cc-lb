@@ -9,6 +9,7 @@ import {
   Database,
   Gauge,
   Hourglass,
+  Info,
   ShieldCheck,
   Timer,
   TrendingUp,
@@ -35,6 +36,7 @@ import {
   Card,
   CardHeader,
   cx,
+  Hint,
   PageContainer,
   PageHeader,
   Section,
@@ -50,7 +52,7 @@ import {
   sumCostMicros,
 } from '../components/ui/usage/costCategories';
 import { OAuthReconnectSummary } from '../components/upstreams/OAuthReconnectNotice';
-import type { AggregateResponse } from '../lib/api';
+import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
 import { getWindowColor, SERIES_FILL_OPACITY } from '../lib/colors';
 import {
   cacheHitRatio,
@@ -77,6 +79,7 @@ import {
   useUsage,
 } from '../lib/queries';
 import {
+  formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
   type QuotaSeverity,
   quotaSeverity,
@@ -110,6 +113,8 @@ type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
+/** The Overview previews the newest requests; Logs holds the full history. */
+const OVERVIEW_LATEST_ROWS = 10;
 // The overview previews real user requests only: renewals and non-messages
 // endpoints are excluded server-side, and merged rows are re-checked against
 // the same effective-kind rule so retained data cannot leak other categories.
@@ -599,13 +604,15 @@ export function TopPrincipalsCard({
   range,
   principals,
   loading,
+  className,
 }: {
   range: Range;
   principals: readonly TopPrincipal[];
   loading: boolean;
+  className?: string;
 }) {
   return (
-    <Card className="min-w-0 flex flex-col">
+    <Card className={cx('min-w-0 flex flex-col', className)}>
       <CardHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -616,15 +623,7 @@ export function TopPrincipalsCard({
         subtitle={`By virtual cost · ${range}`}
       />
       <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
-        <div
-          className={cx(
-            'flex flex-col',
-            // Keep the loading and populated list at one height so rows do
-            // not jump; an empty window collapses to a single line.
-            (loading || principals.length > 0) && 'min-h-80',
-          )}
-          data-slot="principal-list"
-        >
+        <div className="flex flex-col" data-slot="principal-list">
           {loading ? (
             Array.from({ length: 5 }).map((_, index) => (
               <div
@@ -705,15 +704,16 @@ const POOL_SEVERITY_FILL_VAR: Record<QuotaSeverity, string> = {
 };
 /** Shade steps that tell adjacent upstream segments (and their swatches) apart. */
 const POOL_SEGMENT_SHADES = [100, 72, 52, 38] as const;
-const POOL_WINDOW_LABEL: Record<PoolQuotaWindow, string> = {
-  '5h': '5h',
-  '7d': '7d',
-  '7d_fable': '7d (Fable)',
-};
+function isPoolQuotaWindow(key: string): key is PoolQuotaWindow {
+  return (POOL_QUOTA_WINDOWS as readonly string[]).includes(key);
+}
 
 const POOL_QUOTA_SNAPSHOT_SLOT_CLASS =
   'relative flex min-h-10 w-full flex-col justify-center';
-const POOL_QUOTA_CHART_SLOT_CLASS = 'relative h-64 min-w-0 w-full';
+// A fixed 256px chart, except at xl where the card shares a row with the
+// side column and the chart takes up whatever height that row gives it.
+const POOL_QUOTA_CHART_SLOT_CLASS =
+  'relative h-64 min-w-0 w-full xl:h-auto xl:min-h-64 xl:flex-1';
 const POOL_QUOTA_LEGEND_ITEM_CLASS = 'inline-flex min-h-4 items-center gap-1.5';
 
 function poolSegmentColor(severity: QuotaSeverity, index: number): string {
@@ -779,7 +779,7 @@ function PoolQuotaPopoverContent({
                 QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(utilPct)],
               )}
             >
-              {utilPct != null ? `${utilPct.toFixed(1)}%` : '—'}
+              {formatQuotaPercent(utilPct)}
             </span>
             <span className="tabular-nums w-14 text-right text-text-muted">
               {lot.capacity_ratio.toFixed(1)}x
@@ -809,7 +809,7 @@ export function PoolQuotaStackedBar({
   loading?: boolean;
 }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
-  const label = POOL_WINDOW_LABEL[window];
+  const label = WINDOW_LABELS[window];
 
   if (loading || !w) {
     return (
@@ -848,10 +848,7 @@ export function PoolQuotaStackedBar({
     (sum, segment) => sum + segment.weightedContribution,
     0,
   );
-  const pctText =
-    w.utilization_percent != null
-      ? `${w.utilization_percent.toFixed(1)}%`
-      : '—';
+  const pctText = formatQuotaPercent(w.utilization_percent);
 
   return (
     <BasePopover.Root
@@ -930,16 +927,20 @@ export function PoolQuotaStackedBar({
 
 const CLOSEST_TO_LIMIT_ROWS = 5;
 // Name, bar (capped so it never runs across the row), % right after the bar,
-// reset text, chevron. Below md: name + % on one line, bar and reset below.
+// reset text, chevron. The card is a size container, so a narrow column
+// (the xl sidebar slot, or a phone) keeps name + % on one line with the bar
+// and reset below; a wide card lays the row out in five columns.
 const CLOSEST_ROW_CLASS =
-  'grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(8rem,14rem)_minmax(6rem,22rem)_3rem_minmax(7rem,1fr)_1rem] items-center gap-x-3 gap-y-1.5 px-4 py-2.5';
+  'grid grid-cols-[minmax(0,1fr)_auto] @2xl:grid-cols-[minmax(8rem,14rem)_minmax(6rem,22rem)_3rem_minmax(7rem,1fr)_1rem] items-center gap-x-3 gap-y-1.5 px-4 py-2.5';
 
 export function ClosestToLimitCard({
   aggregate,
   loading,
+  className,
 }: {
   aggregate: AggregateResponse | undefined;
   loading: boolean;
+  className?: string;
 }) {
   const { effective: timeZone } = useTimezone();
   const entries = useMemo(() => closestToLimit(aggregate), [aggregate]);
@@ -948,7 +949,7 @@ export function ClosestToLimitCard({
   return (
     <Card
       aria-busy={loading}
-      className="min-w-0"
+      className={cx('@container min-w-0', className)}
       data-testid="closest-to-limit"
     >
       <CardHeader
@@ -976,8 +977,8 @@ export function ClosestToLimitCard({
           {Array.from({ length: 3 }).map((_, index) => (
             <li key={index} className={CLOSEST_ROW_CLASS}>
               <Skeleton className="h-4 w-32" />
-              <Skeleton className="h-4 w-10 md:order-3" />
-              <Skeleton className="col-span-2 h-1.5 rounded-xs md:col-span-1 md:order-2" />
+              <Skeleton className="h-4 w-10 @2xl:order-3" />
+              <Skeleton className="col-span-2 h-1.5 rounded-xs @2xl:col-span-1 @2xl:order-2" />
             </li>
           ))}
         </ul>
@@ -1035,21 +1036,21 @@ function ClosestToLimitRow({
             {entry.upstreamName}
           </span>
           <span className="shrink-0 text-caption text-text-faint">
-            {POOL_WINDOW_LABEL[entry.window]}
+            {WINDOW_LABELS[entry.window]}
           </span>
         </span>
         <span
           className={cx(
-            'text-right tabular-nums text-body-sm font-medium md:order-3 md:text-left',
+            'text-right tabular-nums text-body-sm font-medium @2xl:order-3 @2xl:text-left',
             QUOTA_SEVERITY_TEXT_CLASS[severity],
           )}
           data-slot="closest-pct"
         >
-          {`${entry.utilizationPercent.toFixed(0)}%`}
+          {formatQuotaPercent(entry.utilizationPercent)}
         </span>
         <span
           aria-hidden="true"
-          className="col-span-2 md:col-span-1 md:order-2 h-1.5 rounded-xs bg-progress-track overflow-hidden"
+          className="col-span-2 @2xl:col-span-1 @2xl:order-2 h-1.5 rounded-xs bg-progress-track overflow-hidden"
         >
           <span
             className="block h-full"
@@ -1060,14 +1061,14 @@ function ClosestToLimitRow({
           />
         </span>
         <span
-          className="col-span-2 md:col-span-1 md:order-4 text-caption text-text-faint tabular-nums truncate"
+          className="col-span-2 @2xl:col-span-1 @2xl:order-4 text-caption text-text-faint tabular-nums truncate"
           title={resetAt}
         >
           {meta || '—'}
         </span>
         <ChevronRight
           aria-hidden="true"
-          className="hidden md:block md:order-5 w-3.5 h-3.5 text-text-faint group-hover:text-text"
+          className="hidden @2xl:block @2xl:order-5 w-3.5 h-3.5 text-text-faint group-hover:text-text"
         />
       </Link>
     </li>
@@ -1088,10 +1089,12 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
   aggregate,
   chart,
   loading,
+  className,
 }: {
   aggregate: AggregateResponse | undefined;
   chart: PoolQuotaChartProps;
   loading: boolean;
+  className?: string;
 }) {
   const w5h = aggregate?.windows.find((x) => x.window === '5h');
   const w7d = aggregate?.windows.find((x) => x.window === '7d');
@@ -1105,7 +1108,7 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
   return (
     <Card
       aria-busy={loading}
-      className="min-w-0 flex flex-col"
+      className={cx('min-w-0 flex flex-col', className)}
       data-testid="pool-quota-card"
     >
       <CardHeader
@@ -1116,13 +1119,38 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
           </span>
         }
         subtitle={
-          upstreamCount > 0
-            ? `Plan-weighted · ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
-            : 'Plan-weighted'
+          <span className="inline-flex flex-wrap items-center gap-x-1">
+            <Hint
+              label={
+                <span className="block max-w-72 whitespace-normal leading-5">
+                  Each upstream's usage counts in proportion to its plan size
+                  relative to Claude Pro (Pro 1×, Max 5× counts 5×). Unknown
+                  plans count as Pro. Routing is not affected.
+                </span>
+              }
+            >
+              <span
+                tabIndex={0}
+                className="inline-flex cursor-help items-center gap-1 rounded-sm hover:text-text-muted"
+              >
+                Plan-weighted
+                <Info
+                  aria-hidden="true"
+                  strokeWidth={1.75}
+                  className="size-3 opacity-60"
+                />
+              </span>
+            </Hint>
+            {upstreamCount > 0
+              ? `· ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
+              : null}
+          </span>
         }
       />
-      <div className="flex flex-col gap-4 p-4 pt-1">
-        <div className="grid grid-cols-1 gap-x-10 gap-y-3 md:grid-cols-2 xl:grid-cols-3">
+      {/* At xl the card shares a row with the stacked side column; the
+      chart absorbs any extra height so the card never ends in blank space. */}
+      <div className="flex flex-1 flex-col gap-4 p-4 pt-1">
+        <div className="grid grid-cols-1 gap-x-10 gap-y-3 md:grid-cols-3">
           {POOL_QUOTA_WINDOWS.map((window) => (
             <div
               key={window}
@@ -1138,7 +1166,7 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
           ))}
         </div>
         <div className="border-t border-row" />
-        <div className="flex flex-col gap-3">
+        <div className="flex flex-1 flex-col gap-3">
           <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-label text-text-muted">
               {`Last ${chart.range}`}
@@ -1189,7 +1217,7 @@ export function PoolQuotaThemedChart({
   const cFable = getWindowColor('7d_fable');
 
   return (
-    <div className="relative size-full min-h-0 min-w-0">
+    <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length ? (
         <div className="absolute inset-0 z-10 flex items-center justify-center text-body-sm text-text-muted pointer-events-none">
           No timeline data yet for this range
@@ -1263,14 +1291,9 @@ export function PoolQuotaThemedChart({
                 </div>
                 {payload.map((p) => {
                   const w = String(p.dataKey);
-                  const wLabel =
-                    w === '5h'
-                      ? '5h window'
-                      : w === '7d'
-                        ? '7d window'
-                        : w === '7d_fable'
-                          ? 'Fable window'
-                          : w;
+                  const wLabel = isPoolQuotaWindow(w)
+                    ? `${WINDOW_LABELS[w]} window`
+                    : w;
                   return (
                     <div
                       key={w}
@@ -1291,7 +1314,7 @@ export function PoolQuotaThemedChart({
                       </span>
                       <span className="font-medium tabular-nums">
                         {typeof p.value === 'number'
-                          ? `${p.value.toFixed(1)}%`
+                          ? formatQuotaPercent(p.value)
                           : '—'}
                       </span>
                     </div>
@@ -1354,7 +1377,7 @@ export function PoolQuotaLegend({
       ).map((window) => {
         const color = getWindowColor(window);
         const value = latest?.[window];
-        const label = window === '7d_fable' ? 'Fable' : window;
+        const label = WINDOW_LABELS[window];
         return (
           <span
             key={window}
@@ -1372,7 +1395,9 @@ export function PoolQuotaLegend({
             ) : value != null ? (
               <>
                 {' · '}
-                <span className="tabular-nums text-text">{`${value.toFixed(0)}%`}</span>
+                <span className="tabular-nums text-text">
+                  {formatQuotaPercent(value)}
+                </span>
               </>
             ) : null}
           </span>
@@ -1424,22 +1449,6 @@ function OverviewPage() {
 
   const live = useLiveEventStream(OVERVIEW_EVENT_FILTERS);
   const streamStatus = live.status;
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const sentinelRef = useRef<HTMLTableRowElement>(null);
-
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el || !events.hasNextPage || events.isFetchingNextPage) return;
-    const obs = new IntersectionObserver(
-      (entries) =>
-        entries.forEach((e) => {
-          if (e.isIntersecting) events.fetchNextPage();
-        }),
-      { root: scrollContainerRef.current, threshold: 0.1 },
-    );
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
   const recentRows = useMemo(
@@ -1449,6 +1458,10 @@ function OverviewPage() {
         events.data?.pages.flatMap((page) => page.events) ?? [],
       ).filter(isMessagesRequestEvent),
     [live.eventsMap, live.version, events.data],
+  );
+  const latestRows = useMemo(
+    () => recentRows.slice(0, OVERVIEW_LATEST_ROWS),
+    [recentRows],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: live.version is the mutation counter for the stable eventsMap ref.
@@ -1679,22 +1692,27 @@ function OverviewPage() {
 
       {firstRunIncomplete ? null : (
         <>
-          <ClosestToLimitCard
-            aggregate={quotaAggregate.data}
-            loading={quotaLoading}
-          />
-
           {/* Quota comes first in the DOM (and on mobile); desktop shows the
-          traffic strip above it. */}
+          traffic strip above it. At xl the pool card takes the wide column
+          and "Closest to limit" stacks over "Top principals" beside it, so
+          neither column ends in blank space. */}
           <div className="flex flex-col gap-4 min-w-0">
-            <div className="grid grid-cols-1 items-start xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
+            <div className="grid grid-cols-1 gap-4 min-w-0 xl:grid-cols-[2fr_1fr] xl:grid-rows-[auto_1fr]">
+              <ClosestToLimitCard
+                className="xl:col-start-2 xl:row-start-1 xl:self-start"
+                aggregate={quotaAggregate.data}
+                loading={quotaLoading}
+              />
+
               <PoolQuotaCard
+                className="xl:col-start-1 xl:row-span-2 xl:row-start-1"
                 aggregate={quotaAggregate.data}
                 loading={quotaLoading}
                 chart={poolQuotaChart}
               />
 
               <TopPrincipalsCard
+                className="xl:col-start-2 xl:row-start-2 xl:self-start"
                 range={range}
                 principals={topPrincipals}
                 loading={
@@ -1708,85 +1726,88 @@ function OverviewPage() {
               className="glass rounded-md min-w-0 md:order-first"
               data-testid="overview-kpi-strip"
             >
+              {/* A window without requests has nothing to chart: one line
+              instead of five tiles of zeros and dashes. */}
               {!summary.isPending && noTraffic ? (
-                <p className="border-b border-row px-3 py-2 text-caption text-text-faint md:px-4">
-                  {`No traffic in the last ${range}.`}
+                <p className="px-4 py-3 text-caption text-text-muted">
+                  {`No requests in the last ${range}`}
                 </p>
-              ) : null}
-              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
-                <ValueTile
-                  className={KPI_CELL_CLASS[0]}
-                  chartId="request-rate"
-                  icon={<Activity />}
-                  label="Requests/s"
-                  loading={summary.isPending}
-                  value={formatRate(reqPerSec)}
-                  sub={`${formatCount(totals?.request_count)} in ${range}`}
-                  spark={kpiPoints.rate}
-                  sparkColor={KPI_SERIES_COLOR}
-                  chartLabel="Req/s"
-                  formatChartValue={formatRate}
-                  activeIndex={activeKpiIndex}
-                  onActiveIndexChange={setActiveKpiIndex}
-                />
-                <ValueTile
-                  className={KPI_CELL_CLASS[1]}
-                  chartId="tokens"
-                  icon={<Database />}
-                  label="Tokens"
-                  loading={summary.isPending}
-                  value={formatCount(totalTokens)}
-                  sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
-                  spark={kpiPoints.tokens}
-                  sparkColor={KPI_SERIES_COLOR}
-                  formatChartValue={formatCount}
-                  secondary={TOKENS_CACHE_MISS_SERIES}
-                  activeIndex={activeKpiIndex}
-                  onActiveIndexChange={setActiveKpiIndex}
-                />
-                <ValueTile
-                  className={KPI_CELL_CLASS[2]}
-                  chartId="cost"
-                  icon={<TrendingUp />}
-                  label="Cost at list price"
-                  loading={summary.isPending}
-                  value={formatUsdAmount(virtualUsd)}
-                  spark={kpiPoints.cost}
-                  sparkColor={KPI_SERIES_COLOR}
-                  chartLabel="Cost"
-                  formatChartValue={formatUsdAmount}
-                  activeIndex={activeKpiIndex}
-                  onActiveIndexChange={setActiveKpiIndex}
-                />
-                <ValueTile
-                  className={KPI_CELL_CLASS[3]}
-                  chartId="latency"
-                  icon={<Timer />}
-                  label={latencyLabel}
-                  loading={summary.isPending}
-                  value={noTraffic ? '—' : fmtMs(latency)}
-                  spark={kpiPoints.latency}
-                  sparkColor={KPI_SERIES_COLOR}
-                  formatChartValue={fmtMs}
-                  activeIndex={activeKpiIndex}
-                  onActiveIndexChange={setActiveKpiIndex}
-                />
-                <ValueTile
-                  className={KPI_CELL_CLASS[4]}
-                  chartId="error-rate"
-                  icon={<ShieldCheck />}
-                  label="Error rate"
-                  loading={summary.isPending}
-                  value={noTraffic ? '—' : fmtErrorPercent(errRate)}
-                  spark={kpiPoints.error}
-                  sparkColor={
-                    errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
-                  }
-                  formatChartValue={fmtErrorPercent}
-                  activeIndex={activeKpiIndex}
-                  onActiveIndexChange={setActiveKpiIndex}
-                />
-              </div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
+                  <ValueTile
+                    className={KPI_CELL_CLASS[0]}
+                    chartId="request-rate"
+                    icon={<Activity />}
+                    label="Requests/s"
+                    loading={summary.isPending}
+                    value={formatRate(reqPerSec)}
+                    sub={`${formatCount(totals?.request_count)} in ${range}`}
+                    spark={kpiPoints.rate}
+                    sparkColor={KPI_SERIES_COLOR}
+                    chartLabel="Req/s"
+                    formatChartValue={formatRate}
+                    activeIndex={activeKpiIndex}
+                    onActiveIndexChange={setActiveKpiIndex}
+                  />
+                  <ValueTile
+                    className={KPI_CELL_CLASS[1]}
+                    chartId="tokens"
+                    icon={<Database />}
+                    label="Tokens"
+                    loading={summary.isPending}
+                    value={formatCount(totalTokens)}
+                    sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
+                    spark={kpiPoints.tokens}
+                    sparkColor={KPI_SERIES_COLOR}
+                    formatChartValue={formatCount}
+                    secondary={TOKENS_CACHE_MISS_SERIES}
+                    activeIndex={activeKpiIndex}
+                    onActiveIndexChange={setActiveKpiIndex}
+                  />
+                  <ValueTile
+                    className={KPI_CELL_CLASS[2]}
+                    chartId="cost"
+                    icon={<TrendingUp />}
+                    label="Cost at list price"
+                    loading={summary.isPending}
+                    value={formatUsdAmount(virtualUsd)}
+                    spark={kpiPoints.cost}
+                    sparkColor={KPI_SERIES_COLOR}
+                    chartLabel="Cost"
+                    formatChartValue={formatUsdAmount}
+                    activeIndex={activeKpiIndex}
+                    onActiveIndexChange={setActiveKpiIndex}
+                  />
+                  <ValueTile
+                    className={KPI_CELL_CLASS[3]}
+                    chartId="latency"
+                    icon={<Timer />}
+                    label={latencyLabel}
+                    loading={summary.isPending}
+                    value={fmtMs(latency)}
+                    spark={kpiPoints.latency}
+                    sparkColor={KPI_SERIES_COLOR}
+                    formatChartValue={fmtMs}
+                    activeIndex={activeKpiIndex}
+                    onActiveIndexChange={setActiveKpiIndex}
+                  />
+                  <ValueTile
+                    className={KPI_CELL_CLASS[4]}
+                    chartId="error-rate"
+                    icon={<ShieldCheck />}
+                    label="Error rate"
+                    loading={summary.isPending}
+                    value={fmtErrorPercent(errRate)}
+                    spark={kpiPoints.error}
+                    sparkColor={
+                      errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
+                    }
+                    formatChartValue={fmtErrorPercent}
+                    activeIndex={activeKpiIndex}
+                    onActiveIndexChange={setActiveKpiIndex}
+                  />
+                </div>
+              )}
             </section>
           </div>
 
@@ -1795,29 +1816,35 @@ function OverviewPage() {
           <Section
             title="Latest requests (any time)"
             subtitle={
-              <span className="flex items-center gap-2">
-                <span>
-                  Newest first, not limited to the range above — full view on
-                  Logs page
-                  {streamStatus === 'live' ? ' · streaming' : ''}
+              <span>
+                Newest first, not limited to the range above — full view on Logs
+                page{streamStatus === 'live' ? ' · ' : ' '}
+                {/* The dot and its word wrap as one unit, so the status never
+                lands alone at the end of a wrapped line. */}
+                <span className="inline-flex items-center gap-1.5 whitespace-nowrap align-middle">
+                  {live.permanentFailure ? (
+                    <AlertTriangle
+                      aria-hidden="true"
+                      strokeWidth={1.75}
+                      className="w-3 h-3 text-danger-text"
+                    />
+                  ) : (
+                    <span
+                      className={cx(
+                        'status-dot',
+                        streamStatus === 'live'
+                          ? 'live'
+                          : streamStatus === 'error'
+                            ? 'danger'
+                            : streamStatus === 'connecting' ||
+                                streamStatus === 'reconnecting'
+                              ? 'warn animate-pulse'
+                              : 'neutral',
+                      )}
+                    />
+                  )}
+                  {streamStatus === 'live' ? 'streaming' : null}
                 </span>
-                {live.permanentFailure ? (
-                  <AlertTriangle className="w-3 h-3 text-danger-text" />
-                ) : (
-                  <span
-                    className={cx(
-                      'status-dot',
-                      streamStatus === 'live'
-                        ? 'live'
-                        : streamStatus === 'error'
-                          ? 'danger'
-                          : streamStatus === 'connecting' ||
-                              streamStatus === 'reconnecting'
-                            ? 'warn animate-pulse'
-                            : 'neutral',
-                    )}
-                  />
-                )}
               </span>
             }
             action={
@@ -1829,29 +1856,17 @@ function OverviewPage() {
               </Link>
             }
           >
+            {/* A preview, not a feed: the newest rows at their natural
+            height, with the full history one click away on Logs. */}
             <Card className="min-w-0">
-              <div
-                className={cx(
-                  'relative overflow-auto scroll-fade-right',
-                  // A fixed box keeps loading → loaded from jumping; an empty
-                  // feed collapses to its one-line empty row instead of
-                  // leaving a tall blank frame.
-                  !events.isLoading && recentRows.length === 0
-                    ? 'max-h-[50vh]'
-                    : 'h-[50vh]',
-                )}
-                ref={scrollContainerRef}
-              >
+              <div className="relative overflow-x-auto scroll-fade-right">
                 <RequestEventsTable
-                  events={recentRows}
+                  events={latestRows}
                   principalNameMap={principalNameMap}
                   upstreamNameMap={upstreamNameMap}
                   loading={events.isLoading}
                   liveFlashIds={recentLiveIds}
                   columns={OVERVIEW_TABLE_COLUMNS}
-                  sentinelRef={sentinelRef}
-                  loadingMore={events.isFetchingNextPage}
-                  hasMore={events.hasNextPage}
                   minWidthClass="min-w-[1080px]"
                   emptyTitle="No recent requests"
                 />

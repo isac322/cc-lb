@@ -668,6 +668,115 @@ export function classifyConfigLeaf(
   };
 }
 
+/** What a scalar leaf's local on-blur check enforces. */
+export type ConfigScalarCheck =
+  | { kind: 'address' }
+  | {
+      kind: 'integer' | 'number';
+      minimum?: number;
+      maximum?: number;
+    }
+  | { kind: 'string'; required: boolean };
+
+const HOSTNAME_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+function isValidIpv6(host: string): boolean {
+  if (!/^[0-9A-Fa-f:.]+$/.test(host) || !host.includes(':')) return false;
+  try {
+    new URL(`http://[${host}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidHost(host: string): boolean {
+  if (/^[\d.]+$/.test(host)) {
+    const octets = host.split('.');
+    return (
+      octets.length === 4 &&
+      octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    );
+  }
+  return (
+    host.length <= 253 &&
+    host.split('.').every((label) => HOSTNAME_LABEL.test(label))
+  );
+}
+
+const ADDRESS_FORMAT_MESSAGE =
+  'Enter host:port, e.g. 127.0.0.1:8080, [::1]:8080, or localhost:8080.';
+
+/**
+ * Local check for a `host:port` socket address: IPv4, bracketed IPv6, or a
+ * hostname, with a port in 1–65535. Returns an error message, or null.
+ */
+export function checkSocketAddress(input: string): string | null {
+  let host: string;
+  let port: string;
+  if (input.startsWith('[')) {
+    const match = /^\[([^\]]*)\]:([^:]*)$/.exec(input);
+    if (!match) return ADDRESS_FORMAT_MESSAGE;
+    host = match[1] ?? '';
+    port = match[2] ?? '';
+    if (!isValidIpv6(host)) return ADDRESS_FORMAT_MESSAGE;
+  } else {
+    const separator = input.lastIndexOf(':');
+    if (separator <= 0) return ADDRESS_FORMAT_MESSAGE;
+    host = input.slice(0, separator);
+    port = input.slice(separator + 1);
+    if (!isValidHost(host)) return ADDRESS_FORMAT_MESSAGE;
+  }
+  if (!/^\d{1,5}$/.test(port)) return ADDRESS_FORMAT_MESSAGE;
+  const portNumber = Number(port);
+  if (portNumber < 1 || portNumber > 65535) {
+    return 'Port must be between 1 and 65535.';
+  }
+  return null;
+}
+
+/**
+ * The local, pre-Validate check a scalar field runs on blur. Unset values
+ * inherit and are never flagged here; the server validation owns the rest.
+ */
+export function checkConfigScalar(
+  value: unknown,
+  check: ConfigScalarCheck,
+): string | null {
+  if (value === undefined || value === null) return null;
+  switch (check.kind) {
+    case 'address':
+      return typeof value === 'string'
+        ? checkSocketAddress(value)
+        : ADDRESS_FORMAT_MESSAGE;
+    case 'string':
+      return check.required && (typeof value !== 'string' || !value.trim())
+        ? 'Enter a value.'
+        : null;
+    case 'integer':
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return 'Enter a number.';
+      }
+      if (check.kind === 'integer' && !Number.isInteger(value)) {
+        return 'Enter a whole number.';
+      }
+      const { minimum, maximum } = check;
+      if (
+        (minimum !== undefined && value < minimum) ||
+        (maximum !== undefined && value > maximum)
+      ) {
+        return minimum !== undefined && maximum !== undefined
+          ? `Enter a value between ${minimum} and ${maximum}.`
+          : minimum !== undefined
+            ? `Enter a value of at least ${minimum}.`
+            : `Enter a value of at most ${maximum}.`;
+      }
+      return null;
+    }
+  }
+}
+
 export type ConfigImpactDimension =
   | 'availability'
   | 'cost'

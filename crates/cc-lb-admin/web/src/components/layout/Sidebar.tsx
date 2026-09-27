@@ -1,18 +1,25 @@
 import { Link } from '@tanstack/react-router';
+import { BookOpen } from 'lucide-react';
 import { useId, useMemo } from 'react';
-import { useOAuthReconnectNudges } from '../../lib/oauthReconnect';
+import {
+  type OAuthReconnectNudge,
+  useOAuthReconnectNudges,
+} from '../../lib/oauthReconnect';
 import { useUpstreams } from '../../lib/queries';
 import { cx } from '../ui/primitives';
 import { NAV_GROUPS, type NavGroup } from './navItems';
 
+const DOCS_URL = 'https://github.com/isac322/cc-lb#readme';
+
 /**
- * Count of enabled OAuth upstreams whose reconnect nudge is active. An empty
- * nudge set means healthy or unknown (pending/failed queries with no cached
- * rows): render nothing rather than fabricate a zero. Known nudges keep
- * their badge through a refetch or failed poll, with a stale-status note for
- * assistive tech. Collapsed sidebars get a corner dot instead of a pill.
+ * Reconnect nudges for enabled OAuth upstreams: the one source for the
+ * sidebar badge and the document-title count. Shares query keys with every
+ * other OAuth status consumer, so extra callers add no requests.
  */
-function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
+export function useUpstreamOAuthAttention(): {
+  nudges: ReadonlyMap<string, OAuthReconnectNudge>;
+  stale: boolean;
+} {
   const upstreams = useUpstreams();
   const oauthUpstreams = useMemo(
     () =>
@@ -23,15 +30,26 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
   );
   const { nudges, isPending, isError } =
     useOAuthReconnectNudges(oauthUpstreams);
+  const stale =
+    upstreams.isPending || upstreams.isError || isPending || isError;
+  return { nudges, stale };
+}
+
+/**
+ * Count of enabled OAuth upstreams whose reconnect nudge is active. An empty
+ * nudge set means healthy or unknown (pending/failed queries with no cached
+ * rows): render nothing rather than fabricate a zero. Known nudges keep
+ * their badge through a refetch or failed poll, with a stale-status note for
+ * assistive tech. Collapsed sidebars get a corner dot instead of a pill.
+ */
+function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
+  const { nudges, stale } = useUpstreamOAuthAttention();
 
   const count = nudges.size;
   if (count === 0) return null;
 
   const danger = Array.from(nudges.values()).some((n) => n.tone === 'danger');
-  const stale =
-    upstreams.isPending || upstreams.isError || isPending || isError;
   const a11y = `${count} OAuth account${count === 1 ? '' : 's'} need${count === 1 ? 's' : ''} attention${stale ? ' (status may be outdated)' : ''}`;
-
   if (collapsed) {
     return (
       <span
@@ -186,10 +204,30 @@ export function SidebarFooter({
   return (
     <div
       className={cx(
-        'border-t border-subtle px-3 py-3',
-        collapsed ? 'text-center' : '',
+        'border-t border-subtle px-3 py-3 flex flex-col gap-2',
+        collapsed ? 'items-center text-center' : '',
       )}
     >
+      <a
+        href={DOCS_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
+        title={collapsed ? 'Docs' : undefined}
+        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+      >
+        <BookOpen
+          size={14}
+          strokeWidth={1.75}
+          className="shrink-0"
+          aria-hidden="true"
+        />
+        {collapsed ? null : (
+          <>
+            Docs<span className="sr-only"> (opens in a new tab)</span>
+          </>
+        )}
+      </a>
       <div
         className="text-2xs text-text-faint truncate"
         title={collapsed ? label : undefined}

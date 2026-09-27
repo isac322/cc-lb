@@ -117,8 +117,13 @@ export function CalendarPopover({
         <CalendarIcon className="w-4 h-4" />
       </BasePopover.Trigger>
       <BasePopover.Portal>
-        <BasePopover.Positioner align="start" side="top" sideOffset={6}>
-          <BasePopover.Popup className="z-50 bg-bg-sub border border-subtle-strong rounded-md shadow-xl p-2 text-text">
+        <BasePopover.Positioner
+          className="z-50"
+          align="start"
+          side="top"
+          sideOffset={6}
+        >
+          <BasePopover.Popup className="glass-strong rounded-md p-2 text-text outline-none">
             <CalendarContent selected={selected} onSelect={selectDate} />
           </BasePopover.Popup>
         </BasePopover.Positioner>

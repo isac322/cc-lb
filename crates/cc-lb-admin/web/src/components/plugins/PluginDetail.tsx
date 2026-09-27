@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { type PluginEntry, usePluginReferences } from '../../lib/queries';
-import { Badge, Card, Section, Skeleton } from '../ui/primitives';
-import { BackToCatalogLink } from './BackToCatalogLink';
+import { Card, Section, Skeleton } from '../ui/primitives';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
 import { PluginDetailApply } from './PluginDetailApply';
 import { PluginDetailIntegrity } from './PluginDetailIntegrity';
@@ -29,14 +28,6 @@ export function PluginDetail({
 
   return (
     <div className="space-y-8">
-      <div>
-        <BackToCatalogLink onBack={onBack} />
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-          <h2 className="text-title-page text-text break-all">{plugin.name}</h2>
-          {plugin.is_builtin && <Badge tone="neutral">Built-in</Badge>}
-        </div>
-      </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-8">
         <div className="lg:col-span-2 space-y-8">
           <PluginDetailUnderstand plugin={plugin} />

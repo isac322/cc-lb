@@ -28,7 +28,8 @@ import { Button, Card, cx, INPUT_CLASS, Spinner } from './ui/primitives';
 type SessionState =
   | { status: 'loading' }
   | { status: 'authenticated'; session: AuthSession }
-  | { status: 'required' }
+  /** `storedTokenRejected`: a saved token existed and the server refused it. */
+  | { status: 'required'; storedTokenRejected: boolean }
   | { status: 'external_required' }
   | { status: 'error' };
 
@@ -41,8 +42,19 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const requestSequence = useRef(0);
 
+  const showRequired = useCallback((storedTokenRejected: boolean) => {
+    setSessionState({ status: 'required', storedTokenRejected });
+    if (storedTokenRejected) {
+      setValue('');
+      setErrors({ token: 'Saved token no longer works' });
+    }
+  }, []);
+
   const loadSession = useCallback(
-    async (showLoading: boolean): Promise<SessionState['status']> => {
+    async (
+      showLoading: boolean,
+      tokenSource: 'stored' | 'submitted' = 'stored',
+    ): Promise<SessionState['status']> => {
       const requestId = ++requestSequence.current;
       let sentStoredToken = Boolean(getAdminToken());
       let retriedWithoutToken = false;
@@ -73,7 +85,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
 
             clearAdminToken();
             if (authMode === 'static_token') {
-              setSessionState({ status: 'required' });
+              showRequired(sentStoredToken && tokenSource === 'stored');
               return 'required';
             }
             if (authMode === 'external') {
@@ -86,7 +98,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
         }
       }
     },
-    [],
+    [showRequired],
   );
 
   useEffect(() => {
@@ -108,7 +120,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
         return;
       }
       if (detail?.authMode === 'static_token') {
-        setSessionState({ status: 'required' });
+        showRequired(detail.hadToken);
         return;
       }
       setSessionState({ status: 'error' });
@@ -123,7 +135,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
       window.removeEventListener('storage', onStorage);
       window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
     };
-  }, [loadSession]);
+  }, [loadSession, showRequired]);
 
   if (sessionState.status === 'authenticated') {
     return (
@@ -196,7 +208,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     try {
       setErrors({});
       setAdminToken(trimmed);
-      const result = await loadSession(false);
+      const result = await loadSession(false, 'submitted');
       if (result === 'authenticated') {
         setValue('');
       } else if (result === 'required' || result === 'loading') {
@@ -207,12 +219,17 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     }
   }
 
+  const rejected = sessionState.storedTokenRejected;
   return (
     <AuthGateFrame>
       <Card className="p-6">
-        <h1 className="text-title-section text-text">Admin token required</h1>
+        <h1 className="text-title-section text-text">
+          {rejected ? 'Saved admin token was rejected' : 'Admin token required'}
+        </h1>
         <p className="mt-1 text-body-sm text-text-muted">
-          Paste the admin Bearer token to continue.
+          {rejected
+            ? 'The admin token saved in this browser no longer works. It may have been rotated. Paste the current admin Bearer token to continue.'
+            : 'Paste the admin Bearer token to continue.'}
         </p>
         <BaseForm
           className="mt-5 flex flex-col gap-5"

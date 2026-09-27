@@ -239,7 +239,11 @@ export function PluginCatalog({
                               copy(p.sha256_hex, 'SHA256');
                             }}
                           >
-                            <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                            <Copy
+                              className="w-3.5 h-3.5"
+                              strokeWidth={1.75}
+                              aria-hidden="true"
+                            />
                           </IconButton>
                         </div>
                       </TableCell>
@@ -253,22 +257,15 @@ export function PluginCatalog({
                           </>
                         )}
                       </TableCell>
-                      <TableCell numeric>
-                        {p.refcount > 0 ? (
-                          <button
-                            type="button"
-                            aria-label={`View ${p.refcount} use${p.refcount === 1 ? '' : 's'} of ${p.name}`}
-                            className="rounded-sm tabular-nums text-accent-text hover:underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onSelectPlugin(p.id);
-                            }}
-                          >
-                            {p.refcount}
-                          </button>
-                        ) : (
-                          <span className="text-text-faint">0</span>
-                        )}
+                      {/* Plain count: the row and its Inspect action already
+                          open the detail view that lists every use. */}
+                      <TableCell
+                        numeric
+                        className={
+                          p.refcount > 0 ? 'text-text' : 'text-text-faint'
+                        }
+                      >
+                        {p.refcount}
                       </TableCell>
                       <TableCell className="text-text-muted">
                         {p.is_builtin && p.uploaded_at_unix_secs === 0 ? (
@@ -317,6 +314,7 @@ export function PluginCatalog({
                             >
                               <Trash2
                                 className="w-3.5 h-3.5"
+                                strokeWidth={1.75}
                                 aria-hidden="true"
                               />
                             </IconButton>

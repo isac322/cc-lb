@@ -1701,8 +1701,10 @@ test('admin providers render as divider-separated rows without nested boxes', ()
   }
   // The leaf controls themselves still render and stay editable.
   expect(within(provider).getByLabelText('ID')).toBeDefined();
-  // Embedded drops only the outer chrome — the leaf keeps its own Reset/Unset
-  // actions (suppression is a separate contract owned by row headers).
+  // Embedded drops only the outer chrome — the leaf keeps its own field
+  // actions (suppression is a separate contract owned by row headers). The
+  // saved values are configured but unchanged, so only Unset shows until the
+  // draft diverges from the file.
   const idField = provider.querySelector<HTMLElement>(
     '[data-config-path="admin.auth.providers[0].id"]',
   ) as HTMLElement;
@@ -1712,9 +1714,59 @@ test('admin providers render as divider-separated rows without nested boxes', ()
   for (const field of [idField, tokenEnvField]) {
     expect(field).not.toBeNull();
     expect(field.hasAttribute('data-field-embedded')).toBe(true);
-    expect(within(field).getByRole('button', { name: 'Reset' })).toBeDefined();
+    expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
     expect(within(field).getByRole('button', { name: 'Unset' })).toBeDefined();
   }
+  fireEvent.change(within(idField).getByLabelText('ID'), {
+    target: { value: 'renamed' },
+  });
+  expect(within(idField).getByRole('button', { name: 'Reset' })).toBeDefined();
+});
+
+test('field actions appear only when they would change something', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  // Saved and unchanged: nothing to reset, but the explicit value can be unset.
+  const field = revealField('listener.admin_addr');
+  expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
+  expect(within(field).getByRole('button', { name: 'Unset' })).toBeDefined();
+
+  // Unset: inherited from defaults, the saved value differs — Reset restores it.
+  fireEvent.click(within(field).getByRole('button', { name: 'Unset' }));
+  expect(within(field).queryByRole('button', { name: 'Unset' })).toBeNull();
+  fireEvent.click(within(field).getByRole('button', { name: 'Reset' }));
+  const input = within(field).getByLabelText(
+    'Admin address',
+  ) as HTMLInputElement;
+  expect(input.value).toBe('127.0.0.1:9090');
+  expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
+});
+
+test('an invalid address shows an inline error on blur that clears once valid', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const field = revealField('listener.admin_addr');
+  const input = within(field).getByLabelText(
+    'Admin address',
+  ) as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'not-an-address' } });
+  // No error while still typing — the check runs on blur.
+  expect(within(field).queryByText(/Enter host:port/)).toBeNull();
+  fireEvent.blur(input);
+  const message = within(field).getByText(/Enter host:port/);
+  expect(message.className).toContain('text-danger-text');
+  expect(input.getAttribute('aria-invalid')).toBe('true');
+  expect(input.getAttribute('aria-describedby')).toBe(message.id);
+
+  fireEvent.change(input, { target: { value: '127.0.0.1:9191' } });
+  expect(within(field).queryByText(/Enter host:port/)).toBeNull();
+  expect(input.getAttribute('aria-invalid')).toBe('false');
+
+  // Unmodified neighbours carry no Reset action.
+  const proxy = revealField('listener.proxy_addr');
+  expect(within(proxy).queryByRole('button', { name: 'Reset' })).toBeNull();
 });
 
 test('dirty edits require save draft and validation before file save or download', () => {
@@ -2900,7 +2952,8 @@ test('recurring jobs render one flat card per key with the enabled switch in the
   expect(within(interval as HTMLElement).getByText('Lower')).toBeDefined();
   expect(within(interval as HTMLElement).getByText('Higher')).toBeDefined();
   // The job header owns Reset/Unset for the whole job — embedded leaves
-  // suppress their own copies so the actions never duplicate.
+  // suppress their own copies so the actions never duplicate. The toggle above
+  // diverged the draft, so Reset shows alongside Unset.
   expect(within(job).getAllByRole('button', { name: 'Reset' })).toHaveLength(1);
   expect(within(job).getAllByRole('button', { name: 'Unset' })).toHaveLength(1);
   for (const field of [interval, jitter]) {
@@ -2911,6 +2964,19 @@ test('recurring jobs render one flat card per key with the enabled switch in the
       within(field as HTMLElement).queryByRole('button', { name: 'Unset' }),
     ).toBeNull();
   }
+  // Reset restores the saved job; with nothing left to reset only Unset stays.
+  fireEvent.click(within(job).getByRole('button', { name: 'Reset' }));
+  expect(within(job).queryByRole('button', { name: 'Reset' })).toBeNull();
+  expect(within(job).getByRole('button', { name: 'Unset' })).toBeDefined();
+  expect(
+    job.querySelector<HTMLInputElement>(
+      '[data-config-path="scheduler.recurring_jobs.usage_rollup.enabled"]',
+    )?.checked,
+  ).toBe(true);
+  // Unset leaves nothing explicit to unset.
+  fireEvent.click(within(job).getByRole('button', { name: 'Unset' }));
+  expect(within(job).queryByRole('button', { name: 'Unset' })).toBeNull();
+  expect(within(job).getByRole('button', { name: 'Reset' })).toBeDefined();
   // The enabled switch is self-explanatory: no On/Off effect rows repeat the
   // obvious enqueue/stop outcome anywhere in the job card.
   expect(enabledGuidance.enabled).toBeFalsy();

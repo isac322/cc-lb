@@ -1,5 +1,5 @@
 import { Popover as BasePopover } from '@base-ui/react/popover';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Star, Triangle } from 'lucide-react';
 import {
   type ReactElement,
   type ReactNode,
@@ -772,13 +772,26 @@ function UnaccountedInfo({ ms, total }: { ms: number; total: number }) {
   );
 }
 
+/** Starred markers are the headline SSE moments; the rest are plain triangles. */
+function MarkerIcon({ starred }: { starred?: boolean }) {
+  const Icon = starred ? Star : Triangle;
+  return (
+    <Icon size={12} strokeWidth={1.75} fill="currentColor" aria-hidden="true" />
+  );
+}
+
 function MarkerInfo({ marker }: { marker: SseMarker }) {
   const description = MARKER_DESCRIPTIONS[marker.key];
   return (
     <div className="flex flex-col gap-1 min-w-[220px]">
       <div className="flex items-center gap-1.5">
-        <span className={cx(marker.color, 'w-3 text-center leading-none')}>
-          {marker.starred ? '★' : '▲'}
+        <span
+          className={cx(
+            marker.color,
+            'inline-flex w-3 shrink-0 items-center justify-center',
+          )}
+        >
+          <MarkerIcon starred={marker.starred} />
         </span>
         <span className="text-text font-medium">{marker.label}</span>
       </div>
@@ -951,10 +964,10 @@ function MarkerDot({
             aria-hidden
             className={cx(
               marker.color,
-              'text-[13px] leading-none drop-shadow-[0_1px_1px_var(--color-bg)]',
+              'inline-flex drop-shadow-[0_1px_1px_var(--color-bg)]',
             )}
           >
-            {marker.starred ? '★' : '▲'}
+            <MarkerIcon starred={marker.starred} />
           </span>
         </button>
       </InfoPopover>
@@ -1329,8 +1342,13 @@ function SseDetailsList({
                     : '',
               )}
             >
-              <span className={cx(m.color, 'shrink-0 w-3 text-center')}>
-                {m.starred ? '★' : '▲'}
+              <span
+                className={cx(
+                  m.color,
+                  'inline-flex w-3 shrink-0 items-center justify-center',
+                )}
+              >
+                <MarkerIcon starred={m.starred} />
               </span>
               <span className="flex-1 truncate">{m.label}</span>
               <span className="tabular-nums shrink-0 w-16 text-right">

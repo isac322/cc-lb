@@ -882,7 +882,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     const oauthSidebarRow = screen.getByRole('button', {
       name: /OAuth Primary/,
@@ -901,7 +901,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     expect(
       screen.getByTestId('quota-history-legend-slot').textContent,
@@ -942,7 +942,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('new-scope')).toBeDefined();
     expect(screen.getByText('new-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '68.0%',
+      '68%',
     );
   });
 
@@ -1121,7 +1121,9 @@ describe('/upstreams refresh retention', () => {
     expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
     expect(screen.queryByText('identity-old-scope')).toBeNull();
     expect(screen.queryByText('identity-old-model')).toBeNull();
-    expect(screen.queryByText('42.0%')).toBeNull();
+    expect(
+      screen.queryByTestId('quota-snapshot-grid')?.textContent ?? '',
+    ).not.toContain('42%');
     expect(screen.getByTestId('upstream-metadata-loading')).toBeDefined();
     expect(
       screen
