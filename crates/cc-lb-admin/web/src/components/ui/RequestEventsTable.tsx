@@ -4,13 +4,13 @@ import { eventTime } from '../../lib/api';
 import { getRequestOutcome, requestOutcomeTone } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
-import { requestKindBadgeText } from '../../lib/requestKind';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
 import { Badge, cx, EmptyState, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
 import { RequestOutcomeTableCell } from './RequestEventIdentity';
+import { RequestKindBadge } from './RequestKindBadge';
 import { SessionChip } from './SessionChip';
 import { Table, TableHead, TableHeadCell, TableRow } from './Table';
 import { TokenCell } from './TokenCell';
@@ -36,64 +36,77 @@ const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
  * Layout follows the table's own wrapper (`@container/events`), not the
  * viewport, so the same table fits a full page and a narrow detail pane.
  *
- * Under 36rem each row becomes a three-line card instead of a wide table
- * row: time, kind and status; principal, upstream and model; latency,
- * tokens and cost, each with its composition bar. Session is left to the
- * drawer. Cells keep their DOM order and are only placed on the grid.
+ * Under 46rem each row becomes a three-line card instead of a wide table
+ * row: time, kind, session and status; principal, upstream and model;
+ * latency, tokens and cost, each with its composition bar. Cells keep their
+ * DOM order and are only placed on the four-track grid. 46rem is the
+ * narrowest table that fits the columns that never drop (≈ 41rem) plus a
+ * 5rem model.
  */
 const MOBILE_ROW =
-  '@max-xl/events:grid @max-xl/events:h-auto! @max-xl/events:grid-cols-[auto_minmax(0,1fr)_auto] @max-xl/events:items-center @max-xl/events:gap-x-3 @max-xl/events:gap-y-1 @max-xl/events:px-4 @max-xl/events:py-2.5';
+  '@max-[46rem]/events:grid @max-[46rem]/events:h-auto! @max-[46rem]/events:grid-cols-[auto_auto_minmax(0,1fr)_auto] @max-[46rem]/events:items-center @max-[46rem]/events:gap-x-2 @max-[46rem]/events:gap-y-1 @max-[46rem]/events:px-4 @max-[46rem]/events:py-2.5';
 // `p-0!` beats the table's first/last-cell inset, which only applies to rows.
+// `*:min-w-0` drops the metric buttons' 72px floor; the time cell instead
+// holds the first track at 3.5rem (fits "23h ago" and "100 ms"), so kind
+// badges line up from card to card while the upstream keeps its room.
+// `max-w-none` lifts the table's `max-w-0`; principal and model re-cap
+// themselves with `!` so an auto track never grows past 40cqw and squeezes
+// the upstream out of the flexible track.
 const MOBILE_CELL =
-  '@max-xl/events:p-0! @max-xl/events:*:p-0 @max-xl/events:max-w-none';
+  '@max-[46rem]/events:p-0! @max-[46rem]/events:*:p-0 @max-[46rem]/events:*:min-w-0 @max-[46rem]/events:max-w-none';
 const MOBILE_AT = {
-  time: '@max-xl/events:row-start-1 @max-xl/events:col-start-1',
-  kind: '@max-xl/events:row-start-1 @max-xl/events:col-start-2 @max-xl/events:justify-self-start',
-  status: '@max-xl/events:row-start-1 @max-xl/events:col-start-3',
+  time: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-1 @max-[46rem]/events:min-w-14',
+  kind: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-2 @max-[46rem]/events:justify-self-start',
+  session:
+    '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-3 @max-[46rem]/events:justify-self-start',
+  status: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-4',
   principal:
-    '@max-xl/events:row-start-2 @max-xl/events:col-start-1 @max-xl/events:max-w-[40cqw]',
+    '@max-[46rem]/events:row-start-2 @max-[46rem]/events:col-start-1 @max-[46rem]/events:col-span-2 @max-[46rem]/events:max-w-[40cqw]!',
   upstream:
-    '@max-xl/events:row-start-2 @max-xl/events:col-start-1 @max-xl/events:col-span-2',
+    '@max-[46rem]/events:row-start-2 @max-[46rem]/events:col-start-1 @max-[46rem]/events:col-span-3',
   /** Reads "principal → upstream" when both cells are shown. */
   upstreamAfterPrincipal:
-    '@max-xl/events:row-start-2 @max-xl/events:col-start-2 @max-xl/events:before:content-["→_"] @max-xl/events:before:text-text-faint',
+    '@max-[46rem]/events:row-start-2 @max-[46rem]/events:col-start-3 @max-[46rem]/events:before:content-["→_"] @max-[46rem]/events:before:text-text-faint',
   model:
-    '@max-xl/events:row-start-2 @max-xl/events:col-start-3 @max-xl/events:max-w-[40cqw] @max-xl/events:text-right',
+    '@max-[46rem]/events:row-start-2 @max-[46rem]/events:col-start-4 @max-[46rem]/events:max-w-[40cqw]! @max-[46rem]/events:text-right',
   latency:
-    '@max-xl/events:row-start-3 @max-xl/events:col-start-1 @max-xl/events:text-left',
+    '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-1 @max-[46rem]/events:text-left',
   tokens:
-    '@max-xl/events:row-start-3 @max-xl/events:col-start-2 @max-xl/events:justify-self-start @max-xl/events:text-left',
-  cost: '@max-xl/events:row-start-3 @max-xl/events:col-start-3',
+    '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-2 @max-[46rem]/events:col-span-2 @max-[46rem]/events:justify-self-start @max-[46rem]/events:text-left',
+  cost: '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-4',
 } as const;
 
 /** Per-column classes for the columns that give way when space runs out. */
 interface ColumnFit {
   /** Principal and upstream. */
   entity: string;
-  session: string;
-  kind: string;
   model: string;
+  /** True when the table may shorten the model id to fit the pane. */
+  compactModel: boolean;
 }
 
 /*
  * Without a `minWidthClass` floor the table fits its container: between the
- * card layout and the full width, session drops first, then request kind,
- * then principal and upstream, and model absorbs whatever is left, truncated
- * (the full name stays in its title). Time, status, latency, tokens and cost
- * never drop.
+ * card layout and 60rem principal and upstream are hidden (with them a model
+ * would get under 13rem), and model absorbs whatever is left, truncated (the
+ * full name stays in its title). Time, session, kind, status, latency, tokens
+ * and cost never drop. In this mode the model cell drops a leading
+ * 'claude-' prefix; the full id stays in the title and accessible name.
  */
 const FIT_COLUMNS: ColumnFit = {
-  entity: '@xl/events:@max-[44rem]/events:hidden',
-  session: '@max-[64rem]/events:hidden',
-  kind: '@xl/events:@max-[52rem]/events:hidden',
-  model: '@xl/events:w-full @xl/events:max-w-0',
+  entity: '@min-[46rem]/events:@max-[60rem]/events:hidden',
+  model: '@min-[46rem]/events:w-full @min-[46rem]/events:max-w-0',
+  compactModel: true,
 };
-/** With a floor the table keeps every column and its wrapper scrolls. */
+/*
+ * With a floor the table keeps every column and the full model id; model
+ * still absorbs the slack and truncates, so the wrapper scrolls only once
+ * the floor is reached.
+ */
 const SCROLL_COLUMNS: ColumnFit = {
   entity: '',
-  session: '',
-  kind: '',
-  model: 'max-w-[260px]',
+  model: 'w-full max-w-0 @min-[46rem]/events:min-w-40',
+  compactModel: false,
 };
 
 /** Radii offered by the per-row time anchor, as [label, seconds either side]. */
@@ -145,7 +158,6 @@ interface RequestEventRowProps {
   showPrincipal: boolean;
   showUpstream: boolean;
   showSession: boolean;
-  showKind: boolean;
   showTokens: boolean;
   showCost: boolean;
   selected: boolean;
@@ -163,7 +175,6 @@ const RequestEventRow = memo(function RequestEventRow({
   showPrincipal,
   showUpstream,
   showSession,
-  showKind,
   showTokens,
   showCost,
   selected,
@@ -181,7 +192,6 @@ const RequestEventRow = memo(function RequestEventRow({
   );
   const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);
-  const requestKindBadge = requestKindBadgeText(event.request_kind);
   const at = eventTime(event);
 
   return (
@@ -221,14 +231,14 @@ const RequestEventRow = memo(function RequestEventRow({
         {tone === 'ok' ? null : (
           <span
             className={cx(
-              'status-dot absolute top-1/2 left-1.5 -translate-y-1/2 @max-xl/events:-left-3',
+              'status-dot absolute top-1/2 left-1.5 -translate-y-1/2 @max-[46rem]/events:-left-3',
               outcome.type === 'partial' ? 'neutral animate-pulse' : tone,
             )}
           />
         )}
         <RelativeTime compact ts={at} />
         {onAnchorRange != null && at != null ? (
-          <span className="absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 @max-xl/events:hidden">
+          <span className="absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 @max-[46rem]/events:hidden">
             {ANCHOR_RADII_SECS.map(([label, radius]) => (
               <button
                 key={label}
@@ -276,29 +286,23 @@ const RequestEventRow = memo(function RequestEventRow({
       {showSession && (
         <td
           className={cx(
-            'px-3 py-2 whitespace-nowrap @max-xl/events:hidden',
-            fit.session,
+            'px-3 py-2 whitespace-nowrap',
+            MOBILE_CELL,
+            MOBILE_AT.session,
           )}
         >
           <SessionChip sessionId={event.thread_id ?? null} />
         </td>
       )}
-      {showKind && (
-        <td
-          className={cx(
-            'px-3 py-2 whitespace-nowrap',
-            MOBILE_CELL,
-            MOBILE_AT.kind,
-            fit.kind,
-          )}
-        >
-          {requestKindBadge != null ? (
-            <Badge className="shrink-0">{requestKindBadge}</Badge>
-          ) : (
-            <span className="text-text-faint">{DASH}</span>
-          )}
-        </td>
-      )}
+      <td
+        className={cx(
+          'px-3 py-2 whitespace-nowrap',
+          MOBILE_CELL,
+          MOBILE_AT.kind,
+        )}
+      >
+        <RequestKindBadge requestKind={event.request_kind} />
+      </td>
       <td
         className={cx(
           'px-3 py-2 text-text-muted truncate',
@@ -307,13 +311,23 @@ const RequestEventRow = memo(function RequestEventRow({
           fit.model,
         )}
       >
-        <span className="flex items-center gap-2 min-w-0 @max-xl/events:justify-end">
-          <span
-            className="truncate font-mono text-data"
-            title={event.model ?? undefined}
-          >
-            {event.model ?? DASH}
-          </span>
+        <span className="flex items-center gap-2 min-w-0 @max-[46rem]/events:justify-end">
+          {event.model != null && fit.compactModel ? (
+            <span
+              className="truncate font-mono text-data"
+              title={event.model}
+              aria-label={event.model}
+            >
+              {event.model.replace(/^claude-/, '')}
+            </span>
+          ) : (
+            <span
+              className="truncate font-mono text-data"
+              title={event.model ?? undefined}
+            >
+              {event.model ?? DASH}
+            </span>
+          )}
           {tierBadge != null && (
             <Badge tone="neutral" className="shrink-0">
               {tierBadge}
@@ -390,11 +404,9 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   const showUpstream = columns?.upstream ?? true;
   const showTokens = columns?.tokens ?? true;
   const showCost = columns?.cost ?? true;
-  // Optional columns earn their width only when a visible row has a value;
-  // a column of dashes is noise.
-  const showSession =
-    (columns?.session ?? true) && events.some((e) => e.thread_id);
-  const showKind = events.some((e) => requestKindBadgeText(e.request_kind));
+  // Session and kind stay even when every row is null: the dashes say the
+  // requests carried none, and the columns do not jump as rows stream in.
+  const showSession = columns?.session ?? true;
   const fit = minWidthClass == null ? FIT_COLUMNS : SCROLL_COLUMNS;
 
   const columnSpecs: ColumnSpec[] = [
@@ -405,12 +417,8 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     ...(showUpstream
       ? [{ label: 'Upstream', skeleton: 'max-w-28', className: fit.entity }]
       : []),
-    ...(showSession
-      ? [{ label: 'Session', skeleton: 'max-w-24', className: fit.session }]
-      : []),
-    ...(showKind
-      ? [{ label: 'Request kind', skeleton: 'max-w-12', className: fit.kind }]
-      : []),
+    ...(showSession ? [{ label: 'Session', skeleton: 'max-w-24' }] : []),
+    { label: 'Kind', skeleton: 'max-w-12' },
     { label: 'Model', skeleton: 'max-w-40', className: fit.model },
     { label: 'Status', numeric: true, skeleton: 'max-w-12 ml-auto' },
     { label: 'Latency', numeric: true, skeleton: 'max-w-16 ml-auto' },
@@ -436,11 +444,11 @@ export const RequestEventsTable = memo(function RequestEventsTable({
             // `relative` keeps absolutely positioned descendants (the
             // LatencyCell sr-only descriptions) inside the scroll wrapper;
             // without it they resolve against <body> and widen the page.
-            'relative @max-xl/events:block @max-xl/events:min-w-0',
+            'relative @max-[46rem]/events:block @max-[46rem]/events:min-w-0',
             className,
           )}
         >
-          <TableHead className="@max-xl/events:hidden">
+          <TableHead className="@max-[46rem]/events:hidden">
             <tr>
               {columnSpecs.map((column) => (
                 <TableHeadCell
@@ -453,7 +461,10 @@ export const RequestEventsTable = memo(function RequestEventsTable({
               ))}
             </tr>
           </TableHead>
-          <tbody style={reservedBodyStyle} className="@max-xl/events:block">
+          <tbody
+            style={reservedBodyStyle}
+            className="@max-[46rem]/events:block"
+          >
             {loading ? (
               Array.from({ length: reservedRowCount }).map((_, i) => (
                 <SkeletonRow
@@ -462,14 +473,14 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                   style={REQUEST_EVENT_ROW_STYLE}
                   // In the card layout the body is a list of cards, so the
                   // placeholder is one line of the first three cells.
-                  className="@max-xl/events:flex @max-xl/events:items-center @max-xl/events:px-1"
+                  className="@max-[46rem]/events:flex @max-[46rem]/events:items-center @max-[46rem]/events:px-1"
                   cellClassNames={columnSpecs.map((column, index) =>
                     cx(
                       column.numeric ? 'text-right tabular-nums' : '',
                       column.className,
                       index < 3
-                        ? '@max-xl/events:flex-1'
-                        : '@max-xl/events:hidden',
+                        ? '@max-[46rem]/events:flex-1'
+                        : '@max-[46rem]/events:hidden',
                     ),
                   )}
                   skeletonClassNames={columnSpecs.map(
@@ -500,7 +511,6 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                     showPrincipal={showPrincipal}
                     showUpstream={showUpstream}
                     showSession={showSession}
-                    showKind={showKind}
                     showTokens={showTokens}
                     showCost={showCost}
                     selected={selectedId === eventKey}

@@ -113,8 +113,20 @@ export function BrandMark({ size = 24 }: { size?: number }) {
   );
 }
 
-export function SidebarBrand({ collapsed }: { collapsed: boolean }) {
-  return (
+/**
+ * Brand row, 48px so it lines up with the top bar. On the desktop rail it also
+ * carries the collapse/expand toggle: right-aligned beside the wordmark when
+ * expanded, directly under the mark when collapsed. The phone sheet omits it
+ * (`onToggleCollapsed` absent).
+ */
+export function SidebarBrand({
+  collapsed,
+  onToggleCollapsed,
+}: {
+  collapsed: boolean;
+  onToggleCollapsed?: () => void;
+}) {
+  const brand = (
     <div
       className={cx(
         'flex items-center gap-2.5 h-12 shrink-0',
@@ -129,6 +141,30 @@ export function SidebarBrand({ collapsed }: { collapsed: boolean }) {
       ) : (
         <span className="sr-only">cc-lb</span>
       )}
+    </div>
+  );
+  if (!onToggleCollapsed) return brand;
+
+  // One tree for both states so the button keeps keyboard focus when it
+  // flips the rail.
+  return (
+    <div
+      className={cx(
+        'flex shrink-0',
+        collapsed
+          ? 'flex-col items-center'
+          : 'h-12 items-center justify-between pr-3',
+      )}
+    >
+      {brand}
+      <IconButton
+        label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        aria-expanded={!collapsed}
+        title={collapsed ? 'Expand sidebar (⌘B)' : 'Collapse sidebar (⌘B)'}
+        onClick={onToggleCollapsed}
+      >
+        <PanelLeft strokeWidth={1.75} aria-hidden="true" />
+      </IconButton>
     </div>
   );
 }
@@ -236,75 +272,48 @@ export function SidebarNav({
   );
 }
 
-/**
- * Docs link, version and, on the desktop rail, the collapse/expand toggle.
- * The toggle sits at the foot of the rail in both states so it moves with
- * the rail; the phone sheet omits it (`onToggleCollapsed` absent).
- */
+/** Docs link and version at the foot of the rail and the phone sheet. */
 export function SidebarFooter({
   collapsed,
   version,
-  onToggleCollapsed,
 }: {
   collapsed: boolean;
   version: string | null;
-  onToggleCollapsed?: () => void;
 }) {
   const label = version ? `cc-lb v${version}` : 'cc-lb';
-  const toggle = onToggleCollapsed ? (
-    <IconButton
-      label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      aria-expanded={!collapsed}
-      title={collapsed ? 'Expand sidebar (⌘B)' : 'Collapse sidebar (⌘B)'}
-      onClick={onToggleCollapsed}
-    >
-      <PanelLeft strokeWidth={1.75} aria-hidden="true" />
-    </IconButton>
-  ) : null;
-
   return (
     <div
       className={cx(
-        'py-4 flex gap-2',
-        collapsed
-          ? 'flex-col items-center px-2 text-center'
-          : 'items-end justify-between pl-5 pr-3',
+        'py-4 flex min-w-0 flex-col gap-2',
+        collapsed ? 'items-center px-2 text-center' : 'items-start px-5',
       )}
     >
-      <div
-        className={cx(
-          'flex min-w-0 flex-col gap-2',
-          collapsed ? 'items-center' : '',
-        )}
+      <a
+        href={DOCS_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
+        title={collapsed ? 'Docs' : undefined}
+        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
-        <a
-          href={DOCS_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
-          title={collapsed ? 'Docs' : undefined}
-          className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-        >
-          <BookOpen
-            size={14}
-            strokeWidth={1.75}
-            className="shrink-0"
-            aria-hidden="true"
-          />
-          {collapsed ? null : (
-            <>
-              Docs<span className="sr-only"> (opens in a new tab)</span>
-            </>
-          )}
-        </a>
-        <div
-          className="text-2xs text-text-faint truncate"
-          title={collapsed ? label : undefined}
-        >
-          {collapsed ? 'cc' : label}
-        </div>
+        <BookOpen
+          size={14}
+          strokeWidth={1.75}
+          className="shrink-0"
+          aria-hidden="true"
+        />
+        {collapsed ? null : (
+          <>
+            Docs<span className="sr-only"> (opens in a new tab)</span>
+          </>
+        )}
+      </a>
+      <div
+        className="text-2xs text-text-faint truncate"
+        title={collapsed ? label : undefined}
+      >
+        {collapsed ? 'cc' : label}
       </div>
-      {toggle}
     </div>
   );
 }

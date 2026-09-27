@@ -96,25 +96,25 @@ export const LATENCY_RESPONSIBILITY_META: Record<
 > = {
   downstream: {
     label: 'Downstream',
-    color: 'bg-series-sonnet',
+    color: 'bg-series-latency-downstream',
     description:
       'Combines client pacing and downstream transit with runtime scheduling after handler entry. It is not a network RTT measurement.',
   },
   'cc-lb': {
     label: 'cc-lb',
-    color: 'bg-series-5h',
+    color: 'bg-series-latency-cclb',
     description:
       'Local request handling, routing, cache analysis, queueing, relay processing, and finalization.',
   },
   'upstream-net': {
     label: 'Upstream net',
-    color: 'bg-series-fable',
+    color: 'bg-series-latency-net',
     description:
       'DNS resolution and TCP/TLS connection establishment. Reused connections report no connector timing.',
   },
   'upstream-wait': {
     label: 'Upstream wait',
-    color: 'bg-series-7d',
+    color: 'bg-series-latency-wait',
     description:
       'Combines provider generation, upstream transit, and runtime scheduling. Those parts cannot be separated.',
   },
@@ -127,7 +127,7 @@ export const LATENCY_RESPONSIBILITY_META: Record<
   },
   renewal: {
     label: 'Renewal cycle',
-    color: 'bg-series-5h',
+    color: 'bg-series-latency-cclb',
     description:
       'The complete cache-keepalive renewal cycle performed by the scheduler.',
   },

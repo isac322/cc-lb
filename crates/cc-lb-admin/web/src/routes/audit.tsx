@@ -130,21 +130,24 @@ const TYPE_OPTIONS: ReadonlyArray<{ value: AuditTypeFilter; label: string }> = [
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS_WITH_ALL;
 
 // Columns size to the table's own width (container query, so a collapsed
-// sidebar counts), not the viewport. Below 56rem (1024px screens) Action is the
-// one flexible column and the change summary rides under it. From 56rem
-// (1280–1536px screens) Action is capped and the room goes to a Details column
-// plus the route beside the status; Target is wide enough for a typical
-// `upstream <name>` without truncating. From 80rem (1920px screens) the fixed
-// columns widen, favouring Target and the route over the line-clamped Details,
-// and the actor kind shows. Order: Time, Action, Target, Details, Actor,
-// Request (status + route), Open.
+// sidebar counts), not the viewport; the page is capped at PageContainer's
+// 90rem, so the table tops out near 85rem. Below 56rem (1024px screens) Action
+// is the one flexible column and the change summary rides under it; Target
+// still fits a typical `upstream <name>`. From 56rem (1280–1440px screens)
+// Action and Target are fixed and a line-clamped Details column appears;
+// Details and Request (status + route) are the two flexible columns and split
+// the rest evenly, so Details never takes more than half of the leftover and
+// its full text stays in the cell title and the entry drawer. From 80rem
+// (1920px screens, or 1440px with the rail collapsed) the fixed columns widen
+// a step and the actor kind shows. Order: Time, Action, Target, Details,
+// Actor, Request, Open.
 const AUDIT_COLUMN_CLASS_NAMES = [
   'w-[6rem]',
-  '@4xl:w-[13rem] @7xl:w-[16rem]',
-  'w-[10.5rem] @4xl:w-[13rem] @7xl:w-[17rem]',
+  '@4xl:w-[12.5rem] @7xl:w-[14rem]',
+  'w-[11.5rem] @4xl:w-[12rem] @7xl:w-[15rem]',
   'hidden @4xl:table-cell',
-  'w-[8.5rem] @4xl:w-[9.5rem] @7xl:w-[12rem]',
-  'w-[4.5rem] @4xl:w-[12rem] @7xl:w-[20rem]',
+  'w-[8.5rem] @4xl:w-[9.5rem] @7xl:w-[11rem]',
+  'w-[4rem] @4xl:w-auto',
   'w-[3.5rem]',
 ] as const;
 
@@ -428,7 +431,11 @@ function AuditPage() {
   }));
 
   return (
-    <FullPage>
+    // Same content width and side padding as PageContainer pages (plugins,
+    // settings); FullPage keeps the viewport-fit scroller. Both overrides are
+    // `lg:` variants so they reliably win over FullPage's base classes; below
+    // `lg` the viewport is already narrower than 90rem.
+    <FullPage className="lg:max-w-[90rem] lg:px-10">
       <PageHeader
         title="Audit trail"
         description="Admin API actions, newest first. Open an entry for its recorded details."
@@ -542,7 +549,7 @@ function AuditPage() {
       <Card className="flex min-h-0 flex-col">
         {/* Desktop table */}
         <div className="@container hidden min-h-0 overflow-auto md:block">
-          <Table className="table-fixed min-w-[46rem]">
+          <Table className="table-fixed min-w-[45rem]">
             <TableHead>
               <tr>
                 <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[0]}>

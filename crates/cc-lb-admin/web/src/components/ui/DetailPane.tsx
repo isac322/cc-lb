@@ -22,14 +22,21 @@ import {
  *
  * `DetailPane` is the pane's scroll container. Its `header` (a
  * `DetailHeader`) stays pinned at the top and gains a 1px bottom line once
- * the body scrolls under it. The body stacks optional `notices` and then
- * `DetailSection`s, each opened by a full-width rule.
+ * the body scrolls under it. The body is the `detail` size container; it
+ * stacks optional `notices` and then `DetailSection`s, each opened by a
+ * full-width rule. Wrap settings-like sections in a `DetailSectionGrid` so
+ * they pair up in two columns when the pane is wide.
  */
 
 const DetailScrolledContext = createContext(false);
 
 /** Horizontal inset shared by the header and the body. */
 const PANE_INSET_CLASS = 'px-4 md:px-8';
+/**
+ * Space between one section's content and the next section's rule. The body
+ * stack and `DetailSectionGrid` rows share it so the rhythm never changes.
+ */
+const SECTION_GAP_CLASS = 'gap-y-6 md:gap-y-8';
 
 export function DetailPane({
   header,
@@ -59,7 +66,8 @@ export function DetailPane({
       </DetailScrolledContext.Provider>
       <div
         className={cx(
-          'flex flex-col gap-8 pb-10 md:gap-10 md:pb-16',
+          '@container/detail flex flex-col pb-10 md:pb-16',
+          SECTION_GAP_CLASS,
           PANE_INSET_CLASS,
         )}
       >
@@ -250,10 +258,31 @@ export function DetailHeaderSkeleton() {
 }
 
 /**
+ * Lays `DetailSection`s out in reading order: one column, then two equal
+ * columns once the pane body (`@container/detail`) is 56rem wide. Sections in
+ * one row share the row's top, so their rules line up; `span="full"` sections
+ * take the whole row.
+ */
+export function DetailSectionGrid({ children }: { children: ReactNode }) {
+  return (
+    <div
+      data-detail-section-grid=""
+      className={cx(
+        'grid min-w-0 grid-cols-1 items-start @[56rem]/detail:grid-cols-2 @[56rem]/detail:gap-x-12',
+        SECTION_GAP_CLASS,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
  * One titled region of a detail pane: a full-width 1px rule, then a
  * `text-title-section` h3 with a one-line muted description and an optional
  * action, then the content. `collapsible` sections are a disclosure, closed
- * unless `defaultOpen`.
+ * unless `defaultOpen`. Each section is its own size container, so rows and
+ * fact grids inside respond to the section's width, not the pane's.
  */
 export function DetailSection({
   title,
@@ -262,6 +291,7 @@ export function DetailSection({
   children,
   className,
   titleId,
+  span,
   collapsible = false,
   defaultOpen = false,
   ...rest
@@ -272,13 +302,16 @@ export function DetailSection({
   children: ReactNode;
   className?: string;
   titleId?: string;
+  /** In a `DetailSectionGrid`, span both columns. */
+  span?: 'full';
   collapsible?: boolean;
   defaultOpen?: boolean;
 } & Omit<HTMLAttributes<HTMLElement>, 'title' | 'children'>) {
   const generatedId = useId();
   const headingId = titleId ?? generatedId;
   const sectionClass = cx(
-    'flex min-w-0 flex-col border-t border-subtle pt-8 md:pt-10',
+    '@container flex min-w-0 flex-col border-t border-subtle pt-5 md:pt-6',
+    span === 'full' && '@[56rem]/detail:col-span-2',
     className,
   );
   const heading = (
@@ -321,7 +354,7 @@ export function DetailSection({
               />
             </span>
           </summary>
-          <div className="mt-4 flex flex-col gap-4">
+          <div className="mt-3 flex flex-col gap-3">
             {action ? <div className="flex justify-end">{action}</div> : null}
             {children}
           </div>
@@ -334,13 +367,16 @@ export function DetailSection({
     <section
       aria-labelledby={headingId}
       data-detail-section=""
-      className={cx(sectionClass, 'gap-4')}
+      className={cx(sectionClass, 'gap-3')}
       {...rest}
     >
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+      {/* The action shares the heading's line while both fit the section
+          and wraps under it otherwise, so a half-width section never
+          overflows. */}
+      <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
         {heading}
         {action ? (
-          <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {action}
           </div>
         ) : null}

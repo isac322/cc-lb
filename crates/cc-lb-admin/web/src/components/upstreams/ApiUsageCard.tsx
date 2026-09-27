@@ -9,9 +9,15 @@ import {
   YAxis,
 } from 'recharts';
 import type { DashboardUsageResponse } from '../../lib/api';
-import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
-import { fmtUsd, sumTokens } from '../../lib/format';
-import { CHART_AXIS, CHART_CURSOR, CHART_GRID } from '../ui/charts';
+import { getWindowColor } from '../../lib/colors';
+import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
+import {
+  CHART_AXIS,
+  CHART_CURSOR,
+  CHART_GRID,
+  SeriesFillGradient,
+  useChartId,
+} from '../ui/charts';
 import { DetailSection } from '../ui/DetailPane';
 import { EmptyState, SegmentedControl, Skeleton } from '../ui/primitives';
 
@@ -60,6 +66,7 @@ export function ApiUsageCard({
   onMetricChange,
 }: Props) {
   const showLoading = data === undefined && isLoading;
+  const chartId = useChartId();
 
   const chartData = useMemo(() => {
     if (!data?.series || data.series.length === 0) return [];
@@ -102,9 +109,9 @@ export function ApiUsageCard({
     if (metric === 'cost') {
       return fmtUsd(val * 1_000_000);
     }
-    if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
-    if (val >= 1_000) return `${(val / 1_000).toFixed(1)}K`;
-    return val.toString();
+    // Compact counts share the app's k/M/B casing (splitNum, like fmtTokens).
+    const { value, unit } = splitNum(val);
+    return `${value}${unit}`;
   };
 
   const formatTooltip = (val: number) => {
@@ -133,6 +140,7 @@ export function ApiUsageCard({
 
   return (
     <DetailSection
+      span="full"
       data-testid="api-usage-card"
       title="API usage"
       description="Token and cost breakdown by model"
@@ -151,7 +159,7 @@ export function ApiUsageCard({
                   <div key={model} className="flex items-center gap-1.5">
                     <span
                       aria-hidden="true"
-                      className="h-0.5 w-2.5 shrink-0 rounded-xs"
+                      className="size-2.5 shrink-0 rounded-xs"
                       style={{
                         backgroundColor: modelSeriesColor(model, index),
                       }}
@@ -198,22 +206,28 @@ export function ApiUsageCard({
                     ]}
                     cursor={CHART_CURSOR}
                   />
-                  {models.map((model, index) => {
-                    const color = modelSeriesColor(model, index);
-                    return (
-                      <Area
+                  <defs>
+                    {models.map((model, index) => (
+                      <SeriesFillGradient
                         key={model}
-                        type="monotone"
-                        dataKey={model}
-                        stackId="1"
-                        stroke={color}
-                        fill={color}
-                        fillOpacity={SERIES_FILL_OPACITY}
-                        strokeWidth={1.5}
-                        isAnimationActive={false}
+                        id={`${chartId}-${index}`}
+                        color={modelSeriesColor(model, index)}
                       />
-                    );
-                  })}
+                    ))}
+                  </defs>
+                  {models.map((model, index) => (
+                    <Area
+                      key={model}
+                      type="monotone"
+                      dataKey={model}
+                      stackId="1"
+                      stroke={modelSeriesColor(model, index)}
+                      fill={`url(#${chartId}-${index})`}
+                      fillOpacity={1}
+                      strokeWidth={1.5}
+                      isAnimationActive={false}
+                    />
+                  ))}
                 </AreaChart>
               </ResponsiveContainer>
             )}

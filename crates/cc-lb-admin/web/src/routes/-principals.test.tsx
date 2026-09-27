@@ -119,9 +119,17 @@ function renderPrincipalDetail(
 
 // Access rows are headed regions inside one card; every other heading names a
 // card. Either way this scopes queries to the controls that heading owns.
+// Match heading text, not `getByRole('heading', { name })`: that recomputes
+// every heading's accessible name through jsdom's style cascade after each
+// DOM mutation (50–250ms per call here), and this helper only scopes queries.
+// Full text content, since some titles wrap their text in a span.
 function cardNamed(title: string) {
   const card = screen
-    .getByRole('heading', { name: title })
+    .getByText(
+      (_, heading) =>
+        heading?.textContent?.replace(/\s+/g, ' ').trim() === title,
+      { selector: 'h1, h2, h3, h4, h5, h6' },
+    )
     .closest('section[aria-labelledby], .glass');
   if (!card) throw new Error(`Card not found: ${title}`);
   return within(card as HTMLElement);
@@ -285,6 +293,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   expect(detailPane?.className).toContain('hidden');
   expect(detailPane?.className).toContain('md:flex');
   expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(7);
+  expect(detailShell.querySelector('details')).toBeNull();
   expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
 
   loadingView.unmount();
@@ -300,6 +309,37 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   for (const className of rowGeometryClasses) {
     expect(loadedRow.className).toContain(className);
   }
+});
+
+test('principal detail reads keepalive to observability with every section expanded', () => {
+  renderPrincipalDetail();
+
+  const pane = screen
+    .getByRole('heading', { level: 2, name: 'p-1' })
+    .closest('[data-detail-pane]') as HTMLElement;
+  const sectionTitles = Array.from(
+    pane.querySelectorAll('[data-detail-section]'),
+  ).map((section) =>
+    document
+      .getElementById(section.getAttribute('aria-labelledby') ?? '')
+      ?.textContent?.trim(),
+  );
+  expect(sectionTitles).toEqual([
+    'Cache keepalive',
+    'Recent requests',
+    'Router',
+    'Shape',
+    'API keys',
+    'Access',
+    'Observability',
+  ]);
+  // Nothing is folded away: no disclosure, and Shape and Observability
+  // content renders without a click.
+  expect(pane.querySelector('details')).toBeNull();
+  expect(cardNamed('Shape').getByText('None')).toBeDefined();
+  expect(
+    cardNamed('Observability').getByText(/No observability plugins/),
+  ).toBeDefined();
 });
 
 test('recent requests delegates pending geometry to the structured table', () => {

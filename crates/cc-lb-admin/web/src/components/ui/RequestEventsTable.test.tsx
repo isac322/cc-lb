@@ -135,12 +135,12 @@ describe('RequestEventsTable', () => {
     const headerCells = container.querySelectorAll('thead th');
     const body = container.querySelector('tbody');
     const rows = container.querySelectorAll('tbody > tr');
-    // Session is off and, with no rows yet, so are the columns that only
-    // appear when a row has a value (request kind, cache hit).
+    // Session is off; kind stays even with no rows yet.
     const expectedSkeletonWidths = [
       'max-w-24',
       'max-w-24',
       'max-w-28',
+      'max-w-12',
       'max-w-40',
       'max-w-12',
       'max-w-16',
@@ -148,7 +148,7 @@ describe('RequestEventsTable', () => {
       'max-w-16',
     ];
 
-    expect(headerCells).toHaveLength(8);
+    expect(headerCells).toHaveLength(9);
     expect(rows).toHaveLength(3);
     expect(body?.style.height).toBe('7.5rem');
 
@@ -163,7 +163,7 @@ describe('RequestEventsTable', () => {
         const skeleton = cell.querySelector('.skeleton');
         expect(skeleton?.className).toContain(expectedSkeletonWidths[index]);
 
-        if (index >= 4) {
+        if (index >= 5) {
           expect(cell.className).toContain('text-right');
           expect(cell.className).toContain('tabular-nums');
           expect(skeleton?.className).toContain('ml-auto');
@@ -239,7 +239,8 @@ describe('RequestEventsTable', () => {
     const emptyRow = emptyBody?.querySelector('tr');
     expect(emptyBody?.style.height).toBe(loadingHeight);
     expect(emptyRow?.className).toContain('h-full');
-    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('8');
+    // Every column, session and kind included, is present with no rows.
+    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('10');
     expect(screen.getByText('No requests')).toBeDefined();
   });
 
@@ -318,15 +319,13 @@ describe('RequestEventsTable', () => {
     const sessionChip = screen.getByTitle('session-advisor');
     const requestKindBadge = screen.getByText('adv');
     expect(sessionChip.closest('td')).not.toBe(requestKindBadge.closest('td'));
-    expect(
-      screen.getByRole('columnheader', { name: 'Request kind' }),
-    ).toBeDefined();
+    expect(screen.getByRole('columnheader', { name: 'Kind' })).toBeDefined();
     expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
 
     const kindColumnIndex = [
       ...container.querySelectorAll('thead th'),
-    ].findIndex((th) => th.textContent === 'Request kind');
+    ].findIndex((th) => th.textContent === 'Kind');
     const unclassifiedRow = container.querySelectorAll('tbody > tr')[1];
     expect(
       unclassifiedRow.querySelectorAll('td')[kindColumnIndex].textContent,
@@ -465,14 +464,14 @@ describe('RequestEventsTable', () => {
     expect(dashes.length).toBeGreaterThan(0);
   });
 
-  it('shows optional columns only when a visible row has a value', () => {
+  it('keeps the session and kind columns when every row is null', () => {
     const base = {
       ts: 1718553120,
       status: 200,
       duration_ms: 100,
       _phase: 'final',
     } as const;
-    const { container, rerender } = render(
+    const { container } = render(
       <RequestEventsTable
         events={[
           { ...base, event_id: 'evt_a', request_id: 'req_a', input_tokens: 10 },
@@ -482,16 +481,28 @@ describe('RequestEventsTable', () => {
         upstreamNameMap={upstreamNameMap}
       />,
     );
-    const headers = () =>
-      Array.from(
-        container.querySelectorAll('thead th'),
-        (th) => th.textContent,
-      );
+    const headers = Array.from(
+      container.querySelectorAll('thead th'),
+      (th) => th.textContent,
+    );
 
-    expect(headers()).not.toContain('Session');
-    expect(headers()).not.toContain('Request kind');
+    expect(headers).toEqual(expect.arrayContaining(['Session', 'Kind']));
+    for (const column of ['Session', 'Kind']) {
+      const index = headers.indexOf(column);
+      for (const row of container.querySelectorAll('tbody > tr')) {
+        expect(row.querySelectorAll('td')[index].textContent).toBe('—');
+      }
+    }
+  });
 
-    rerender(
+  it('shows the cache hit for every row with prompt tokens, including 0%', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    render(
       <RequestEventsTable
         events={[
           {
@@ -500,31 +511,101 @@ describe('RequestEventsTable', () => {
             request_id: 'req_a',
             input_tokens: 10,
             cache_read_input_tokens: 30,
-            thread_id: 'session-a',
-            request_kind: 'subagent',
           },
           { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
+          {
+            ...base,
+            event_id: 'evt_c',
+            request_id: 'req_c',
+            input_tokens: 1,
+            cache_read_input_tokens: 999,
+          },
+          { ...base, event_id: 'evt_d', request_id: 'req_d' },
         ]}
         principalNameMap={principalNameMap}
         upstreamNameMap={upstreamNameMap}
       />,
     );
 
-    expect(headers()).toEqual(
-      expect.arrayContaining(['Session', 'Request kind']),
+    const tokens = (name: string) => screen.getByRole('button', { name });
+    expect(
+      tokens('Tokens 40 in, 0 out, cache hit 75%, show breakdown').textContent,
+    ).toContain('75%');
+    expect(
+      tokens('Tokens 20 in, 0 out, cache hit 0%, show breakdown').textContent,
+    ).toContain('0%');
+    // A partial hit never rounds up to a full one.
+    expect(
+      tokens('Tokens 1.0k in, 0 out, cache hit 99%, show breakdown')
+        .textContent,
+    ).toContain('99%');
+    // No prompt tokens: nothing to hit, so no percentage.
+    expect(
+      tokens('Tokens 0 in, 0 out, show breakdown').textContent,
+    ).not.toContain('%');
+  });
+
+  it('gives rows of one session the same chip color and other sessions another', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    render(
+      <RequestEventsTable
+        events={[
+          { ...base, event_id: 'a1', request_id: 'a1', thread_id: 'sess-a-1' },
+          { ...base, event_id: 'b1', request_id: 'b1', thread_id: 'sess-b-2' },
+          { ...base, event_id: 'a2', request_id: 'a2', thread_id: 'sess-a-1' },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
     );
-    // Cache hit lives in the tokens cell, not in a column of its own.
-    expect(headers()).not.toContain('Cache hit');
+
+    const [a1, a2] = screen.getAllByTitle('sess-a-1');
+    const [b1] = screen.getAllByTitle('sess-b-2');
+    expect(a1.getAttribute('style')).toBe(a2.getAttribute('style'));
+    expect(a1.getAttribute('style')).not.toBe(b1.getAttribute('style'));
+  });
+
+  it('shortens the model id only in fit tables, keeping the full id in the title', () => {
+    const events = [
+      {
+        event_id: 'evt_m',
+        request_id: 'req_m',
+        ts: 1718553120,
+        status: 200,
+        duration_ms: 100,
+        model: 'claude-sonnet-4-6',
+        _phase: 'final',
+      } satisfies RequestEventWithPhase,
+    ];
+
+    const { container: fit } = render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
     expect(
-      screen.getByRole('button', {
-        name: 'Tokens 40 in, 0 out, cache hit 75%, show breakdown',
-      }),
-    ).toBeDefined();
+      fit.querySelector('tbody span[title="claude-sonnet-4-6"]')?.textContent,
+    ).toBe('sonnet-4-6');
+
+    const { container: scroll } = render(
+      <RequestEventsTable
+        events={events}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+        minWidthClass="min-w-[1080px]"
+      />,
+    );
     expect(
-      screen.getByRole('button', {
-        name: 'Tokens 20 in, 0 out, show breakdown',
-      }),
-    ).toBeDefined();
+      scroll.querySelector('tbody span[title="claude-sonnet-4-6"]')
+        ?.textContent,
+    ).toBe('claude-sonnet-4-6');
   });
 
   describe('Cost Tooltip', () => {

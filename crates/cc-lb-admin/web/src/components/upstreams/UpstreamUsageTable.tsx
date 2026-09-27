@@ -29,9 +29,12 @@ import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
   quotaSeverity,
+  quotaStatusLabel,
+  quotaStatusTone,
 } from '../../lib/quotaSeverity';
 import { cx, Skeleton } from '../ui/primitives';
 import { UsageMeter } from '../ui/UsageMeter';
+import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
 /** The three windows every row reads, in column order. */
@@ -39,11 +42,11 @@ const USAGE_WINDOWS = ['5h', '7d', '7d_fable'] as const;
 type UsageWindow = (typeof USAGE_WINDOWS)[number];
 
 /**
- * The `/latest` window set the Upstreams page polls. Overview and Upstreams
- * both pass it so TanStack dedups the poll into one request.
+ * The `/latest` window set the Upstreams page polls: every window the
+ * detail pane can show. Overview, the list and the detail pane all pass it
+ * so TanStack dedups the poll into one request.
  */
-export const UPSTREAM_LATEST_WINDOWS =
-  '5h,7d,overage,7d_sonnet,7d_opus,7d_fable';
+export const UPSTREAM_LATEST_WINDOWS = QUOTA_WINDOW_ORDER.join(',');
 
 export interface UpstreamUsage7d {
   cost_usd: number;
@@ -362,12 +365,22 @@ function WindowCell({
           <UsageMeter label={`${label} window used`} usedPct={used} />
           <span
             className={cx(
-              'truncate text-caption tabular-nums',
-              status ? 'text-danger-text' : 'text-text-muted',
+              'text-caption tabular-nums',
+              status && quotaStatusTone(status) === 'danger'
+                ? 'text-danger-text'
+                : status && quotaStatusTone(status) === 'warn'
+                  ? 'text-warn-text'
+                  : 'text-text-muted',
             )}
-            title={reset.title ?? reset.text}
+            title={
+              status
+                ? `${quotaStatusLabel(status)} · ${reset.title ?? reset.text}`
+                : (reset.title ?? reset.text)
+            }
           >
-            {status ? `${status} · ${reset.text}` : reset.text}
+            {status
+              ? `${quotaStatusLabel(status)} · ${reset.text}`
+              : reset.text}
           </span>
         </>
       )}

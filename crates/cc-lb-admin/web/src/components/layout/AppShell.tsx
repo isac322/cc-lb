@@ -104,13 +104,12 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
           collapsed ? 'w-14' : 'w-52',
         )}
       >
-        <SidebarBrand collapsed={collapsed} />
-        <SidebarNav collapsed={collapsed} onNavigate={() => {}} />
-        <SidebarFooter
+        <SidebarBrand
           collapsed={collapsed}
-          version={version}
           onToggleCollapsed={() => setCollapsed((c) => !c)}
         />
+        <SidebarNav collapsed={collapsed} onNavigate={() => {}} />
+        <SidebarFooter collapsed={collapsed} version={version} />
       </aside>
 
       {/* "More" sheet below `lg`: the full navigation, opened from the tab bar. */}

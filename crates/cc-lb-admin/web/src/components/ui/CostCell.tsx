@@ -33,8 +33,10 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
 }
 
 /**
- * Request cost over a bar of what it paid for, in the token bar's five
- * categories. Cost no category accounts for is left as bare track.
+ * Request cost over a bar of what it paid for, in the token bar's categories
+ * and order (`USAGE_CATEGORIES`). Cost no category accounts for is left as
+ * bare track. The figure is right-aligned in the cell, so every row's cost
+ * ends on the same edge.
  */
 export function CostCell({
   event,
@@ -79,7 +81,9 @@ export function CostCell({
       total={c.total}
       pulse={isPartial}
     >
-      <span className="text-text">{text}</span>
+      <span data-slot="cost" className="text-text">
+        {text}
+      </span>
     </MetricCell>
   );
 }

@@ -42,15 +42,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import * as z from 'zod';
 import { PrincipalsListEmpty } from '../components/onboarding/ListEmptyStates';
-import {
-  CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
-  CacheKeepaliveCard,
-} from '../components/principals/cache-keepalive/CacheKeepaliveCard';
+import { CacheKeepaliveCard } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
 import {
   DetailHeader,
   DetailHeaderSkeleton,
   DetailPane,
   DetailSection,
+  DetailSectionGrid,
 } from '../components/ui/DetailPane';
 import {
   EntityList,
@@ -194,7 +192,6 @@ const PRINCIPAL_KIND_LABEL: Record<Principal['kind'], string> = {
 // Minimums measured on the unboxed sections against an admin fixture at
 // 1440×1000 so the loading shell and the loaded detail keep the same geometry.
 const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
-  cacheKeepalive: CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
   access: 'min-h-[143px]',
   recentRequests: 'min-h-[301px]',
   router: 'min-h-[324px]',
@@ -241,113 +238,121 @@ function PrincipalDetailLoadingShell() {
       role="status"
       header={<DetailHeaderSkeleton />}
     >
-      <DetailSection
-        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive}
-        data-testid="cache-keepalive-card"
-        title={<Skeleton as="span" className="block h-5 w-32" />}
-        description={<Skeleton as="span" className="block h-4 w-64" />}
-        action={
-          <div className="flex items-center gap-2">
-            <Skeleton className="h-7 w-24" />
-            <Skeleton className="h-7 w-24" />
-            <Skeleton className="h-5 w-9" />
+      <DetailSectionGrid>
+        <DetailSection
+          span="full"
+          data-testid="cache-keepalive-card"
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          description={<Skeleton as="span" className="block h-4 w-64" />}
+          action={
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-7 w-24" />
+              <Skeleton className="h-7 w-24" />
+              <Skeleton className="h-5 w-9" />
+            </div>
+          }
+        >
+          <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div key={index} className="flex flex-col gap-1 pr-5">
+                <Skeleton className="h-3 w-24" />
+                <div className="flex h-9 items-center">
+                  <Skeleton className="h-7 w-20" />
+                </div>
+                <Skeleton className="h-3 w-32" />
+              </div>
+            ))}
           </div>
-        }
-      >
-        <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <div key={index} className="flex flex-col gap-1 pr-5">
-              <Skeleton className="h-3 w-24" />
-              <div className="flex h-9 items-center">
-                <Skeleton className="h-7 w-20" />
+        </DetailSection>
+
+        <DetailSection
+          span="full"
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          description={<Skeleton as="span" className="block h-4 w-48" />}
+        >
+          <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
+            <RequestEventsTable
+              events={[]}
+              principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+              upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+              loading
+              columns={{
+                principal: false,
+                cost: true,
+                tokens: true,
+              }}
+            />
+          </div>
+        </DetailSection>
+
+        <DetailSection
+          span="full"
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          description={<Skeleton as="span" className="block h-8 w-full" />}
+          action={<Skeleton className="h-7 w-24" />}
+        >
+          <div className="space-y-3">
+            <Skeleton className="h-10" />
+            <Skeleton className="h-10" />
+            <Skeleton className="h-28" />
+          </div>
+        </DetailSection>
+
+        <DetailSection
+          span="full"
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          description={<Skeleton as="span" className="block h-4 w-96" />}
+        >
+          <div className="space-y-2">
+            <Skeleton className="h-14" />
+            <Skeleton className="h-14" />
+          </div>
+        </DetailSection>
+
+        <DetailSection
+          span="full"
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          description={<Skeleton as="span" className="block h-4 w-44" />}
+          action={<Skeleton className="h-7 w-24" />}
+        >
+          <div className="space-y-3">
+            <Skeleton className="h-9" />
+            <Skeleton className="h-9" />
+          </div>
+        </DetailSection>
+
+        <DetailSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
+          title={<Skeleton as="span" className="block h-5 w-20" />}
+          description={<Skeleton as="span" className="block h-4 w-64" />}
+        >
+          <div className="space-y-5">
+            {Array.from({ length: 2 }).map((_, index) => (
+              <div
+                key={index}
+                className="flex items-center justify-between gap-4"
+              >
+                <div className="flex items-center gap-4 min-w-0 flex-1">
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-4 w-2/5" />
+                </div>
+                <Skeleton className="h-7 w-14" />
               </div>
-              <Skeleton className="h-3 w-32" />
-            </div>
-          ))}
-        </div>
-      </DetailSection>
+            ))}
+          </div>
+        </DetailSection>
 
-      <DetailSection
-        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
-        title={<Skeleton as="span" className="block h-5 w-20" />}
-        description={<Skeleton as="span" className="block h-4 w-64" />}
-      >
-        <div className="space-y-5">
-          {Array.from({ length: 2 }).map((_, index) => (
-            <div
-              key={index}
-              className="flex items-center justify-between gap-4"
-            >
-              <div className="flex items-center gap-4 min-w-0 flex-1">
-                <Skeleton className="h-4 w-28" />
-                <Skeleton className="h-4 w-2/5" />
-              </div>
-              <Skeleton className="h-7 w-14" />
-            </div>
-          ))}
-        </div>
-      </DetailSection>
-
-      <DetailSection
-        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
-        title={<Skeleton as="span" className="block h-5 w-32" />}
-        description={<Skeleton as="span" className="block h-4 w-48" />}
-      >
-        <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
-          <RequestEventsTable
-            events={[]}
-            principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
-            upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
-            loading
-            columns={{
-              principal: false,
-              cost: true,
-              tokens: true,
-            }}
-          />
-        </div>
-      </DetailSection>
-
-      <DetailSection
-        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}
-        title={<Skeleton as="span" className="block h-5 w-24" />}
-        description={<Skeleton as="span" className="block h-8 w-full" />}
-        action={<Skeleton className="h-7 w-24" />}
-      >
-        <div className="space-y-3">
+        <DetailSection
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          description={<Skeleton as="span" className="block h-4 w-64" />}
+          action={<Skeleton className="h-7 w-16" />}
+        >
           <Skeleton className="h-10" />
-          <Skeleton className="h-10" />
-          <Skeleton className="h-28" />
-        </div>
-      </DetailSection>
-
-      <DetailSection
-        collapsible
-        title={<Skeleton as="span" className="block h-5 w-32" />}
-        description={<Skeleton as="span" className="block h-4 w-64" />}
-      >
-        <Skeleton className="h-10" />
-      </DetailSection>
-
-      <DetailSection
-        collapsible
-        title={<Skeleton as="span" className="block h-5 w-24" />}
-        description={<Skeleton as="span" className="block h-4 w-96" />}
-      >
-        <Skeleton className="h-14" />
-      </DetailSection>
-
-      <DetailSection
-        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
-        title={<Skeleton as="span" className="block h-5 w-24" />}
-        description={<Skeleton as="span" className="block h-4 w-44" />}
-        action={<Skeleton className="h-7 w-24" />}
-      >
-        <div className="space-y-3">
-          <Skeleton className="h-9" />
-          <Skeleton className="h-9" />
-        </div>
-      </DetailSection>
+        </DetailSection>
+      </DetailSectionGrid>
     </DetailPane>
   );
 }
@@ -446,7 +451,7 @@ function PrincipalsPage() {
   const disabledCount = all.filter((p) => !p.enabled).length;
 
   return (
-    <div className="h-shell min-h-0 flex w-full max-w-[120rem] mx-auto">
+    <div className="h-shell min-h-0 flex w-full max-w-[90rem] mx-auto">
       <EntityList
         className={cx(
           'w-full shrink-0 border-r border-subtle md:w-[360px] xl:w-[400px]',
@@ -716,15 +721,21 @@ function PrincipalDetail({
         }
       />
 
-      <fieldset className="min-w-0" disabled={principalWritePending}>
-        <CacheKeepaliveCard principal={principal} />
-      </fieldset>
-      <AccessCard principal={principal} />
-      <RecentRequestsCard principal={principal} />
-      <RouterSlotEditor principal={principal} />
-      <ObservabilityHookEditor principalId={principal.id} />
-      <ShapeSlotEditor principalId={principal.id} />
-      <ApiKeysCard principal={principal} />
+      {/* Reading order. From 56rem only Access and Observability share a row:
+          measured at half width, Router runs ~150px taller than Shape and
+          API keys is a wide table, so pairing any of them leaves a hole. */}
+      <DetailSectionGrid>
+        {/* `contents` keeps the keepalive section itself the grid item. */}
+        <fieldset className="contents" disabled={principalWritePending}>
+          <CacheKeepaliveCard principal={principal} />
+        </fieldset>
+        <RecentRequestsCard principal={principal} />
+        <RouterSlotEditor principal={principal} />
+        <ShapeSlotEditor principalId={principal.id} />
+        <ApiKeysCard principal={principal} />
+        <AccessCard principal={principal} />
+        <ObservabilityHookEditor principalId={principal.id} />
+      </DetailSectionGrid>
     </DetailPane>
   );
 }
@@ -748,6 +759,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const loading = recent.data === undefined && recent.isPending;
   return (
     <DetailSection
+      span="full"
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
       title="Recent requests"
       description={
@@ -1777,6 +1789,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
 
   return (
     <DetailSection
+      span="full"
       id={PRINCIPAL_ROUTER_ANCHOR}
       className={cx(PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router, 'scroll-mt-4')}
       title="Router"
@@ -2204,8 +2217,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
 
   return (
     <DetailSection
-      collapsible
-      defaultOpen={activeEntry != null}
+      span="full"
       title={
         <span className="flex items-center gap-2">
           Shape
@@ -2316,8 +2328,6 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
 
   return (
     <DetailSection
-      collapsible
-      defaultOpen={entries.length > 0}
       title="Observability"
       description="SSE / audit hooks. Executed in order. Multiple allowed."
       action={
@@ -2708,6 +2718,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
 
   return (
     <DetailSection
+      span="full"
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
       title="API keys"
       description="Authenticates as this DB principal; routing selects a DB upstream"

@@ -195,11 +195,13 @@ function Toolbar<F extends string, S extends string>({
           data-testid="entity-list-search"
         />
       </label>
-      <div className="flex gap-2">
+      {/* Auto tracks: each select starts at its label's width and the two
+      share what is left, so "Needs attention first" fits a 360px pane. */}
+      <div className="grid grid-cols-[minmax(0,auto)_minmax(0,auto)] gap-2">
         <Select
           size="sm"
           aria-label={`Filter ${noun}`}
-          className="min-w-0 flex-1 max-md:h-11"
+          className="min-w-0 max-md:h-11"
           value={view.filter}
           options={filterOptions as readonly SelectOption[]}
           onChange={(value) => {
@@ -210,7 +212,7 @@ function Toolbar<F extends string, S extends string>({
         <Select
           size="sm"
           aria-label={`Sort ${noun}`}
-          className="min-w-0 flex-1 max-md:h-11"
+          className="min-w-0 max-md:h-11"
           value={view.sort}
           options={sortOptions as readonly SelectOption[]}
           onChange={(value) => {

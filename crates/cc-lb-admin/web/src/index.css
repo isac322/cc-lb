@@ -130,6 +130,10 @@
   --color-series-opus: var(--color-series-opus);
   --color-series-overage: var(--color-series-overage);
   --color-series-unified: var(--color-series-unified);
+  --color-series-latency-downstream: var(--color-series-latency-downstream);
+  --color-series-latency-cclb: var(--color-series-latency-cclb);
+  --color-series-latency-net: var(--color-series-latency-net);
+  --color-series-latency-wait: var(--color-series-latency-wait);
 }
 
 /* `dark:` follows the app theme (data-theme on <html>), not only the OS. */
@@ -212,19 +216,28 @@
     --color-modal-backdrop: rgb(10 11 13 / 0.72);
     --color-drawer-backdrop: rgb(10 11 13 / 0.6);
     --color-toast-bg: #23272c;
-    /* Series: none within OKLab ΔE 0.08 of the accent, warn or danger. */
-    --color-series-input: oklch(0.74 0.120 250);
-    --color-series-output: oklch(0.74 0.120 345);
-    --color-series-cache-create-5m: oklch(0.78 0.100 190);
-    --color-series-cache-create-1h: oklch(0.60 0.090 190);
-    --color-series-cache-read: oklch(0.76 0.130 140);
-    --color-series-5h: oklch(0.76 0.110 235);
-    --color-series-7d: oklch(0.78 0.100 180);
-    --color-series-fable: oklch(0.72 0.140 145);
-    --color-series-sonnet: oklch(0.88 0.060 215);
-    --color-series-opus: oklch(0.66 0.130 330);
+    /* Series. Tokens: cache read (the good outcome) is green, cache
+       creation (the costly miss) is amber/orange, uncached input is a quiet
+       slate, output violet. Quota windows: the three live windows (5h, 7d,
+       7d Fable) are sky, magenta and lime, at least OKLab ΔE 0.12 apart under
+       protan/deutan/tritan simulation; legacy Sonnet/Opus windows are muted.
+       Latency responsibility groups have their own tokens. */
+    --color-series-input: #95a7ba;
+    --color-series-output: #997fde;
+    --color-series-cache-create-5m: #f8bd40;
+    --color-series-cache-create-1h: #e2832d;
+    --color-series-cache-read: #24c27d;
+    --color-series-5h: #4ebdf7;
+    --color-series-7d: #cd5cac;
+    --color-series-fable: #bbe75f;
+    --color-series-sonnet: #629092;
+    --color-series-opus: #91745d;
     --color-series-overage: oklch(0.72 0.005 260);
     --color-series-unified: oklch(0.58 0.010 260);
+    --color-series-latency-downstream: oklch(0.88 0.060 215);
+    --color-series-latency-cclb: oklch(0.76 0.110 235);
+    --color-series-latency-net: oklch(0.72 0.140 145);
+    --color-series-latency-wait: oklch(0.78 0.100 180);
     --chart-fill-opacity: 0.12;
     --color-input-bg: #15171a;
     --color-overlay-shadow: rgb(0 0 0 / 0.5);
@@ -272,18 +285,22 @@
     --color-modal-backdrop: rgb(23 25 28 / 0.4);
     --color-drawer-backdrop: rgb(23 25 28 / 0.32);
     --color-toast-bg: #f8f8f9;
-    --color-series-input: oklch(0.50 0.130 250);
-    --color-series-output: oklch(0.52 0.150 345);
-    --color-series-cache-create-5m: oklch(0.54 0.100 195);
-    --color-series-cache-create-1h: oklch(0.40 0.070 195);
-    --color-series-cache-read: oklch(0.56 0.120 140);
-    --color-series-5h: oklch(0.52 0.130 240);
-    --color-series-7d: oklch(0.54 0.100 185);
-    --color-series-fable: oklch(0.54 0.130 145);
-    --color-series-sonnet: oklch(0.40 0.070 210);
-    --color-series-opus: oklch(0.60 0.130 350);
+    --color-series-input: #657689;
+    --color-series-output: #613ea6;
+    --color-series-cache-create-5m: #b67700;
+    --color-series-cache-create-1h: #a05000;
+    --color-series-cache-read: #00774b;
+    --color-series-5h: #0c82bf;
+    --color-series-7d: #8d1071;
+    --color-series-fable: #427a17;
+    --color-series-sonnet: #486a6c;
+    --color-series-opus: #755e4c;
     --color-series-overage: oklch(0.50 0.005 260);
     --color-series-unified: oklch(0.62 0.010 260);
+    --color-series-latency-downstream: oklch(0.40 0.070 210);
+    --color-series-latency-cclb: oklch(0.52 0.130 240);
+    --color-series-latency-net: oklch(0.54 0.130 145);
+    --color-series-latency-wait: oklch(0.54 0.100 185);
     --chart-fill-opacity: 0.1;
     --color-input-bg: #f8f8f9;
     --color-overlay-shadow: rgb(23 25 28 / 0.16);
@@ -332,18 +349,22 @@
       --color-modal-backdrop: rgb(23 25 28 / 0.4);
       --color-drawer-backdrop: rgb(23 25 28 / 0.32);
       --color-toast-bg: #f8f8f9;
-      --color-series-input: oklch(0.50 0.130 250);
-      --color-series-output: oklch(0.52 0.150 345);
-      --color-series-cache-create-5m: oklch(0.54 0.100 195);
-      --color-series-cache-create-1h: oklch(0.40 0.070 195);
-      --color-series-cache-read: oklch(0.56 0.120 140);
-      --color-series-5h: oklch(0.52 0.130 240);
-      --color-series-7d: oklch(0.54 0.100 185);
-      --color-series-fable: oklch(0.54 0.130 145);
-      --color-series-sonnet: oklch(0.40 0.070 210);
-      --color-series-opus: oklch(0.60 0.130 350);
+      --color-series-input: #657689;
+      --color-series-output: #613ea6;
+      --color-series-cache-create-5m: #b67700;
+      --color-series-cache-create-1h: #a05000;
+      --color-series-cache-read: #00774b;
+      --color-series-5h: #0c82bf;
+      --color-series-7d: #8d1071;
+      --color-series-fable: #427a17;
+      --color-series-sonnet: #486a6c;
+      --color-series-opus: #755e4c;
       --color-series-overage: oklch(0.50 0.005 260);
       --color-series-unified: oklch(0.62 0.010 260);
+      --color-series-latency-downstream: oklch(0.40 0.070 210);
+      --color-series-latency-cclb: oklch(0.52 0.130 240);
+      --color-series-latency-net: oklch(0.54 0.130 145);
+      --color-series-latency-wait: oklch(0.54 0.100 185);
       --chart-fill-opacity: 0.1;
       --color-input-bg: #f8f8f9;
       --color-overlay-shadow: rgb(23 25 28 / 0.16);

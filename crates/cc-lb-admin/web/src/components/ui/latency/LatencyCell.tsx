@@ -477,12 +477,14 @@ export function LatencyCell({
           {triggerStages.join(', ')}
         </span>
       ) : null}
-      {/* Left-aligned in RequestEventsTable's card layout. */}
-      <span className="flex items-baseline justify-end @max-xl/events:justify-start">
-        <span className="text-text">{value}</span>
-        <span className="ml-1 w-[2ch] shrink-0 text-left text-text-muted">
-          {unit}
-        </span>
+      {/* One right-aligned figure in tables; the card layout's `text-left`
+          on the cell pulls it (and the bar) to the row's left column. The
+          unit must not sit in a fixed-width left-aligned slot: a short unit
+          ('s') then leaves a visible gap between the figure and the bar's
+          right edge. */}
+      <span className="text-text">
+        {value}
+        <span className="text-text-muted">{unit ? ` ${unit}` : ''}</span>
       </span>
     </MetricCell>
   );

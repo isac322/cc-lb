@@ -94,6 +94,7 @@ export function SettingsCard({ upstream }: Props) {
 
   return (
     <DetailSection
+      span="full"
       title="Settings"
       description="Where requests go and which key they carry"
       action={

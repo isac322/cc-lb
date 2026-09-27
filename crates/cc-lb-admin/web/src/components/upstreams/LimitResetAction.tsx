@@ -133,16 +133,25 @@ function blockingReason(
 
 export function LimitResetAction({
   upstream,
+  credentialsStored,
   quotaWindows = [],
 }: {
   upstream: Upstream;
+  /** Whether OAuth credentials are stored (`has_credentials`); undefined
+   *  while the OAuth status loads. Resets are claimed with the stored
+   *  credential, so without one there is nothing to check or claim. */
+  credentialsStored: boolean | undefined;
   /** Quota snapshots the page already renders — the nudge reads the same
    *  numbers, never a second source. */
   quotaWindows?: readonly NudgeQuotaWindow[];
 }) {
   const isOauth = upstream.kind === 'anthropic_oauth';
+  const notConnected = isOauth && credentialsStored === false;
   const { resetsQ, nowMs, suppressed, nudge, derived, claimInFlight } =
-    useCouponNudge(isOauth ? upstream.id : null, quotaWindows);
+    useCouponNudge(
+      isOauth && credentialsStored === true ? upstream.id : null,
+      quotaWindows,
+    );
   const claim = useClaimLimitReset();
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -196,7 +205,7 @@ export function LimitResetAction({
   // disabledReason popover explains why), while a read error or an
   // unresolved pending op keeps it clickable for inspection.
   const queryError = resetsQ.isError;
-  const loading = resetsQ.isPending && !data;
+  const loading = !notConnected && resetsQ.isPending && !data;
   const eligible = ember?.eligible === true;
 
   const grants = ember?.grants ?? [];
@@ -257,6 +266,7 @@ export function LimitResetAction({
   // the dialog is where the user inspects the state.
   const actionDisabled =
     claimInFlight ||
+    notConnected ||
     (pendingOp == null &&
       (loading || (!queryError && data != null && !usableCoupons)));
 
@@ -394,14 +404,16 @@ export function LimitResetAction({
   const displayBlocking = inFlightView ? null : selectedBlocking;
 
   // Popover copy for the disabled button: the direct reason the action is
-  // unavailable. Only set when data actually proves the state is unusable.
-  const disabledReason =
-    !claimInFlight &&
-    pendingOp == null &&
-    !loading &&
-    !queryError &&
-    data != null &&
-    !usableCoupons
+  // unavailable. Only set when the OAuth status or the reset data actually
+  // proves the state is unusable.
+  const disabledReason = notConnected
+    ? 'Connect the account first: resets are claimed with its stored credentials.'
+    : !claimInFlight &&
+        pendingOp == null &&
+        !loading &&
+        !queryError &&
+        data != null &&
+        !usableCoupons
       ? ember == null
         ? 'No current reset coupon data. Status updates with quota polling.'
         : (() => {
@@ -428,14 +440,10 @@ export function LimitResetAction({
       ? derived.activeCount
       : null;
   // Constant label while a claim is in flight — the button's own loading
-  // spinner signals progress, so the ticket outline never resizes.
-  const buttonLabel = pendingView
-    ? 'Reset not confirmed'
-    : loading
-      ? 'Reset quota · …'
-      : queryError || !eligible
-        ? 'Reset unavailable'
-        : 'Reset quota';
+  // spinner signals progress, so the ticket outline never resizes. The
+  // initial status check uses the same spinner+label instead of a ghost
+  // placeholder, so the action stays readable from first paint.
+  const buttonLabel = pendingView ? 'Reset not confirmed' : 'Reset quota';
   // Expiry rides beside the button whenever a usable grant ends inside the
   // notice window — including while a limit recommendation owns the tone.
   const expiryLabel =
@@ -443,9 +451,12 @@ export function LimitResetAction({
       ? `Expires ${formatWait(nudge.expiresSoonAt - nowMs)}`
       : undefined;
 
-  // An unavailable reset is not an action: the header drops it entirely
-  // rather than showing a permanently inert control.
-  const unavailable = buttonLabel === 'Reset unavailable';
+  // The action drops out of the header only when authoritative data proves
+  // the account ineligible — a permanently inert control. Every other
+  // failure mode keeps a visible button: the status check shows a spinner,
+  // read errors stay clickable so the dialog can explain and retry.
+  const unavailable =
+    !loading && !queryError && data != null && ember?.eligible === false;
 
   return (
     <>
@@ -455,7 +466,7 @@ export function LimitResetAction({
           count={buttonCount}
           disabled={actionDisabled}
           disabledReason={disabledReason}
-          loading={claimInFlight}
+          loading={claimInFlight || loading}
           expiryLabel={expiryLabel}
           title={buttonTitle}
           onClick={openDialog}

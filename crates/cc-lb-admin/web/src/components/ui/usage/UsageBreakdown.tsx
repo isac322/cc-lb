@@ -1,7 +1,7 @@
 import { fmtN, formatCostMicros } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { StackedBar } from '../StackedBar';
-import { SLICE_COLORS } from './sliceColors';
+import { USAGE_CATEGORIES, type UsageCategoryKey } from './sliceColors';
 
 interface UsageRow {
   key: string;
@@ -78,49 +78,25 @@ export function TokenBreakdown({ event }: { event: RequestEventWithPhase }) {
   const cache5m = event.cache_creation_input_tokens_5m;
   const cache1h = event.cache_creation_input_tokens_1h;
   const hasSplit = cache5m != null || cache1h != null;
-  const rows = [
-    {
-      key: 'input',
-      label: 'Input',
-      value: event.input_tokens ?? 0,
-      color: SLICE_COLORS.input,
-    },
-    {
-      key: 'output',
-      label: 'Output',
-      value: event.output_tokens ?? 0,
-      color: SLICE_COLORS.output,
-    },
-    ...(hasSplit
-      ? [
-          {
-            key: 'cache_create_5m',
-            label: 'Cache create 5m',
-            value: cache5m ?? 0,
-            color: SLICE_COLORS.cache_create_5m,
-          },
-          {
-            key: 'cache_create_1h',
-            label: 'Cache create 1h',
-            value: cache1h ?? 0,
-            color: SLICE_COLORS.cache_create_1h,
-          },
-        ]
-      : [
-          {
-            key: 'cache_creation',
-            label: 'Cache creation',
-            value: event.cache_creation_input_tokens ?? 0,
-            color: SLICE_COLORS.cache_create_5m,
-          },
-        ]),
-    {
-      key: 'cache_read',
-      label: 'Cache read',
-      value: event.cache_read_input_tokens ?? 0,
-      color: SLICE_COLORS.cache_read,
-    },
-  ]
+  const tokens: Record<UsageCategoryKey, number> = {
+    cache_read: event.cache_read_input_tokens ?? 0,
+    cache_create_5m: hasSplit
+      ? (cache5m ?? 0)
+      : (event.cache_creation_input_tokens ?? 0),
+    cache_create_1h: hasSplit ? (cache1h ?? 0) : 0,
+    input: event.input_tokens ?? 0,
+    output: event.output_tokens ?? 0,
+  };
+  const rows = USAGE_CATEGORIES.map((category) => ({
+    key: category.key,
+    // A row recorded before the 5m / 1h split carries one unsplit total.
+    label:
+      category.key === 'cache_create_5m' && !hasSplit
+        ? 'Cache creation'
+        : category.label,
+    value: tokens[category.key],
+    color: category.color,
+  }))
     .filter((row) => row.value > 0)
     .map((row) => ({ ...row, formatted: fmtN(row.value) }));
   const totalTokens = rows.reduce((sum, row) => sum + row.value, 0);
@@ -136,38 +112,19 @@ export function TokenBreakdown({ event }: { event: RequestEventWithPhase }) {
 }
 
 export function CostBreakdown({ event }: { event: RequestEventWithPhase }) {
-  const rows = [
-    {
-      key: 'input',
-      label: 'Input',
-      value: event.cost_input_micros ?? 0,
-      color: SLICE_COLORS.input,
-    },
-    {
-      key: 'output',
-      label: 'Output',
-      value: event.cost_output_micros ?? 0,
-      color: SLICE_COLORS.output,
-    },
-    {
-      key: 'cache_create_5m',
-      label: 'Cache create 5m',
-      value: event.cost_cache_creation_5m_micros ?? 0,
-      color: SLICE_COLORS.cache_create_5m,
-    },
-    {
-      key: 'cache_create_1h',
-      label: 'Cache create 1h',
-      value: event.cost_cache_creation_1h_micros ?? 0,
-      color: SLICE_COLORS.cache_create_1h,
-    },
-    {
-      key: 'cache_read',
-      label: 'Cache read',
-      value: event.cost_cache_read_micros ?? 0,
-      color: SLICE_COLORS.cache_read,
-    },
-  ]
+  const micros: Record<UsageCategoryKey, number> = {
+    cache_read: event.cost_cache_read_micros ?? 0,
+    cache_create_5m: event.cost_cache_creation_5m_micros ?? 0,
+    cache_create_1h: event.cost_cache_creation_1h_micros ?? 0,
+    input: event.cost_input_micros ?? 0,
+    output: event.cost_output_micros ?? 0,
+  };
+  const rows = USAGE_CATEGORIES.map((category) => ({
+    key: category.key,
+    label: category.label,
+    value: micros[category.key],
+    color: category.color,
+  }))
     .filter((row) => row.value > 0)
     .map((row) => ({ ...row, formatted: formatCostMicros(row.value) }));
   const totalMicros =

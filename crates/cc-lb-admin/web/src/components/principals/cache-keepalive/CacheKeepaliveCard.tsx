@@ -112,9 +112,6 @@ function MetricTile({
   );
 }
 
-// Header (46) + gap (16) + readout row (78): the enabled layout's height.
-export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[140px]';
-
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
   // Sibling principal writes bump the revision this toggle would submit, so the
@@ -243,8 +240,8 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   return (
     <>
       <DetailSection
+        span="full"
         data-testid="cache-keepalive-card"
-        className={CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS}
         title={headerTitle}
         description="Renews the prompt-cache TTL during idle gaps."
         action={headerActions}

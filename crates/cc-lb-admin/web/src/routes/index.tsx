@@ -1,8 +1,21 @@
 import { Meter as BaseMeter } from '@base-ui/react/meter';
 import { Popover as BasePopover } from '@base-ui/react/popover';
-import { createFileRoute, Link } from '@tanstack/react-router';
-import { AlertTriangle } from 'lucide-react';
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createFileRoute,
+  Link,
+  stripSearchParams,
+  useNavigate,
+  useSearch,
+} from '@tanstack/react-router';
+import { AlertTriangle, ArrowDown, ArrowUp } from 'lucide-react';
+import {
+  memo,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   Area,
   AreaChart,
@@ -12,6 +25,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import * as z from 'zod';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import {
   FirstRunChecklist,
@@ -23,14 +37,18 @@ import {
   CHART_CURSOR,
   CHART_GRID,
   CHART_THRESHOLD,
+  SeriesFillGradient,
   SPARKLINE_SECONDARY_DASH,
   Sparkline,
+  useChartId,
 } from '../components/ui/charts';
 import {
   Badge,
+  Button,
   Card,
   cx,
   Hint,
+  INPUT_SM_CLASS,
   PageContainer,
   PageHeader,
   Section,
@@ -38,6 +56,14 @@ import {
   Skeleton,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import {
+  Table,
+  TableCell,
+  TableEmptyRow,
+  TableHead,
+  TableHeadCell,
+  TableRow,
+} from '../components/ui/Table';
 import {
   addBucketCostMicros,
   type CostComponentMicros,
@@ -51,13 +77,14 @@ import {
   useUpstreamUsageData,
 } from '../components/upstreams/UpstreamUsageTable';
 import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
+import { getWindowColor } from '../lib/colors';
 import {
-  cacheHitRatio,
   cacheMissRatio,
   formatCostMicros,
   formatCount,
   formatRate,
   formatUsdAmount,
+  splitNum,
   sumTokens,
 } from '../lib/format';
 import { useTimezone } from '../lib/locale';
@@ -104,11 +131,21 @@ import {
   poolQuotaResponseLatest,
   poolWindowResets,
 } from './-overviewPoolQuota';
+
+const overviewSearchSchema = z.object({
+  // The one range behind the Usage group (pool quota, traffic, principals).
+  range: z.enum(TIME_PRESETS).default('24h').catch('24h'),
+});
+
+const OVERVIEW_SEARCH_DEFAULTS = { range: '24h' } as const;
+
 export const Route = createFileRoute('/')({
+  validateSearch: overviewSearchSchema,
+  // The default range stays out of the address bar.
+  search: { middlewares: [stripSearchParams(OVERVIEW_SEARCH_DEFAULTS)] },
   component: OverviewPage,
 });
 
-const RANGES = TIME_PRESETS;
 type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
@@ -122,13 +159,6 @@ const OVERVIEW_EVENT_FILTERS = { event_kind: 'messages' } as const;
 
 const stepFor = (r: Range): 'hour' | 'minute' =>
   r === '7d' || r === '24h' ? 'hour' : 'minute';
-
-function rangeLabelForSecs(rangeSecs: number): string {
-  return (
-    RANGES.find((candidate) => RANGE_SECONDS[candidate] === rangeSecs) ??
-    `${rangeSecs}s`
-  );
-}
 
 const POOL_QUOTA_QUERY_WINDOWS = POOL_QUOTA_WINDOWS.join(',');
 const POOL_HISTORY_WINDOW_QUANTUM_SECS = 1800;
@@ -152,17 +182,22 @@ function fmtChartTooltip(unix: number): string {
 export type KpiChartPoint = {
   timestamp: number;
   value: number;
-  secondaryValue?: number;
+  /** Second series value for the bucket; null where it is undefined (gap). */
+  secondaryValue?: number | null;
 };
 
 /**
  * Optional second series drawn over the primary area as a dashed line on its
  * own scale (the sparkline shows shape; the legend and readout carry figures).
+ * A tile with a second series reads each readout row as a self-describing
+ * figure with its unit (`formatChartValue` and `format` include the unit),
+ * behind the same swatch as the legend.
  */
 type KpiSecondarySeries = {
-  label: string;
   color: string;
-  format: (value: number) => string;
+  format: (value: number | null) => string;
+  /** Fixed scale of the second series; auto from zero when omitted. */
+  domain?: [number, number];
 };
 
 const NO_KPI_POINTS: readonly KpiChartPoint[] = [];
@@ -173,52 +208,83 @@ function fmtPercent(value: number | null | undefined): string {
   return `${value.toFixed(1)}%`;
 }
 
-/** One-decimal percent of a 0–1 ratio. */
-function fmtRatioPercent(ratio: number | null | undefined): string {
-  if (ratio == null || !Number.isFinite(ratio)) return '—';
-  return fmtPercent(ratio * 100);
-}
-
 function fmtErrorPercent(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
 // KPI series are data, not status: they draw in neutral ink. Only the error
 // rate turns danger, and only when there are errors to report. Tokens is the
-// one two-series tile: input and output take the token series colors, input
-// as a solid area and output as a dashed line, named by an inline legend.
+// one two-series tile: total tokens in the neutral KPI ink, and the cache
+// miss ratio (0-100 on its own scale) as a dashed amber line, the color that
+// marks cache writes in the request tables.
 const KPI_SERIES_COLOR = 'var(--color-text-muted)';
-const TOKENS_INPUT_COLOR = 'var(--color-series-input)';
-const TOKENS_OUTPUT_COLOR = 'var(--color-series-output)';
+const TOKENS_CACHE_MISS_COLOR = 'var(--color-series-cache-create-5m)';
 
-const TOKENS_OUTPUT_SERIES: KpiSecondarySeries = {
-  label: 'Out',
-  color: TOKENS_OUTPUT_COLOR,
-  format: fmtTokens,
+const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
+  color: TOKENS_CACHE_MISS_COLOR,
+  format: (value) => `${fmtPercent(value)} cache miss`,
+  domain: [0, 100],
 };
 
+function fmtTokensReadout(value: number): string {
+  return `${fmtTokens(value)} tokens`;
+}
+
 /**
- * "── In 45.2k  ┄┄ Out 295" under the Tokens value: names both chart series
- * with the range totals, compact like the Logs token column. Wraps to two
- * lines when the tile is narrow rather than truncating a figure.
+ * KPI tile values never truncate: counts at or past a million shrink to
+ * `splitNum`'s compact unit (same `k`/`M`/`B` the tables use) and the exact
+ * figure rides in `title` and screen-reader text.
  */
-function TokensLegend({ input, output }: { input: number; output: number }) {
+function fmtRateKpi(reqPerSec: number): {
+  value: string;
+  exact: string | null;
+} {
+  const compact = reqPerSec >= 1_000_000;
+  const num = splitNum(Math.round(reqPerSec));
+  return {
+    value: compact ? `${num.value}${num.unit}/s` : formatRate(reqPerSec),
+    exact: compact ? `${formatCount(Math.round(reqPerSec))} requests/s` : null,
+  };
+}
+
+/** Cost at list price: whole dollars under $1M, `$1.2M` at or past it. */
+function fmtUsdKpi(usd: number): { value: string; exact: string | null } {
+  const compact = usd >= 1_000_000;
+  const num = splitNum(usd);
+  return {
+    value: compact ? `$${num.value}${num.unit}` : formatUsdAmount(usd),
+    exact: compact ? formatUsdAmount(usd) : null,
+  };
+}
+
+/**
+ * "── Tokens 45.2k  ┄┄ Cache miss 12.3%" under the Tokens value: names both
+ * chart series with the range figures. Wraps to two lines when the tile is
+ * narrow rather than truncating a figure.
+ */
+function TokensLegend({
+  total,
+  cacheMissPct,
+}: {
+  total: number;
+  cacheMissPct: number | null;
+}) {
   return (
     <div
       className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-caption tabular-nums text-text-muted"
       data-testid="overview-kpi-tokens-legend"
     >
       <span className="inline-flex h-4 items-center gap-1.5 whitespace-nowrap">
-        <LegendSwatch stroke={TOKENS_INPUT_COLOR} strokeWidth={2} />
-        In <span className="text-text">{fmtTokens(input)}</span>
+        <LegendSwatch stroke={KPI_SERIES_COLOR} strokeWidth={2} />
+        Tokens <span className="text-text">{fmtTokens(total)}</span>
       </span>
       <span className="inline-flex h-4 items-center gap-1.5 whitespace-nowrap">
         <LegendSwatch
-          stroke={TOKENS_OUTPUT_COLOR}
+          stroke={TOKENS_CACHE_MISS_COLOR}
           strokeWidth={2}
           strokeDasharray={SPARKLINE_SECONDARY_DASH}
         />
-        Out <span className="text-text">{fmtTokens(output)}</span>
+        Cache miss <span className="text-text">{fmtPercent(cacheMissPct)}</span>
       </span>
     </div>
   );
@@ -240,6 +306,7 @@ const KPI_CELL_CLASS = [
 export function ValueTile({
   label,
   value,
+  valueExact,
   legend,
   sub,
   chartId,
@@ -255,6 +322,11 @@ export function ValueTile({
 }: {
   label: string;
   value: React.ReactNode;
+  /**
+   * Full-precision rendering of `value`, shown to screen readers and as the
+   * hover `title` whenever the visible figure is a compacted form.
+   */
+  valueExact?: string | null;
   /** Series legend under the value, for a tile that draws two series. */
   legend?: React.ReactNode;
   sub?: React.ReactNode;
@@ -282,10 +354,13 @@ export function ValueTile({
   const values = useMemo(() => points.map((point) => point.value), [points]);
   const secondaryValues = useMemo(
     () =>
-      secondary ? points.map((point) => point.secondaryValue ?? 0) : undefined,
+      secondary
+        ? points.map((point) => point.secondaryValue ?? null)
+        : undefined,
     [points, secondary],
   );
   const secondaryColor = secondary?.color;
+  const secondaryDomain = secondary?.domain;
   // Memoized so a hover on any sibling tile does not re-render Recharts.
   const chart = useMemo(
     () => (
@@ -294,12 +369,16 @@ export function ValueTile({
         data={values}
         secondary={
           secondaryValues && secondaryColor
-            ? { data: secondaryValues, color: secondaryColor }
+            ? {
+                data: secondaryValues,
+                color: secondaryColor,
+                domain: secondaryDomain,
+              }
             : undefined
         }
       />
     ),
-    [color, values, secondaryValues, secondaryColor],
+    [color, values, secondaryValues, secondaryColor, secondaryDomain],
   );
 
   // Bucket position across the plot, matching Sparkline's x axis.
@@ -330,8 +409,14 @@ export function ValueTile({
         {loading ? (
           <Skeleton className="h-8 w-20" />
         ) : (
-          <span className="truncate text-display tabular-nums text-text">
+          <span
+            className="truncate text-display tabular-nums text-text"
+            title={valueExact ?? undefined}
+          >
             {value}
+            {valueExact != null ? (
+              <span className="sr-only">{` (${valueExact})`}</span>
+            ) : null}
           </span>
         )}
       </div>
@@ -358,14 +443,30 @@ export function ValueTile({
           <span className="truncate text-caption leading-none tabular-nums text-text-faint">
             {fmtChartTooltip(activePoint.timestamp)}
           </span>
-          <span className="truncate text-caption leading-none tabular-nums text-text">
-            {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
-          </span>
           {secondary ? (
+            <>
+              <span className="inline-flex min-w-0 items-center gap-1.5 text-caption leading-none tabular-nums text-text">
+                <LegendSwatch stroke={color} strokeWidth={2} />
+                <span className="truncate">
+                  {formatChartValue(activePoint.value)}
+                </span>
+              </span>
+              <span className="inline-flex min-w-0 items-center gap-1.5 text-caption leading-none tabular-nums text-text">
+                <LegendSwatch
+                  stroke={secondary.color}
+                  strokeWidth={2}
+                  strokeDasharray={SPARKLINE_SECONDARY_DASH}
+                />
+                <span className="truncate">
+                  {secondary.format(activePoint.secondaryValue ?? null)}
+                </span>
+              </span>
+            </>
+          ) : (
             <span className="truncate text-caption leading-none tabular-nums text-text">
-              {`${secondary.label} ${secondary.format(activePoint.secondaryValue ?? 0)}`}
+              {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
             </span>
-          ) : null}
+          )}
         </div>
       ) : null}
       <div className="mt-auto h-8 shrink-0 pt-1" data-slot="sparkline">
@@ -405,39 +506,54 @@ export type TopPrincipal = {
   cost_components_micros: CostComponentMicros | null;
   tokens: number;
   requests: number;
-  cache_hit_ratio: number | null;
   /** Share of every principal's cost in the window, 0-100. */
   share_pct: number;
   /** Every principal's cost in the window: the full-length reference for a meter. */
   total_cost_micros: number;
 };
 
-/** The principals past the top rows, folded into one "N others" line. */
-export type TopPrincipalsRest = {
-  count: number;
-  cost_micros: number;
-  requests: number;
-  tokens: number;
-  share_pct: number;
+/** Rows the ranking shows before "Show all N principals" expands it. */
+export const TOP_PRINCIPAL_ROWS = 10;
+
+type TopPrincipalSortKey = 'requests' | 'tokens' | 'cost';
+type SortDirection = 'asc' | 'desc';
+
+const TOP_PRINCIPAL_SORT_VALUE: Record<
+  TopPrincipalSortKey,
+  (principal: TopPrincipal) => number
+> = {
+  requests: (principal) => principal.requests,
+  tokens: (principal) => principal.tokens,
+  cost: (principal) => principal.cost_micros,
 };
 
-/** Principals listed by name before the rest fold into "N others". */
-const TOP_PRINCIPAL_ROWS = 8;
-
-const TOP_PRINCIPAL_ROW_CLASS =
-  'flex min-h-[66px] items-center gap-3 border-t border-row py-2 first:border-t-0';
+/** Sorted copy: the chosen figure, then cost (desc) and name as tie-breaks. */
+function sortTopPrincipals(
+  principals: readonly TopPrincipal[],
+  key: TopPrincipalSortKey,
+  direction: SortDirection,
+): TopPrincipal[] {
+  const value = TOP_PRINCIPAL_SORT_VALUE[key];
+  const sign = direction === 'desc' ? -1 : 1;
+  return [...principals].sort(
+    (a, b) =>
+      sign * (value(a) - value(b)) ||
+      b.cost_micros - a.cost_micros ||
+      a.name.localeCompare(b.name),
+  );
+}
 
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
-/** Share-of-total track: one neutral fill, square ends. */
+/** Share-of-total track: UsageMeter `sm` geometry (4px, square), neutral fill. */
 const SHARE_TRACK_CLASS =
-  'relative h-1.5 w-full overflow-hidden rounded-xs bg-progress-track';
+  'relative block h-1 w-full overflow-hidden bg-progress-track';
 
 /**
- * Cost meter for one principal row: one neutral fill whose length is the
- * principal's share of every principal's cost in the window. The per-category
- * split lives in the hover/focus breakdown and in the meter's value text, so
- * the row keeps its geometry and its reading.
+ * Share-of-cost meter for one principal row: one neutral fill whose length is
+ * the principal's share of every principal's cost in the window. The
+ * per-category split lives in the hover/focus breakdown and in the meter's
+ * value text, so the row keeps its geometry and its reading.
  */
 function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   const [open, setOpen] = useState(false);
@@ -473,7 +589,7 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
     <BasePopover.Root open={open} onOpenChange={setOpen}>
       <BasePopover.Trigger
         aria-label={`${principal.name} cost breakdown`}
-        className="mt-1.5 block w-full cursor-help rounded-sm text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+        className="block w-full cursor-help rounded-sm py-1.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         data-testid="top-principal-cost-trigger"
         delay={200}
         onBlur={() => setOpen(false)}
@@ -542,45 +658,190 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   );
 }
 
-/** Cost and share figures on the right of a principal row. */
-function PrincipalCostFigures({
-  costMicros,
-  sharePct,
+/**
+ * A sortable numeric column header: the whole label is the button, the
+ * active column carries its direction arrow and `aria-sort`.
+ */
+function SortableHeadCell({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSort,
+  className,
 }: {
-  costMicros: number;
-  sharePct: number;
+  label: string;
+  sortKey: TopPrincipalSortKey;
+  activeKey: TopPrincipalSortKey;
+  direction: SortDirection;
+  onSort: (key: TopPrincipalSortKey) => void;
+  className?: string;
 }) {
+  const active = sortKey === activeKey;
+  const Arrow = direction === 'desc' ? ArrowDown : ArrowUp;
   return (
-    <div className="text-right shrink-0">
-      <div className="text-body font-medium tabular-nums text-text">
-        {formatUsdAmount(costMicros / 1_000_000)}
-      </div>
-      <div className="text-caption tabular-nums text-text-muted">
-        {sharePct.toFixed(1)}%
-      </div>
-    </div>
+    <TableHeadCell
+      aria-sort={
+        active ? (direction === 'desc' ? 'descending' : 'ascending') : 'none'
+      }
+      // Figures get room in a wide list so they do not end up stranded far
+      // right of short names.
+      className={cx('@4xl/principals:w-36', className)}
+      numeric
+    >
+      <button
+        className={cx(
+          'inline-flex items-center gap-1 rounded-sm transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+          active && 'text-text',
+        )}
+        onClick={() => onSort(sortKey)}
+        type="button"
+      >
+        {active ? (
+          <Arrow aria-hidden="true" className="size-3" strokeWidth={1.75} />
+        ) : null}
+        {label}
+      </button>
+    </TableHeadCell>
   );
 }
 
+/** Requests and Tokens drop below `sm`: Principal, Cost and Share stay. */
+const TOP_PRINCIPAL_OPTIONAL_CELL = 'max-sm:hidden';
+
 export function TopPrincipalsSection({
-  range,
+  rangeWords,
   principals,
-  rest = null,
+  idleCount = 0,
   loading,
-  className,
 }: {
-  range: Range;
-  /** The top principals by cost, at most `TOP_PRINCIPAL_ROWS`. */
+  /** The range as the control words it, e.g. "last 24h". */
+  rangeWords: string;
+  /** Every principal with requests in the range, in any order. */
   principals: readonly TopPrincipal[];
-  /** Everyone past the top rows; null when every principal is listed. */
-  rest?: TopPrincipalsRest | null;
+  /** Known principals with no requests in the range: a footnote, not rows. */
+  idleCount?: number;
   loading: boolean;
-  className?: string;
 }) {
+  const [sortKey, setSortKey] = useState<TopPrincipalSortKey>('cost');
+  const [direction, setDirection] = useState<SortDirection>('desc');
+  const [expanded, setExpanded] = useState(false);
+  const [query, setQuery] = useState('');
+
+  const sorted = useMemo(
+    () => sortTopPrincipals(principals, sortKey, direction),
+    [principals, sortKey, direction],
+  );
+  const canExpand = sorted.length > TOP_PRINCIPAL_ROWS;
+  const showAll = expanded && canExpand;
+  const needle = query.trim().toLowerCase();
+  const rows = showAll
+    ? needle
+      ? sorted.filter((principal) =>
+          principal.name.toLowerCase().includes(needle),
+        )
+      : sorted
+    : sorted.slice(0, TOP_PRINCIPAL_ROWS);
+
+  const handleSort = (key: TopPrincipalSortKey) => {
+    if (key === sortKey) {
+      setDirection((current) => (current === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortKey(key);
+      setDirection('desc');
+    }
+  };
+  const collapse = () => {
+    setExpanded(false);
+    setQuery('');
+  };
+
+  // From a 56rem list every column fits, so a fixed layout can honour the
+  // figure column widths and hand the rest to Principal; narrower, the auto
+  // layout lets Principal absorb what the visible figures leave.
+  const table = (
+    <Table className="@4xl/principals:table-fixed md:[&_td:first-child]:pl-6 md:[&_td:last-child]:pr-6 md:[&_th:first-child]:pl-6 md:[&_th:last-child]:pr-6">
+      <TableHead sticky={showAll}>
+        <tr>
+          <TableHeadCell>Principal</TableHeadCell>
+          <SortableHeadCell
+            activeKey={sortKey}
+            className={TOP_PRINCIPAL_OPTIONAL_CELL}
+            direction={direction}
+            label="Requests"
+            onSort={handleSort}
+            sortKey="requests"
+          />
+          <SortableHeadCell
+            activeKey={sortKey}
+            className={TOP_PRINCIPAL_OPTIONAL_CELL}
+            direction={direction}
+            label="Tokens"
+            onSort={handleSort}
+            sortKey="tokens"
+          />
+          <SortableHeadCell
+            activeKey={sortKey}
+            direction={direction}
+            label="Cost"
+            onSort={handleSort}
+            sortKey="cost"
+          />
+          <TableHeadCell className="@4xl/principals:w-80" numeric>
+            Share
+          </TableHeadCell>
+        </tr>
+      </TableHead>
+      <tbody>
+        {rows.length === 0 ? (
+          <TableEmptyRow colSpan={5}>
+            {`No principals match "${query.trim()}"`}
+          </TableEmptyRow>
+        ) : (
+          rows.map((principal) => (
+            <TableRow
+              key={principal.id}
+              className="hover:bg-hover-bg"
+              data-testid="top-principal-row"
+            >
+              <TableCell className="w-full max-w-0">
+                <Link
+                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                  search={{ selectedId: principal.id }}
+                  title={principal.name}
+                  to="/principals"
+                >
+                  {principal.name}
+                </Link>
+              </TableCell>
+              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                {formatCount(principal.requests)}
+              </TableCell>
+              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                {fmtTokens(principal.tokens)}
+              </TableCell>
+              <TableCell numeric>
+                {formatUsdAmount(principal.cost_micros / 1_000_000)}
+              </TableCell>
+              <TableCell numeric>
+                <div className="flex items-center justify-end gap-2">
+                  <div className="w-14 sm:w-24 @4xl/principals:w-52">
+                    <PrincipalCostMeter principal={principal} />
+                  </div>
+                  <span className="w-12 text-text-muted">
+                    {fmtPercent(principal.share_pct)}
+                  </span>
+                </div>
+              </TableCell>
+            </TableRow>
+          ))
+        )}
+      </tbody>
+    </Table>
+  );
+
   return (
-    <Section
-      title="Top principals"
-      subtitle={`By virtual cost · Same range as Traffic (${range})`}
+    <UsageBlock
       action={
         <Link
           className={OVERVIEW_LINK_CLASS}
@@ -590,95 +851,145 @@ export function TopPrincipalsSection({
           View all principals
         </Link>
       }
-      className={cx('min-w-0', className)}
+      bleed
+      subtitle={`Ranked by virtual cost · ${rangeWords}`}
+      testId="overview-top-principals"
+      title="Top principals"
     >
-      <div className="flex flex-col" data-slot="principal-list">
-        {loading ? (
-          Array.from({ length: 5 }).map((_, index) => (
+      {loading ? (
+        <div
+          aria-hidden="true"
+          className="flex flex-col px-4 md:px-6"
+          data-slot="principal-list"
+        >
+          {Array.from({ length: 5 }).map((_, index) => (
             <div
               key={index}
-              aria-hidden="true"
-              className={TOP_PRINCIPAL_ROW_CLASS}
+              className="flex h-10 items-center gap-3 border-t border-row first:border-t-0"
               data-testid="top-principal-skeleton-row"
             >
-              <div className="min-w-0 flex-1">
-                <Skeleton className="h-5 w-2/5" />
-                <Skeleton className="mt-0.5 h-3 w-3/5" />
-                <Skeleton className="mt-1.5 h-1.5 rounded-xs" />
-              </div>
-              <div className="flex shrink-0 flex-col items-end gap-1 text-right">
-                <Skeleton className="h-5 w-16" />
-                <Skeleton className="h-3 w-10" />
-              </div>
+              <Skeleton className="h-4 w-2/5" />
+              <Skeleton className="ml-auto h-4 w-16" />
+              <Skeleton className="h-1 w-24 rounded-none" />
             </div>
-          ))
-        ) : principals.length === 0 ? (
-          <p className="text-body text-text-muted">
-            {`No usage in the last ${range}`}
-          </p>
-        ) : (
-          <>
-            {principals.map((principal) => (
-              <div
-                key={principal.id}
-                className={TOP_PRINCIPAL_ROW_CLASS}
-                data-testid="top-principal-row"
+          ))}
+        </div>
+      ) : principals.length === 0 ? (
+        <p className="px-4 text-body text-text-muted md:px-6">
+          {`No usage in the ${rangeWords}`}
+        </p>
+      ) : (
+        <div
+          className="@container/principals flex flex-col"
+          data-slot="principal-list"
+        >
+          {showAll ? (
+            <div className="border-b border-row px-4 pb-3 md:px-6">
+              <input
+                aria-label="Filter principals by name"
+                className={cx(INPUT_SM_CLASS, 'w-full sm:w-64')}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape' && query !== '') {
+                    event.preventDefault();
+                    setQuery('');
+                  }
+                }}
+                placeholder="Filter by name"
+                type="search"
+                value={query}
+              />
+            </div>
+          ) : null}
+          {showAll ? (
+            <div
+              className="max-h-[28rem] overflow-y-auto"
+              data-testid="top-principals-scroll"
+            >
+              {table}
+            </div>
+          ) : (
+            table
+          )}
+          {canExpand || idleCount > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-row px-4 pt-2 md:px-6">
+              <span
+                className="min-w-0 text-caption text-text-muted"
+                data-testid="top-principals-idle-note"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-body text-text">
-                    {principal.name}
-                  </div>
-                  <div
-                    className="truncate text-caption text-text-muted"
-                    data-slot="principal-meta"
-                  >
-                    {formatCount(principal.requests)} req ·{' '}
-                    {formatCount(principal.tokens)} tok ·{' '}
-                    <span>
-                      {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
-                    </span>
-                  </div>
-                  <PrincipalCostMeter principal={principal} />
-                </div>
-                <PrincipalCostFigures
-                  costMicros={principal.cost_micros}
-                  sharePct={principal.share_pct}
-                />
-              </div>
-            ))}
-            {rest ? (
-              <div
-                className={TOP_PRINCIPAL_ROW_CLASS}
-                data-testid="top-principal-rest-row"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-body text-text-muted">
-                    {`${formatCount(rest.count)} others`}
-                  </div>
-                  <div className="truncate text-caption text-text-muted">
-                    {formatCount(rest.requests)} req ·{' '}
-                    {formatCount(rest.tokens)} tok
-                  </div>
-                  <div
-                    aria-hidden="true"
-                    className={cx('mt-1.5', SHARE_TRACK_CLASS)}
-                  >
-                    <div
-                      className="h-full bg-text-muted"
-                      style={{ width: `${Math.min(100, rest.share_pct)}%` }}
-                    />
-                  </div>
-                </div>
-                <PrincipalCostFigures
-                  costMicros={rest.cost_micros}
-                  sharePct={rest.share_pct}
-                />
-              </div>
-            ) : null}
-          </>
+                {idleCount > 0
+                  ? `${formatCount(idleCount)} ${idleCount === 1 ? 'principal' : 'principals'} had no requests in the ${rangeWords}`
+                  : null}
+              </span>
+              {canExpand ? (
+                <Button
+                  aria-expanded={showAll}
+                  onClick={showAll ? collapse : () => setExpanded(true)}
+                  size="sm"
+                  variant="ghost"
+                >
+                  {showAll
+                    ? `Show top ${TOP_PRINCIPAL_ROWS}`
+                    : `Show all ${formatCount(sorted.length)} principals`}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </UsageBlock>
+  );
+}
+
+/**
+ * One region inside the Usage group: an h3 title row with a subtitle that
+ * ends in the group's range words, then the content. `bleed` drops the
+ * horizontal inset so a table can run edge to edge inside the frame (its
+ * cells keep the same inset).
+ */
+function UsageBlock({
+  title,
+  subtitle,
+  action,
+  bleed = false,
+  testId,
+  children,
+}: {
+  title: string;
+  subtitle: ReactNode;
+  action?: ReactNode;
+  bleed?: boolean;
+  testId?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      aria-label={title}
+      className={cx(
+        'flex min-w-0 flex-col gap-4 py-5 md:py-6',
+        bleed ? 'pb-2 md:pb-3' : 'px-4 md:px-6',
+      )}
+      data-testid={testId}
+    >
+      <header
+        className={cx(
+          'flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2',
+          bleed && 'px-4 md:px-6',
         )}
-      </div>
-    </Section>
+      >
+        <div className="min-w-0 flex-1">
+          <h3 className="text-title-card text-text">{title}</h3>
+          <div
+            className="mt-0.5 min-h-4 text-body-sm text-text-muted"
+            data-slot="section-subtitle"
+          >
+            {subtitle}
+          </div>
+        </div>
+        {action ? <div className="flex-shrink-0">{action}</div> : null}
+      </header>
+      {children}
+    </section>
   );
 }
 
@@ -746,27 +1057,41 @@ type PoolQuotaChartProps = {
   data: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
-  range: string;
   latest: PoolQuotaLatest;
   showFable: boolean;
 };
 
 /**
- * Pool usage series: 7d is the brand line, 7d (Fable) the same hue dashed,
- * 5h a thin neutral line. No fills, so crossings stay readable.
+ * Pool windows draw as filled areas: the shared vertical gradient
+ * (`SeriesFillGradient`, 2× series fill opacity at the top, transparent at
+ * the bottom) under a 1.5px stroke. Fills paint in one pass and every stroke
+ * in a second pass on top, so a lower window's stroke is never covered by an
+ * upper window's fill.
  */
-const POOL_SERIES: Record<
-  PoolQuotaWindow,
-  { stroke: string; strokeWidth: number; strokeDasharray?: string }
-> = {
-  '5h': { stroke: 'var(--color-text-muted)', strokeWidth: 1 },
-  '7d': { stroke: 'var(--color-accent)', strokeWidth: 1.5 },
-  '7d_fable': {
-    stroke: 'var(--color-accent)',
-    strokeWidth: 1.5,
-    strokeDasharray: '4 3',
-  },
-};
+const POOL_STROKE_WIDTH = 1.5;
+const POOL_QUOTA_WINDOWS_DRAW_ORDER: readonly PoolQuotaWindow[] = [
+  '7d',
+  '7d_fable',
+  '5h',
+];
+
+/** Tooltip rows follow the legend (5h, 7d, Fable), not the paint order. */
+function legendOrder(key: string): number {
+  const index = (POOL_QUOTA_WINDOWS as readonly string[]).indexOf(key);
+  return index === -1 ? POOL_QUOTA_WINDOWS.length : index;
+}
+
+/** Filled square chip in a quota window's color: its legend identity. */
+function WindowChip({ window }: { window: PoolQuotaWindow }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block size-2.5 shrink-0 rounded-xs"
+      data-slot="window-chip"
+      style={{ backgroundColor: getWindowColor(window).fill }}
+    />
+  );
+}
 
 function LegendSwatch({
   stroke,
@@ -804,15 +1129,13 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   chart,
   aggregate,
   loading,
-  range,
-  onRangeChange,
+  rangeWords,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
   loading: boolean;
-  /** The range control's value; the chart keeps its last response's range. */
-  range: Range;
-  onRangeChange: (range: Range) => void;
+  /** The group range control's words ("last 24h"); the plot keeps its last response's range. */
+  rangeWords: string;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -827,17 +1150,9 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
       : null;
   return (
     <div aria-busy={loading} className="min-w-0" data-testid="pool-quota-card">
-      <Section
+      <UsageBlock
         title="Pool quota usage"
-        subtitle={`Used per window across the pool · last ${chart.range}`}
-        action={
-          <SegmentedControl
-            ariaLabel="Pool quota usage range"
-            options={RANGE_OPTIONS}
-            value={range}
-            onChange={onRangeChange}
-          />
-        }
+        subtitle={`Used per window across the pool · ${rangeWords}`}
       >
         <PoolQuotaLegend
           latest={chart.latest}
@@ -907,7 +1222,7 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
             </>
           )}
         </div>
-      </Section>
+      </UsageBlock>
     </div>
   );
 });
@@ -928,6 +1243,11 @@ export function PoolQuotaThemedChart({
   rangeEndUnix: number;
   showFable: boolean;
 }) {
+  const gradientPrefix = `pool-fill-${useChartId()}`;
+  // Back to front: the long windows first, 5h (the fastest mover) on top.
+  const windows = POOL_QUOTA_WINDOWS_DRAW_ORDER.filter(
+    (window) => showFable || window !== '7d_fable',
+  );
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length ? (
@@ -941,6 +1261,15 @@ export function PoolQuotaThemedChart({
         data={seriesData}
         margin={{ top: 16, right: 8, bottom: 0, left: 0 }}
       >
+        <defs>
+          {windows.map((window) => (
+            <SeriesFillGradient
+              key={window}
+              color={getWindowColor(window).fill}
+              id={`${gradientPrefix}-${window}`}
+            />
+          ))}
+        </defs>
         <CartesianGrid {...CHART_GRID} />
         <XAxis
           {...CHART_AXIS}
@@ -992,43 +1321,62 @@ export function PoolQuotaThemedChart({
                 <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(Number(label))}
                 </div>
-                {payload.map((p) => {
-                  const key = String(p.dataKey);
-                  return (
-                    <div
-                      key={key}
-                      className="flex items-center justify-between gap-3 py-0.5"
-                    >
-                      <span className="inline-flex items-center gap-1.5 text-text-muted">
-                        {isPoolQuotaWindow(key) ? (
-                          <>
-                            <LegendSwatch {...POOL_SERIES[key]} />
-                            {`${WINDOW_LABELS[key]} window`}
-                          </>
-                        ) : (
-                          key
-                        )}
-                      </span>
-                      <span className="font-medium tabular-nums">
-                        {typeof p.value === 'number'
-                          ? `${formatQuotaPercent(p.value)} used`
-                          : '—'}
-                      </span>
-                    </div>
-                  );
-                })}
+                {[...payload]
+                  .sort(
+                    (a, b) =>
+                      legendOrder(String(a.dataKey)) -
+                      legendOrder(String(b.dataKey)),
+                  )
+                  .map((p) => {
+                    const key = String(p.dataKey);
+                    return (
+                      <div
+                        key={key}
+                        className="flex items-center justify-between gap-3 py-0.5"
+                      >
+                        <span className="inline-flex items-center gap-1.5 text-text-muted">
+                          {isPoolQuotaWindow(key) ? (
+                            <>
+                              <WindowChip window={key} />
+                              {`${WINDOW_LABELS[key]} window`}
+                            </>
+                          ) : (
+                            key
+                          )}
+                        </span>
+                        <span className="font-medium tabular-nums">
+                          {typeof p.value === 'number'
+                            ? `${formatQuotaPercent(p.value)} used`
+                            : '—'}
+                        </span>
+                      </div>
+                    );
+                  })}
               </div>
             );
           }}
         />
-        {POOL_QUOTA_WINDOWS.filter(
-          (window) => showFable || window !== '7d_fable',
-        ).map((window) => (
+        {windows.map((window) => (
           <Area
-            key={window}
+            key={`fill-${window}`}
             type="monotone"
             dataKey={window}
-            {...POOL_SERIES[window]}
+            stroke="none"
+            fill={`url(#${gradientPrefix}-${window})`}
+            fillOpacity={1}
+            activeDot={false}
+            tooltipType="none"
+            isAnimationActive={false}
+            connectNulls={false}
+          />
+        ))}
+        {windows.map((window) => (
+          <Area
+            key={`stroke-${window}`}
+            type="monotone"
+            dataKey={window}
+            stroke={getWindowColor(window).stroke}
+            strokeWidth={POOL_STROKE_WIDTH}
             fill="none"
             isAnimationActive={false}
             connectNulls={false}
@@ -1077,7 +1425,7 @@ export function PoolQuotaLegend({
             data-testid="pool-quota-legend-slot"
             data-window={window}
           >
-            <LegendSwatch {...POOL_SERIES[window]} />
+            <WindowChip window={window} />
             {WINDOW_LABELS[window]}
             {loading ? (
               <Skeleton as="span" className="inline-block h-3 w-16" />
@@ -1124,17 +1472,21 @@ export function PoolQuotaLegend({
 }
 
 function OverviewPage() {
-  // Each range control sits on the title row of the section that reads it:
-  // one for the pool chart, one shared by Traffic and Top principals.
-  const [poolRange, setPoolRange] = useState<Range>('24h');
-  const [range, setRange] = useState<Range>('24h');
+  // One range, in the URL, governs the whole Usage group: pool quota usage,
+  // Traffic and Top principals.
+  const { range } = useSearch({ from: '/' });
+  const navigate = useNavigate({ from: '/' });
+  const rangeWords = `last ${range}`;
   // One hover index shared by every KPI chart so all five read the same bucket.
   const [activeKpiIndex, setActiveKpiIndex] = useState<number | null>(null);
   // Switching windows re-buckets every series, so an index carried over from
   // the previous window would address unrelated data: drop it with the range.
   const selectRange = (next: Range) => {
     setActiveKpiIndex(null);
-    setRange(next);
+    void navigate({
+      search: (prev) => ({ ...prev, range: next }),
+      replace: true,
+    });
   };
 
   const summary = useSummary(range);
@@ -1154,7 +1506,7 @@ function OverviewPage() {
     source: 'merged',
   });
 
-  const seriesRangeSecs = RANGE_SECONDS[poolRange];
+  const seriesRangeSecs = RANGE_SECONDS[range];
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
     windows: POOL_QUOTA_QUERY_WINDOWS,
     rangeSecs: seriesRangeSecs,
@@ -1206,6 +1558,9 @@ function OverviewPage() {
       : 0;
   const latency = totals?.avg_latency_ms ?? 0;
   const latencyLabel = 'Avg latency';
+  // Compact tile figures: the exact count stays in `title`/screen-reader text.
+  const kpiRate = fmtRateKpi(reqPerSec);
+  const kpiCost = fmtUsdKpi(virtualUsd);
   // With zero requests, averages and ratios are undefined, not zero.
   const noTraffic = totals?.request_count === 0;
   const requestSeen =
@@ -1217,7 +1572,6 @@ function OverviewPage() {
   const firstRunIncomplete = useFirstRunIncomplete(requestSeen);
 
   const cacheMissAvg = totals ? cacheMissRatio(totals) : null;
-  const outputTokens = totals?.output_tokens ?? 0;
 
   const kpiPoints = useMemo(() => {
     const buckets = summary.data?.sparkline.buckets ?? [];
@@ -1231,14 +1585,14 @@ function OverviewPage() {
     };
     for (const b of buckets) {
       const timestamp = b.bucket_start_unix_secs;
-      const out = b.output_tokens ?? 0;
+      const miss = cacheMissRatio(b);
       series.rate.push({ timestamp, value: b.request_count / stepSecs });
-      // Input is every prompt-side token (fresh, cache writes and reads), so
-      // In + Out is the tile's total.
+      // Total tokens, with the bucket's cache miss ratio (0-100) as the
+      // second series; a bucket with no prompt tokens has no ratio.
       series.tokens.push({
         timestamp,
-        value: sumTokens(b) - out,
-        secondaryValue: out,
+        value: sumTokens(b),
+        secondaryValue: miss == null ? null : miss * 100,
       });
       series.cost.push({
         timestamp,
@@ -1265,16 +1619,13 @@ function OverviewPage() {
     if (kpiBucketCount === 0) setActiveKpiIndex(null);
   }, [kpiBucketCount]);
 
-  // Anchor the visible window and its label to the last successful response.
+  // Anchor the visible window to the last successful response.
   // A range control may move immediately, but placeholder data keeps its own
   // plot context until the replacement response lands.
   const poolHistoryNowUnixSecs =
     quotaPoolHistory.data?.now_unix_secs ?? Math.floor(Date.now() / 1000);
   const displayedPoolHistoryRangeSecs =
     quotaPoolHistory.data?.range_secs ?? seriesRangeSecs;
-  const displayedPoolHistoryRange = rangeLabelForSecs(
-    displayedPoolHistoryRangeSecs,
-  );
   const chartData = useMemo(
     () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows, showFable),
     [quotaPoolHistory.data, showFable],
@@ -1303,13 +1654,11 @@ function OverviewPage() {
       data: visibleChartData,
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
-      range: displayedPoolHistoryRange,
       latest: chartLatest,
       showFable,
     }),
     [
       chartLatest,
-      displayedPoolHistoryRange,
       displayedPoolHistoryRangeSecs,
       poolHistoryNowUnixSecs,
       showFable,
@@ -1317,13 +1666,12 @@ function OverviewPage() {
     ],
   );
 
-  // Principals Data: the top rows by cost, then everyone else as one line.
+  // Principals Data: every principal with requests in the range (the table
+  // sorts and pages them), and how many known principals had none.
   const principalRanking = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
-    const byId = new Map<
-      string,
-      Omit<TopPrincipal, 'share_pct' | 'total_cost_micros'>
-    >();
+    const listed: Omit<TopPrincipal, 'share_pct' | 'total_cost_micros'>[] = [];
+    const listedIds = new Set<string>();
     let totalCostMicros = 0;
 
     for (const s of series) {
@@ -1331,67 +1679,39 @@ function OverviewPage() {
       let costMicros = 0;
       let tokens = 0;
       let requests = 0;
-      let inputTokens = 0;
-      let cacheCreationTokens = 0;
-      let cacheReadTokens = 0;
       const components = emptyCostComponents();
       let recordedComponents = false;
       for (const b of s.buckets) {
         costMicros += b.virtual_cost_micros ?? 0;
         tokens += sumTokens(b);
         requests += b.request_count ?? 0;
-        inputTokens += b.input_tokens ?? 0;
-        cacheCreationTokens += b.cache_creation_input_tokens ?? 0;
-        cacheReadTokens += b.cache_read_input_tokens ?? 0;
         if (addBucketCostMicros(b, components)) recordedComponents = true;
       }
-      if (costMicros <= 0 && requests <= 0) continue;
+      if (requests <= 0) continue;
 
       totalCostMicros += costMicros;
-
-      byId.set(s.key, {
+      listedIds.add(s.key);
+      listed.push({
         id: s.key,
         name: principalNameMap.get(s.key) ?? s.key,
         cost_micros: costMicros,
         cost_components_micros: recordedComponents ? components : null,
         tokens,
         requests,
-        cache_hit_ratio: cacheHitRatio({
-          input_tokens: inputTokens,
-          cache_creation_input_tokens: cacheCreationTokens,
-          cache_read_input_tokens: cacheReadTokens,
-        }),
       });
     }
 
-    const sharePct = (costMicros: number) =>
-      totalCostMicros > 0 ? (costMicros / totalCostMicros) * 100 : 0;
-    const ranked = Array.from(byId.values()).sort(
-      (a, b) => b.cost_micros - a.cost_micros,
-    );
-    const top: TopPrincipal[] = ranked
-      .slice(0, TOP_PRINCIPAL_ROWS)
-      .map((p) => ({
-        ...p,
-        share_pct: sharePct(p.cost_micros),
-        total_cost_micros: totalCostMicros,
-      }));
-    const others = ranked.slice(TOP_PRINCIPAL_ROWS);
-    if (others.length === 0) return { top, rest: null };
-    const rest: TopPrincipalsRest = {
-      count: others.length,
-      cost_micros: 0,
-      requests: 0,
-      tokens: 0,
-      share_pct: 0,
-    };
-    for (const p of others) {
-      rest.cost_micros += p.cost_micros;
-      rest.requests += p.requests;
-      rest.tokens += p.tokens;
+    const principals: TopPrincipal[] = listed.map((p) => ({
+      ...p,
+      share_pct:
+        totalCostMicros > 0 ? (p.cost_micros / totalCostMicros) * 100 : 0,
+      total_cost_micros: totalCostMicros,
+    }));
+    let idleCount = 0;
+    for (const id of principalNameMap.keys()) {
+      if (!listedIds.has(id)) idleCount += 1;
     }
-    rest.share_pct = sharePct(rest.cost_micros);
-    return { top, rest };
+    return { principals, idleCount };
   }, [principalUsage.data, principalNameMap]);
 
   return (
@@ -1411,136 +1731,159 @@ function OverviewPage() {
 
       {firstRunIncomplete ? null : (
         <>
-          {/* Time first: how pool usage moved, then every upstream's
-          usage, then traffic. */}
-          <PoolQuotaUsage
-            aggregate={quotaAggregate.data}
-            chart={poolQuotaChart}
-            loading={quotaLoading}
-            range={poolRange}
-            onRangeChange={setPoolRange}
-          />
+          {/* Usage first: one frame binds the range control to everything it
+          scopes (pool quota usage, traffic, top principals); the sections
+          after it read "as last observed" or "any time". */}
+          <section
+            aria-labelledby="overview-usage-title"
+            className="min-w-0 rounded-md border border-subtle"
+            data-testid="overview-usage-group"
+          >
+            <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-subtle px-4 py-4 md:flex-nowrap md:px-6">
+              <div className="min-w-0">
+                <h2
+                  className="text-title-section text-text"
+                  id="overview-usage-title"
+                >
+                  Usage
+                </h2>
+                <p className="mt-0.5 text-body-sm text-text-muted">
+                  Pool quota usage, traffic and top principals over the selected
+                  range
+                </p>
+              </div>
+              <SegmentedControl
+                ariaLabel="Usage range"
+                className="shrink-0"
+                options={RANGE_OPTIONS}
+                value={range}
+                onChange={selectRange}
+              />
+            </header>
+            <div className="divide-y divide-subtle">
+              <PoolQuotaUsage
+                aggregate={quotaAggregate.data}
+                chart={poolQuotaChart}
+                loading={quotaLoading}
+                rangeWords={rangeWords}
+              />
+
+              <UsageBlock
+                subtitle={`Requests, tokens, cost, latency and errors · ${rangeWords}`}
+                testId="overview-traffic"
+                title="Traffic"
+              >
+                <div className="min-w-0" data-testid="overview-kpi-strip">
+                  {/* A window without requests has nothing to chart: one line
+                  instead of five readouts of zeros and dashes. */}
+                  {!summary.isPending && noTraffic ? (
+                    <p className="text-body text-text-muted">
+                      {`No requests in the ${rangeWords}`}
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-y-6 sm:grid-cols-3 xl:grid-cols-5">
+                      <ValueTile
+                        className={KPI_CELL_CLASS[0]}
+                        chartId="request-rate"
+                        label="Requests/s"
+                        loading={summary.isPending}
+                        value={kpiRate.value}
+                        valueExact={kpiRate.exact}
+                        sub={`${formatCount(totals?.request_count)} in ${range}`}
+                        spark={kpiPoints.rate}
+                        sparkColor={KPI_SERIES_COLOR}
+                        chartLabel="Req/s"
+                        formatChartValue={formatRate}
+                        activeIndex={activeKpiIndex}
+                        onActiveIndexChange={setActiveKpiIndex}
+                      />
+                      <ValueTile
+                        className={KPI_CELL_CLASS[1]}
+                        chartId="tokens"
+                        label="Tokens"
+                        loading={summary.isPending}
+                        value={fmtTokens(totalTokens)}
+                        valueExact={`${formatCount(totalTokens)} tokens`}
+                        legend={
+                          <TokensLegend
+                            cacheMissPct={
+                              cacheMissAvg == null ? null : cacheMissAvg * 100
+                            }
+                            total={totalTokens}
+                          />
+                        }
+                        spark={kpiPoints.tokens}
+                        sparkColor={KPI_SERIES_COLOR}
+                        formatChartValue={fmtTokensReadout}
+                        secondary={TOKENS_CACHE_MISS_SERIES}
+                        activeIndex={activeKpiIndex}
+                        onActiveIndexChange={setActiveKpiIndex}
+                      />
+                      <ValueTile
+                        className={KPI_CELL_CLASS[2]}
+                        chartId="cost"
+                        label="Cost at list price"
+                        loading={summary.isPending}
+                        value={kpiCost.value}
+                        valueExact={kpiCost.exact}
+                        spark={kpiPoints.cost}
+                        sparkColor={KPI_SERIES_COLOR}
+                        chartLabel="Cost"
+                        formatChartValue={formatUsdAmount}
+                        activeIndex={activeKpiIndex}
+                        onActiveIndexChange={setActiveKpiIndex}
+                      />
+                      <ValueTile
+                        className={KPI_CELL_CLASS[3]}
+                        chartId="latency"
+                        label={latencyLabel}
+                        loading={summary.isPending}
+                        value={fmtMs(latency)}
+                        spark={kpiPoints.latency}
+                        sparkColor={KPI_SERIES_COLOR}
+                        formatChartValue={fmtMs}
+                        activeIndex={activeKpiIndex}
+                        onActiveIndexChange={setActiveKpiIndex}
+                      />
+                      <ValueTile
+                        className={KPI_CELL_CLASS[4]}
+                        chartId="error-rate"
+                        label="Error rate"
+                        loading={summary.isPending}
+                        value={fmtErrorPercent(errRate)}
+                        spark={kpiPoints.error}
+                        sparkColor={
+                          errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
+                        }
+                        formatChartValue={fmtErrorPercent}
+                        activeIndex={activeKpiIndex}
+                        onActiveIndexChange={setActiveKpiIndex}
+                      />
+                    </div>
+                  )}
+                </div>
+              </UsageBlock>
+
+              <TopPrincipalsSection
+                idleCount={principalRanking.idleCount}
+                loading={
+                  principalUsage.data === undefined && principalUsage.isPending
+                }
+                principals={principalRanking.principals}
+                rangeWords={rangeWords}
+              />
+            </div>
+          </section>
 
           <UpstreamsUsageSection />
 
-          <div className="grid min-w-0 grid-cols-1 gap-12 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-10">
-            <Section
-              title="Traffic"
-              subtitle={`Last ${range}`}
-              action={
-                <SegmentedControl
-                  ariaLabel="Traffic range"
-                  options={RANGE_OPTIONS}
-                  value={range}
-                  onChange={selectRange}
-                />
-              }
-              className="min-w-0"
-            >
-              <div className="min-w-0" data-testid="overview-kpi-strip">
-                {/* A window without requests has nothing to chart: one line
-                instead of five readouts of zeros and dashes. */}
-                {!summary.isPending && noTraffic ? (
-                  <p className="text-body text-text-muted">
-                    {`No requests in the last ${range}`}
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-2 gap-y-6 sm:grid-cols-3 xl:grid-cols-5">
-                    <ValueTile
-                      className={KPI_CELL_CLASS[0]}
-                      chartId="request-rate"
-                      label="Requests/s"
-                      loading={summary.isPending}
-                      value={formatRate(reqPerSec)}
-                      sub={`${formatCount(totals?.request_count)} in ${range}`}
-                      spark={kpiPoints.rate}
-                      sparkColor={KPI_SERIES_COLOR}
-                      chartLabel="Req/s"
-                      formatChartValue={formatRate}
-                      activeIndex={activeKpiIndex}
-                      onActiveIndexChange={setActiveKpiIndex}
-                    />
-                    <ValueTile
-                      className={KPI_CELL_CLASS[1]}
-                      chartId="tokens"
-                      label="Tokens"
-                      loading={summary.isPending}
-                      value={formatCount(totalTokens)}
-                      legend={
-                        <TokensLegend
-                          input={totalTokens - outputTokens}
-                          output={outputTokens}
-                        />
-                      }
-                      sub={`Cache miss ${fmtRatioPercent(cacheMissAvg)}`}
-                      spark={kpiPoints.tokens}
-                      sparkColor={TOKENS_INPUT_COLOR}
-                      chartLabel="In"
-                      formatChartValue={fmtTokens}
-                      secondary={TOKENS_OUTPUT_SERIES}
-                      activeIndex={activeKpiIndex}
-                      onActiveIndexChange={setActiveKpiIndex}
-                    />
-                    <ValueTile
-                      className={KPI_CELL_CLASS[2]}
-                      chartId="cost"
-                      label="Cost at list price"
-                      loading={summary.isPending}
-                      value={formatUsdAmount(virtualUsd)}
-                      spark={kpiPoints.cost}
-                      sparkColor={KPI_SERIES_COLOR}
-                      chartLabel="Cost"
-                      formatChartValue={formatUsdAmount}
-                      activeIndex={activeKpiIndex}
-                      onActiveIndexChange={setActiveKpiIndex}
-                    />
-                    <ValueTile
-                      className={KPI_CELL_CLASS[3]}
-                      chartId="latency"
-                      label={latencyLabel}
-                      loading={summary.isPending}
-                      value={fmtMs(latency)}
-                      spark={kpiPoints.latency}
-                      sparkColor={KPI_SERIES_COLOR}
-                      formatChartValue={fmtMs}
-                      activeIndex={activeKpiIndex}
-                      onActiveIndexChange={setActiveKpiIndex}
-                    />
-                    <ValueTile
-                      className={KPI_CELL_CLASS[4]}
-                      chartId="error-rate"
-                      label="Error rate"
-                      loading={summary.isPending}
-                      value={fmtErrorPercent(errRate)}
-                      spark={kpiPoints.error}
-                      sparkColor={
-                        errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
-                      }
-                      formatChartValue={fmtErrorPercent}
-                      activeIndex={activeKpiIndex}
-                      onActiveIndexChange={setActiveKpiIndex}
-                    />
-                  </div>
-                )}
-              </div>
-            </Section>
-
-            <TopPrincipalsSection
-              range={range}
-              principals={principalRanking.top}
-              rest={principalRanking.rest}
-              loading={
-                principalUsage.data === undefined && principalUsage.isPending
-              }
-            />
-          </div>
           {/* Latest requests: the feed is not range-scoped (newest events of any
           age), so its label must not suggest it follows the range picker. */}
           <Section
             title="Latest requests (any time)"
             subtitle={
               <span>
-                Newest first, not limited to the range above — full view on Logs
+                Newest first, not limited to the usage range — full view on Logs
                 page{streamStatus === 'live' ? ' · ' : ' '}
                 {/* The dot and its word wrap as one unit, so the status never
                 lands alone at the end of a wrapped line. */}

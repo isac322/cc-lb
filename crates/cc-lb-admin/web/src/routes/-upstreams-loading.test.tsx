@@ -684,11 +684,9 @@ describe('/upstreams cold-load geometry', () => {
     expect(screen.queryByText(/No subscription quota data/)).toBeNull();
 
     const oauthBody = screen.getByTestId('oauth-status-card-body');
-    expect(oauthBody.className).toContain('min-h-28');
     const oauthGrid = within(oauthBody).getByTestId(
       'oauth-status-loading-grid',
     );
-    expect(oauthGrid.className).toContain('min-h-20');
     expect(oauthGrid.className).toContain('space-y-3');
 
     const requestSlot = screen.getByTestId('recent-requests-table-slot');
@@ -783,11 +781,7 @@ describe('/upstreams cold-load geometry', () => {
     for (const rangeItem of rangeItems) {
       expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
-    expect(screen.getByTestId('oauth-status-card-body').className).toContain(
-      'min-h-28',
-    );
     const loadedOauthGrid = screen.getByTestId('oauth-status-loaded-grid');
-    expect(loadedOauthGrid.className).toContain('min-h-20');
     expect(loadedOauthGrid.className).toContain('space-y-3');
     expect(
       screen.getByTestId('recent-requests-table-slot').className,

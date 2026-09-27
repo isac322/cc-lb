@@ -16,9 +16,11 @@ import {
   PRINCIPAL_LIMITS_ANCHOR,
   PRINCIPAL_ROUTER_ANCHOR,
 } from '../../lib/requestErrorCodes';
+import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint, Skeleton } from './primitives';
 import { RelativeTime } from './RelativeTime';
+import { RequestKindBadge } from './RequestKindBadge';
 import { SessionChip } from './SessionChip';
 
 const DASH = '—';
@@ -35,11 +37,16 @@ const PRINCIPAL_KIND_LABEL: Record<string, string> = {
   subscription_bearer: 'Subscription bearer',
 };
 
-/** Sentence-case label for a server principal kind; unknown kinds keep their words. */
-function principalKindLabel(kind: string): string {
-  const known = PRINCIPAL_KIND_LABEL[kind];
+/** The provider an event's upstream speaks (`event.upstream`). */
+const UPSTREAM_PROVIDER_LABEL: Record<string, string> = {
+  anthropic_direct: 'Anthropic',
+};
+
+/** Sentence-case label for a server enum value; unknown values keep their words. */
+function enumLabel(labels: Record<string, string>, value: string): string {
+  const known = labels[value];
   if (known) return known;
-  const words = kind.replaceAll('_', ' ');
+  const words = value.replaceAll('_', ' ');
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
@@ -167,7 +174,7 @@ export function RequestEventIdentity({
               </span>
               {event.principal_kind ? (
                 <Badge className="shrink-0">
-                  {principalKindLabel(event.principal_kind)}
+                  {enumLabel(PRINCIPAL_KIND_LABEL, event.principal_kind)}
                 </Badge>
               ) : isDetailPending ? (
                 <Skeleton className="h-5 w-14 shrink-0" />
@@ -207,8 +214,8 @@ export function RequestEventIdentity({
             <span className="break-all min-w-0">
               {event.upstream_name ?? DASH}
               {event.upstream && event.upstream !== event.upstream_name ? (
-                <span className="font-mono text-data text-text-faint ml-2">
-                  {event.upstream}
+                <span className="text-text-faint ml-2">
+                  {enumLabel(UPSTREAM_PROVIDER_LABEL, event.upstream)}
                 </span>
               ) : null}
             </span>
@@ -236,7 +243,20 @@ export function RequestEventIdentity({
         />
         <KvRow
           label="Request kind"
-          value={requestKind ? <Badge>{requestKind}</Badge> : DASH}
+          value={
+            requestKind ? (
+              <span className="flex min-h-5 items-center gap-2 justify-end flex-wrap min-w-0">
+                <RequestKindBadge requestKind={requestKind} />
+                {requestKindBadgeText(requestKind) !== requestKind ? (
+                  <span className="font-mono text-data text-text-faint break-all min-w-0">
+                    {requestKind}
+                  </span>
+                ) : null}
+              </span>
+            ) : (
+              DASH
+            )
+          }
         />
         <KvRow
           label="Observed session"

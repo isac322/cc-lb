@@ -8,7 +8,8 @@ export const WINDOW_DURATION_SECS: Record<string, number> = {
 
 /**
  * Quota window → series token (`--color-series-*` in `index.css`, tuned per
- * theme). Series never use amber, orange or red: those hues mean severity.
+ * theme). Window series never use amber, orange or red: on quota charts those
+ * hues mean severity (the warn/danger thresholds).
  */
 const WINDOW_SERIES_TOKEN: Record<string, string> = {
   '5h': 'var(--color-series-5h)',
@@ -36,8 +37,8 @@ export function getWindowColor(window: string): {
   return { stroke: token, fill: token };
 }
 
-// FNV-1a: better hue distribution than djb2 for short opaque session ids.
-function fnv1aHash(input: string): number {
+// FNV-1a: better hue distribution than djb2 for short opaque ids.
+export function fnv1aHash(input: string): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);
@@ -47,33 +48,69 @@ function fnv1aHash(input: string): number {
 }
 
 /**
- * Hue bands a session colour may use. They are the hues where a chip drawn at
- * the series lightness and chroma (night oklch 0.76/0.11, day 0.52/0.13) stays
- * more than OKLab ΔE 0.09 from the accent, warn and danger tokens in both
- * themes, so a session chip never reads as brand or severity.
+ * A categorical chip color (session chips, request-kind badges) for an OKLCH
+ * hue, tuned per theme through `light-dark()`:
+ * - `text` at night L 0.83 / by day L 0.42 holds ≥ 4.5:1 on the chip's own
+ *   tint over every table surface, including the selected-row fill;
+ * - `mark` is the series-strength dot;
+ * - `bg` is the chip's tint.
  */
-const SESSION_HUE_BANDS: ReadonlyArray<readonly [number, number]> = [
-  [117, 258],
-  [321, 354],
-];
-
-const SESSION_HUES: readonly number[] = SESSION_HUE_BANDS.flatMap(
-  ([from, to]) => Array.from({ length: to - from + 1 }, (_, i) => from + i),
-);
-
-export interface SessionColor {
-  /** Series-strength colour for the chip's dot. */
+export interface CategoricalColor {
+  text: string;
   mark: string;
-  /** Tinted chip background. */
   bg: string;
-  hue: number;
 }
 
-export function getSessionColor(sessionId: string): SessionColor {
-  const hue = SESSION_HUES[fnv1aHash(sessionId) % SESSION_HUES.length]!;
+export function categoricalColor(hue: number): CategoricalColor {
   return {
-    hue,
-    mark: `light-dark(oklch(0.52 0.13 ${hue}), oklch(0.76 0.11 ${hue}))`,
-    bg: `light-dark(oklch(0.52 0.13 ${hue} / 0.12), oklch(0.76 0.11 ${hue} / 0.14))`,
+    text: `light-dark(oklch(0.42 0.12 ${hue}), oklch(0.83 0.11 ${hue}))`,
+    mark: `light-dark(oklch(0.55 0.15 ${hue}), oklch(0.75 0.14 ${hue}))`,
+    bg: `light-dark(oklch(0.55 0.15 ${hue} / 0.14), oklch(0.75 0.14 ${hue} / 0.18))`,
   };
+}
+
+/**
+ * Session chip hues: steps ≥ 21° apart inside the bands a session may use —
+ * the whole circle except pink-red through yellow-green (danger, warn and the
+ * cache-write series, 351–134; below ~135 a chip tint reads khaki, next to
+ * warn) and the accent violet (264–308) — so a chip never reads as severity
+ * or brand and any two palette hues are visibly different.
+ */
+const SESSION_HUES: readonly number[] = [
+  135, 156, 177, 198, 219, 240, 261, 316, 338,
+];
+
+/** Coprime with the palette size: each probe lands ~100° from the last. */
+const SESSION_PROBE_STRIDE = 4;
+
+const sessionSlots = new Map<string, number>();
+const sessionSlotLoad: number[] = SESSION_HUES.map(() => 0);
+
+/**
+ * A session keeps the palette slot it was first given. A new session takes
+ * its hashed slot unless another session already holds it, then the
+ * least-used slot along the probe order — so the first nine sessions seen
+ * never share a hue, and past that each hue carries an even share.
+ */
+function sessionSlot(sessionId: string): number {
+  const known = sessionSlots.get(sessionId);
+  if (known !== undefined) return known;
+  const preferred = fnv1aHash(sessionId) % SESSION_HUES.length;
+  let slot = preferred;
+  for (let step = 1; step < SESSION_HUES.length; step++) {
+    const candidate =
+      (preferred + step * SESSION_PROBE_STRIDE) % SESSION_HUES.length;
+    if (sessionSlotLoad[candidate]! < sessionSlotLoad[slot]!) slot = candidate;
+  }
+  sessionSlots.set(sessionId, slot);
+  sessionSlotLoad[slot]! += 1;
+  return slot;
+}
+
+/**
+ * The chip color of a session: rows of one session share it everywhere in
+ * the app, and different sessions get different hues.
+ */
+export function getSessionColor(sessionId: string): CategoricalColor {
+  return categoricalColor(SESSION_HUES[sessionSlot(sessionId)]!);
 }

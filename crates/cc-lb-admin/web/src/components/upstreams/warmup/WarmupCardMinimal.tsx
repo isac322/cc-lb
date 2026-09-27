@@ -478,6 +478,10 @@ function WarmupCardMinimalInner({
   return (
     <>
       <DetailSection
+        // Full width like the neighbouring Credential and Account metadata
+        // sections: half-width pairing leaves a tall dead gap in the other
+        // column whenever card heights differ.
+        span="full"
         data-testid="warmup-card"
         data-variant="minimal"
         tabIndex={-1}

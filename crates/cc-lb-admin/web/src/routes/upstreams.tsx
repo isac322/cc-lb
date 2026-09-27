@@ -25,6 +25,8 @@ import {
   CHART_CURSOR,
   CHART_GRID,
   CHART_THRESHOLD,
+  SeriesFillGradient,
+  useChartId,
 } from '../components/ui/charts';
 import {
   DetailFact,
@@ -33,6 +35,7 @@ import {
   DetailHeaderSkeleton,
   DetailPane,
   DetailSection,
+  DetailSectionGrid,
 } from '../components/ui/DetailPane';
 import {
   EntityList,
@@ -52,13 +55,8 @@ import {
   Skeleton,
   StatusBadge,
 } from '../components/ui/primitives';
-import {
-  RelativeOffsetTime,
-  RelativeTime,
-  ResetCountdown,
-} from '../components/ui/RelativeTime';
+import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
-import { UsageMeter } from '../components/ui/UsageMeter';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
   buildQuotaChartData,
@@ -73,6 +71,12 @@ import { LimitResetAction } from '../components/upstreams/LimitResetAction';
 import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import {
+  QuotaWindowRow,
+  QuotaWindowRowSkeleton,
+  QuotaWindowRows,
+  windowLabel,
+} from '../components/upstreams/QuotaWindowRows';
+import {
   selectQuotaCardSnapshots,
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
@@ -80,6 +84,7 @@ import { SettingsCard } from '../components/upstreams/SettingsCard';
 import {
   formatQuotaStamp,
   subscriptionPlanLabel,
+  UPSTREAM_LATEST_WINDOWS,
   type UpstreamUsageRow,
   useUpstreamUsageData,
 } from '../components/upstreams/UpstreamUsageTable';
@@ -92,9 +97,7 @@ import {
   ApiError,
   type OrganizationMetadataInner,
   type SubscriptionMetadataResponse,
-  type SubscriptionQuotaWindow,
   type UpstreamOAuthStatusResponse,
-  WINDOW_LABELS,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import { fmtChartTooltipTs, formatCount } from '../lib/format';
@@ -400,7 +403,7 @@ function UpstreamsPage() {
   const total = upstreamUsage.rows.length;
 
   return (
-    <div className="h-shell min-h-0 flex w-full max-w-[120rem] mx-auto">
+    <div className="h-shell min-h-0 flex w-full max-w-[90rem] mx-auto">
       <EntityList
         className={cx(
           'w-full shrink-0 border-r border-subtle md:w-[360px] xl:w-[400px]',
@@ -590,18 +593,24 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
   'inline-flex items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5';
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
-// Sized to its window blocks; the loading skeleton mirrors a block line for
-// line, so the loaded grid lands at the skeleton's height.
-const QUOTA_WINDOW_GRID_CLASS =
-  'grid grid-cols-2 items-start gap-x-6 gap-y-8 @lg:gap-x-10 @lg:gap-y-10 @lg:[grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))]';
 const QUOTA_CHART_HEIGHT = 280;
-/** The one series drawn dashed, so 7d and 7d (Fable) stay apart without a new hue. */
-const DASHED_WINDOW = '7d_fable';
 /** Usage thresholds on the chart: warn at 80% used, danger at 95% used. */
 const USAGE_THRESHOLDS = [
   { y: QUOTA_WARN_PCT, tone: 'warn' },
   { y: QUOTA_DANGER_PCT, tone: 'danger' },
 ] as const;
+
+/**
+ * Windows that keep a gradient fill in the quota-history chart: the three
+ * live subscription windows. Legacy model windows, unified and overage draw
+ * as bare strokes so five-plus overlapping windows stay readable instead of
+ * stacking into a tinted wash.
+ */
+const QUOTA_FILL_WINDOWS: Record<string, true> = {
+  '5h': true,
+  '7d': true,
+  '7d_fable': true,
+};
 
 function IdentitySkeleton() {
   return (
@@ -619,71 +628,6 @@ function IdentitySkeleton() {
   );
 }
 
-/** A skeleton bar in one line box of `typeClass`, so it is one text line tall. */
-function SkeletonLine({
-  typeClass,
-  widthClass,
-}: {
-  typeClass: string;
-  widthClass: string;
-}) {
-  return (
-    <span className={cx('block', typeClass)}>
-      <Skeleton
-        as="span"
-        className={cx('inline-block h-[0.75em] align-middle', widthClass)}
-      />
-    </span>
-  );
-}
-
-/** A `WindowFact` placeholder: label, value and an optional caption line. */
-function WindowFactSkeleton({
-  valueWidth,
-  caption,
-}: {
-  valueWidth: string;
-  caption?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <SkeletonLine typeClass="text-label" widthClass="w-16" />
-      <span className="block">
-        <SkeletonLine typeClass="text-body-sm" widthClass={valueWidth} />
-        {caption ? (
-          <SkeletonLine typeClass="text-caption" widthClass={caption} />
-        ) : null}
-      </span>
-    </div>
-  );
-}
-
-/**
- * One started window block: title, `N% used` meter, then the reset, ETA and
- * burn facts, with the same spacing as the loaded block.
- */
-function QuotaWindowCardSkeleton() {
-  return (
-    <div
-      data-testid="quota-snapshot-skeleton-card"
-      className="flex min-w-0 flex-col gap-4"
-    >
-      <div className="flex flex-col gap-2">
-        <SkeletonLine typeClass="text-title-section" widthClass="w-12" />
-        <div className="flex flex-col gap-1.5">
-          <SkeletonLine typeClass="text-title-card" widthClass="w-24" />
-          <Skeleton className="h-1.5 w-full" />
-        </div>
-      </div>
-      <div className="flex flex-col gap-2">
-        <WindowFactSkeleton valueWidth="w-32" caption="w-16" />
-        <WindowFactSkeleton valueWidth="w-20" />
-        <WindowFactSkeleton valueWidth="w-24" caption="w-28" />
-      </div>
-    </div>
-  );
-}
-
 function UpstreamDetailLoadingShell() {
   return (
     <DetailPane
@@ -692,80 +636,70 @@ function UpstreamDetailLoadingShell() {
       aria-label="Loading upstream details"
       header={<DetailHeaderSkeleton />}
     >
-      <DetailSection
-        title="Quota"
-        description={<Skeleton as="span" className="block h-4 w-56" />}
-      >
-        <div
-          data-testid="quota-snapshot-grid"
-          className={QUOTA_WINDOW_GRID_CLASS}
+      <DetailSectionGrid>
+        <DetailSection
+          span="full"
+          title="Quota"
+          description={<Skeleton as="span" className="block h-4 w-56" />}
         >
-          {Array.from({ length: 3 }).map((_, index) => (
-            <QuotaWindowCardSkeleton key={index} />
-          ))}
-        </div>
-      </DetailSection>
-      <DetailSection
-        title="Quota history"
-        description="Used per window over time"
-        action={
-          <div
-            aria-hidden="true"
-            className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
-            data-testid="quota-history-range-control"
-          >
-            {QUOTA_HISTORY_RANGES.map((range) => (
-              <span
-                key={range}
-                className={cx(
-                  'skeleton inline-flex items-center justify-center',
-                  QUOTA_HISTORY_RANGE_ITEM_CLASS,
-                )}
-              >
-                <span className="invisible">{range}</span>
-              </span>
+          <QuotaWindowRows>
+            {Array.from({ length: 3 }).map((_, index) => (
+              <QuotaWindowRowSkeleton key={index} />
             ))}
+          </QuotaWindowRows>
+        </DetailSection>
+        <DetailSection
+          span="full"
+          title="Quota history"
+          description="Used per window over time"
+          action={
+            <div
+              aria-hidden="true"
+              className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
+              data-testid="quota-history-range-control"
+            >
+              {QUOTA_HISTORY_RANGES.map((range) => (
+                <span
+                  key={range}
+                  className={cx(
+                    'skeleton inline-flex items-center justify-center',
+                    QUOTA_HISTORY_RANGE_ITEM_CLASS,
+                  )}
+                >
+                  <span className="invisible">{range}</span>
+                </span>
+              ))}
+            </div>
+          }
+        >
+          <div>
+            <div
+              data-testid="quota-history-legend-slot"
+              className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1"
+            >
+              <Skeleton className="h-3 w-20" />
+              <Skeleton className="h-3 w-20" />
+            </div>
+            <Skeleton
+              className="w-full"
+              style={{ height: QUOTA_CHART_HEIGHT }}
+            />
           </div>
-        }
-      >
-        <div>
+        </DetailSection>
+        <DetailSection
+          collapsible
+          title="Account metadata"
+          description="Subscription details Anthropic reports for this account"
+        >
           <div
-            data-testid="quota-history-legend-slot"
-            className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1"
+            data-testid="upstream-detail-loading-metadata"
+            className="min-h-9"
           >
-            <Skeleton className="h-3 w-20" />
-            <Skeleton className="h-3 w-20" />
+            <IdentitySkeleton />
           </div>
-          <Skeleton className="w-full" style={{ height: QUOTA_CHART_HEIGHT }} />
-        </div>
-      </DetailSection>
-      <DetailSection
-        collapsible
-        title="Account metadata"
-        description="Subscription details Anthropic reports for this account"
-      >
-        <div data-testid="upstream-detail-loading-metadata" className="min-h-9">
-          <IdentitySkeleton />
-        </div>
-      </DetailSection>
+        </DetailSection>
+      </DetailSectionGrid>
     </DetailPane>
-  );
-}
-
-function WindowFact({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <dt className="text-label text-text-muted">{label}</dt>
-      <dd className="min-w-0 text-body-sm tabular-nums text-text">
-        {children}
-      </dd>
-    </div>
   );
 }
 
@@ -806,17 +740,6 @@ function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   if (refreshExp - now < REFRESH_EXPIRING_SOON_SECS)
     return { tone: 'warn', label: 'Login expiring' };
   return { tone: 'ok', label: 'Connected' };
-}
-
-function isQuotaWindow(name: string): name is SubscriptionQuotaWindow {
-  return name in WINDOW_LABELS;
-}
-
-/** Canonical window names come from `WINDOW_LABELS`; the overage window is
- *  spelled in sentence case here. */
-function windowLabel(windowName: string): string {
-  if (windowName === 'overage') return 'Extra usage';
-  return isQuotaWindow(windowName) ? WINDOW_LABELS[windowName] : windowName;
 }
 
 function PromotionalCreditsBadge({
@@ -927,6 +850,7 @@ function DetailView({
   const confirmEnabled = enabledConfirm.enabled;
   const [range, setRange] = useState<TimePreset>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
+  const chartId = useChartId();
   const isOauth = upstream.kind === 'anthropic_oauth';
 
   // ?action=reconnect deep link: consume the param exactly once, then open the
@@ -1007,7 +931,7 @@ function DetailView({
     : null;
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds: allUpstreamIds,
-    windows: '5h,7d,overage,7d_sonnet,7d_opus,7d_fable',
+    windows: UPSTREAM_LATEST_WINDOWS,
     source: 'merged',
     refetchInterval: 5_000,
   });
@@ -1181,17 +1105,11 @@ function DetailView({
     metadataFacts.push({ label: 'Role', value: subMeta.organization_role });
   if (subMeta?.workspace_role)
     metadataFacts.push({ label: 'Seat', value: subMeta.workspace_role });
-  if (orgMeta?.has_extra_usage_enabled != null)
-    metadataFacts.push({
-      label: 'Extra usage billing',
-      value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
-    });
   if (orgMeta?.billing_type)
     metadataFacts.push({
       label: 'Billing',
-      value: (
-        <span className="font-mono text-data">{orgMeta.billing_type}</span>
-      ),
+      // "stripe_subscription" → "Stripe subscription"
+      value: `${orgMeta.billing_type.charAt(0).toUpperCase()}${orgMeta.billing_type.slice(1).replaceAll('_', ' ')}`,
     });
   if (orgMeta?.subscription_created_at_unix_secs)
     metadataFacts.push({
@@ -1206,6 +1124,9 @@ function DetailView({
   const identity = (
     <DetailSection
       collapsible
+      // Open whenever a credential is bound: the expanded facts then stand
+      // beside the taller Credential section so the shared row has no hole.
+      defaultOpen={hasBoundToken}
       title="Account metadata"
       description="Subscription details Anthropic reports for this account"
       action={
@@ -1248,7 +1169,7 @@ function DetailView({
             ))}
           </DetailFacts>
         ) : (
-          <p className="text-body-sm text-text-muted">
+          <p className="flex min-h-36 items-center text-body-sm text-text-muted">
             No subscription metadata reported yet.
           </p>
         )}
@@ -1258,6 +1179,7 @@ function DetailView({
 
   const quotaWindows = (
     <DetailSection
+      span="full"
       title="Quota"
       description={
         <span className="flex flex-wrap items-center gap-x-2">
@@ -1271,6 +1193,7 @@ function DetailView({
         <LimitResetAction
           key={upstream.id}
           upstream={upstream}
+          credentialsStored={upstreamOAuthQ.data?.has_credentials}
           quotaWindows={
             quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
           }
@@ -1278,175 +1201,34 @@ function DetailView({
       }
     >
       {quotaLatestPending ? (
-        <div
-          data-testid="quota-snapshot-grid"
-          className={QUOTA_WINDOW_GRID_CLASS}
-        >
+        <QuotaWindowRows>
           {Array.from({ length: 3 }).map((_, index) => (
-            <QuotaWindowCardSkeleton key={index} />
+            <QuotaWindowRowSkeleton key={index} />
           ))}
-        </div>
+        </QuotaWindowRows>
       ) : !selectedLatest ? (
-        <div
-          data-testid="quota-snapshot-grid"
-          className={QUOTA_WINDOW_GRID_CLASS}
-        >
-          <div className="col-span-full flex items-center justify-center">
-            <EmptyState
-              title={`No subscription quota data for ${upstream.name}`}
-            />
-          </div>
-        </div>
+        <EmptyState title={`No subscription quota data for ${upstream.name}`} />
       ) : (
-        <div
-          data-testid="quota-snapshot-grid"
-          className={QUOTA_WINDOW_GRID_CLASS}
-        >
+        <QuotaWindowRows>
           {selectQuotaCardSnapshots({
             latestWindows: selectedLatest.windows,
-            nowUnixSecs,
-          }).map((snap) => {
-            const isOverage =
-              snap.window === 'overage' &&
-              (snap.extra_usage_enabled ||
-                snap.extra_usage_monthly_limit != null);
-            const overageLimit = snap.extra_usage_monthly_limit;
-            const overageUsed = snap.extra_usage_used_credits;
-            const usedPct = isOverage
-              ? overageLimit != null && overageUsed != null && overageLimit > 0
-                ? (overageUsed / overageLimit) * 100
-                : null
-              : snap.utilization == null
-                ? null
-                : snap.utilization * 100;
-            const windowAnalysis = analysis?.windows.find(
-              (w) => w.window === snap.window,
-            );
-            const actualBurn =
-              windowAnalysis?.actual_account_burn.utilization_per_second;
-            const projBurn =
-              windowAnalysis?.proxy_projected_burn.utilization_per_hour;
-            const eta = windowAnalysis?.actual_account_burn.eta_to_limit_secs;
-            const windowNotStarted =
-              !isOverage &&
-              (snap.utilization == null ||
-                snap.resets_at_unix_secs == null ||
-                snap.resets_at_unix_secs <= nowUnixSecs);
-            const waitingForGrowth =
-              !isOverage &&
-              !windowNotStarted &&
-              (!windowAnalysis ||
-                windowAnalysis.actual_account_burn.reason ===
-                  'insufficient_growth_intervals');
-            const status =
-              snap.status && snap.status !== 'allowed' ? snap.status : null;
-            // The meter carries `N% used`; the caption only adds what it
-            // cannot say: a limit status, a missing reading, or the extra
-            // usage budget in dollars.
-            let caption: string | null;
-            if (isOverage) {
-              caption =
-                overageLimit != null && overageUsed != null
-                  ? `$${(overageUsed / 100).toFixed(2)} of $${(
-                      overageLimit / 100
-                    ).toLocaleString('en-US', {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })} USD used`
-                  : 'Enabled — no limit set';
-            } else if (usedPct == null) {
-              caption = status ?? 'No reading';
-            } else {
-              caption = status;
-            }
-            return (
-              <article
-                key={snap.window}
-                data-window={snap.window}
-                className="flex min-w-0 flex-col gap-4"
-              >
-                <div className="flex flex-col gap-2">
-                  <span className="text-title-section text-text">
-                    {windowLabel(snap.window)}
-                  </span>
-                  <UsageMeter
-                    label={windowLabel(snap.window)}
-                    size="md"
-                    usedPct={usedPct}
-                  />
-                  {caption ? (
-                    <span className="text-body-sm text-text-muted">
-                      {caption}
-                    </span>
-                  ) : null}
-                </div>
-                <dl className="flex flex-col gap-2">
-                  {!isOverage || snap.resets_at_unix_secs ? (
-                    <WindowFact label="Reset">
-                      {windowNotStarted ? (
-                        'Not started — begins on first request or warm-up'
-                      ) : snap.resets_at_unix_secs ? (
-                        <>
-                          {formatQuotaStamp(snap.resets_at_unix_secs, timeZone)}
-                          <span className="block text-caption text-text-muted">
-                            <ResetCountdown
-                              compact
-                              ts={snap.resets_at_unix_secs * 1000}
-                            />
-                          </span>
-                        </>
-                      ) : (
-                        'No reset reported'
-                      )}
-                    </WindowFact>
-                  ) : null}
-                  {!isOverage && !windowNotStarted && (
-                    <>
-                      <WindowFact label="ETA to limit">
-                        {quotaAnalysisPending ? (
-                          <Skeleton className="h-5 w-24" />
-                        ) : eta != null && eta <= 0 ? (
-                          'Already saturated'
-                        ) : (
-                          <RelativeOffsetTime compact offsetSeconds={eta} />
-                        )}
-                      </WindowFact>
-                      <WindowFact label="Burn">
-                        {quotaAnalysisPending ? (
-                          <Skeleton className="h-4 w-28" />
-                        ) : (
-                          <>
-                            {actualBurn == null
-                              ? '—'
-                              : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
-                            <span className="block text-caption text-text-muted">
-                              {'projected '}
-                              {projBurn == null
-                                ? '—'
-                                : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
-                            </span>
-                          </>
-                        )}
-                      </WindowFact>
-                    </>
-                  )}
-                </dl>
-                {!quotaAnalysisPending && waitingForGrowth && (
-                  <p className="text-body-sm text-warn-text">
-                    Waiting for utilization to rise — burn appears once growth
-                    is observed.
-                  </p>
-                )}
-              </article>
-            );
-          })}
-        </div>
+          }).map((snap) => (
+            <QuotaWindowRow
+              key={snap.window}
+              snap={snap}
+              analysis={analysis?.windows.find((w) => w.window === snap.window)}
+              analysisPending={quotaAnalysisPending}
+              nowUnixSecs={nowUnixSecs}
+            />
+          ))}
+        </QuotaWindowRows>
       )}
     </DetailSection>
   );
 
   const quotaHistory = (
     <DetailSection
+      span="full"
       title="Quota history"
       description="Used per window over time"
       action={
@@ -1493,11 +1275,12 @@ function DetailView({
                   >
                     <span
                       aria-hidden="true"
-                      className={cx('w-3 border-t-2', dimmed && 'opacity-40')}
+                      className={cx(
+                        'size-2.5 shrink-0 rounded-xs',
+                        dimmed && 'opacity-40',
+                      )}
                       style={{
-                        borderColor: getWindowColor(windowName).stroke,
-                        borderStyle:
-                          windowName === DASHED_WINDOW ? 'dashed' : 'solid',
+                        backgroundColor: getWindowColor(windowName).stroke,
                       }}
                     />
                     <span
@@ -1522,21 +1305,25 @@ function DetailView({
                   </button>
                 );
               })}
-              {USAGE_THRESHOLDS.map(({ y, tone }) => (
-                <span
-                  key={tone}
-                  className="flex items-center gap-1.5 text-body-sm text-text-muted"
-                >
+              {/* Threshold entries wrap to the next line as one unit so a
+                  lone "Danger at 95% used" never dangles under the series. */}
+              <span className="flex flex-wrap items-center gap-x-5 gap-y-1">
+                {USAGE_THRESHOLDS.map(({ y, tone }) => (
                   <span
-                    aria-hidden="true"
-                    className={cx(
-                      'w-3 border-t border-dashed',
-                      tone === 'warn' ? 'border-warn' : 'border-danger',
-                    )}
-                  />
-                  {tone === 'warn' ? 'Warn' : 'Danger'} at {y}% used
-                </span>
-              ))}
+                    key={tone}
+                    className="flex items-center gap-1.5 whitespace-nowrap text-body-sm text-text-muted"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={cx(
+                        'w-3 border-t border-dashed',
+                        tone === 'warn' ? 'border-warn' : 'border-danger',
+                      )}
+                    />
+                    {tone === 'warn' ? 'Warn' : 'Danger'} at {y}% used
+                  </span>
+                ))}
+              </span>
             </>
           ) : null}
         </div>
@@ -1611,13 +1398,9 @@ function DetailView({
                               <span className="flex items-center gap-1.5 text-text-muted">
                                 <span
                                   aria-hidden="true"
-                                  className="w-3 border-t-2"
+                                  className="size-2.5 shrink-0 rounded-xs"
                                   style={{
-                                    borderColor: getWindowColor(key).stroke,
-                                    borderStyle:
-                                      key === DASHED_WINDOW
-                                        ? 'dashed'
-                                        : 'solid',
+                                    backgroundColor: getWindowColor(key).stroke,
                                   }}
                                 />
                                 {windowLabel(key)}
@@ -1744,6 +1527,25 @@ function DetailView({
                     );
                   });
                 })()}
+                <defs>
+                  {visibleGraphWindows.map((windowName) =>
+                    QUOTA_FILL_WINDOWS[windowName] ? (
+                      <SeriesFillGradient
+                        key={windowName}
+                        id={`${chartId}-${windowName}`}
+                        color={getWindowColor(windowName).fill}
+                        // Many overlapping windows stack their tints; keep
+                        // each lighter so the lower lines still read.
+                        strength={
+                          effectiveIsolatedWindow === null &&
+                          visibleGraphWindows.length > 3
+                            ? 1
+                            : 2
+                        }
+                      />
+                    ) : null,
+                  )}
+                </defs>
                 {visibleGraphWindows.map((windowName) => (
                   <Area
                     key={windowName}
@@ -1751,10 +1553,15 @@ function DetailView({
                     dataKey={windowName}
                     stroke={getWindowColor(windowName).stroke}
                     strokeWidth={1.5}
-                    strokeDasharray={
-                      windowName === DASHED_WINDOW ? '5 3' : undefined
+                    // Only the live windows get a gradient fill; legacy
+                    // windows, unified and overage draw as strokes so
+                    // overlapping series stay individually traceable.
+                    fill={
+                      QUOTA_FILL_WINDOWS[windowName]
+                        ? `url(#${chartId}-${windowName})`
+                        : 'none'
                     }
-                    fill="none"
+                    fillOpacity={1}
                     isAnimationActive={false}
                     connectNulls={false}
                     hide={
@@ -1852,263 +1659,269 @@ function DetailView({
           ) : null
         }
       >
-        {isOauth ? (
-          <>
-            {quotaWindows}
-            {quotaHistory}
-          </>
-        ) : (
-          <ApiUsageCard
-            data={apiUsageQ.data}
-            isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
-            range={apiUsageRange}
-            onRangeChange={setApiUsageRange}
-            metric={apiUsageMetric}
-            onMetricChange={setApiUsageMetric}
-          />
-        )}
-
-        <DetailSection
-          data-testid="recent-requests-card"
-          title="Recent requests"
-          description={
-            recentPending ? (
-              <Skeleton className="h-3 w-52" />
-            ) : recentForUpstream.length === 0 ? (
-              `No recent requests against ${upstream.name}`
-            ) : (
-              `Last ${recentForUpstream.length} against ${upstream.name}`
-            )
-          }
-        >
-          <div
-            data-testid="recent-requests-table-slot"
-            className="glass min-h-48 overflow-x-auto rounded-md"
-          >
-            <RequestEventsTable
-              events={recentForUpstream}
-              principalNameMap={principalNameMap}
-              upstreamNameMap={upstreamNameMap}
-              loading={recentPending}
-              columns={{
-                upstream: false,
-                cost: true,
-                tokens: true,
-              }}
-              emptyTitle="No recent requests for this upstream"
+        <DetailSectionGrid>
+          {isOauth ? (
+            <>
+              {quotaWindows}
+              {quotaHistory}
+            </>
+          ) : (
+            <ApiUsageCard
+              data={apiUsageQ.data}
+              isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
+              range={apiUsageRange}
+              onRangeChange={setApiUsageRange}
+              metric={apiUsageMetric}
+              onMetricChange={setApiUsageMetric}
             />
-          </div>
-        </DetailSection>
+          )}
 
-        {isOauth ? (
-          <>
-            <DetailSection
-              title="Credential"
-              description={
-                oauthStatusPending ? (
-                  <Skeleton className="h-3 w-32" />
-                ) : hasBoundToken ? (
-                  'OAuth token bound on this upstream'
-                ) : (
-                  'Not connected'
-                )
-              }
-              action={
-                oauthStatusPending ? (
-                  <>
-                    <Skeleton className="h-5 w-24" />
-                    <Skeleton className="h-7 w-24" />
-                  </>
-                ) : (
-                  <>
-                    {/* The reconnect notice already names a problem. */}
-                    {reconnectNudge ? null : (
-                      <StatusBadge
-                        tone={oauthStatusBadge.tone}
-                        label={oauthStatusBadge.label}
-                      />
-                    )}
-                    <Button
-                      size="sm"
-                      iconLeft={<KeyRound />}
-                      onClick={onConnect}
-                    >
-                      {hasBoundToken ? 'Reconnect' : 'Connect'}
-                    </Button>
-                  </>
-                )
-              }
+          <DetailSection
+            span="full"
+            data-testid="recent-requests-card"
+            title="Recent requests"
+            // The table names an empty result and shows the count; the
+            // subtitle only says what the list is.
+            description="Latest requests routed here"
+          >
+            <div
+              data-testid="recent-requests-table-slot"
+              className="glass min-h-48 overflow-x-auto rounded-md"
             >
-              <div
-                data-testid="oauth-status-card-body"
-                className="min-h-28 text-body-sm"
+              <RequestEventsTable
+                events={recentForUpstream}
+                principalNameMap={principalNameMap}
+                upstreamNameMap={upstreamNameMap}
+                loading={recentPending}
+                columns={{
+                  upstream: false,
+                  cost: true,
+                  tokens: true,
+                }}
+                emptyTitle="No recent requests for this upstream"
+              />
+            </div>
+          </DetailSection>
+
+          {isOauth ? (
+            <>
+              <DetailSection
+                title="Credential"
+                description={
+                  oauthStatusPending ? (
+                    <Skeleton className="h-3 w-32" />
+                  ) : hasBoundToken ? (
+                    'OAuth token bound on this upstream'
+                  ) : (
+                    'Not connected'
+                  )
+                }
+                action={
+                  oauthStatusPending ? (
+                    <>
+                      <Skeleton className="h-5 w-24" />
+                      <Skeleton className="h-7 w-24" />
+                    </>
+                  ) : (
+                    <>
+                      {/* The reconnect notice already names a problem. */}
+                      {reconnectNudge ? null : (
+                        <StatusBadge
+                          tone={oauthStatusBadge.tone}
+                          label={oauthStatusBadge.label}
+                        />
+                      )}
+                      <Button
+                        size="sm"
+                        iconLeft={<KeyRound />}
+                        onClick={onConnect}
+                      >
+                        {hasBoundToken ? 'Reconnect' : 'Connect'}
+                      </Button>
+                    </>
+                  )
+                }
               >
-                {oauthStatusPending ? (
-                  <div
-                    data-testid="oauth-status-loading-grid"
-                    className="min-h-20 space-y-3"
-                  >
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      {Array.from({ length: 2 }).map((_, index) => (
-                        <div key={index}>
-                          <Skeleton className="h-3 w-20" />
-                          <Skeleton className="mt-1 h-5 w-28" />
-                        </div>
-                      ))}
-                    </div>
-                    <div>
-                      <Skeleton className="h-3 w-16" />
-                      <Skeleton className="mt-1 h-3 w-full max-w-56" />
-                    </div>
-                  </div>
-                ) : !hasBoundToken ? (
-                  <p className="text-body-sm text-text-muted">
-                    Use Connect to authorize this upstream with a Claude
-                    account.
-                  </p>
-                ) : principalEntry ? (
-                  <div
-                    data-testid="oauth-status-loaded-grid"
-                    className="min-h-20 space-y-3"
-                  >
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                      <div>
-                        <div className="text-label text-text-faint">
-                          Access token
-                        </div>
-                        <div className="mt-1">
-                          {principalEntry.expires_at_unix_secs ? (
-                            <span>
-                              Expires{' '}
-                              <RelativeTime
-                                ts={
-                                  new Date(
-                                    principalEntry.expires_at_unix_secs * 1000,
-                                  )
-                                }
-                              />
-                            </span>
-                          ) : (
-                            <span className="text-text-faint">—</span>
-                          )}
-                        </div>
-                        {principalEntry.mode === 'refreshing' ? (
-                          <div className="mt-0.5 text-caption text-text-faint">
-                            Renews automatically while the refresh token is
-                            valid.
+                <div
+                  data-testid="oauth-status-card-body"
+                  className="text-body-sm"
+                >
+                  {oauthStatusPending ? (
+                    <div
+                      data-testid="oauth-status-loading-grid"
+                      className="space-y-3"
+                    >
+                      <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+                        {Array.from({ length: 3 }).map((_, index) => (
+                          <div key={index}>
+                            <Skeleton className="h-3 w-20" />
+                            <Skeleton className="mt-1 h-5 w-28" />
                           </div>
-                        ) : null}
+                        ))}
                       </div>
                       <div>
-                        <div className="text-label text-text-faint">
-                          Credential mode
-                        </div>
-                        <div
-                          data-testid="oauth-credential-mode"
-                          className="mt-1"
-                        >
-                          {principalEntry.mode === 'long_lived_365d' ? (
-                            <>
-                              <span>365-day token</span>
-                              <div className="mt-0.5 text-caption text-text-faint">
-                                Never refreshed — reauthorize once a year
-                              </div>
-                            </>
-                          ) : principalEntry.mode === 'refreshing' ? (
-                            <>
-                              <span>Refreshing</span>
-                              <div className="mt-0.5 text-caption text-text-faint">
-                                Auto-refreshes; reauthorize about every 30 days
-                              </div>
-                            </>
-                          ) : (
-                            <span className="text-text-faint">Unknown</span>
-                          )}
-                        </div>
+                        <Skeleton className="h-3 w-16" />
+                        <Skeleton className="mt-1 h-3 w-full max-w-56" />
                       </div>
-                      <div>
-                        <div className="text-label text-text-faint">
-                          Refresh token
-                        </div>
-                        <div className="mt-1">
-                          {principalEntry.can_refresh ? (
-                            principalEntry.refresh_token_present ? (
-                              'Present'
+                    </div>
+                  ) : !hasBoundToken ? (
+                    <p className="text-body-sm text-text-muted">
+                      Use Connect to authorize this upstream with a Claude
+                      account.
+                    </p>
+                  ) : principalEntry ? (
+                    <div
+                      data-testid="oauth-status-loaded-grid"
+                      className="space-y-3"
+                    >
+                      <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+                        <div>
+                          <div className="text-label text-text-faint">
+                            Access token
+                          </div>
+                          <div className="mt-1">
+                            {principalEntry.expires_at_unix_secs ? (
+                              <span>
+                                Expires{' '}
+                                <RelativeTime
+                                  ts={
+                                    new Date(
+                                      principalEntry.expires_at_unix_secs *
+                                        1000,
+                                    )
+                                  }
+                                />
+                              </span>
                             ) : (
-                              <span className="text-warn-text">Missing</span>
-                            )
-                          ) : principalEntry.refresh_token_present ? (
-                            <span className="text-text-muted">
-                              Stored, unused
-                            </span>
-                          ) : (
-                            <span className="text-text-muted">Not stored</span>
-                          )}
+                              <span className="text-text-faint">—</span>
+                            )}
+                          </div>
+                          {principalEntry.mode === 'refreshing' ? (
+                            <div className="mt-0.5 text-caption text-text-faint">
+                              Renews automatically while the refresh token is
+                              valid.
+                            </div>
+                          ) : null}
                         </div>
-                        {/* The refresh-token clock only matters when the
+                        <div>
+                          <div className="text-label text-text-faint">
+                            Credential mode
+                          </div>
+                          <div
+                            data-testid="oauth-credential-mode"
+                            className="mt-1"
+                          >
+                            {principalEntry.mode === 'long_lived_365d' ? (
+                              <>
+                                <span>365-day token</span>
+                                <div className="mt-0.5 text-caption text-text-faint">
+                                  Never refreshed — reauthorize once a year
+                                </div>
+                              </>
+                            ) : principalEntry.mode === 'refreshing' ? (
+                              <>
+                                <span>Refreshing</span>
+                                <div className="mt-0.5 text-caption text-text-faint">
+                                  Auto-refreshes; reauthorize about every 30
+                                  days
+                                </div>
+                              </>
+                            ) : (
+                              <span className="text-text-faint">Unknown</span>
+                            )}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-label text-text-faint">
+                            Refresh token
+                          </div>
+                          <div className="mt-1">
+                            {principalEntry.can_refresh ? (
+                              principalEntry.refresh_token_present ? (
+                                'Present'
+                              ) : (
+                                <span className="text-warn-text">Missing</span>
+                              )
+                            ) : principalEntry.refresh_token_present ? (
+                              <span className="text-text-muted">
+                                Stored, unused
+                              </span>
+                            ) : (
+                              <span className="text-text-muted">
+                                Not stored
+                              </span>
+                            )}
+                          </div>
+                          {/* The refresh-token clock only matters when the
                             credential can actually be refreshed; for a
                             long-lived credential it would paint a false
                             danger badge. */}
-                        {principalEntry.can_refresh &&
-                        principalEntry.refresh_token_expires_at_unix_secs !=
-                          null ? (
-                          <div
-                            data-testid="oauth-refresh-token-expiry"
-                            className="mt-0.5 text-caption text-text-faint"
-                          >
-                            Expires{' '}
-                            <span
-                              className={
-                                {
-                                  ok: 'text-text-muted',
-                                  warn: 'text-warn-text',
-                                  danger: 'text-danger-text',
-                                }[
-                                  refreshTokenExpiryTone(
-                                    principalEntry.refresh_token_expires_at_unix_secs,
-                                  )
-                                ]
-                              }
+                          {principalEntry.can_refresh &&
+                          principalEntry.refresh_token_expires_at_unix_secs !=
+                            null ? (
+                            <div
+                              data-testid="oauth-refresh-token-expiry"
+                              className="mt-0.5 text-caption text-text-faint"
                             >
-                              <RelativeTime
-                                ts={
-                                  new Date(
-                                    principalEntry.refresh_token_expires_at_unix_secs *
-                                      1000,
-                                  )
+                              Expires{' '}
+                              <span
+                                className={
+                                  {
+                                    ok: 'text-text-muted',
+                                    warn: 'text-warn-text',
+                                    danger: 'text-danger-text',
+                                  }[
+                                    refreshTokenExpiryTone(
+                                      principalEntry.refresh_token_expires_at_unix_secs,
+                                    )
+                                  ]
                                 }
-                              />
-                            </span>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    {principalEntry.scopes.length ? (
-                      <div>
-                        <div className="text-label text-text-faint">Scopes</div>
-                        <div className="mt-1 break-all font-mono text-data text-text-muted">
-                          {principalEntry.scopes.join(', ')}
+                              >
+                                <RelativeTime
+                                  ts={
+                                    new Date(
+                                      principalEntry.refresh_token_expires_at_unix_secs *
+                                        1000,
+                                    )
+                                  }
+                                />
+                              </span>
+                            </div>
+                          ) : null}
                         </div>
                       </div>
-                    ) : null}
-                  </div>
-                ) : (
-                  <p className="text-body-sm text-text-muted">
-                    Token is bound on the upstream but no credential details are
-                    available right now.
-                  </p>
-                )}
-              </div>
-            </DetailSection>
-            <WarmupCardMinimal
-              upstream={upstream}
-              credentialNoticeShown={reconnectNudge != null}
-            />
-            {identity}
-          </>
-        ) : (
-          <SettingsCard upstream={upstream} />
-        )}
+                      {principalEntry.scopes.length ? (
+                        <div>
+                          <div className="text-label text-text-faint">
+                            Scopes
+                          </div>
+                          <div className="mt-1 break-all font-mono text-data text-text-muted">
+                            {principalEntry.scopes.join(', ')}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="text-body-sm text-text-muted">
+                      Token is bound on the upstream but no credential details
+                      are available right now.
+                    </p>
+                  )}
+                </div>
+              </DetailSection>
+              {/* Account metadata pairs beside Credential in the row above;
+                  Warm-up keeps the full row below — half-width pairing with
+                  these two sections always leaves a dead column gap. */}
+              {identity}
+              <WarmupCardMinimal
+                upstream={upstream}
+                credentialNoticeShown={reconnectNudge != null}
+              />
+            </>
+          ) : (
+            <SettingsCard upstream={upstream} />
+          )}
+        </DetailSectionGrid>
       </DetailPane>
 
       <ConfirmDialog

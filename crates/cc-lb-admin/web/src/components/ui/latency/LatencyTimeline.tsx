@@ -1179,10 +1179,13 @@ function CounterPill({
         </div>
       }
     >
-      <span className="cursor-help border-b border-dashed border-text-faint/60">
+      <button
+        type="button"
+        className="cursor-help rounded-xs border-b border-dashed border-text-faint/60 bg-transparent p-0 text-inherit focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+      >
         <span className="text-text-faint">{label}: </span>
         <span className="text-text tabular-nums">{rendered}</span>
-      </span>
+      </button>
     </InfoPopover>
   );
 }

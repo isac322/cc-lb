@@ -1,53 +1,66 @@
+import { splitNum } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover, fmtTokens } from './BreakdownPopover';
 import { MetricCell } from './MetricCell';
-import { SLICE_COLORS } from './usage/sliceColors';
+import { cx } from './primitives';
+import { USAGE_CATEGORIES, type UsageCategoryKey } from './usage/sliceColors';
 
-type TokenBreakdown = {
-  input: number;
-  output: number;
-  cc_5m: number;
-  cc_1h: number;
-  cr: number;
-};
+type TokenBreakdown = Record<UsageCategoryKey, number>;
 
 function tokenBreakdown(e: RequestEventWithPhase): TokenBreakdown {
-  const input = e.input_tokens ?? 0;
-  const output = e.output_tokens ?? 0;
-  const cr = e.cache_read_input_tokens ?? 0;
-  const cc_5m_split = e.cache_creation_input_tokens_5m;
-  const cc_1h_split = e.cache_creation_input_tokens_1h;
-  if (cc_5m_split != null || cc_1h_split != null) {
-    return {
-      input,
-      output,
-      cc_5m: cc_5m_split ?? 0,
-      cc_1h: cc_1h_split ?? 0,
-      cr,
-    };
-  }
-  const legacy = e.cache_creation_input_tokens ?? 0;
-  return { input, output, cc_5m: legacy, cc_1h: 0, cr };
-}
-
-function totalInputTokens(b: TokenBreakdown): number {
-  return b.input + b.cc_5m + b.cc_1h + b.cr;
+  const split5m = e.cache_creation_input_tokens_5m;
+  const split1h = e.cache_creation_input_tokens_1h;
+  const hasSplit = split5m != null || split1h != null;
+  return {
+    cache_read: e.cache_read_input_tokens ?? 0,
+    // Rows recorded before the 5m / 1h split carry one legacy total, billed
+    // at the 5m rate.
+    cache_create_5m: hasSplit
+      ? (split5m ?? 0)
+      : (e.cache_creation_input_tokens ?? 0),
+    cache_create_1h: hasSplit ? (split1h ?? 0) : 0,
+    input: e.input_tokens ?? 0,
+    output: e.output_tokens ?? 0,
+  };
 }
 
 /**
- * Share of the prompt served from cache, as a whole percent, or null when the
- * request read nothing from cache.
+ * Share of the prompt served from cache, in whole percent rounded down (so
+ * 100% means fully cached and a partial hit never reads as full), or null
+ * when the request has no prompt tokens yet.
  */
-function cacheHitPercent(b: TokenBreakdown): number | null {
-  const denom = totalInputTokens(b);
-  if (denom <= 0 || b.cr <= 0) return null;
-  return Math.round((b.cr / denom) * 100);
+function cacheHitPercent(b: TokenBreakdown, promptTokens: number) {
+  if (promptTokens <= 0) return null;
+  return Math.floor((b.cache_read / promptTokens) * 100);
 }
 
 /**
- * "2.8k → 8" (prompt tokens in, output tokens out) over a bar of the request's
- * token composition: input, output, cache create 5m / 1h and cache read, so the
- * cache-read share is the cache hit at a glance.
+ * One token count in a fixed-width slot: the figure right-aligned, its k / m
+ * unit in a fixed trailing slot, so every row's digits line up whatever the
+ * magnitude ("21", "2.8k", "120k", "1.2M").
+ */
+function TokenFigure({ tokens, slot }: { tokens: number; slot: string }) {
+  const { value, unit } = splitNum(tokens);
+  return (
+    <span
+      data-slot={slot}
+      className="inline-flex w-[5.5ch] shrink-0 justify-end"
+    >
+      <span className="text-text">{value}</span>
+      <span className="w-[1.5ch] shrink-0 text-left text-text-muted">
+        {unit}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * "2.8k → 812   94% hit" (prompt tokens in, output tokens out, the share of
+ * the prompt served from cache) over a bar of the request's token
+ * composition in `USAGE_CATEGORIES` order. Each figure sits in a fixed-width,
+ * right-aligned slot so the columns of in, out and hit line up down the table.
+ * The "hit" word stays in the cell rather than the header because the card
+ * layout has no header.
  */
 export function TokenCell({
   event,
@@ -59,24 +72,13 @@ export function TokenCell({
   className?: string;
 }) {
   const b = tokenBreakdown(event);
-  const input = fmtTokens(totalInputTokens(b));
-  const output = fmtTokens(b.output);
-  const hit = cacheHitPercent(b);
-  const rows = [
-    { label: 'Input', value: b.input, color: SLICE_COLORS.input },
-    { label: 'Output', value: b.output, color: SLICE_COLORS.output },
-    {
-      label: 'Cache create 5m',
-      value: b.cc_5m,
-      color: SLICE_COLORS.cache_create_5m,
-    },
-    {
-      label: 'Cache create 1h',
-      value: b.cc_1h,
-      color: SLICE_COLORS.cache_create_1h,
-    },
-    { label: 'Cache read', value: b.cr, color: SLICE_COLORS.cache_read },
-  ];
+  const prompt = b.cache_read + b.cache_create_5m + b.cache_create_1h + b.input;
+  const hit = cacheHitPercent(b, prompt);
+  const rows = USAGE_CATEGORIES.map((category) => ({
+    label: category.label,
+    color: category.color,
+    value: b[category.key],
+  }));
 
   const popover = (
     <BreakdownPopover
@@ -93,18 +95,40 @@ export function TokenCell({
   return (
     <MetricCell
       className={className}
-      label={`Tokens ${input} in, ${output} out${
+      label={`Tokens ${fmtTokens(prompt)} in, ${fmtTokens(b.output)} out${
         hit != null ? `, cache hit ${hit}%` : ''
       }, show breakdown`}
       popover={popover}
       segments={rows}
       pulse={isPartial}
     >
-      <span className="text-text">{input}</span>
-      <span aria-hidden="true" className="px-1 text-text-faint">
-        →
+      <span className="inline-flex items-baseline">
+        <TokenFigure tokens={prompt} slot="in" />
+        <span
+          aria-hidden="true"
+          className="w-[2ch] shrink-0 text-center text-text-faint"
+        >
+          →
+        </span>
+        <TokenFigure tokens={b.output} slot="out" />
+        <span
+          data-slot="hit"
+          className={cx(
+            'ml-2 w-[4.5ch] shrink-0 text-right',
+            hit == null ? 'text-text-faint' : 'text-text',
+          )}
+        >
+          {hit == null ? '—' : `${hit}%`}
+        </span>
+        <span
+          className={cx(
+            'ml-1 text-caption text-text-faint',
+            hit == null ? 'invisible' : '',
+          )}
+        >
+          hit
+        </span>
       </span>
-      <span className="text-text">{output}</span>
     </MetricCell>
   );
 }
