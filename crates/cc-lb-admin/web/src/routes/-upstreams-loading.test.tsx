@@ -604,7 +604,7 @@ describe('/upstreams quota request cadence', () => {
   test('updates both stable range identities when the visible range changes', () => {
     renderRoute();
 
-    fireEvent.click(screen.getByRole('button', { name: '1h' }));
+    fireEvent.click(screen.getByRole('radio', { name: '1h' }));
 
     const seriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
@@ -650,7 +650,7 @@ describe('/upstreams cold-load geometry', () => {
     expect(rangeControl.className).toContain('p-0.5');
     expect(rangeControl.children).toHaveLength(4);
     for (const rangeItem of rangeControl.children) {
-      expect(rangeItem.className).toContain('h-7');
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
     expect(within(shell).queryByText('Timestamp')).toBeNull();
     expect(
@@ -780,10 +780,10 @@ describe('/upstreams cold-load geometry', () => {
       'min-h-[203px]',
     );
     const rangeControl = screen.getByTestId('quota-history-range-control');
-    expect(rangeControl.className).toContain('p-0.5');
-    expect(rangeControl.querySelectorAll('button')).toHaveLength(4);
-    for (const rangeItem of rangeControl.querySelectorAll('button')) {
-      expect(rangeItem.className).toContain('h-7');
+    const rangeItems = within(rangeControl).getAllByRole('radio');
+    expect(rangeItems).toHaveLength(4);
+    for (const rangeItem of rangeItems) {
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
     expect(screen.getByTestId('oauth-status-card-body').className).toContain(
       'min-h-28',
@@ -893,9 +893,9 @@ describe('/upstreams refresh retention', () => {
     ).toContain('5h');
 
     isPlaceholderData = true;
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     expect(screen.getByText(/old@example\.com/)).toBeDefined();
     expect(screen.getByText('old-scope')).toBeDefined();
@@ -1010,7 +1010,7 @@ describe('/upstreams refresh retention', () => {
     expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
 
     isPlaceholderData = true;
-    fireEvent.click(screen.getByRole('button', { name: '7d' }));
+    fireEvent.click(screen.getByRole('radio', { name: '7d' }));
 
     expect(screen.getByText('old-usage-model')).toBeDefined();
     expect(screen.getByText('old-request-model')).toBeDefined();
@@ -1100,9 +1100,9 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('identity-old-scope')).toBeDefined();
     expect(screen.getByText('identity-old-model')).toBeDefined();
 
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     searchState = { selectedId: secondOauthUpstream.id };
     view.rerender(routeElement());
@@ -1110,13 +1110,13 @@ describe('/upstreams refresh retention', () => {
     const resetRangeControl = screen.getByTestId('quota-history-range-control');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '7d' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '7d' })
+        .getAttribute('aria-checked'),
     ).toBe('true');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '1h' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '1h' })
+        .getAttribute('aria-checked'),
     ).toBe('false');
     expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
     expect(screen.queryByText('identity-old-scope')).toBeNull();
@@ -1336,7 +1336,7 @@ describe('/upstreams mutation pending UX', () => {
     expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
   });
 
-  test('toggle pending shows the requested progress and prevents a second change', () => {
+  test('toggle asks for confirmation, then shows progress and prevents a second change', () => {
     const mutate = vi.fn();
     vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue({
       mutate,
@@ -1348,6 +1348,16 @@ describe('/upstreams mutation pending UX', () => {
     const view = renderRoute();
     const toggle = screen.getByRole('switch', { name: 'Enabled' });
     fireEvent.click(toggle);
+
+    // The switch alone never changes the pool: it opens a confirmation that
+    // names the impact, including the warm-up side effect.
+    expect(mutate).not.toHaveBeenCalled();
+    const confirm = screen.getByRole('alertdialog', {
+      name: 'Disable upstream?',
+    });
+    expect(confirm.textContent).toContain('will stop receiving requests.');
+    expect(confirm.textContent).toContain('Warm-up is turned off too.');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Disable' }));
 
     expect(mutate).toHaveBeenCalledTimes(1);
     expect(mutate).toHaveBeenCalledWith(
@@ -1612,7 +1622,7 @@ describe('/upstreams OAuth card', () => {
     renderRoute();
 
     const expiry = screen.getByTestId('oauth-refresh-token-expiry');
-    expect(expiry.textContent).toContain('expires');
+    expect(expiry.textContent).toContain('Expires');
     expect(expiry.textContent).toMatch(/in \d+ (weeks?|months?|days?)/);
   });
 
@@ -1693,7 +1703,7 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
     const refreshRow = screen.getByText('Refresh token')
       .parentElement as HTMLElement;
-    expect(within(refreshRow).getByText('stored, unused')).toBeDefined();
+    expect(within(refreshRow).getByText('Stored, unused')).toBeDefined();
   });
 
   test('keeps the healthy Long-lived badge when the stored refresh-token clock has lapsed', () => {

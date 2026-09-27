@@ -1,5 +1,4 @@
-import { Switch as BaseSwitch } from '@base-ui/react/switch';
-import { HelpCircle, History, Zap } from 'lucide-react';
+import { ChevronRight, HelpCircle, History, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -20,7 +19,6 @@ import {
   useWarmupSummary,
 } from '../../../lib/queries';
 import {
-  Badge,
   Button,
   Card,
   CardBody,
@@ -30,12 +28,19 @@ import {
   Hint,
   Skeleton,
   StatusBadge,
+  ToggleSwitch,
 } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
+import { Select } from '../../ui/Select';
 import { REASON_LABEL } from './parts/copy';
 import { WarmupConfigModal } from './parts/WarmupConfigModal';
 import { detectActiveIncident } from './parts/warmupViewModel';
 import { WarmupHistoryDrawer } from './WarmupHistoryDrawer';
+
+const WARN_PANEL_CLASS =
+  'rounded-sm bg-warn/8 px-3 py-2 text-body-sm text-warn-text';
+const DANGER_PANEL_CLASS =
+  'rounded-sm bg-danger/8 px-3 py-2 text-body-sm text-danger-text';
 
 const LAST_OUTCOME_LABEL = {
   success: 'Success',
@@ -140,17 +145,45 @@ function ShapePluginHelpHover() {
   );
 }
 
-export function WarmupCardMinimal({ upstream }: { upstream: Upstream }) {
+// Failure reasons caused by the stored OAuth credential. When the detail view
+// already shows the reconnect notice, the card points there instead of
+// repeating the diagnosis.
+const CREDENTIAL_FAILURE_REASONS: Record<string, true> = {
+  credential_decrypt_failed: true,
+  oauth_credentials_missing: true,
+  oauth_refresh_failed: true,
+  auth_failed: true,
+};
+
+type WarmupCardProps = {
+  upstream: Upstream;
+  /** True when the page already shows a reconnect notice for this upstream. */
+  credentialNoticeShown?: boolean;
+};
+
+export function WarmupCardMinimal({
+  upstream,
+  credentialNoticeShown = false,
+}: WarmupCardProps) {
   if (upstream.kind !== 'anthropic_oauth') {
     return null;
   }
   const stateKey = `${upstream.id}:${
     upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''
   }`;
-  return <WarmupCardMinimalInner key={stateKey} upstream={upstream} />;
+  return (
+    <WarmupCardMinimalInner
+      key={stateKey}
+      upstream={upstream}
+      credentialNoticeShown={credentialNoticeShown}
+    />
+  );
 }
 
-function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
+function WarmupCardMinimalInner({
+  upstream,
+  credentialNoticeShown,
+}: Required<WarmupCardProps>) {
   const updateSettings = useUpdateUpstreamWarmupSettings();
   const clearPlugin = useClearUpstreamWarmupDialectPlugin();
   const fireWarmup = useFireNowUpstreamWarmup();
@@ -223,8 +256,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
     );
   };
 
-  const handlePluginChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const val = e.target.value;
+  const handlePluginChange = (val: string) => {
     if (!val) {
       if (upstream.warmup_dialect_plugin) {
         setConfirmClearPluginOpen(true);
@@ -394,45 +426,52 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
 
   const headerTitle = (
     <div className="flex items-center gap-2">
+      <span>Warm-up</span>
+      <WarmupHelpHover />
       <span
-        className="inline-flex min-h-5 w-24 items-center"
+        className="ml-1 inline-flex min-h-5 w-24 items-center"
         data-testid="warmup-status-value"
       >
         {summaryPending && upstream.warmup_enabled ? (
-          <Skeleton className="h-5 w-full rounded-sm" />
+          <Skeleton className="h-4 w-full rounded-sm" />
         ) : (
           <StatusBadge tone={statusTone} label={statusLabel} />
         )}
       </span>
-      <span>Warm-up</span>
-      <WarmupHelpHover />
     </div>
   );
 
   const headerActions = (
-    <div className="flex items-center">
-      <BaseSwitch.Root
+    <div className="flex items-center gap-2">
+      <Button
+        size="sm"
+        data-testid="warmup-fire-now"
+        onClick={() => setConfirmFireOpen(true)}
+        disabled={
+          fireWarmup.isPending || fireCooldown || !upstream.warmup_enabled
+        }
+        iconLeft={<Zap />}
+      >
+        {COPY.fireNowButtonLabel}
+      </Button>
+      <Button
+        size="sm"
+        data-testid="warmup-history-button"
+        onClick={() => openHistory()}
+        iconLeft={<History />}
+      >
+        History
+      </Button>
+      <ToggleSwitch
+        variant="compact"
+        role="switch"
         aria-label="Toggle warmup"
         checked={upstream.warmup_enabled}
-        className={cx(
-          'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
-          upstream.warmup_enabled
-            ? 'bg-[color:var(--color-ok)] border-[color:var(--color-ok)]'
-            : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
-        )}
         data-testid="warmup-switch"
         disabled={settingsPending}
-        nativeButton
-        onCheckedChange={handleToggle}
-        render={<button type="button" />}
-      >
-        <BaseSwitch.Thumb
-          className={cx(
-            'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-            upstream.warmup_enabled ? 'translate-x-4' : 'translate-x-0.5',
-          )}
-        />
-      </BaseSwitch.Root>
+        onChange={handleToggle}
+        className="ml-1"
+      />
     </div>
   );
 
@@ -444,7 +483,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
         data-testid="warmup-card"
         data-variant="minimal"
         tabIndex={-1}
-        className="w-full h-full flex flex-col"
+        className="w-full h-full"
       >
         <CardHeader
           title={headerTitle}
@@ -452,25 +491,24 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
           action={headerActions}
           align="center"
         />
-        <CardBody className="space-y-4 flex-1 flex flex-col">
+        <CardBody className="space-y-4">
           {staleRevisionVisible && (
             <div
               role="status"
               aria-live="polite"
               data-testid="warmup-stale-hint"
-              className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
+              className={WARN_PANEL_CLASS}
             >
               {COPY.staleRevisionHint}
             </div>
           )}
 
           {!upstream.warmup_enabled && (
-            <div className="flex items-center justify-between bg-overlay-2 border border-subtle rounded p-3">
-              <span className="text-sm text-text-muted">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm bg-overlay-2 px-3 py-2">
+              <span className="text-body-sm text-text-muted">
                 Warmup disabled — re-enable to schedule new attempts
               </span>
               <Button
-                variant="primary"
                 size="sm"
                 data-testid="warmup-enable-btn"
                 onClick={handleToggle}
@@ -481,14 +519,12 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
             </div>
           )}
 
-          <div className="flex-1 flex flex-col gap-4">
-            <div className="grid grid-cols-1 gap-4 border-b border-subtle pb-3 sm:grid-cols-2">
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-1 gap-4 border-b border-subtle pb-4 sm:grid-cols-2">
               <div className="flex flex-col gap-1">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Next run
-                </span>
+                <span className="text-label text-text-faint">Next run</span>
                 <div
-                  className="flex min-h-5 items-center text-sm font-medium text-text"
+                  className="flex min-h-5 items-center text-body-sm text-text"
                   data-testid="warmup-next-value"
                 >
                   {summaryPending ? (
@@ -505,11 +541,9 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               </div>
 
               <div className="flex flex-col gap-1">
-                <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider text-text-faint">
-                  Last run
-                </span>
+                <span className="text-label text-text-faint">Last run</span>
                 <div
-                  className="flex min-h-5 items-center text-sm font-medium text-text"
+                  className="flex min-h-5 items-center text-body-sm text-text"
                   data-testid="warmup-last"
                 >
                   {summaryPending ? (
@@ -518,18 +552,19 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                     <button
                       type="button"
                       onClick={openHistory}
-                      className="rounded-sm text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                      className="-mx-1 rounded-sm px-1 text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                       aria-label="Open last warm-up attempt detail"
                     >
-                      <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-text">
-                        <Badge tone={LAST_OUTCOME_TONE[lastAttempt.status]}>
-                          {LAST_OUTCOME_LABEL[lastAttempt.status]}
-                        </Badge>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <StatusBadge
+                          tone={LAST_OUTCOME_TONE[lastAttempt.status]}
+                          label={LAST_OUTCOME_LABEL[lastAttempt.status]}
+                        />
                         <RelativeTime
                           compact
                           ts={lastAttempt.attempted_at_unix_secs * 1000}
                         />
-                      </div>
+                      </span>
                     </button>
                   ) : upstream.status.last_warmup_at_unix_secs ? (
                     <RelativeTime
@@ -547,48 +582,53 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               className="flex min-h-7 items-center justify-between gap-3"
               data-testid="warmup-plugin-row"
             >
-              <span className="inline-flex items-center gap-1.5 text-sm text-text-muted">
+              <span className="inline-flex shrink-0 items-center gap-1.5 text-body-sm text-text-muted">
                 Shape plugin
                 <ShapePluginHelpHover />
               </span>
               {pluginRegistryPending ? (
-                <Skeleton className="h-7 w-40 rounded-sm" />
+                <Skeleton className="h-8 w-48 rounded-sm" />
               ) : shapePlugins.length === 0 &&
                 !upstream.warmup_dialect_plugin ? (
-                <div className="text-xs text-text-muted">
+                <div className="text-body-sm text-text-muted">
                   <span>{COPY.noShapePluginsAvailable}</span>{' '}
-                  <a href="/plugins" className="text-accent hover:underline">
+                  <a
+                    href="/plugins"
+                    className="text-accent-text underline-offset-2 hover:underline"
+                  >
                     Plugins
                   </a>
                 </div>
               ) : (
-                <label className="inline-flex items-center gap-2 rounded-sm border border-subtle bg-overlay-2 px-2 py-1 text-xs text-text-muted">
-                  <select
+                <div className="w-56 max-w-full min-w-0">
+                  <Select
                     id="dialect-plugin-select"
                     data-testid="warmup-plugin-select"
-                    className="max-w-[220px] bg-transparent font-mono text-text outline-none"
+                    size="sm"
                     value={selectedPluginValue}
                     onChange={handlePluginChange}
                     disabled={settingsPending}
                     aria-label={COPY.dialectPluginLabel}
-                    title={selectedPluginValue || COPY.defaultPluginOption}
-                  >
-                    <option value="">{COPY.defaultPluginOption}</option>
-                    {selectedPluginValue && !selectedPluginKnown && (
-                      <option value={selectedPluginValue}>
-                        {COPY.unknownPluginTemplate.replace(
-                          '{id}',
-                          selectedPluginValue,
-                        )}
-                      </option>
-                    )}
-                    {shapePlugins.map((p: PluginEntry) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    allLabel={COPY.defaultPluginOption}
+                    options={[
+                      ...(selectedPluginValue && !selectedPluginKnown
+                        ? [
+                            {
+                              value: selectedPluginValue,
+                              label: COPY.unknownPluginTemplate.replace(
+                                '{id}',
+                                selectedPluginValue,
+                              ),
+                            },
+                          ]
+                        : []),
+                      ...shapePlugins.map((p: PluginEntry) => ({
+                        value: p.id,
+                        label: p.name,
+                      })),
+                    ]}
+                  />
+                </div>
               )}
             </div>
 
@@ -598,28 +638,50 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               ) : lastAttempt?.error_detail ? (
                 <div
                   className={cx(
-                    'flex min-h-12 items-center rounded-sm border p-2 text-xs leading-relaxed',
+                    'min-h-12',
                     lastAttempt.status === 'permanent_failure'
-                      ? 'border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]'
-                      : 'border-[color:var(--color-warn)]/30 bg-amber-500/10 text-[color:var(--color-warn)]',
+                      ? DANGER_PANEL_CLASS
+                      : WARN_PANEL_CLASS,
                   )}
                 >
-                  {lastAttempt.reason
-                    ? REASON_LABEL[lastAttempt.reason]
-                    : 'Warm-up failed'}
-                  : {lastAttempt.error_detail}
+                  <p>
+                    {lastAttempt.status === 'permanent_failure'
+                      ? 'Last warm-up failed'
+                      : 'Last warm-up hit an error'}
+                    {lastAttempt.reason
+                      ? `: ${REASON_LABEL[lastAttempt.reason]}.`
+                      : '.'}
+                    {credentialNoticeShown &&
+                    lastAttempt.reason &&
+                    CREDENTIAL_FAILURE_REASONS[lastAttempt.reason]
+                      ? ' Reconnect from the notice above.'
+                      : null}
+                  </p>
+                  <details className="group mt-1">
+                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted hover:text-text [&::-webkit-details-marker]:hidden">
+                      <ChevronRight
+                        aria-hidden="true"
+                        strokeWidth={1.75}
+                        className="size-3 transition-transform group-open:rotate-90"
+                      />
+                      Details
+                    </summary>
+                    <code className="mt-1 block break-words font-mono text-data text-text-muted">
+                      {lastAttempt.error_detail}
+                    </code>
+                  </details>
                 </div>
               ) : null}
             </div>
 
             {(leasePanel || errorPanel) && (
-              <div className="flex flex-col gap-2 mt-2">
+              <div className="flex flex-col gap-2">
                 {leasePanel && (
                   <div
                     data-testid="warmup-lease-panel"
                     role="status"
                     aria-live="polite"
-                    className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
+                    className={WARN_PANEL_CLASS}
                   >
                     {COPY.leaseHeldTemplate.replace(
                       '{heldBy}',
@@ -633,38 +695,13 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                     data-reason={errorPanel.reason}
                     role="alert"
                     aria-live="polite"
-                    className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
+                    className={DANGER_PANEL_CLASS}
                   >
                     {COPY.fireErrorReasons[errorPanel.reason]}
                   </div>
                 )}
               </div>
             )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 border-t border-subtle pt-3 mt-auto">
-            <Button
-              variant="secondary"
-              size="sm"
-              fullWidth
-              data-testid="warmup-fire-now"
-              onClick={() => setConfirmFireOpen(true)}
-              disabled={
-                fireWarmup.isPending || fireCooldown || !upstream.warmup_enabled
-              }
-              iconLeft={<Zap className="h-3 w-3" />}
-            >
-              {COPY.fireNowButtonLabel}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              data-testid="warmup-history-button"
-              onClick={() => openHistory()}
-              iconLeft={<History className="h-3 w-3" />}
-            >
-              History
-            </Button>
           </div>
         </CardBody>
 

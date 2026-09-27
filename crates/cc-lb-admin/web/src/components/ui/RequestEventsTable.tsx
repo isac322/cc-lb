@@ -7,27 +7,55 @@ import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { requestKindBadgeText } from '../../lib/requestKind';
 import { CostCell } from './CostCell';
 import { LatencyCell } from './latency/LatencyCell';
-import { Badge, cx, SkeletonRow } from './primitives';
+import { Badge, cx, EmptyState, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 import { RequestEventDrawer } from './RequestEventDrawer';
 import { RequestOutcomeTableCell } from './RequestEventIdentity';
 import { SessionChip } from './SessionChip';
-import { TokenCell } from './TokenCell';
+import { Table, TableHead, TableHeadCell, TableRow } from './Table';
+import { cacheHitPercent, TokenCell } from './TokenCell';
 
 export { SessionChip };
 
 const DASH = '—';
-const REQUEST_EVENT_ROW_HEIGHT_REM = 2.53125;
+/** Matches `TableRow`'s 40px row so loading, empty and loaded bodies agree. */
+const REQUEST_EVENT_ROW_HEIGHT_REM = 2.5;
 const REQUEST_EVENT_ROW_STYLE = {
   height: `${REQUEST_EVENT_ROW_HEIGHT_REM}rem`,
 } satisfies React.CSSProperties;
 
 const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
-  ok: 'text-[color:var(--color-ok)]',
-  warn: 'text-[color:var(--color-warn)]',
-  danger: 'text-[color:var(--color-danger)]',
+  ok: 'text-success-text',
+  warn: 'text-warn-text',
+  danger: 'text-danger-text',
   neutral: 'text-text',
 };
+
+/*
+ * Below `md` each row becomes a three-line card instead of a 1000px-wide
+ * table row: time, kind and status; principal, upstream and model; latency,
+ * tokens and cost. Session and cache hit are left to the drawer. Cells keep
+ * their DOM order and are only placed on the grid.
+ */
+const MOBILE_ROW =
+  'max-md:grid max-md:h-auto! max-md:grid-cols-[auto_minmax(0,1fr)_auto] max-md:items-center max-md:gap-x-3 max-md:gap-y-1 max-md:px-4 max-md:py-2.5';
+// `p-0!` beats the table's first/last-cell inset, which only applies to rows.
+const MOBILE_CELL = 'max-md:p-0! max-md:*:p-0 max-md:max-w-none';
+const MOBILE_AT = {
+  time: 'max-md:row-start-1 max-md:col-start-1',
+  kind: 'max-md:row-start-1 max-md:col-start-2 max-md:justify-self-start',
+  status: 'max-md:row-start-1 max-md:col-start-3',
+  principal: 'max-md:row-start-2 max-md:col-start-1 max-md:max-w-[40vw]',
+  upstream: 'max-md:row-start-2 max-md:col-start-1 max-md:col-span-2',
+  /** Reads "principal → upstream" when both cells are shown. */
+  upstreamAfterPrincipal:
+    'max-md:row-start-2 max-md:col-start-2 max-md:before:content-["→_"] max-md:before:text-text-faint',
+  model:
+    'max-md:row-start-2 max-md:col-start-3 max-md:max-w-[40vw] max-md:text-right',
+  latency: 'max-md:row-start-3 max-md:col-start-1',
+  tokens: 'max-md:row-start-3 max-md:col-start-2 max-md:justify-self-start',
+  cost: 'max-md:row-start-3 max-md:col-start-3',
+} as const;
 
 /** Radii offered by the per-row time anchor, as [label, seconds either side]. */
 const ANCHOR_RADII_SECS: ReadonlyArray<readonly [string, number]> = [
@@ -44,6 +72,10 @@ interface RequestEventsTableProps {
   reservedRowCount?: number;
   emptyTitle?: string;
   emptyDescription?: string;
+  /** Next step shown under the empty message, e.g. a link to the setup flow. */
+  emptyAction?: React.ReactNode;
+  /** Heading level of the empty-state title; match the surrounding outline. */
+  emptyHeadingLevel?: 2 | 3 | 4;
   liveFlashIds?: Set<string>;
   columns?: {
     principal?: boolean;
@@ -69,7 +101,9 @@ interface RequestEventRowProps {
   showPrincipal: boolean;
   showUpstream: boolean;
   showSession: boolean;
+  showKind: boolean;
   showTokens: boolean;
+  showCacheHit: boolean;
   showCost: boolean;
   selected: boolean;
   flash: boolean;
@@ -85,7 +119,9 @@ const RequestEventRow = memo(function RequestEventRow({
   showPrincipal,
   showUpstream,
   showSession,
+  showKind,
   showTokens,
+  showCacheHit,
   showCost,
   selected,
   flash,
@@ -101,18 +137,25 @@ const RequestEventRow = memo(function RequestEventRow({
   );
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const requestKindBadge = requestKindBadgeText(event.request_kind);
+  const hit = showCacheHit ? cacheHitPercent(event) : null;
   const at = eventTime(event);
 
   return (
-    <tr
+    <TableRow
+      interactive
+      selected={selected}
       className={cx(
-        'border-b border-row hover:bg-overlay-1 focus:bg-overlay-1 focus:outline-none cursor-pointer',
+        'focus:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         flash ? 'flash-in' : '',
+        MOBILE_ROW,
       )}
       style={REQUEST_EVENT_ROW_STYLE}
       onClick={() => selectEvent(eventKey)}
       tabIndex={0}
       onKeyDown={(keyboardEvent) => {
+        // Keys pressed on a control inside the row (latency breakdown, time
+        // anchors) belong to that control, not to the row.
+        if (keyboardEvent.target !== keyboardEvent.currentTarget) return;
         if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
           keyboardEvent.preventDefault();
           selectEvent(eventKey);
@@ -121,7 +164,13 @@ const RequestEventRow = memo(function RequestEventRow({
       aria-selected={selected}
       aria-label={`View request ${eventKey}`}
     >
-      <td className="group/ts relative px-3 py-2 text-text-faint whitespace-nowrap">
+      <td
+        className={cx(
+          'group/ts relative px-3 py-2 text-text-muted tabular-nums whitespace-nowrap',
+          MOBILE_CELL,
+          MOBILE_AT.time,
+        )}
+      >
         <span
           className={cx(
             'status-dot mr-2',
@@ -132,12 +181,13 @@ const RequestEventRow = memo(function RequestEventRow({
         />
         <RelativeTime compact ts={at} />
         {onAnchorRange != null && at != null ? (
-          <span className="absolute inset-y-0 right-0 hidden items-center gap-0.5 bg-[color:var(--color-panel-strong)] pl-2 pr-1 group-hover/ts:flex group-focus-within/ts:flex">
+          <span className="absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 max-md:hidden">
             {ANCHOR_RADII_SECS.map(([label, radius]) => (
               <button
                 key={label}
                 type="button"
-                className="rounded-sm border border-subtle px-1 text-[10px] leading-4 hover:bg-[color:var(--color-hover-bg)]"
+                className="rounded-sm bg-overlay-3 px-1 text-caption text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                aria-label={`Show ${label} around this request`}
                 title={`Show ${label} around this request`}
                 onClick={(clickEvent) => {
                   clickEvent.stopPropagation();
@@ -151,32 +201,60 @@ const RequestEventRow = memo(function RequestEventRow({
         ) : null}
       </td>
       {showPrincipal && (
-        <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+        <td
+          className={cx(
+            'px-3 py-2 whitespace-nowrap truncate max-w-[160px]',
+            MOBILE_CELL,
+            MOBILE_AT.principal,
+          )}
+        >
           {principalName}
         </td>
       )}
       {showUpstream && (
-        <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+        <td
+          className={cx(
+            'px-3 py-2 whitespace-nowrap truncate max-w-[180px]',
+            MOBILE_CELL,
+            showPrincipal
+              ? MOBILE_AT.upstreamAfterPrincipal
+              : MOBILE_AT.upstream,
+          )}
+        >
           {upstreamName}
         </td>
       )}
       {showSession && (
-        <td className="px-3 py-2 whitespace-nowrap">
+        <td className="px-3 py-2 whitespace-nowrap max-md:hidden">
           <SessionChip sessionId={event.thread_id ?? null} />
         </td>
       )}
-      <td className="px-3 py-2 whitespace-nowrap">
-        {requestKindBadge != null ? (
-          <Badge tone="mono" className="shrink-0">
-            {requestKindBadge}
-          </Badge>
-        ) : (
-          <span className="text-text-faint">{DASH}</span>
+      {showKind && (
+        <td
+          className={cx(
+            'px-3 py-2 whitespace-nowrap',
+            MOBILE_CELL,
+            MOBILE_AT.kind,
+          )}
+        >
+          {requestKindBadge != null ? (
+            <Badge className="shrink-0">{requestKindBadge}</Badge>
+          ) : (
+            <span className="text-text-faint">{DASH}</span>
+          )}
+        </td>
+      )}
+      <td
+        className={cx(
+          'px-3 py-2 text-text-muted truncate max-w-[260px]',
+          MOBILE_CELL,
+          MOBILE_AT.model,
         )}
-      </td>
-      <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
-        <span className="flex items-center gap-2 min-w-0">
-          <span className="truncate">{event.model ?? DASH}</span>
+      >
+        <span className="flex items-center gap-2 min-w-0 max-md:justify-end">
+          <span className="truncate font-mono text-data">
+            {event.model ?? DASH}
+          </span>
           {tierBadge != null && (
             <Badge tone="neutral" className="shrink-0">
               {tierBadge}
@@ -187,6 +265,8 @@ const RequestEventRow = memo(function RequestEventRow({
       <td
         className={cx(
           'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+          MOBILE_CELL,
+          MOBILE_AT.status,
           outcome.type === 'partial'
             ? 'text-text-faint'
             : STATUS_TONE_TEXT[requestOutcomeTone(outcome)],
@@ -194,14 +274,44 @@ const RequestEventRow = memo(function RequestEventRow({
       >
         <RequestOutcomeTableCell outcome={outcome} />
       </td>
-      <LatencyCell event={event} />
-      {showTokens && <TokenCell event={event} isPartial={isPartial} />}
-      {showCost && <CostCell event={event} isPartial={isPartial} />}
-    </tr>
+      <LatencyCell
+        event={event}
+        className={cx(MOBILE_CELL, MOBILE_AT.latency)}
+      />
+      {showTokens && (
+        <TokenCell
+          event={event}
+          isPartial={isPartial}
+          className={cx(MOBILE_CELL, MOBILE_AT.tokens)}
+        />
+      )}
+      {showCacheHit && (
+        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap max-md:hidden">
+          {hit != null ? (
+            <span className="text-text-muted">{hit}%</span>
+          ) : (
+            <span className="text-text-faint">{DASH}</span>
+          )}
+        </td>
+      )}
+      {showCost && (
+        <CostCell
+          event={event}
+          isPartial={isPartial}
+          className={cx(MOBILE_CELL, MOBILE_AT.cost)}
+        />
+      )}
+    </TableRow>
   );
 });
 
-export function RequestEventsTable({
+interface ColumnSpec {
+  label: string;
+  numeric?: boolean;
+  skeleton: string;
+}
+
+export const RequestEventsTable = memo(function RequestEventsTable({
   events,
   principalNameMap,
   upstreamNameMap,
@@ -209,6 +319,8 @@ export function RequestEventsTable({
   reservedRowCount = 5,
   emptyTitle = 'No requests',
   emptyDescription,
+  emptyAction,
+  emptyHeadingLevel,
   liveFlashIds,
   columns,
   sentinelRef,
@@ -224,35 +336,36 @@ export function RequestEventsTable({
     : null;
   const showPrincipal = columns?.principal ?? true;
   const showUpstream = columns?.upstream ?? true;
-  const showSession = columns?.session ?? true;
   const showTokens = columns?.tokens ?? true;
   const showCost = columns?.cost ?? true;
+  // Optional columns earn their width only when a visible row has a value;
+  // a column of dashes is noise.
+  const showSession =
+    (columns?.session ?? true) && events.some((e) => e.thread_id);
+  const showKind = events.some((e) => requestKindBadgeText(e.request_kind));
+  const showCacheHit =
+    showTokens && events.some((e) => cacheHitPercent(e) != null);
 
-  const loadingCellClassNames = [
-    '',
-    ...(showPrincipal ? [''] : []),
-    ...(showUpstream ? [''] : []),
-    ...(showSession ? [''] : []),
-    '',
-    '',
-    'text-right tabular-nums',
-    'text-right tabular-nums',
-    ...(showTokens ? ['text-right tabular-nums'] : []),
-    ...(showCost ? ['text-right tabular-nums'] : []),
+  const columnSpecs: ColumnSpec[] = [
+    { label: 'Timestamp', skeleton: 'max-w-24' },
+    ...(showPrincipal ? [{ label: 'Principal', skeleton: 'max-w-24' }] : []),
+    ...(showUpstream ? [{ label: 'Upstream', skeleton: 'max-w-28' }] : []),
+    ...(showSession ? [{ label: 'Session', skeleton: 'max-w-24' }] : []),
+    ...(showKind ? [{ label: 'Request kind', skeleton: 'max-w-12' }] : []),
+    { label: 'Model', skeleton: 'max-w-40' },
+    { label: 'Status', numeric: true, skeleton: 'max-w-12 ml-auto' },
+    { label: 'Latency', numeric: true, skeleton: 'max-w-16 ml-auto' },
+    ...(showTokens
+      ? [{ label: 'Tokens', numeric: true, skeleton: 'max-w-20 ml-auto' }]
+      : []),
+    ...(showCacheHit
+      ? [{ label: 'Cache hit', numeric: true, skeleton: 'max-w-10 ml-auto' }]
+      : []),
+    ...(showCost
+      ? [{ label: 'Cost', numeric: true, skeleton: 'max-w-16 ml-auto' }]
+      : []),
   ];
-  const loadingSkeletonClassNames = [
-    'max-w-24',
-    ...(showPrincipal ? ['max-w-24'] : []),
-    ...(showUpstream ? ['max-w-28'] : []),
-    ...(showSession ? ['max-w-24'] : []),
-    'max-w-12',
-    'max-w-40',
-    'max-w-12 ml-auto',
-    'max-w-16 ml-auto',
-    ...(showTokens ? ['max-w-36 ml-auto'] : []),
-    ...(showCost ? ['max-w-20 ml-auto'] : []),
-  ];
-  const colCount = loadingSkeletonClassNames.length;
+  const colCount = columnSpecs.length;
   const reservedBodyStyle =
     loading || events.length === 0
       ? { height: `${reservedRowCount * REQUEST_EVENT_ROW_HEIGHT_REM}rem` }
@@ -260,48 +373,44 @@ export function RequestEventsTable({
 
   return (
     <>
-      <table
-        className={cx(minWidthClass, 'w-full font-mono text-xs', className)}
+      <Table
+        className={cx(
+          minWidthClass,
+          // `relative` keeps absolutely positioned descendants (the
+          // LatencyCell sr-only descriptions) inside the scroll wrapper;
+          // without it they resolve against <body> and widen the page.
+          'relative max-md:block max-md:min-w-0',
+          className,
+        )}
       >
-        <thead className="table-header sticky top-0 z-10">
-          <tr className="text-[10px] uppercase tracking-wider">
-            <th className="text-left px-3 py-2 whitespace-nowrap">Timestamp</th>
-            {showPrincipal && (
-              <th className="text-left px-3 py-2 whitespace-nowrap">
-                Principal
-              </th>
-            )}
-            {showUpstream && (
-              <th className="text-left px-3 py-2 whitespace-nowrap">
-                Upstream
-              </th>
-            )}
-            {showSession && (
-              <th className="text-left px-3 py-2 whitespace-nowrap">Session</th>
-            )}
-            <th className="text-left px-3 py-2 whitespace-nowrap">
-              Request kind
-            </th>
-            <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
-            <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
-            <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
-            {showTokens && (
-              <th className="text-right px-3 py-2 whitespace-nowrap">Token</th>
-            )}
-            {showCost && (
-              <th className="text-right px-3 py-2 whitespace-nowrap">Cost</th>
-            )}
+        <TableHead className="max-md:hidden">
+          <tr>
+            {columnSpecs.map((column) => (
+              <TableHeadCell key={column.label} numeric={column.numeric}>
+                {column.label}
+              </TableHeadCell>
+            ))}
           </tr>
-        </thead>
-        <tbody style={reservedBodyStyle}>
+        </TableHead>
+        <tbody style={reservedBodyStyle} className="max-md:block">
           {loading ? (
             Array.from({ length: reservedRowCount }).map((_, i) => (
               <SkeletonRow
                 key={i}
                 cols={colCount}
                 style={REQUEST_EVENT_ROW_STYLE}
-                cellClassNames={loadingCellClassNames}
-                skeletonClassNames={loadingSkeletonClassNames}
+                // Below `md` the body is a list of cards, so the placeholder
+                // is one line of the first three cells.
+                className="max-md:flex max-md:items-center max-md:px-1"
+                cellClassNames={columnSpecs.map((column, index) =>
+                  cx(
+                    column.numeric ? 'text-right tabular-nums' : '',
+                    index < 3 ? 'max-md:flex-1' : 'max-md:hidden',
+                  ),
+                )}
+                skeletonClassNames={columnSpecs.map(
+                  (column) => column.skeleton,
+                )}
               />
             ))
           ) : events.length ? (
@@ -327,7 +436,9 @@ export function RequestEventsTable({
                   showPrincipal={showPrincipal}
                   showUpstream={showUpstream}
                   showSession={showSession}
+                  showKind={showKind}
                   showTokens={showTokens}
+                  showCacheHit={showCacheHit}
                   showCost={showCost}
                   selected={selectedId === eventKey}
                   flash={liveFlashIds?.has(eventKey) ?? false}
@@ -338,20 +449,13 @@ export function RequestEventsTable({
             })
           ) : (
             <tr className="h-full">
-              <td
-                colSpan={colCount}
-                className="px-3 py-8 align-middle text-center text-text-faint text-xs"
-              >
-                <div className="flex flex-col items-center justify-center text-center py-4">
-                  <h3 className="text-sm font-medium text-text">
-                    {emptyTitle}
-                  </h3>
-                  {emptyDescription && (
-                    <p className="mt-1 text-xs text-text-faint max-w-md">
-                      {emptyDescription}
-                    </p>
-                  )}
-                </div>
+              <td colSpan={colCount} className="px-4 align-middle">
+                <EmptyState
+                  title={emptyTitle}
+                  description={emptyDescription}
+                  action={emptyAction}
+                  headingLevel={emptyHeadingLevel}
+                />
               </td>
             </tr>
           )}
@@ -359,14 +463,14 @@ export function RequestEventsTable({
             <tr ref={sentinelRef}>
               <td
                 colSpan={colCount}
-                className="px-3 py-4 text-center text-text-faint text-[11px]"
+                className="px-3 py-4 text-center text-caption text-text-faint"
               >
                 {loadingMore ? 'Loading…' : hasMore ? '' : 'No more entries'}
               </td>
             </tr>
           )}
         </tbody>
-      </table>
+      </Table>
       <RequestEventDrawer
         event={selected}
         principalName={
@@ -378,4 +482,4 @@ export function RequestEventsTable({
       />
     </>
   );
-}
+});

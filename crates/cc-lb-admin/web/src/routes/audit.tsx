@@ -1,32 +1,65 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { Filter, RefreshCw, X } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { ChevronRight, RefreshCw, SlidersHorizontal, X } from 'lucide-react';
+import { type ReactNode, useMemo, useRef, useState } from 'react';
 import * as z from 'zod';
+import { AuditEntryDrawer } from '../components/audit/AuditEntryDrawer';
 import {
-  Badge,
+  AUDIT_CATEGORY_LABEL,
+  AUDIT_TYPE_FILTERS,
+  AUDIT_TYPE_NOUN,
+  type AuditEntryLike,
+  type AuditTypeFilter,
+  auditActorLabel,
+  auditCategory,
+  auditTarget,
+  humanizeAuditAction,
+  type NameMaps,
+  type ParsedAction,
+  parseAuditAction,
+  readableRoute,
+  statusTextClass,
+} from '../components/audit/auditEntry';
+import {
   Button,
   Card,
-  CardBody,
-  CardHeader,
   cx,
   EmptyState,
   Field,
   FullPage,
-  INPUT_CLASS,
-  Modal,
-  Section,
+  IconButton,
+  PageHeader,
+  SegmentedControl,
   SkeletonRow,
 } from '../components/ui/primitives';
-import { RelativeTime } from '../components/ui/RelativeTime';
+import { Select } from '../components/ui/Select';
+import {
+  EmptyValue,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeadCell,
+  TableRow,
+} from '../components/ui/Table';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { eventTime } from '../lib/api';
+import { useLocale, useTimezone } from '../lib/locale';
 import {
   useAudit,
   usePrincipalNameMap,
   usePrincipals,
   useUpstreamNameMap,
 } from '../lib/queries';
+import {
+  TIME_PRESET_OPTIONS_WITH_ALL,
+  TIME_PRESET_SECONDS,
+  TIME_PRESETS,
+  type TimePreset,
+} from '../lib/timePresets';
 import { MAX_FORMATTABLE_UNIX_SECONDS } from '../lib/timezone';
+
+const AUDIT_LIMIT = 200;
+
+type RangePreset = TimePreset;
 
 const unixSecondsSearchParam = z.preprocess((value) => {
   if (value == null || value === '') return undefined;
@@ -43,6 +76,11 @@ const auditSearchSchema = z
     principal_id: z.string().optional(),
     since: unixSecondsSearchParam,
     until: unixSecondsSearchParam,
+    // Absent means the default "write" view; the server has no action-type
+    // filter, so this one is applied to the loaded entries in the browser.
+    type: z.enum(AUDIT_TYPE_FILTERS).optional().catch(undefined),
+    // Marks which preset produced `since`; only used to highlight it.
+    range: z.enum(TIME_PRESETS).optional().catch(undefined),
   })
   .transform((filters) => {
     if (
@@ -54,7 +92,11 @@ const auditSearchSchema = z
         ...filters,
         since: undefined,
         until: undefined,
+        range: undefined,
       };
+    }
+    if (filters.since == null || filters.until != null) {
+      return { ...filters, range: undefined };
     }
     return filters;
   });
@@ -64,72 +106,49 @@ export const Route = createFileRoute('/audit')({
   component: AuditPage,
 });
 
-interface AuditEntryLike {
-  request_id: string;
-  ts?: number | null;
-  ts_ms?: number | null;
-  principal_id?: string | null;
-  route?: string | null;
-  upstream?: string | null;
-  status: number;
-  actor?: string | null;
-  actor_authority?: string | null;
-  actor_subject?: string | null;
-  actor_kind?: string | null;
-  actor_email?: string | null;
-  admin_action?: string | null;
-  kind?: string | null;
-  payload?: Record<string, unknown> | null;
-  [k: string]: unknown;
-}
+const TYPE_OPTIONS: ReadonlyArray<{ value: AuditTypeFilter; label: string }> = [
+  { value: 'write', label: 'Writes' },
+  { value: 'read', label: 'Reads' },
+  { value: 'auth', label: 'Auth' },
+  { value: 'all', label: 'All' },
+];
 
+const RANGE_OPTIONS = TIME_PRESET_OPTIONS_WITH_ALL;
+
+// Time, Action, Target, Actor, Route, Status, Open.
 const AUDIT_COLUMN_CLASS_NAMES = [
-  'w-36 whitespace-nowrap',
-  'w-40 max-w-40 truncate',
-  'w-36 max-w-36 truncate',
+  'w-44',
+  '',
+  'w-48',
   'w-40',
-  'w-44 max-w-44 truncate',
-  'w-72 max-w-72 truncate',
-  'w-40 max-w-40 truncate',
-  'w-20 text-right',
-  'w-20 text-right',
+  'w-56',
+  'w-20',
+  'w-14',
 ] as const;
 
 const AUDIT_SKELETON_CLASS_NAMES = [
-  'w-24',
   'w-28',
-  'w-24',
+  'w-40',
   'w-28',
-  'w-32',
-  'w-48',
   'w-28',
-  'w-10 ml-auto',
-  'w-10 ml-auto',
+  'w-40',
+  'w-8 ml-auto',
+  'w-6 ml-auto',
 ] as const;
-const AUDIT_COUNT_SLOT_CLASS =
-  'inline-flex min-w-5 shrink-0 items-center justify-end';
 
-function cleanAuditPayload(entry: AuditEntryLike): Record<string, unknown> {
-  const DROP = new Set([
-    'model',
-    'input_tokens',
-    'output_tokens',
-    'duration_ms',
-    'body_bytes',
-    'cost_usd_micros',
-    'cache_creation_input_tokens',
-    'cache_read_input_tokens',
-    'agent_label',
-    'api_key_id',
-  ]);
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(entry)) {
-    if (DROP.has(k)) continue;
-    if (v == null) continue;
-    if (typeof v === 'number' && v === 0 && k !== 'status') continue;
-    out[k] = v;
-  }
-  return out;
+const GROUP_LABEL_CLASS = 'text-label text-text-muted';
+
+interface AuditRow {
+  entry: AuditEntryLike;
+  key: string;
+  parsed: ParsedAction;
+}
+
+function changedFieldsSummary(parsed: ParsedAction): string | null {
+  const changed = parsed.params.find(
+    ([key]) => key === 'fields' || key === 'slots',
+  );
+  return changed ? `${changed[0]}: ${changed[1].split(',').join(', ')}` : null;
 }
 
 function AuditPage() {
@@ -137,7 +156,7 @@ function AuditPage() {
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
   const audit = useAudit({
-    limit: '200',
+    limit: String(AUDIT_LIMIT),
     admin_only: 'true',
     principal_id: filters.principal_id,
     since: filters.since?.toString(),
@@ -145,24 +164,42 @@ function AuditPage() {
   });
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
+  const maps: NameMaps = useMemo(
+    () => ({ principals: principalNameMap, upstreams: upstreamNameMap }),
+    [principalNameMap, upstreamNameMap],
+  );
+  const { effective: locale } = useLocale();
+  const { effective: timezone } = useTimezone();
+  const timeFormat = useMemo(
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        timeZone: timezone,
+      }),
+    [locale, timezone],
+  );
   const [selected, setSelected] = useState<AuditEntryLike | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const refreshInFlightRef = useRef(false);
 
-  const setPrincipalFilter = (value: string) => {
-    navigate({
-      search: { ...filters, principal_id: value || undefined },
-    });
-  };
+  const typeFilter: AuditTypeFilter = filters.type ?? 'write';
+  const rangeValue =
+    filters.range ??
+    (filters.since == null && filters.until == null ? 'all' : 'custom');
 
-  const rows = (audit.data?.entries ?? []) as unknown as AuditEntryLike[];
-  const adminRows = rows.filter(
-    (r) => (r.admin_action ?? null) != null || (r.kind ?? null) != null,
-  );
-  const renderRows = useMemo(() => {
+  const loadedRows = useMemo(() => {
+    const entries = (audit.data?.entries ?? []) as unknown as AuditEntryLike[];
     const identityOccurrences = new Map<string, number>();
-    return adminRows
-      .map((entry) => {
+    return entries
+      .filter(
+        (r) => (r.admin_action ?? null) != null || (r.kind ?? null) != null,
+      )
+      .map((entry): AuditRow => {
         const identity = JSON.stringify([
           entry.request_id,
           entry.ts_ms ?? null,
@@ -174,12 +211,13 @@ function AuditPage() {
           entry.admin_action ?? null,
           entry.kind ?? null,
           entry.status,
-        ])!;
+        ]);
         const occurrence = identityOccurrences.get(identity) ?? 0;
         identityOccurrences.set(identity, occurrence + 1);
         return {
           entry,
           key: `${identity}:${occurrence}`,
+          parsed: parseAuditAction(entry),
         };
       })
       .sort(
@@ -187,12 +225,45 @@ function AuditPage() {
           (eventTime(b.entry)?.getTime() ?? 0) -
           (eventTime(a.entry)?.getTime() ?? 0),
       );
-  }, [adminRows]);
+  }, [audit.data]);
 
-  const activeFilterCount =
+  const visibleRows = useMemo(
+    () =>
+      typeFilter === 'all'
+        ? loadedRows
+        : loadedRows.filter(
+            (row) => auditCategory(row.parsed.name) === typeFilter,
+          ),
+    [loadedRows, typeFilter],
+  );
+
+  const serverFilterCount =
     Number(Boolean(filters.principal_id)) +
-    Number(filters.since != null) +
-    Number(filters.until != null);
+    Number(filters.since != null || filters.until != null);
+  const hasNonDefaultFilters = serverFilterCount > 0 || typeFilter !== 'write';
+
+  const setType = (value: AuditTypeFilter) => {
+    navigate({
+      search: (prev) => ({
+        ...prev,
+        type: value === 'write' ? undefined : value,
+      }),
+    });
+  };
+
+  const setRange = (value: RangePreset | 'all') => {
+    navigate({
+      search: (prev) =>
+        value === 'all'
+          ? { ...prev, since: undefined, until: undefined, range: undefined }
+          : {
+              ...prev,
+              since: Math.floor(Date.now() / 1000) - TIME_PRESET_SECONDS[value],
+              until: undefined,
+              range: value,
+            },
+    });
+  };
 
   const refreshAudit = async () => {
     if (refreshInFlightRef.current) return;
@@ -207,366 +278,417 @@ function AuditPage() {
     }
   };
 
-  return (
-    <FullPage>
-      <Section
-        title="Audit Trail"
-        className="flex-1 min-h-0"
-        subtitle={
-          <span className="inline-flex items-center gap-1.5">
-            <span
-              className={AUDIT_COUNT_SLOT_CLASS}
-              data-testid="audit-count-slot"
-            >
-              {audit.isLoading ? (
-                <span className="skeleton h-3 flex-1" aria-hidden="true" />
-              ) : (
-                renderRows.length
-              )}
-            </span>
-            <span>
-              admin actions ·{' '}
-              {activeFilterCount
-                ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active`
-                : 'unfiltered'}
-            </span>
-          </span>
+  const [singular, plural] = AUDIT_TYPE_NOUN[typeFilter];
+  const reachedLimit = (audit.data?.entries.length ?? 0) >= AUDIT_LIMIT;
+  const summary = audit.isLoading ? null : (
+    <>
+      Showing{' '}
+      <span className="font-medium text-text">{visibleRows.length}</span>{' '}
+      {visibleRows.length === 1 ? singular : plural}
+      {typeFilter === 'all'
+        ? null
+        : ` of ${loadedRows.length} loaded ${loadedRows.length === 1 ? 'entry' : 'entries'}`}
+      {reachedLimit ? ` (the newest ${AUDIT_LIMIT} for these filters)` : null}
+    </>
+  );
+
+  const formatTime = (entry: AuditEntryLike) => {
+    const date = eventTime(entry);
+    return date ? timeFormat.format(date) : '—';
+  };
+
+  const clearButton = hasNonDefaultFilters ? (
+    <Button
+      size="sm"
+      variant="ghost"
+      iconLeft={<X className="w-3 h-3" aria-hidden="true" />}
+      onClick={() => navigate({ search: {} })}
+    >
+      Reset filters
+    </Button>
+  ) : null;
+
+  let emptyState: ReactNode = null;
+  if (audit.isError) {
+    emptyState = (
+      <EmptyState
+        title="Couldn't load the audit trail"
+        description={
+          audit.error instanceof Error ? audit.error.message : undefined
         }
         action={
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              data-testid="audit-refresh"
-              iconLeft={<RefreshCw className="w-3 h-3" />}
-              loading={refreshing}
-              onClick={refreshAudit}
-            >
-              {refreshing ? 'Refreshing...' : 'Refresh'}
-            </Button>
-          </div>
+          <Button size="sm" onClick={refreshAudit}>
+            Retry
+          </Button>
         }
-      >
-        <Card className="flex-1 flex flex-col min-h-0">
-          <div className="flex shrink-0 flex-wrap items-end gap-3 border-b border-subtle p-3">
-            <div className="w-full min-w-0 sm:w-auto">
-              <Field label="Principal">
-                <select
-                  className={`${INPUT_CLASS} w-full sm:w-44`}
-                  value={filters.principal_id ?? ''}
-                  onChange={(e) => setPrincipalFilter(e.target.value)}
-                >
-                  <option value="">All principals</option>
-                  {principals.data?.principals.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-            <TimeRangeBounds
-              since={filters.since}
-              until={filters.until}
-              onCommit={({ since, until }) => {
-                navigate({
-                  search: (prev) => ({
-                    ...prev,
-                    since,
-                    until,
-                  }),
-                });
-              }}
-            />
-            {activeFilterCount ? (
-              <Button
-                size="sm"
-                iconLeft={<X className="w-3 h-3" />}
-                onClick={() => navigate({ search: {} })}
-              >
-                Clear
-              </Button>
-            ) : null}
-          </div>
+      />
+    );
+  } else if (visibleRows.length === 0 && loadedRows.length > 0) {
+    emptyState = (
+      <EmptyState
+        title={`No ${plural} in the loaded entries`}
+        description={`${loadedRows.length} ${loadedRows.length === 1 ? 'entry matches' : 'entries match'} the principal and time filters, but none are ${plural}.`}
+        action={
+          <Button size="sm" variant="primary" onClick={() => setType('all')}>
+            Show all entries
+          </Button>
+        }
+      />
+    );
+  } else if (visibleRows.length === 0) {
+    emptyState = (
+      <EmptyState
+        title="No audit entries"
+        description={
+          serverFilterCount
+            ? 'Nothing matches the principal and time filters.'
+            : 'No admin actions have been recorded yet.'
+        }
+        action={clearButton}
+      />
+    );
+  }
 
-          <div className="flex-1 overflow-auto min-h-0">
-            <table className="table-fixed min-w-[1080px] w-full font-mono text-xs">
-              <colgroup>
-                {AUDIT_COLUMN_CLASS_NAMES.map((className, index) => (
-                  <col key={index} className={className} />
-                ))}
-              </colgroup>
-              <thead className="table-header sticky top-0 z-10">
-                <tr className="text-[10px] uppercase tracking-wider">
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[0],
-                    )}
-                  >
-                    Timestamp <span className="font-mono ml-1">↓</span>
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[1],
-                    )}
-                  >
-                    Principal
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[2],
-                    )}
-                  >
-                    Actor
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[3],
-                    )}
-                  >
-                    Route
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[4],
-                    )}
-                  >
-                    Upstream
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[5],
-                    )}
-                  >
-                    Action
-                  </th>
-                  <th
-                    className={cx(
-                      'text-left px-3 py-2',
-                      AUDIT_COLUMN_CLASS_NAMES[6],
-                    )}
-                  >
-                    Kind
-                  </th>
-                  <th className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[7])}>
-                    Status
-                  </th>
-                  <th className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[8])}>
-                    Detail
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit.isLoading ? (
-                  Array.from({ length: 5 }).map((_, i) => (
-                    <SkeletonRow
-                      key={i}
-                      cols={AUDIT_COLUMN_CLASS_NAMES.length}
-                      cellClassNames={AUDIT_COLUMN_CLASS_NAMES}
-                      skeletonClassNames={AUDIT_SKELETON_CLASS_NAMES}
-                    />
-                  ))
-                ) : renderRows.length ? (
-                  renderRows.map(({ entry: e, key }) => (
-                    <tr
-                      key={key}
-                      className="border-b border-row hover:bg-overlay-3 cursor-pointer"
-                      onClick={() => setSelected(e)}
-                    >
-                      <td
-                        className={cx(
-                          'px-3 py-2 text-text-faint',
-                          AUDIT_COLUMN_CLASS_NAMES[0],
-                        )}
-                      >
-                        <RelativeTime compact ts={eventTime(e)} />
-                      </td>
-                      <td
-                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[1])}
-                      >
-                        {principalNameMap.get(e.principal_id ?? '') ??
-                          e.principal_id ??
-                          '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 font-mono',
-                          AUDIT_COLUMN_CLASS_NAMES[2],
-                        )}
-                      >
-                        {e.actor ?? '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 text-text-muted',
-                          AUDIT_COLUMN_CLASS_NAMES[3],
-                        )}
-                      >
-                        {e.route ?? '—'}
-                      </td>
-                      <td
-                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[4])}
-                      >
-                        {upstreamNameMap.get(e.upstream ?? '') ??
-                          e.upstream ??
-                          '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 font-mono',
-                          AUDIT_COLUMN_CLASS_NAMES[5],
-                        )}
-                        title={e.admin_action ?? undefined}
-                      >
-                        {e.admin_action ?? '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 font-mono',
-                          AUDIT_COLUMN_CLASS_NAMES[6],
-                        )}
-                      >
-                        {e.kind ?? '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 tabular-nums',
-                          AUDIT_COLUMN_CLASS_NAMES[7],
-                          e.status >= 500
-                            ? 'text-red-400'
-                            : e.status >= 400
-                              ? 'text-amber-400'
-                              : 'text-green-400',
-                        )}
-                      >
-                        {e.status}
-                      </td>
-                      <td
-                        className={cx('px-3 py-2', AUDIT_COLUMN_CLASS_NAMES[8])}
-                      >
-                        <Badge tone="neutral">view</Badge>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={9}>
-                      <EmptyState
-                        title="No audit entries"
-                        description="No entries match the current filters."
-                        action={
-                          activeFilterCount ? (
-                            <Button
-                              onClick={() => navigate({ search: {} })}
-                              variant="primary"
-                              iconLeft={<Filter className="w-3 h-3" />}
-                            >
-                              Clear filters
-                            </Button>
-                          ) : undefined
-                        }
-                      />
-                    </td>
-                  </tr>
-                )}
-                {renderRows.length > 0 && (
-                  <tr>
-                    <td
-                      colSpan={9}
-                      className="px-3 py-4 text-center text-text-faint text-[11px]"
-                    >
-                      No more entries
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      </Section>
+  const principalOptions = (principals.data?.principals ?? []).map((p) => ({
+    value: p.id,
+    label: p.name,
+  }));
 
-      <Modal
-        open={!!selected}
-        onOpenChange={(o) => {
-          if (!o) setSelected(null);
-        }}
-        title={selected ? `Audit entry ${selected.request_id}` : ''}
-        size="lg"
-        footer={<Button onClick={() => setSelected(null)}>Close</Button>}
-      >
-        {selected ? (
-          <div className="space-y-3 text-xs font-mono">
-            <Card>
-              <CardHeader title="Summary" />
-              <CardBody className="space-y-2">
-                <Row
-                  label="Timestamp"
-                  value={<RelativeTime ts={eventTime(selected)} />}
-                />
-                <Row
-                  label="Principal"
-                  value={
-                    principalNameMap.get(selected.principal_id ?? '') ??
-                    selected.principal_id ??
-                    '—'
-                  }
-                />
-                <Row label="Actor" value={selected.actor ?? '—'} />
-                <Row
-                  label="Actor authority"
-                  value={selected.actor_authority ?? '—'}
-                />
-                <Row
-                  label="Actor subject"
-                  value={selected.actor_subject ?? '—'}
-                />
-                <Row label="Actor kind" value={selected.actor_kind ?? '—'} />
-                <Row label="Actor email" value={selected.actor_email ?? '—'} />
-                <Row label="Route" value={selected.route ?? '—'} />
-                <Row
-                  label="Upstream"
-                  value={
-                    upstreamNameMap.get(selected.upstream ?? '') ??
-                    selected.upstream ??
-                    '—'
-                  }
-                />
-                <Row
-                  label="Admin action"
-                  value={selected.admin_action ?? '—'}
-                />
-                <Row label="Kind" value={selected.kind ?? '—'} />
-                <Row label="Status" value={String(selected.status)} />
-              </CardBody>
-            </Card>
-            <Card>
-              <CardHeader
-                title="Raw payload"
-                subtitle="Redacted keys are pre-stripped server-side"
-              />
-              <CardBody>
-                <pre className="overflow-x-auto text-[11px] leading-relaxed">
-                  {JSON.stringify(cleanAuditPayload(selected), null, 2)}
-                </pre>
-              </CardBody>
-            </Card>
-          </div>
-        ) : null}
-      </Modal>
-    </FullPage>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-text-faint">{label}</span>
-      <span className="text-right truncate max-w-[60%]">{value}</span>
-    </div>
+    <FullPage>
+      <PageHeader
+        title="Audit trail"
+        description="Admin API actions, newest first. Open an entry for its recorded details."
+        actions={
+          <Button
+            data-testid="audit-refresh"
+            iconLeft={<RefreshCw aria-hidden="true" />}
+            loading={refreshing}
+            onClick={refreshAudit}
+          >
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </Button>
+        }
+      />
+
+      {/* The card is as tall as its rows; past the viewport the list scrolls. */}
+      <Card className="flex min-h-0 flex-col">
+        <div className="flex shrink-0 flex-col gap-3 border-b border-subtle px-4 py-3">
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+            <div className="flex flex-col gap-1.5">
+              <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+                Action type
+              </span>
+              <SegmentedControl
+                ariaLabel="Action type"
+                value={typeFilter}
+                onChange={setType}
+                options={TYPE_OPTIONS}
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+                Time range
+              </span>
+              <SegmentedControl
+                ariaLabel="Time range"
+                value={rangeValue}
+                onChange={(value) => {
+                  if (value !== 'custom') setRange(value);
+                }}
+                options={RANGE_OPTIONS}
+              />
+            </div>
+            <Button
+              className="md:hidden"
+              aria-expanded={mobileFiltersOpen}
+              aria-controls="audit-more-filters"
+              iconLeft={<SlidersHorizontal aria-hidden="true" />}
+              onClick={() => setMobileFiltersOpen((open) => !open)}
+            >
+              {serverFilterCount
+                ? `More filters (${serverFilterCount})`
+                : 'More filters'}
+            </Button>
+            <div
+              id="audit-more-filters"
+              className={cx(
+                'w-full flex-wrap items-end gap-3 md:flex md:w-auto',
+                mobileFiltersOpen ? 'flex' : 'hidden',
+              )}
+            >
+              <div className="w-full min-w-0 sm:w-48">
+                <Field label="Principal">
+                  <Select
+                    size="sm"
+                    value={filters.principal_id ?? ''}
+                    options={principalOptions}
+                    onChange={(value) =>
+                      navigate({
+                        search: (prev) => ({
+                          ...prev,
+                          principal_id: value || undefined,
+                        }),
+                      })
+                    }
+                    allLabel="All principals"
+                    className="w-full"
+                  />
+                </Field>
+              </div>
+              <TimeRangeBounds
+                since={filters.since}
+                until={filters.until}
+                onCommit={({ since, until }) => {
+                  navigate({
+                    search: (prev) => ({
+                      ...prev,
+                      since,
+                      until,
+                      range: undefined,
+                    }),
+                  });
+                }}
+              />
+            </div>
+          </div>
+          <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
+            <p
+              className="text-body-sm text-text-muted"
+              aria-live="polite"
+              data-testid="audit-summary"
+            >
+              {summary ?? (
+                <span className="skeleton inline-block h-3 w-48 align-middle" />
+              )}
+            </p>
+            {clearButton}
+          </div>
+        </div>
+
+        {/* Desktop table */}
+        <div className="hidden min-h-0 overflow-auto md:block">
+          <Table className="table-fixed min-w-[960px]">
+            <colgroup>
+              {AUDIT_COLUMN_CLASS_NAMES.map((className, index) => (
+                <col key={index} className={className} />
+              ))}
+            </colgroup>
+            <TableHead>
+              <tr>
+                <TableHeadCell>Time</TableHeadCell>
+                <TableHeadCell>Action</TableHeadCell>
+                <TableHeadCell>Target</TableHeadCell>
+                <TableHeadCell>Actor</TableHeadCell>
+                <TableHeadCell>Route</TableHeadCell>
+                <TableHeadCell numeric>Status</TableHeadCell>
+                <TableHeadCell>
+                  <span className="sr-only">Open</span>
+                </TableHeadCell>
+              </tr>
+            </TableHead>
+            <tbody>
+              {audit.isLoading ? (
+                Array.from({ length: 5 }).map((_, i) => (
+                  <SkeletonRow
+                    key={i}
+                    className="h-10"
+                    cols={AUDIT_COLUMN_CLASS_NAMES.length}
+                    skeletonClassNames={AUDIT_SKELETON_CLASS_NAMES}
+                  />
+                ))
+              ) : emptyState ? (
+                <tr>
+                  <td colSpan={AUDIT_COLUMN_CLASS_NAMES.length}>
+                    {emptyState}
+                  </td>
+                </tr>
+              ) : (
+                visibleRows.map(({ entry, key, parsed }) => {
+                  const target = auditTarget(entry, parsed, maps);
+                  const changed = changedFieldsSummary(parsed);
+                  const category = auditCategory(parsed.name);
+                  const actor = auditActorLabel(entry);
+                  const time = formatTime(entry);
+                  const action = humanizeAuditAction(parsed.name);
+                  return (
+                    <TableRow
+                      key={key}
+                      interactive
+                      className="has-[:focus-visible]:bg-overlay-3"
+                      onClick={() => setSelected(entry)}
+                    >
+                      <TableCell className="whitespace-nowrap pr-4 text-text-muted">
+                        {time}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex min-w-0 items-baseline gap-2">
+                          <span className="truncate text-text">{action}</span>
+                          {typeFilter === 'all' && category !== 'write' ? (
+                            <span className="shrink-0 text-caption text-text-faint">
+                              {AUDIT_CATEGORY_LABEL[category]}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
+                          <span
+                            className="shrink-0 font-mono text-data"
+                            title={
+                              entry.admin_action ?? entry.kind ?? undefined
+                            }
+                          >
+                            {parsed.name}
+                          </span>
+                          {changed ? (
+                            <span className="truncate" title={changed}>
+                              · {changed}
+                            </span>
+                          ) : null}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {target ? (
+                          <div
+                            className="truncate"
+                            title={target.id ?? target.name}
+                          >
+                            <span className="text-text-faint">
+                              {target.kind}{' '}
+                            </span>
+                            <span
+                              className={
+                                target.resolved
+                                  ? 'text-text'
+                                  : 'font-mono text-data text-text-muted'
+                              }
+                            >
+                              {target.name}
+                            </span>
+                          </div>
+                        ) : (
+                          <EmptyValue label="No target" />
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div
+                          className="truncate text-text-muted"
+                          title={
+                            entry.actor_kind
+                              ? `${actor} (${entry.actor_kind.replaceAll('_', ' ')})`
+                              : actor
+                          }
+                        >
+                          {actor}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        {entry.route ? (
+                          <div
+                            className="truncate font-mono text-data text-text-muted"
+                            title={entry.route}
+                          >
+                            {readableRoute(entry.route, maps)}
+                          </div>
+                        ) : (
+                          <EmptyValue label="No route" />
+                        )}
+                      </TableCell>
+                      <TableCell
+                        numeric
+                        className={statusTextClass(entry.status)}
+                      >
+                        {entry.status}
+                      </TableCell>
+                      <TableCell className="py-1 text-right">
+                        <IconButton
+                          label={`Open ${action} entry from ${time}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelected(entry);
+                          }}
+                        >
+                          <ChevronRight aria-hidden="true" />
+                        </IconButton>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </tbody>
+          </Table>
+        </div>
+
+        {/* Mobile cards */}
+        <div className="min-h-0 overflow-auto md:hidden">
+          {audit.isLoading ? (
+            <div className="flex flex-col gap-2 p-4" aria-hidden="true">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="skeleton h-16 rounded-xs" />
+              ))}
+            </div>
+          ) : emptyState ? (
+            emptyState
+          ) : (
+            <ul className="divide-y divide-row">
+              {visibleRows.map(({ entry, key, parsed }) => {
+                const target = auditTarget(entry, parsed, maps);
+                const changed = changedFieldsSummary(parsed);
+                return (
+                  <li key={key}>
+                    <button
+                      type="button"
+                      className="flex w-full flex-col gap-0.5 px-4 py-3 text-left text-body-sm hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                      onClick={() => setSelected(entry)}
+                    >
+                      <span className="flex w-full items-baseline justify-between gap-3">
+                        <span className="truncate text-text">
+                          {humanizeAuditAction(parsed.name)}
+                        </span>
+                        <span
+                          className={cx(
+                            'shrink-0 tabular-nums',
+                            statusTextClass(entry.status),
+                          )}
+                        >
+                          {entry.status}
+                        </span>
+                      </span>
+                      <span className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
+                        <span className="shrink-0 font-mono text-data">
+                          {parsed.name}
+                        </span>
+                        {changed ? (
+                          <span className="truncate">· {changed}</span>
+                        ) : null}
+                      </span>
+                      {target ? (
+                        <span className="truncate text-text-muted">
+                          <span className="text-text-faint">
+                            {target.kind}{' '}
+                          </span>
+                          {target.name}
+                        </span>
+                      ) : null}
+                      <span className="flex w-full justify-between gap-3 text-caption text-text-faint">
+                        <span className="truncate">
+                          {auditActorLabel(entry)}
+                        </span>
+                        <span className="shrink-0">{formatTime(entry)}</span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </Card>
+
+      <AuditEntryDrawer
+        entry={selected}
+        maps={maps}
+        onClose={() => setSelected(null)}
+      />
+    </FullPage>
   );
 }

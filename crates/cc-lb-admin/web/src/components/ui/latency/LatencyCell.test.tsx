@@ -11,7 +11,7 @@ import { LatencyCell } from './LatencyCell';
 
 function renderCell(
   event: RequestEventWithPhase,
-  openBy: 'hover' | 'focus' = 'hover',
+  openBy: 'hover' | 'click' = 'hover',
 ) {
   render(
     <table>
@@ -25,8 +25,8 @@ function renderCell(
   const trigger = screen.getByRole('button', {
     name: /Latency .* show breakdown/,
   });
-  if (openBy === 'focus') {
-    fireEvent.focus(trigger);
+  if (openBy === 'click') {
+    fireEvent.click(trigger);
   } else {
     fireEvent.pointerEnter(trigger);
     act(() => vi.advanceTimersByTime(200));
@@ -221,19 +221,35 @@ describe('LatencyCell timing breakdown', () => {
     ).toMatch(/50(?:\.0)? ms.*50%/);
   });
 
-  it('uses a native button and opens the popover on keyboard focus', () => {
+  it('does not open on keyboard focus, only on explicit activation', () => {
+    render(
+      <table>
+        <tbody>
+          <tr>
+            <LatencyCell event={baseEvent} />
+          </tr>
+        </tbody>
+      </table>,
+    );
+    fireEvent.focus(
+      screen.getByRole('button', { name: /Latency .* show breakdown/ }),
+    );
+    expect(screen.queryByText('Latency by responsibility')).toBeNull();
+    cleanup();
+
     const trigger = renderCell(
       {
         ...baseEvent,
         proxy_setup_ms: 20,
         json_parse_ms: 0.125,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, cc-lb 20 ms, Unattributed 80 ms, show breakdown',
+      'Latency 100 ms, show breakdown',
     );
+    expect(describedText(trigger)).toBe('cc-lb 20 ms, Unattributed 80 ms');
     expect(screen.getByText('Latency by responsibility')).toBeDefined();
     expect(screen.getByText('JSON parse')).toBeDefined();
   });
@@ -299,11 +315,14 @@ describe('LatencyCell timing breakdown', () => {
         upstream_body_ms: 40,
         finalize_ms: 10,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, cc-lb 30 ms, Upstream wait 20 ms, Unattributed 50 ms, Ingress body 834.3 KB, show breakdown',
+      'Latency 100 ms, show breakdown',
+    );
+    expect(describedText(trigger)).toBe(
+      'cc-lb 30 ms, Upstream wait 20 ms, Unattributed 50 ms, Ingress body 834.3 KB',
     );
 
     expect(screen.getByText('Ingress body: 834.3 KB')).toBeDefined();
@@ -362,11 +381,14 @@ describe('LatencyCell timing breakdown', () => {
         response_body_process_ms: 20,
         response_body_downstream_poll_gap_ms: 10,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 700 ms, Downstream 10 ms, cc-lb 80 ms, Upstream wait 500 ms, Unattributed 110 ms, show breakdown',
+      'Latency 700 ms, show breakdown',
+    );
+    expect(describedText(trigger)).toBe(
+      'Downstream 10 ms, cc-lb 80 ms, Upstream wait 500 ms, Unattributed 110 ms',
     );
 
     expect(
@@ -388,12 +410,13 @@ describe('LatencyCell timing breakdown', () => {
         source_kind: 'renewal',
         duration_ms: 500,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 500 ms, Renewal cycle 500 ms, show breakdown',
+      'Latency 500 ms, show breakdown',
     );
+    expect(describedText(trigger)).toBe('Renewal cycle 500 ms');
 
     expect(screen.getByText('Renewal cycle')).toBeDefined();
     expect(screen.queryByText('Request body read')).toBeNull();
@@ -470,12 +493,13 @@ describe('LatencyCell timing breakdown', () => {
         finalize_ms: undefined,
         limit_reconcile_ms: 10,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, cc-lb 10 ms, Unattributed 90 ms, show breakdown',
+      'Latency 100 ms, show breakdown',
     );
+    expect(describedText(trigger)).toBe('cc-lb 10 ms, Unattributed 90 ms');
     expect(screen.getByText('Request body read')).toBeDefined();
     expect(screen.queryByText('Finalize')).toBeNull();
     expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
@@ -499,12 +523,13 @@ describe('LatencyCell timing breakdown', () => {
         finalize_ms: undefined,
         limit_reconcile_ms: 0,
       },
-      'focus',
+      'click',
     );
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, Unattributed 100 ms, show breakdown',
+      'Latency 100 ms, show breakdown',
     );
+    expect(describedText(trigger)).toBe('Unattributed 100 ms');
     expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
     expect(screen.getByText('Limit reconcile')).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);

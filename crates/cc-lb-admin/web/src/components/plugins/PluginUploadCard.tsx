@@ -46,11 +46,14 @@ type PluginUploadMutation = Pick<
 
 export function PluginUploadCard({
   autoFocus = false,
+  bare = false,
   onAutoFocus,
   onUploaded,
   upload,
 }: {
   autoFocus?: boolean;
+  /** Render only the drop zone, for hosts (the upload dialog) that already title it. */
+  bare?: boolean;
   onAutoFocus?: () => void;
   onUploaded?: (id: string) => void;
   upload: PluginUploadMutation;
@@ -110,108 +113,109 @@ export function PluginUploadCard({
     if (document.activeElement === browseRef.current) onAutoFocus?.();
   }, [autoFocus, onAutoFocus, uploading]);
 
+  const dropZone = (
+    <div
+      ref={browseRef}
+      role="button"
+      tabIndex={uploading ? -1 : 0}
+      aria-disabled={uploading || undefined}
+      aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
+      aria-busy={uploading}
+      className={cx(
+        'flex flex-col items-center justify-center rounded-sm border border-dashed border-subtle-strong px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+        uploading
+          ? 'cursor-wait opacity-70 border-accent/40'
+          : 'cursor-pointer hover:border-accent/40 hover:bg-overlay-2',
+      )}
+      onClick={() => {
+        if (!uploading) fileRef.current?.click();
+      }}
+      onKeyDown={(e) => {
+        if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          fileRef.current?.click();
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (!uploading) handleFile(e.dataTransfer.files?.[0]);
+      }}
+    >
+      <UploadCloud
+        strokeWidth={1.75}
+        aria-hidden="true"
+        className={cx(
+          'mb-2 size-6',
+          uploading ? 'text-accent animate-pulse' : 'text-text-faint',
+        )}
+      />
+      <div className="text-body-sm font-medium text-text">
+        {uploading ? 'Uploading…' : 'Choose .wasm file'}
+      </div>
+      <div className="mt-1 text-caption text-text-faint">
+        Drag and drop or click to browse. Max 32 MiB.
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        aria-label="Plugin file"
+        accept=".wasm"
+        className="hidden"
+        disabled={uploading}
+        onChange={(e) => {
+          handleFile(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
+    </div>
+  );
+
   return (
     <>
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-baseline gap-2">
-              <span className="text-base font-medium">Upload plugin</span>
-            </span>
-          }
-          subtitle={
-            <div className="space-y-1">
-              <div>
-                Choose the .wasm file you received. After upload, review what it
-                can do and where it can be used.
-              </div>
-            </div>
-          }
-        />
-        <div
-          ref={browseRef}
-          role="button"
-          tabIndex={uploading ? -1 : 0}
-          aria-disabled={uploading || undefined}
-          aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
-          aria-busy={uploading}
-          className={cx(
-            'm-4 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-            uploading
-              ? 'cursor-wait opacity-70 border-accent/40'
-              : 'cursor-pointer hover:border-accent/40',
-          )}
-          onClick={() => {
-            if (!uploading) fileRef.current?.click();
-          }}
-          onKeyDown={(e) => {
-            if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
-              e.preventDefault();
-              fileRef.current?.click();
-            }
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (!uploading) handleFile(e.dataTransfer.files?.[0]);
-          }}
-        >
-          <UploadCloud
-            className={cx(
-              'w-8 h-8 mb-2',
-              uploading ? 'text-accent animate-pulse' : 'text-text-faint',
-            )}
+      {bare ? (
+        dropZone
+      ) : (
+        <Card>
+          <CardHeader
+            title="Upload plugin"
+            subtitle="Choose the .wasm file you received. After upload, review what it can do and where it can be used."
           />
-          <div className="text-sm">
-            {uploading ? 'Uploading…' : 'Choose .wasm file'}
-          </div>
-          <div className="text-[11px] text-text-faint mt-1">
-            Drag and drop or click to browse. Max 32 MiB.
-          </div>
-          <input
-            ref={fileRef}
-            type="file"
-            aria-label="Plugin file"
-            accept=".wasm"
-            className="hidden"
-            disabled={uploading}
-            onChange={(e) => {
-              handleFile(e.target.files?.[0]);
-              e.target.value = '';
-            }}
-          />
-        </div>
-      </Card>
+          <div className="p-4">{dropZone}</div>
+        </Card>
+      )}
 
       <ConfirmDialog
         open={pendingReplacement !== null}
         onOpenChange={(o) => {
           if (!o) setPendingReplacement(null);
         }}
-        title="Confirm Plugin Replacement"
+        title="Confirm plugin replacement"
         description={
           pendingReplacement ? (
-            <span className="space-y-2 block">
+            <span className="block space-y-3">
               <span className="block">
                 A plugin named{' '}
-                <span className="font-mono">{pendingReplacement.name}</span>{' '}
+                <span className="font-medium text-text">
+                  {pendingReplacement.name}
+                </span>{' '}
                 already exists.
               </span>
-              <span className="text-xs bg-overlay-1 p-2 rounded-sm border border-subtle block">
+              <span className="well block space-y-1 p-3 text-body-sm">
                 <span className="block">
-                  <strong>Current:</strong>{' '}
+                  <span className="font-medium text-text">Current:</span>{' '}
                   {pendingReplacement.currentVersion || 'none'} (
-                  <code className="text-[10px]">
+                  <code className="font-mono text-data">
                     {pendingReplacement.currentSha256Hex.slice(0, 12)}
                   </code>
                   )
                 </span>
                 <span className="block">
-                  <strong>Incoming:</strong>{' '}
+                  <span className="font-medium text-text">Incoming:</span>{' '}
                   {pendingReplacement.incomingVersion || 'none'} (
-                  <code className="text-[10px]">
+                  <code className="font-mono text-data">
                     {pendingReplacement.incomingSha256Hex.slice(0, 12)}
                   </code>
                   )

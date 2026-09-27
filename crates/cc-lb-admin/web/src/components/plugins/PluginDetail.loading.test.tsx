@@ -78,23 +78,6 @@ function setReferencesQuery(query: ReferenceQueryMock) {
   vi.mocked(queries.usePluginReferences).mockReturnValue(query as never);
 }
 
-const usedByStates: [string, ReferenceQueryMock][] = [
-  ['pending', referencesQuery([], true)],
-  ['zero references', referencesQuery([])],
-  [
-    'one reference',
-    referencesQuery([
-      {
-        kind: 'plugin_chain',
-        principal_id: 'principal-1',
-        principal_name: 'Principal One',
-        revision: 1,
-        slot: 'router',
-      },
-    ]),
-  ],
-];
-
 beforeEach(() => {
   vi.clearAllMocks();
   deleteMutate.mockReset();
@@ -121,19 +104,6 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('PluginDetail loading geometry', () => {
-  test.each(usedByStates)(
-    'keeps the Used by content slot height in the %s state',
-    (_, query) => {
-      setReferencesQuery(query);
-
-      render(<PluginDetail plugin={plugin} onBack={() => {}} />);
-
-      expect(screen.getByTestId('plugin-used-by-slot').className).toContain(
-        'min-h-20',
-      );
-    },
-  );
-
   test('renders two structured Used by skeleton lines while pending', () => {
     setReferencesQuery(referencesQuery([], true));
 
@@ -239,7 +209,7 @@ describe('PluginDetail loading geometry', () => {
     expect(deleteMutate).toHaveBeenCalledTimes(1);
     expect(onClose).not.toHaveBeenCalled();
     expect(
-      screen.getByText('Delete Plugin and Remove References?'),
+      screen.getByText('Delete plugin and remove references?'),
     ).toBeDefined();
 
     completeDelete?.();
@@ -285,7 +255,7 @@ describe('PluginDetail loading geometry', () => {
 
     expect(onClose).not.toHaveBeenCalled();
     expect(
-      screen.getByText('Delete Plugin and Remove References?'),
+      screen.getByText('Delete plugin and remove references?'),
     ).toBeDefined();
   });
 

@@ -134,13 +134,14 @@ describe('TimeRangeStrip', () => {
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
 
     expect(canvas.width).toBe(400);
-    expect(canvas.height).toBe(104);
+    expect(canvas.height).toBe(88);
     expect(widthSetter).toHaveBeenCalledTimes(1);
     expect(heightSetter).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenLastCalledWith(1, 0, 0, 1, 0, 0);
     expect(context.clearRect).toHaveBeenCalledTimes(1);
-    expect(context.fillRect).toHaveBeenCalledTimes(2);
+    // One bar for the single-request bucket.
+    expect(context.fillRect).toHaveBeenCalledTimes(1);
 
     rerender(<TimeRangeStrip {...props} buckets={nextBuckets} />);
 
@@ -148,18 +149,19 @@ describe('TimeRangeStrip', () => {
     expect(heightSetter).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenCalledTimes(2);
     expect(context.clearRect).toHaveBeenCalledTimes(2);
-    expect(context.fillRect).toHaveBeenCalledTimes(6);
+    // Two more bars plus the danger segment stacked on the erroring bucket.
+    expect(context.fillRect).toHaveBeenCalledTimes(4);
 
     vi.stubGlobal('devicePixelRatio', 2);
     act(() => window.dispatchEvent(new Event('resize')));
 
     expect(canvas.width).toBe(800);
-    expect(canvas.height).toBe(208);
+    expect(canvas.height).toBe(176);
     expect(widthSetter).toHaveBeenCalledTimes(2);
     expect(heightSetter).toHaveBeenCalledTimes(2);
     expect(context.setTransform).toHaveBeenCalledTimes(3);
     expect(context.setTransform).toHaveBeenLastCalledWith(2, 0, 0, 2, 0, 0);
-    expect(context.clearRect).toHaveBeenLastCalledWith(0, 0, 400, 104);
+    expect(context.clearRect).toHaveBeenLastCalledWith(0, 0, 400, 88);
 
     act(() => window.dispatchEvent(new Event('resize')));
     expect(widthSetter).toHaveBeenCalledTimes(2);
@@ -204,7 +206,7 @@ describe('TimeRangeStrip', () => {
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
     const rectSpy = vi
       .spyOn(canvas, 'getBoundingClientRect')
-      .mockImplementation(() => new DOMRect(0, 0, clientWidth, 104));
+      .mockImplementation(() => new DOMRect(0, 0, clientWidth, 88));
 
     expect(
       canvasAdd.mock.calls.filter(([type]) => type === 'mousemove'),
@@ -219,9 +221,9 @@ describe('TimeRangeStrip', () => {
       windowAdd.mock.calls.filter(([type]) => type === 'mouseup'),
     ).toHaveLength(0);
 
-    fireEvent.mouseMove(window, { clientX: 200, clientY: 90 });
+    fireEvent.mouseMove(window, { clientX: 200, clientY: 80 });
     expect(rectSpy).not.toHaveBeenCalled();
-    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 90 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 80 });
     expect(rectSpy).toHaveBeenCalledTimes(1);
     expect(canvas.style.cursor).toBe('grab');
 
@@ -256,7 +258,7 @@ describe('TimeRangeStrip', () => {
     ).toHaveLength(0);
 
     fireEvent.mouseMove(window, { clientX: 450, clientY: 20 });
-    expect(screen.getByText('2m · ~7 requests / ~2 err')).toBeDefined();
+    expect(screen.getByText('2m · ~7 requests · ~2 errors')).toBeDefined();
     fireEvent.mouseUp(window, { clientX: 450, clientY: 20 });
 
     expect(firstSelectionCommit).not.toHaveBeenCalled();
@@ -312,7 +314,7 @@ describe('TimeRangeStrip', () => {
     );
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(
-      () => new DOMRect(0, 0, clientWidth, 104),
+      () => new DOMRect(0, 0, clientWidth, 88),
     );
 
     expect(
@@ -333,7 +335,7 @@ describe('TimeRangeStrip', () => {
     expect(wheelEvent.defaultPrevented).toBe(true);
     expect(onViewChange).toHaveBeenNthCalledWith(1, { a: 12_000, b: 108_000 });
 
-    fireEvent.doubleClick(canvas, { clientX: 200, clientY: 70 });
+    fireEvent.doubleClick(canvas, { clientX: 200, clientY: 40 });
     expect(onViewChange).toHaveBeenNthCalledWith(2, { a: 12_000, b: 108_000 });
 
     const tabEvent = new KeyboardEvent('keydown', {
@@ -348,9 +350,9 @@ describe('TimeRangeStrip', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onSelectionCommit).toHaveBeenCalledWith(null);
 
-    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 90, button: 0 });
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 80, button: 0 });
     expect(canvas.style.cursor).toBe('grabbing');
-    fireEvent.mouseMove(window, { clientX: 150, clientY: 90 });
+    fireEvent.mouseMove(window, { clientX: 150, clientY: 80 });
     expect(onViewChange).toHaveBeenNthCalledWith(3, {
       a: 15_000,
       b: 135_000,

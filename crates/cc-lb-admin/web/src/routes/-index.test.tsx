@@ -5,9 +5,12 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from '@testing-library/react';
 import type { ComponentType, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { UNATTRIBUTED_CATEGORY } from '../components/ui/usage/costCategories';
+import { SLICE_COLORS } from '../components/ui/usage/sliceColors';
 import type {
   AggregateResponse,
   DashboardSummaryResponse,
@@ -21,7 +24,9 @@ import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
+  ClosestToLimitCard,
   PoolQuotaLegend,
+  PoolQuotaStackedBar,
   Route,
   type TopPrincipal,
   TopPrincipalsCard,
@@ -46,6 +51,35 @@ vi.mock('../lib/queries', async () => {
 vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: vi.fn(),
 }));
+
+// The Overview links to other routes; render router links as plain anchors so
+// the page can mount without a RouterProvider.
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    '@tanstack/react-router',
+  );
+  return {
+    ...actual,
+    useNavigate: () => vi.fn(),
+    Link: ({
+      to,
+      search,
+      children,
+      ...rest
+    }: {
+      to: string;
+      search?: Record<string, string>;
+      children?: ReactNode;
+    }) => (
+      <a
+        href={search ? `${to}?${new URLSearchParams(search).toString()}` : to}
+        {...rest}
+      >
+        {children}
+      </a>
+    ),
+  };
+});
 
 const rechartsMock = vi.hoisted(() => ({
   areaChartRenderCount: 0,
@@ -487,6 +521,65 @@ afterEach(() => {
   cleanup();
 });
 
+describe('Overview quota headroom', () => {
+  function twoUpstreamAggregate(): AggregateResponse {
+    const base = aggregateResponse(1_000_000, 60);
+    return {
+      ...base,
+      windows: base.windows.map((entry) => ({
+        ...entry,
+        provider_lots: [
+          { ...entry.provider_lots[0]!, utilization: 0.2 },
+          {
+            ...entry.provider_lots[0]!,
+            upstream_id: 'upstream-2',
+            upstream_name: 'Upstream Two',
+            utilization: entry.window === '7d' ? 0.97 : 0.5,
+            provider_reset_unix_secs: 1_000_000 + 2 * 86_400 + 3 * 3600,
+          },
+        ],
+      })),
+    };
+  }
+
+  it('opens the pool breakdown with upstream names from a named button', async () => {
+    const aggregate = twoUpstreamAggregate();
+    render(<PoolQuotaStackedBar window="7d" w={aggregate.windows[1]} />);
+
+    const trigger = screen.getByRole('button', {
+      name: '7d pool 60.0%, show upstream breakdown',
+    });
+    expect(screen.queryByText('Upstream Two')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+
+    const rows = await screen.findAllByTestId('pool-quota-breakdown-row');
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('Upstream One'),
+      expect.stringContaining('Upstream Two'),
+    ]);
+    expect(rows[1]?.textContent).toContain('97.0%');
+  });
+
+  it('ranks upstreams by their most-used window and links each to its detail', () => {
+    render(
+      <ClosestToLimitCard aggregate={twoUpstreamAggregate()} loading={false} />,
+    );
+
+    const rows = screen.getAllByTestId('closest-to-limit-row');
+    expect(rows.map((row) => row.getAttribute('href'))).toEqual([
+      '/upstreams?selectedId=upstream-2',
+      '/upstreams?selectedId=upstream-1',
+    ]);
+    expect(rows[0]?.textContent).toContain('Upstream Two');
+    expect(rows[0]?.textContent).toContain('7d');
+    expect(rows[0]?.textContent).toContain('97%');
+    expect(rows[0]?.textContent).toContain('resets in 2d 3h');
+  });
+});
+
 describe('PoolQuotaLegend', () => {
   it('renders Fable only when the selected range has Fable data', () => {
     const { rerender } = render(
@@ -516,7 +609,6 @@ describe('Overview loading geometry', () => {
         icon={<span />}
         label="requests"
         loading
-        size="sm"
         spark={[]}
         sub="12 / 24h"
         value="12"
@@ -542,7 +634,7 @@ describe('Overview loading geometry', () => {
     expect(
       container.querySelector('[data-slot="sparkline"] .skeleton'),
     ).not.toBeNull();
-    expect(valueClassName).toContain('h-5');
+    expect(valueClassName).toContain('h-7');
     expect(subClassName).toContain('h-4');
     expect(sparklineClassName).toContain('h-8');
     expect(screen.queryByText('12')).toBeNull();
@@ -555,7 +647,6 @@ describe('Overview loading geometry', () => {
         icon={<span />}
         label="requests"
         loading={false}
-        size="sm"
         spark={[]}
         sub="12 / 24h"
         value="12"
@@ -619,7 +710,7 @@ describe('Overview loading geometry', () => {
     expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
   });
 
-  it('keeps the principal card shell stable across loading, empty, and loaded states', () => {
+  it('keeps the principal card shell stable across loading and loaded states, collapsing when empty', () => {
     const { container, rerender } = render(
       <TopPrincipalsCard loading principals={[]} range="24h" />,
     );
@@ -636,7 +727,7 @@ describe('Overview loading geometry', () => {
     for (const row of skeletonRows) {
       const skeletons = row.querySelectorAll('.skeleton');
       expect(row.className).toContain('min-h-[66px]');
-      expect(row.className).toContain('px-3');
+      expect(row.className).toContain('px-4');
       expect(row.className).toContain('py-2');
       expect(skeletons).toHaveLength(5);
       expect(skeletons[0]?.className).toContain('h-5');
@@ -653,10 +744,12 @@ describe('Overview loading geometry', () => {
     expect(
       screen.getByText('Top principals').closest('.glass')?.className,
     ).toBe(cardClassName);
+    // An empty window drops the reserved list height instead of leaving a
+    // tall blank card.
     expect(
       container.querySelector('[data-slot="principal-list"]')?.className,
-    ).toBe(listClassName);
-    expect(screen.getByText('No usage data')).toBeDefined();
+    ).not.toContain('min-h-80');
+    expect(screen.getByText('No usage in the last 24h')).toBeDefined();
 
     rerender(
       <TopPrincipalsCard
@@ -696,13 +789,15 @@ describe('Overview loading geometry', () => {
     render(<OverviewPage />);
 
     for (const label of [
-      'avg req/s',
-      'tokens',
-      'equiv $',
+      'Requests/s',
+      'Tokens',
+      'Cost at list price',
       'Avg latency',
-      'err rate',
+      'Error rate',
     ]) {
-      const tile = screen.getByText(label).closest('.glass');
+      const tile = within(screen.getByTestId('overview-kpi-strip'))
+        .getByText(label)
+        .closest('[data-slot="kpi-tile"]');
       expect(tile?.textContent).toBe(label);
       expect(
         tile?.querySelector('[data-slot="value"] .skeleton'),
@@ -749,7 +844,7 @@ describe('Overview loading geometry', () => {
         Array.from(snapshotSlots, (slot) => slot.textContent?.trim()),
       ).toEqual(['5h pool', '7d pool', '7d (Fable) pool']);
       for (const slot of snapshotSlots) {
-        expect(slot.className).toContain('min-h-[56px]');
+        expect(slot.className).toContain('min-h-10');
         expect(slot.querySelectorAll('.skeleton')).toHaveLength(2);
       }
 
@@ -765,7 +860,7 @@ describe('Overview loading geometry', () => {
       }
 
       const chartSlot = screen.getByTestId('pool-quota-chart-slot');
-      expect(chartSlot.className).toContain('min-h-64');
+      expect(chartSlot.className).toContain('h-64');
       expect(chartSlot.querySelector('.skeleton')).not.toBeNull();
       const chartHeader = chartSlot.previousElementSibling;
       expect(chartHeader?.className).toContain('flex-col');
@@ -972,7 +1067,7 @@ describe('Overview loading geometry', () => {
     } as never);
 
     fireEvent.click(screen.getByText('1h'));
-    expect(screen.getByText('Trend · 24h')).toBeDefined();
+    expect(screen.getByText('Last 24h')).toBeDefined();
 
     const oneHourHistory = poolHistoryResponse(
       POOL_HISTORY_NOW + 60,
@@ -997,7 +1092,7 @@ describe('Overview loading geometry', () => {
     } as never);
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Trend · 1h')).toBeDefined();
+    expect(screen.getByText('Last 1h')).toBeDefined();
     const oneHourDomain = screen
       .getByTestId('pool-quota-x-axis')
       .getAttribute('data-domain');
@@ -1027,12 +1122,12 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    const sevenDayButton = screen.getByRole('button', { name: '7d' });
-    fireEvent.click(sevenDayButton);
+    const sevenDayOption = screen.getByRole('radio', { name: '7d' });
+    fireEvent.click(sevenDayOption);
 
-    expect(sevenDayButton.hasAttribute('data-pressed')).toBe(true);
-    expect(screen.getByText('Trend · 1h')).toBeDefined();
-    expect(screen.getByText('by virtual cost · 7d')).toBeDefined();
+    expect(sevenDayOption.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('Last 1h')).toBeDefined();
+    expect(screen.getByText('By virtual cost · 7d')).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1067,7 +1162,7 @@ describe('Overview loading geometry', () => {
 
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Trend · 7d')).toBeDefined();
+    expect(screen.getByText('Last 7d')).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1356,7 +1451,7 @@ describe('Overview KPI details', () => {
     ]);
     expect(tooltipRows('overview-kpi-tooltip-cost')).toEqual([
       tooltipTimestamp,
-      'Equiv $ $2.50',
+      'Cost $2.50',
     ]);
     expect(tooltipRows('overview-kpi-tooltip-latency')).toEqual([
       tooltipTimestamp,
@@ -1364,7 +1459,7 @@ describe('Overview KPI details', () => {
     ]);
     expect(tooltipRows('overview-kpi-tooltip-error-rate')).toEqual([
       tooltipTimestamp,
-      'Err rate 10.00%',
+      'Error rate 10.00%',
     ]);
 
     fireEvent.mouseLeave(requestChart);
@@ -1517,14 +1612,10 @@ describe('Overview OAuth reconnect summary', () => {
   });
 });
 
-/** Request-log slice colors as jsdom serializes them. */
+/** Request-log slice colors, read back from the meter's inline style. */
 const CATEGORY_COLOR = {
-  input: 'rgb(56, 189, 248)',
-  output: 'rgb(167, 139, 250)',
-  cache_create_5m: 'rgb(251, 191, 36)',
-  cache_create_1h: 'rgb(180, 83, 9)',
-  cache_read: 'rgb(52, 211, 153)',
-  unattributed: 'rgb(107, 114, 128)',
+  ...SLICE_COLORS,
+  unattributed: UNATTRIBUTED_CATEGORY.color,
 } as const;
 
 const COST_NOTE = 'Per-category cost not recorded for this window';
@@ -1786,9 +1877,7 @@ describe('Top principal cost meter', () => {
 
     expect(meter.dataset.costComponents).toBe('unavailable');
     expect(costSegments(meter)).toEqual([]);
-    expect(meterFill(meter).className).toContain(
-      'bg-[color:var(--color-accent)]',
-    );
+    expect(meterFill(meter).className).toContain('bg-text-muted');
     expect(meter.getAttribute('aria-valuetext')).toBe(
       `Total $0.5000; 50.0% of the largest principal; ${COST_NOTE}`,
     );

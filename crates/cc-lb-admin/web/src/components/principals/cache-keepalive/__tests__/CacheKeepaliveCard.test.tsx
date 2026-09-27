@@ -108,8 +108,6 @@ describe('CacheKeepaliveCard', () => {
     const caption = screen.getByText(
       'Renews the prompt-cache TTL during idle gaps.',
     );
-    expect(caption.className).toContain('text-[11px]');
-    expect(caption.className).toContain('text-text-muted');
     expect(caption.closest('header')).toBeNull();
 
     expect(screen.getByText('Renewing now')).toBeDefined();
@@ -127,10 +125,7 @@ describe('CacheKeepaliveCard', () => {
     expect(screen.getByText('Cost saved')).toBeDefined();
     expect(screen.getByText('net, after renewal spend')).toBeDefined();
 
-    const costSaved = screen.getByText('$4.56');
-    expect(costSaved.className).toContain('text-green-400');
-    expect(costSaved.className).toContain('text-lg');
-    expect(costSaved.className).toContain('tabular-nums');
+    expect(screen.getByText('$4.56')).toBeDefined();
 
     const help = screen.getByLabelText('Cache keepalive help');
     expect(help).toBeDefined();
@@ -145,12 +140,13 @@ describe('CacheKeepaliveCard', () => {
     });
   });
 
-  it('switch has role switch and aria-checked', () => {
+  it('switch has role switch and reflects the enabled state', () => {
     renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
 
-    const toggle = screen.getByLabelText('Toggle cache keepalive');
-    expect(toggle.getAttribute('role')).toBe('switch');
-    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    const toggle = screen.getByRole('switch', {
+      name: 'Toggle cache keepalive',
+    }) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
   });
 
   it('locks the toggle during another write to the same principal', () => {
@@ -183,25 +179,23 @@ describe('CacheKeepaliveCard', () => {
   it('Sessions and Settings buttons open separate drawers', () => {
     renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
 
-    const sessionsBtn = screen.getByText('Sessions').closest('button');
-    expect(sessionsBtn?.className).toContain('w-full');
-    expect(sessionsBtn?.querySelector('.lucide-history')).toBeDefined();
+    const sessionsBtn = screen.getByRole('button', { name: 'Sessions' });
+    expect(sessionsBtn.querySelector('.lucide-history')).not.toBeNull();
 
-    const settingsBtn = screen.getByText('Settings').closest('button');
-    expect(settingsBtn?.className).toContain('w-full');
+    const settingsBtn = screen.getByRole('button', { name: 'Settings' });
     expect(
-      settingsBtn?.querySelector('.lucide-sliders-horizontal'),
+      settingsBtn.querySelector('.lucide-sliders-horizontal'),
+    ).not.toBeNull();
+
+    fireEvent.click(sessionsBtn);
+    expect(
+      screen.getByRole('dialog', { name: 'Cache keepalive sessions' }),
     ).toBeDefined();
 
-    const footer = sessionsBtn?.parentElement;
-    expect(footer?.className).toContain('grid');
-    expect(footer?.className).toContain('grid-cols-2');
-
-    fireEvent.click(sessionsBtn!);
-    expect(screen.getByTestId('cache-keepalive-sessions-drawer')).toBeDefined();
-
-    fireEvent.click(settingsBtn!);
-    expect(screen.getByTestId('cache-keepalive-settings-drawer')).toBeDefined();
+    fireEvent.click(settingsBtn);
+    expect(
+      screen.getByRole('dialog', { name: 'Cache keepalive settings' }),
+    ).toBeDefined();
   });
 
   it('Given metric change, When rendered, Then flashes ONLY when value changes', () => {
@@ -237,7 +231,9 @@ describe('CacheKeepaliveCard', () => {
       `flash-text ${cacheKeepaliveAnimationContract.metricFlash}`,
     );
 
-    const sessions = screen.getByText('2', { selector: '.text-lg' });
+    const sessions = screen.getByText('2', {
+      selector: '[data-testid="cache-keepalive-metric-value"]',
+    });
     expect(sessions.className).not.toContain('flash-text-active');
   });
 

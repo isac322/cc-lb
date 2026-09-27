@@ -20,8 +20,9 @@ import {
   useClaimLimitReset,
 } from '../../lib/limitResets';
 import type { Upstream } from '../../lib/queries';
-import { Button, INPUT_CLASS, Modal, Notice } from '../ui/primitives';
+import { Button, Modal, Notice } from '../ui/primitives';
 import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
+import { Select } from '../ui/Select';
 import { CouponActionButton, useCouponNudge } from './CouponNudge';
 
 const SURFACE_URL = 'https://claude.ai/settings/usage';
@@ -442,20 +443,26 @@ export function LimitResetAction({
       ? `Expires ${formatWait(nudge.expiresSoonAt - nowMs)}`
       : undefined;
 
+  // An unavailable reset is not an action: the header drops it entirely
+  // rather than showing a permanently inert control.
+  const unavailable = buttonLabel === 'Reset unavailable';
+
   return (
     <>
-      <CouponActionButton
-        kind={buttonKind}
-        count={buttonCount}
-        disabled={actionDisabled}
-        disabledReason={disabledReason}
-        loading={claimInFlight}
-        expiryLabel={expiryLabel}
-        title={buttonTitle}
-        onClick={openDialog}
-      >
-        {buttonLabel}
-      </CouponActionButton>
+      {unavailable ? null : (
+        <CouponActionButton
+          kind={buttonKind}
+          count={buttonCount}
+          disabled={actionDisabled}
+          disabledReason={disabledReason}
+          loading={claimInFlight}
+          expiryLabel={expiryLabel}
+          title={buttonTitle}
+          onClick={openDialog}
+        >
+          {buttonLabel}
+        </CouponActionButton>
+      )}
 
       <Modal
         open={dialogOpen}
@@ -470,7 +477,6 @@ export function LimitResetAction({
         footer={
           <>
             <Button
-              variant="ghost"
               autoFocus
               disabled={claimInFlight}
               onClick={() => setDialogOpen(false)}
@@ -480,7 +486,7 @@ export function LimitResetAction({
             {pendingView ? (
               <>
                 <Button
-                  variant={dismissArmed ? 'danger' : 'ghost'}
+                  variant={dismissArmed ? 'danger' : 'secondary'}
                   disabled={claimInFlight}
                   onClick={() =>
                     dismissArmed ? dismissPendingOp() : setDismissArmed(true)
@@ -499,7 +505,7 @@ export function LimitResetAction({
               </>
             ) : (
               <Button
-                variant="secondary"
+                variant="primary"
                 loading={claimInFlight}
                 disabled={!selectedUsable || !data || queryError}
                 onClick={() => {
@@ -520,7 +526,7 @@ export function LimitResetAction({
           </>
         }
       >
-        <div className="flex flex-col gap-3 text-sm text-text-muted">
+        <div className="flex flex-col gap-3 text-body-sm text-text-muted">
           {pendingView && pendingOp ? (
             <>
               <Notice tone="warning" title="Reset result not confirmed">
@@ -537,7 +543,7 @@ export function LimitResetAction({
                   <summary className="cursor-pointer text-text-faint">
                     Request details
                   </summary>
-                  <code className="mt-0.5 block break-all font-mono text-[10px]">
+                  <code className="mt-0.5 block break-all font-mono text-data">
                     {pendingOp.request_id}
                   </code>
                 </details>
@@ -574,7 +580,7 @@ export function LimitResetAction({
           ) : null}
 
           {data && !eligible && ember != null ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               {ember.ineligible_reason === 'api_key_upstream'
                 ? 'Limit resets are only available for OAuth subscription upstreams.'
                 : 'This account is not eligible for limit resets.'}{' '}
@@ -591,19 +597,19 @@ export function LimitResetAction({
           ) : null}
 
           {data && ember == null ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               No current reset coupon data. Status updates with quota polling.
             </p>
           ) : null}
 
           {loading ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               Checking reset availability…
             </p>
           ) : null}
 
           {pendingView || !ember ? null : ember.grants.length === 0 ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               No reset coupons available.
               {ember.weekly_resets_at ? (
                 <>
@@ -614,7 +620,7 @@ export function LimitResetAction({
               ) : null}
             </p>
           ) : selectableGrants.length === 0 ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               No active reset coupons.
               {ember.weekly_resets_at ? (
                 <>
@@ -627,32 +633,28 @@ export function LimitResetAction({
           ) : (
             <>
               {selectableGrants.length > 1 ? (
-                <select
+                <Select
                   aria-label="Reset coupon"
-                  className={INPUT_CLASS}
+                  className="w-full"
                   value={displayGrant?.id ?? ''}
                   disabled={claimInFlight || pendingView}
-                  onChange={(e) => setSelectedGrantId(e.target.value)}
-                >
-                  {selectableGrants.map((grant) => (
-                    <option key={grant.id} value={grant.id}>
-                      {grant.label}: {grant.resets_left}
-                      {grant.resets_total != null
-                        ? `/${grant.resets_total}`
-                        : ''}{' '}
-                      left
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSelectedGrantId}
+                  options={selectableGrants.map((grant) => ({
+                    value: grant.id,
+                    label: `${grant.label}: ${grant.resets_left}${
+                      grant.resets_total != null ? `/${grant.resets_total}` : ''
+                    } left`,
+                  }))}
+                />
               ) : null}
               {hiddenGrantCount > 0 ? (
-                <p className="text-[11px] text-text-faint">
+                <p className="text-caption text-text-faint">
                   Only active coupons are shown.
                 </p>
               ) : null}
               {displayGrant ? (
-                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-                  <dt className="text-text-faint">Coupon</dt>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-body-sm">
+                  <dt className="text-label text-text-faint">Coupon</dt>
                   <dd className="min-w-0 break-words text-text">
                     {displayGrant.label} · {displayGrant.resets_left}
                     {displayGrant.resets_total != null
@@ -660,13 +662,13 @@ export function LimitResetAction({
                       : ''}{' '}
                     left
                   </dd>
-                  <dt className="text-text-faint">Clears</dt>
+                  <dt className="text-label text-text-faint">Clears</dt>
                   <dd className="min-w-0 break-words text-text">
                     {windowList(displayGrant.clears)}
                   </dd>
                   {displayGrant.ends_at ? (
                     <>
-                      <dt className="text-text-faint">Expires</dt>
+                      <dt className="text-label text-text-faint">Expires</dt>
                       <dd className="min-w-0 break-words text-text">
                         <RelativeTime ts={new Date(displayGrant.ends_at)} />
                       </dd>
@@ -674,8 +676,8 @@ export function LimitResetAction({
                   ) : null}
                   {displayBlocking ? (
                     <>
-                      <dt className="text-text-faint">Status</dt>
-                      <dd className="min-w-0 break-words text-[color:var(--color-warn-text)]">
+                      <dt className="text-label text-text-faint">Status</dt>
+                      <dd className="min-w-0 break-words text-warn-text">
                         {displayBlocking.text}
                         {displayBlocking.surface ? (
                           <>
@@ -697,7 +699,7 @@ export function LimitResetAction({
                 </dl>
               ) : null}
               {derived != null && derived.usableCount < derived.activeCount ? (
-                <p className="text-[11px] text-text-faint">
+                <p className="text-caption text-text-faint">
                   {derived.usableCount === 0
                     ? 'These coupons cannot be used right now. See the status above.'
                     : `${derived.usableCount} of ${derived.activeCount} coupons can be used right now.`}
@@ -707,7 +709,7 @@ export function LimitResetAction({
           )}
 
           {ember?.cooldown_until ? (
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               Resets on cooldown until{' '}
               <ResetCountdown ts={new Date(ember.cooldown_until)} />.
             </p>
@@ -716,7 +718,7 @@ export function LimitResetAction({
           {displayGrant &&
           (inFlightView != null || (!pendingView && selectedUsable)) ? (
             <>
-              <p className="text-xs text-text-faint">
+              <p className="text-body-sm text-text-muted">
                 This uses one reset coupon to reset usage for your{' '}
                 {windowList(displayGrant.clears)}{' '}
                 {displayGrant.clears.length > 1 ? 'limits' : 'limit'}. It cannot
@@ -733,7 +735,7 @@ export function LimitResetAction({
             href={SURFACE_URL}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-1 text-[11px] text-text-faint hover:text-text"
+            className="inline-flex items-center gap-1 text-caption text-text-faint hover:text-text"
           >
             Manage on claude.ai
             <ExternalLink className="h-3 w-3" />

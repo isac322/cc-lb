@@ -1,40 +1,45 @@
 import { Meter as BaseMeter } from '@base-ui/react/meter';
 import { Popover as BasePopover } from '@base-ui/react/popover';
-import { Toggle as BaseToggle } from '@base-ui/react/toggle';
-import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, Link } from '@tanstack/react-router';
 import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
+  ChevronRight,
   Database,
   Gauge,
+  Hourglass,
   ShieldCheck,
   Timer,
   TrendingUp,
   Users,
 } from 'lucide-react';
-import { memo, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
   CartesianGrid,
-  ReferenceArea,
   ReferenceLine,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
+import {
+  FirstRunChecklist,
+  useFirstRunIncomplete,
+} from '../components/onboarding/FirstRunChecklist';
 import { BreakdownPopover } from '../components/ui/BreakdownPopover';
+import { Sparkline } from '../components/ui/charts';
 import {
   Card,
   CardHeader,
   cx,
   PageContainer,
+  PageHeader,
   Section,
+  SegmentedControl,
   Skeleton,
-  Sparkline,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
@@ -46,7 +51,7 @@ import {
 } from '../components/ui/usage/costCategories';
 import { OAuthReconnectSummary } from '../components/upstreams/OAuthReconnectNotice';
 import type { AggregateResponse } from '../lib/api';
-import { getWindowColor } from '../lib/colors';
+import { getWindowColor, SERIES_FILL_OPACITY } from '../lib/colors';
 import {
   cacheHitRatio,
   cacheMissRatio,
@@ -56,6 +61,7 @@ import {
   formatUsdAmount,
   sumTokens,
 } from '../lib/format';
+import { useTimezone } from '../lib/locale';
 import {
   isMessagesRequestEvent,
   mergeLogRows,
@@ -70,9 +76,24 @@ import {
   useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
+import {
+  QUOTA_SEVERITY_TEXT_CLASS,
+  type QuotaSeverity,
+  quotaSeverity,
+} from '../lib/quotaSeverity';
+import {
+  TIME_PRESET_OPTIONS,
+  TIME_PRESET_SECONDS,
+  TIME_PRESETS,
+  type TimePreset,
+} from '../lib/timePresets';
+import { formatInTimezone } from '../lib/timezone';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 import {
   buildPoolQuotaChartData,
+  type ClosestToLimitEntry,
+  closestToLimit,
+  formatResetIn,
   POOL_QUOTA_WINDOWS,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
@@ -84,15 +105,10 @@ export const Route = createFileRoute('/')({
   component: OverviewPage,
 });
 
-const RANGES = ['1h', '6h', '24h', '7d'] as const;
-type Range = (typeof RANGES)[number];
-
-const RANGE_SECONDS: Record<Range, number> = {
-  '1h': 3600,
-  '6h': 21600,
-  '24h': 86400,
-  '7d': 604800,
-};
+const RANGES = TIME_PRESETS;
+type Range = TimePreset;
+const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
+const RANGE_SECONDS = TIME_PRESET_SECONDS;
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
 // The overview previews real user requests only: renewals and non-messages
 // endpoints are excluded server-side, and merged rows are re-checked against
@@ -179,14 +195,29 @@ function kpiSecondaryY(value: number): number {
   );
 }
 
-const TOKENS_COLOR = '#06b6d4';
+// KPI series are data, not status: they draw in neutral ink. Only the error
+// rate turns danger, and only when there are errors to report.
+const KPI_SERIES_COLOR = 'var(--color-text-muted)';
 
 const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
   testId: 'overview-kpi-secondary-tokens',
   label: 'Cache miss',
-  color: '#8b5cf6',
+  color: 'var(--color-accent)',
   format: fmtPercent,
 };
+
+/**
+ * Hairline dividers between the five KPI cells of the traffic card at each
+ * grid width (2 columns, then 3, with the last cell spanning the rest of its
+ * row; then 5), so no row edge ever doubles up against the card border.
+ */
+const KPI_CELL_CLASS = [
+  'border-row',
+  'border-row border-l',
+  'border-row border-t md:border-t-0 md:border-l',
+  'border-row border-t border-l md:border-l-0 xl:border-t-0 xl:border-l',
+  'border-row col-span-2 border-t md:border-l xl:col-span-1 xl:border-t-0',
+] as const;
 
 export function ValueTile({
   icon,
@@ -202,8 +233,7 @@ export function ValueTile({
   activeIndex = null,
   onActiveIndexChange,
   loading = false,
-  tone = 'neutral',
-  size = 'md',
+  className,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -218,11 +248,11 @@ export function ValueTile({
   activeIndex?: number | null;
   onActiveIndexChange?: (index: number | null) => void;
   loading?: boolean;
-  tone?: 'neutral' | 'accent' | 'warn' | 'ok';
-  size?: 'sm' | 'md';
+  /** Cell geometry from the parent grid (dividers, column span). */
+  className?: string;
 }) {
   const points = spark ?? NO_KPI_POINTS;
-  const color = sparkColor ?? 'var(--color-accent)';
+  const color = sparkColor ?? KPI_SERIES_COLOR;
   const hasChart = !loading && points.length > 0;
   const activeIdx =
     hasChart && activeIndex != null
@@ -293,43 +323,31 @@ export function ValueTile({
   return (
     <div
       className={cx(
-        'glass rounded-sm flex flex-col gap-2 relative overflow-hidden',
-        size === 'sm' ? 'p-2.5 min-h-[88px]' : 'p-3 min-h-[110px]',
+        'relative flex min-w-0 flex-col gap-1.5 p-3 md:p-4',
+        className,
       )}
       data-testid={`overview-kpi-${chartId}`}
+      data-slot="kpi-tile"
     >
       <div className="flex items-center gap-1.5 text-text-faint">
-        <span className="w-3.5 h-3.5">{icon}</span>
-        <span className="text-[11px] uppercase tracking-wider truncate">
-          {label}
-        </span>
+        <span className="size-3.5 [&_svg]:size-3.5">{icon}</span>
+        <span className="text-label truncate">{label}</span>
       </div>
       <div
-        className={cx(
-          'flex items-center justify-between gap-2 min-w-0',
-          size === 'sm' ? 'h-5' : 'h-6',
-        )}
+        className="flex h-7 min-w-0 items-center justify-between gap-2"
         data-slot="value"
       >
         {loading ? (
-          <Skeleton className={size === 'sm' ? 'h-5 w-20' : 'h-6 w-24'} />
+          <Skeleton className="h-6 w-20" />
         ) : (
-          <span
-            className={cx(
-              'tabular-nums leading-none truncate',
-              size === 'sm' ? 'text-xl font-medium' : 'text-2xl font-medium',
-              tone === 'accent' && 'text-accent',
-              tone === 'warn' && 'text-[color:var(--color-warn)]',
-              tone === 'ok' && 'text-[color:var(--color-ok)]',
-            )}
-          >
+          <span className="truncate text-2xl font-medium leading-none tabular-nums text-text">
             {value}
           </span>
         )}
       </div>
       {sub !== undefined ? (
         <div
-          className="flex h-4 items-center text-[11px] text-text-faint truncate"
+          className="flex h-4 items-center truncate text-caption text-text-faint"
           data-slot="sub"
         >
           {loading ? <Skeleton className="h-3 w-20" /> : sub}
@@ -337,33 +355,26 @@ export function ValueTile({
       ) : null}
       {activePoint ? (
         <div
-          className="pointer-events-none absolute inset-x-1.5 bottom-8 z-10 flex flex-col gap-0.5 rounded-sm border border-subtle-strong bg-bg-sub px-2 py-1 shadow-lg"
+          className="glass-strong pointer-events-none absolute inset-x-2 bottom-10 z-10 flex flex-col gap-0.5 rounded-md px-2 py-1.5"
           data-testid={`overview-kpi-tooltip-${chartId}`}
         >
-          <span className="text-[10px] leading-none text-text-faint tabular-nums truncate">
+          <span className="truncate text-caption leading-none tabular-nums text-text-faint">
             {fmtChartTooltip(activePoint.timestamp)}
           </span>
-          <span className="text-[11px] leading-none text-text tabular-nums truncate">
+          <span className="truncate text-caption leading-none tabular-nums text-text">
             {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
           </span>
           {secondary ? (
-            // Muted body text rather than the purple series stroke: #8b5cf6 on
-            // bg-bg-sub measures 4.06:1 in light theme — under the 4.5:1 floor
-            // for this 11px row — and only 4.81:1 in dark, while the muted
-            // token holds 7.24:1 / 8.03:1. Purple stays on the chart itself.
-            <span className="text-[11px] leading-none text-text-muted tabular-nums truncate">
+            // Muted body text rather than the series stroke, so the row keeps
+            // body-text contrast in both themes. The stroke color stays on
+            // the chart itself.
+            <span className="truncate text-caption leading-none tabular-nums text-text-muted">
               {`${secondary.label} ${secondary.format(activePoint.secondaryValue)}`}
             </span>
           ) : null}
         </div>
       ) : null}
-      <div
-        className={cx(
-          'h-8 shrink-0 pt-1 mt-auto',
-          size === 'sm' ? '-mx-2.5 -mb-2.5' : '-mx-3 -mb-3',
-        )}
-        data-slot="sparkline"
-      >
+      <div className="mt-auto h-8 shrink-0 pt-1" data-slot="sparkline">
         {loading ? (
           <Skeleton className="h-7" />
         ) : hasChart ? (
@@ -404,7 +415,7 @@ export function ValueTile({
             {activeX != null ? (
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-y-0 w-px -translate-x-1/2 bg-[color:var(--color-border-strong)]"
+                className="pointer-events-none absolute inset-y-0 w-px -translate-x-1/2 bg-border-strong"
                 style={{ left: activeX }}
               />
             ) : null}
@@ -445,7 +456,7 @@ export type TopPrincipal = {
 };
 
 const TOP_PRINCIPAL_ROW_CLASS =
-  'flex min-h-[66px] items-center gap-3 border-b border-subtle px-3 py-2 last:border-b-0';
+  'flex min-h-[66px] items-center gap-3 border-b border-row px-4 py-2 last:border-b-0';
 
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
@@ -527,11 +538,11 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
           max={Math.max(1, principal.max_cost_micros)}
           value={totalMicros}
         >
-          <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
+          <BaseMeter.Track className="relative h-1.5 w-full overflow-hidden rounded-xs bg-progress-track">
             <BaseMeter.Indicator
               className={cx(
-                'flex h-full rounded-full overflow-hidden transition-all',
-                components ? '' : 'bg-[color:var(--color-accent)]',
+                'flex h-full overflow-hidden transition-all',
+                components ? '' : 'bg-text-muted',
               )}
               data-slot="cost-meter-fill"
             >
@@ -556,7 +567,7 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
       <BasePopover.Portal>
         <BasePopover.Positioner side="top" sideOffset={4}>
           <BasePopover.Popup
-            className="z-50 rounded-sm border border-subtle-strong bg-bg-sub px-2 py-1 text-[11px] text-text shadow-lg"
+            className="glass-strong z-50 rounded-md px-2 py-1.5 text-caption text-text"
             initialFocus={false}
           >
             <div data-testid="top-principal-cost-details">
@@ -594,7 +605,7 @@ export function TopPrincipalsCard({
   loading: boolean;
 }) {
   return (
-    <Card className="min-w-0 flex flex-col h-full">
+    <Card className="min-w-0 flex flex-col">
       <CardHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -602,10 +613,18 @@ export function TopPrincipalsCard({
             Top principals
           </span>
         }
-        subtitle={`by virtual cost · ${range}`}
+        subtitle={`By virtual cost · ${range}`}
       />
       <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
-        <div className="flex min-h-80 flex-col" data-slot="principal-list">
+        <div
+          className={cx(
+            'flex flex-col',
+            // Keep the loading and populated list at one height so rows do
+            // not jump; an empty window collapses to a single line.
+            (loading || principals.length > 0) && 'min-h-80',
+          )}
+          data-slot="principal-list"
+        >
           {loading ? (
             Array.from({ length: 5 }).map((_, index) => (
               <div
@@ -617,7 +636,7 @@ export function TopPrincipalsCard({
                 <div className="min-w-0 flex-1">
                   <Skeleton className="h-5 w-2/5" />
                   <Skeleton className="mt-0.5 h-3 w-3/5" />
-                  <Skeleton className="mt-1.5 h-1.5 rounded-full" />
+                  <Skeleton className="mt-1.5 h-1.5 rounded-xs" />
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1 text-right">
                   <Skeleton className="h-5 w-16" />
@@ -626,8 +645,8 @@ export function TopPrincipalsCard({
               </div>
             ))
           ) : principals.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center p-4 text-center text-xs text-text-faint">
-              No usage data
+            <div className="flex flex-1 items-center justify-center px-4 py-8 text-center text-body-sm text-text-muted">
+              {`No usage in the last ${range}`}
             </div>
           ) : (
             principals.map((principal) => (
@@ -640,9 +659,11 @@ export function TopPrincipalsCard({
                 data-testid="top-principal-row"
               >
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm truncate">{principal.name}</div>
+                  <div className="truncate text-body-sm text-text">
+                    {principal.name}
+                  </div>
                   <div
-                    className="text-[11px] text-text-faint truncate"
+                    className="truncate text-caption text-text-faint"
                     data-slot="principal-meta"
                   >
                     {formatCount(principal.requests)} req ·{' '}
@@ -654,10 +675,10 @@ export function TopPrincipalsCard({
                   <PrincipalCostMeter principal={principal} />
                 </div>
                 <div className="text-right shrink-0">
-                  <div className="text-sm font-mono tabular-nums">
+                  <div className="text-body-sm font-medium tabular-nums text-text">
                     {formatUsdAmount(principal.cost_micros / 1_000_000)}
                   </div>
-                  <div className="text-[11px] text-text-faint tabular-nums">
+                  <div className="text-caption tabular-nums text-text-faint">
                     {principal.share_pct.toFixed(1)}%
                   </div>
                 </div>
@@ -672,47 +693,41 @@ export function TopPrincipalsCard({
 
 type AggregateWindow = AggregateResponse['windows'][number];
 
-const POOL_PALETTES: Record<PoolQuotaWindow, readonly string[]> = {
-  '5h': [
-    'rgb(37, 99, 235)',
-    'rgb(59, 130, 246)',
-    'rgb(96, 165, 250)',
-    'rgb(147, 197, 253)',
-    'rgb(191, 219, 254)',
-  ],
-  '7d': [
-    'rgb(124, 58, 237)',
-    'rgb(139, 92, 246)',
-    'rgb(167, 139, 250)',
-    'rgb(196, 181, 253)',
-    'rgb(221, 214, 254)',
-  ],
-  '7d_fable': [
-    'rgb(77, 124, 15)',
-    'rgb(101, 163, 13)',
-    'rgb(132, 204, 22)',
-    'rgb(163, 230, 53)',
-    'rgb(217, 249, 157)',
-  ],
+/**
+ * Fill for a pool bar at each quota severity. The bar says how close the pool
+ * is to its limit; window identity stays in the trend legend and series.
+ */
+const POOL_SEVERITY_FILL_VAR: Record<QuotaSeverity, string> = {
+  none: 'var(--color-overlay-4)',
+  ok: 'var(--color-text-muted)',
+  warn: 'var(--color-warn)',
+  danger: 'var(--color-danger)',
+};
+/** Shade steps that tell adjacent upstream segments (and their swatches) apart. */
+const POOL_SEGMENT_SHADES = [100, 72, 52, 38] as const;
+const POOL_WINDOW_LABEL: Record<PoolQuotaWindow, string> = {
+  '5h': '5h',
+  '7d': '7d',
+  '7d_fable': '7d (Fable)',
 };
 
 const POOL_QUOTA_SNAPSHOT_SLOT_CLASS =
-  'relative flex min-h-[56px] w-full flex-col justify-center';
-const POOL_QUOTA_CHART_SLOT_CLASS = 'relative flex-1 min-h-64 min-w-0 w-full';
+  'relative flex min-h-10 w-full flex-col justify-center';
+const POOL_QUOTA_CHART_SLOT_CLASS = 'relative h-64 min-w-0 w-full';
 const POOL_QUOTA_LEGEND_ITEM_CLASS = 'inline-flex min-h-4 items-center gap-1.5';
 
-function poolSegmentColor(window: PoolQuotaWindow, index: number): string {
-  const palette = POOL_PALETTES[window];
-  return palette[index % palette.length];
+function poolSegmentColor(severity: QuotaSeverity, index: number): string {
+  const shade = POOL_SEGMENT_SHADES[index % POOL_SEGMENT_SHADES.length];
+  return `color-mix(in oklab, ${POOL_SEVERITY_FILL_VAR[severity]} ${shade}%, var(--color-bg))`;
 }
 
 function PoolQuotaPopoverContent({
-  window,
   w,
+  severity,
   activeIdx,
 }: {
-  window: PoolQuotaWindow;
   w: AggregateWindow;
+  severity: QuotaSeverity;
   activeIdx: number | null;
 }) {
   const totalRatio = w.provider_lots.reduce(
@@ -720,63 +735,62 @@ function PoolQuotaPopoverContent({
     0,
   );
   return (
-    <div className="flex flex-col gap-2 text-sm text-text">
-      <div className="flex items-center gap-3 px-3 pb-2 border-b border-subtle text-xs font-medium text-text-muted uppercase tracking-wider">
-        <span className="flex-1">Upstream</span>
-        <span className="w-16 text-right">Util</span>
-        <span className="w-16 text-right">Weight</span>
-        <span className="w-16 text-right">Impact</span>
+    <div className="flex flex-col gap-0.5 text-body-sm text-text">
+      <div className="flex items-center gap-3 px-2 pb-1.5 mb-0.5 border-b border-row text-label text-text-faint">
+        <span className="flex-1 min-w-32">Upstream</span>
+        <span className="w-14 text-right">Util</span>
+        <span className="w-14 text-right">Weight</span>
+        <span className="w-14 text-right">Impact</span>
       </div>
       {w.provider_lots.map((lot, i) => {
         const util = lot.utilization ?? 0;
         const weightedContribution =
           totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
-        const idColor = poolSegmentColor(window, i);
-        const utilTextColor =
-          lot.utilization != null
-            ? 'var(--color-text)'
-            : 'var(--color-text-muted)';
+        const utilPct = lot.utilization != null ? util * 100 : null;
         const isHovered = activeIdx === i;
         return (
           <div
-            key={i}
+            key={lot.upstream_id}
             className={cx(
-              'flex items-center gap-3 px-3 py-2 rounded-md transition-colors',
-              isHovered ? 'bg-surface-raised shadow-sm' : 'hover:bg-overlay-2',
+              'flex items-center gap-3 px-2 py-1.5 rounded-sm transition-colors',
+              isHovered && 'bg-overlay-5',
             )}
+            data-testid="pool-quota-breakdown-row"
           >
-            <div className="flex items-center gap-2.5 flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-1 min-w-32">
               <span
+                aria-hidden="true"
                 className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
-                style={{ backgroundColor: idColor }}
+                style={{ backgroundColor: poolSegmentColor(severity, i) }}
               />
               <span
                 className={cx(
                   'truncate',
                   isHovered ? 'font-medium text-text' : 'text-text-muted',
                 )}
+                title={lot.upstream_name}
               >
                 {lot.upstream_name}
               </span>
             </div>
             <span
-              className="tabular-nums w-16 text-right font-medium"
-              style={{ color: utilTextColor }}
+              className={cx(
+                'tabular-nums w-14 text-right font-medium',
+                QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(utilPct)],
+              )}
             >
-              {lot.utilization != null ? `${(util * 100).toFixed(1)}%` : '—'}
+              {utilPct != null ? `${utilPct.toFixed(1)}%` : '—'}
             </span>
-            <span className="tabular-nums w-16 text-right text-text-muted">
+            <span className="tabular-nums w-14 text-right text-text-muted">
               {lot.capacity_ratio.toFixed(1)}x
             </span>
             <span
               className={cx(
-                'tabular-nums w-16 text-right',
+                'tabular-nums w-14 text-right',
                 isHovered ? 'font-medium text-text' : 'text-text-muted',
               )}
             >
-              {weightedContribution > 0
-                ? `${weightedContribution.toFixed(1)}%`
-                : '0.0%'}
+              {`${weightedContribution.toFixed(1)}%`}
             </span>
           </div>
         );
@@ -795,26 +809,23 @@ export function PoolQuotaStackedBar({
   loading?: boolean;
 }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
-  const [openPopover, setOpenPopover] = useState(false);
-  const label = window === '7d_fable' ? '7d (Fable)' : window;
+  const label = POOL_WINDOW_LABEL[window];
 
   if (loading || !w) {
     return (
-      <div className={cx(POOL_QUOTA_SNAPSHOT_SLOT_CLASS, 'gap-2')}>
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-xs font-medium text-text-muted">
-            {label} pool
-          </span>
+      <div className={cx(POOL_QUOTA_SNAPSHOT_SLOT_CLASS, 'gap-1.5')}>
+        <div className="flex items-center justify-between">
+          <span className="text-label text-text-muted">{label} pool</span>
           {loading ? (
             <Skeleton as="span" className="inline-block h-4 w-12" />
           ) : (
-            <span className="text-xs text-text-faint">no data</span>
+            <span className="text-caption text-text-faint">no data</span>
           )}
         </div>
         {loading ? (
-          <Skeleton className="h-5 rounded-full" />
+          <Skeleton className="h-2 rounded-xs" />
         ) : (
-          <div className="h-5 w-full rounded-full border border-subtle bg-surface-raised" />
+          <div className="h-2 w-full rounded-xs bg-progress-track" />
         )}
       </div>
     );
@@ -824,149 +835,242 @@ export function PoolQuotaStackedBar({
     (sum, lot) => sum + lot.capacity_ratio,
     0,
   );
-  const usedPct = w.utilization_percent ?? 0;
+  const severity = quotaSeverity(w.utilization_percent);
   const weightedSegments = w.provider_lots
     .map((lot, index) => {
       const util = lot.utilization ?? 0;
       const weightedContribution =
         totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
-
-      return {
-        idColor: poolSegmentColor(window, index),
-        index,
-        lot,
-        weightedContribution,
-      };
+      return { index, lot, weightedContribution };
     })
     .filter((segment) => segment.weightedContribution > 0);
   const totalWeightedContribution = weightedSegments.reduce(
     (sum, segment) => sum + segment.weightedContribution,
     0,
   );
-
-  const handleInteraction = (i: number | null, isClick = false) => {
-    const isMobile = 'ontouchstart' in globalThis.window;
-    if (isMobile && !isClick) return;
-    if (isClick && isMobile) {
-      if (openPopover && activeIdx === i) {
-        setOpenPopover(false);
-        setActiveIdx(null);
-      } else {
-        setOpenPopover(true);
-        setActiveIdx(i);
-      }
-    } else if (!isMobile) {
-      setActiveIdx(i);
-      setOpenPopover(i !== null);
-    }
-  };
-
-  const renderSegments = () =>
-    weightedSegments.map(({ idColor, index, lot, weightedContribution }) => {
-      const util = lot.utilization ?? 0;
-      const isHovered = activeIdx === index;
-      const isOtherHovered = activeIdx !== null && activeIdx !== index;
-      return (
-        <div
-          key={index}
-          className={cx(
-            'h-full basis-0 border-r border-bg last:border-r-0 transition-all cursor-pointer',
-            isHovered &&
-              'outline outline-1 outline-white/60 outline-offset-[-1px] z-10',
-            isOtherHovered && 'opacity-60',
-          )}
-          style={{
-            backgroundColor: idColor,
-            flexGrow: weightedContribution,
-          }}
-          title={`${lot.upstream_name} · ${lot.capacity_ratio.toFixed(1)}x · ${lot.utilization != null ? (util * 100).toFixed(1) : '—'}%`}
-          onMouseEnter={() => handleInteraction(index)}
-          onClick={() => handleInteraction(index, true)}
-          onTouchStart={() => handleInteraction(index, true)}
-        />
-      );
-    });
-
   const pctText =
-    w.utilization_percent != null ? `${usedPct.toFixed(1)}%` : '—';
+    w.utilization_percent != null
+      ? `${w.utilization_percent.toFixed(1)}%`
+      : '—';
+
   return (
     <BasePopover.Root
-      open={openPopover}
       onOpenChange={(nextOpen) => {
-        setOpenPopover(nextOpen);
         if (!nextOpen) setActiveIdx(null);
       }}
     >
       <BasePopover.Trigger
+        aria-label={`${label} pool ${pctText}, show upstream breakdown`}
         className={cx(
           POOL_QUOTA_SNAPSHOT_SLOT_CLASS,
-          'text-left',
-          openPopover && 'z-50',
+          'gap-1.5 text-left rounded-sm cursor-pointer focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4',
         )}
-        closeDelay={0}
-        delay={0}
-        nativeButton={false}
+        closeDelay={100}
+        delay={100}
         openOnHover
-        render={<div />}
       >
-        <div className="2xl:hidden flex flex-col gap-1.5">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-text-muted">
-              {label} pool
-            </span>
-            <span className="tabular-nums font-medium text-sm leading-none text-text">
-              {pctText}
-            </span>
-          </div>
-          <BaseMeter.Root
-            className="h-5 w-full"
-            max={100}
-            value={totalWeightedContribution}
+        <span className="flex items-center justify-between">
+          <span className="text-label text-text-muted">{label} pool</span>
+          <span
+            className={cx(
+              'tabular-nums font-medium text-body-sm leading-none',
+              QUOTA_SEVERITY_TEXT_CLASS[severity],
+            )}
+            data-slot="pool-pct"
           >
-            <BaseMeter.Track className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
-              <BaseMeter.Indicator className="h-full flex transition-all">
-                {renderSegments()}
-              </BaseMeter.Indicator>
-            </BaseMeter.Track>
-          </BaseMeter.Root>
-        </div>
-
-        <div className="hidden 2xl:flex items-center gap-2">
-          <span className="text-xs font-medium text-text-muted shrink-0">
-            {label}
-          </span>
-          <BaseMeter.Root
-            className="flex-1 h-5 min-w-0"
-            max={100}
-            value={totalWeightedContribution}
-          >
-            <BaseMeter.Track className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
-              <BaseMeter.Indicator className="h-full flex transition-all">
-                {renderSegments()}
-              </BaseMeter.Indicator>
-            </BaseMeter.Track>
-          </BaseMeter.Root>
-          <span className="tabular-nums font-medium text-sm leading-none text-text shrink-0">
             {pctText}
           </span>
-        </div>
+        </span>
+        <BaseMeter.Root
+          className="h-2 w-full"
+          max={100}
+          value={Math.min(100, totalWeightedContribution)}
+        >
+          <BaseMeter.Track className="flex h-2 w-full overflow-hidden rounded-xs bg-progress-track">
+            <BaseMeter.Indicator className="flex h-full gap-px">
+              {weightedSegments.map(({ index, lot, weightedContribution }) => (
+                <span
+                  key={lot.upstream_id}
+                  className={cx(
+                    'h-full min-w-[2px] basis-0 transition-opacity',
+                    activeIdx !== null && activeIdx !== index && 'opacity-50',
+                  )}
+                  data-testid="pool-quota-segment"
+                  style={{
+                    backgroundColor: poolSegmentColor(severity, index),
+                    flexGrow: weightedContribution,
+                  }}
+                  onMouseEnter={() => setActiveIdx(index)}
+                  onMouseLeave={() => setActiveIdx(null)}
+                />
+              ))}
+            </BaseMeter.Indicator>
+          </BaseMeter.Track>
+        </BaseMeter.Root>
       </BasePopover.Trigger>
 
       <BasePopover.Portal>
         <BasePopover.Positioner align="start" side="bottom" sideOffset={8}>
           <BasePopover.Popup
-            className="z-50 w-[var(--anchor-width)] max-w-[calc(100vw-1rem)] bg-bg-sub border border-subtle-strong rounded-md shadow-xl p-2"
+            aria-label={`${label} pool by upstream`}
+            className="glass-strong z-50 w-max min-w-[max(var(--anchor-width),22rem)] max-w-[calc(100vw-1rem)] rounded-md p-2"
             initialFocus={false}
           >
             <PoolQuotaPopoverContent
-              window={window}
               w={w}
+              severity={severity}
               activeIdx={activeIdx}
             />
           </BasePopover.Popup>
         </BasePopover.Positioner>
       </BasePopover.Portal>
     </BasePopover.Root>
+  );
+}
+
+const CLOSEST_TO_LIMIT_ROWS = 5;
+// Name, bar (capped so it never runs across the row), % right after the bar,
+// reset text, chevron. Below md: name + % on one line, bar and reset below.
+const CLOSEST_ROW_CLASS =
+  'grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(8rem,14rem)_minmax(6rem,22rem)_3rem_minmax(7rem,1fr)_1rem] items-center gap-x-3 gap-y-1.5 px-4 py-2.5';
+
+export function ClosestToLimitCard({
+  aggregate,
+  loading,
+}: {
+  aggregate: AggregateResponse | undefined;
+  loading: boolean;
+}) {
+  const { effective: timeZone } = useTimezone();
+  const entries = useMemo(() => closestToLimit(aggregate), [aggregate]);
+  const shown = entries.slice(0, CLOSEST_TO_LIMIT_ROWS);
+  const hidden = entries.length - shown.length;
+  return (
+    <Card
+      aria-busy={loading}
+      className="min-w-0"
+      data-testid="closest-to-limit"
+    >
+      <CardHeader
+        align="center"
+        title={
+          <span className="inline-flex items-center gap-2">
+            <Hourglass className="w-3.5 h-3.5 text-text-faint" />
+            Closest to limit
+          </span>
+        }
+        subtitle="Each upstream's most-used quota window"
+        action={
+          hidden > 0 ? (
+            <Link
+              to="/upstreams"
+              className="text-label text-accent-text hover:underline inline-flex items-center gap-1 rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+            >
+              {`${hidden} more`} <ArrowUpRight className="w-3 h-3" />
+            </Link>
+          ) : undefined
+        }
+      />
+      {loading ? (
+        <ul aria-hidden="true" className="divide-y divide-row">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <li key={index} className={CLOSEST_ROW_CLASS}>
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-4 w-10 md:order-3" />
+              <Skeleton className="col-span-2 h-1.5 rounded-xs md:col-span-1 md:order-2" />
+            </li>
+          ))}
+        </ul>
+      ) : shown.length === 0 ? (
+        <p className="px-4 py-8 text-center text-body-sm text-text-muted">
+          No quota readings from any upstream yet.
+        </p>
+      ) : (
+        <ul className="divide-y divide-row">
+          {shown.map((entry) => (
+            <ClosestToLimitRow
+              key={entry.upstreamId}
+              entry={entry}
+              nowUnixSecs={aggregate?.now_unix_secs ?? Date.now() / 1000}
+              timeZone={timeZone}
+            />
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function ClosestToLimitRow({
+  entry,
+  nowUnixSecs,
+  timeZone,
+}: {
+  entry: ClosestToLimitEntry;
+  nowUnixSecs: number;
+  timeZone: string;
+}) {
+  const severity = quotaSeverity(entry.utilizationPercent);
+  const reset = formatResetIn(entry.resetUnixSecs, nowUnixSecs);
+  const resetAt =
+    entry.resetUnixSecs != null
+      ? `Resets ${formatInTimezone(entry.resetUnixSecs * 1000, timeZone).replace('T', ' ')}`
+      : undefined;
+  const meta = [reset, entry.state === 'stale' ? 'stale reading' : null]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <li>
+      <Link
+        to="/upstreams"
+        search={{ selectedId: entry.upstreamId }}
+        className={cx(
+          CLOSEST_ROW_CLASS,
+          'group hover:bg-overlay-2 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+        )}
+        data-testid="closest-to-limit-row"
+      >
+        <span className="min-w-0 flex items-baseline gap-2">
+          <span className="truncate text-body-sm text-text">
+            {entry.upstreamName}
+          </span>
+          <span className="shrink-0 text-caption text-text-faint">
+            {POOL_WINDOW_LABEL[entry.window]}
+          </span>
+        </span>
+        <span
+          className={cx(
+            'text-right tabular-nums text-body-sm font-medium md:order-3 md:text-left',
+            QUOTA_SEVERITY_TEXT_CLASS[severity],
+          )}
+          data-slot="closest-pct"
+        >
+          {`${entry.utilizationPercent.toFixed(0)}%`}
+        </span>
+        <span
+          aria-hidden="true"
+          className="col-span-2 md:col-span-1 md:order-2 h-1.5 rounded-xs bg-progress-track overflow-hidden"
+        >
+          <span
+            className="block h-full"
+            style={{
+              width: `${Math.min(100, entry.utilizationPercent)}%`,
+              backgroundColor: POOL_SEVERITY_FILL_VAR[severity],
+            }}
+          />
+        </span>
+        <span
+          className="col-span-2 md:col-span-1 md:order-4 text-caption text-text-faint tabular-nums truncate"
+          title={resetAt}
+        >
+          {meta || '—'}
+        </span>
+        <ChevronRight
+          aria-hidden="true"
+          className="hidden md:block md:order-5 w-3.5 h-3.5 text-text-faint group-hover:text-text"
+        />
+      </Link>
+    </li>
   );
 }
 
@@ -1001,7 +1105,7 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
   return (
     <Card
       aria-busy={loading}
-      className="min-w-0 min-h-[41rem] flex flex-col h-full sm:min-h-0"
+      className="min-w-0 flex flex-col"
       data-testid="pool-quota-card"
     >
       <CardHeader
@@ -1013,38 +1117,31 @@ const PoolQuotaCard = memo(function PoolQuotaCard({
         }
         subtitle={
           upstreamCount > 0
-            ? `plan-weighted · ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
-            : 'plan-weighted'
+            ? `Plan-weighted · ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
+            : 'Plan-weighted'
         }
       />
-      <div className="flex-1 flex flex-col gap-4 p-4 pt-2 min-h-0">
-        <div className="flex flex-col gap-2">
-          <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
-            Snapshot
-          </div>
-          <div className="grid grid-cols-1 gap-x-10 gap-y-4 md:grid-cols-2 xl:grid-cols-3">
-            {POOL_QUOTA_WINDOWS.map((window) => (
-              <div
-                key={window}
-                data-testid="pool-quota-snapshot-slot"
-                className={POOL_QUOTA_SNAPSHOT_SLOT_CLASS}
-              >
-                <PoolQuotaStackedBar
-                  window={window}
-                  w={aggregate?.windows.find(
-                    (entry) => entry.window === window,
-                  )}
-                  loading={loading}
-                />
-              </div>
-            ))}
-          </div>
+      <div className="flex flex-col gap-4 p-4 pt-1">
+        <div className="grid grid-cols-1 gap-x-10 gap-y-3 md:grid-cols-2 xl:grid-cols-3">
+          {POOL_QUOTA_WINDOWS.map((window) => (
+            <div
+              key={window}
+              data-testid="pool-quota-snapshot-slot"
+              className={POOL_QUOTA_SNAPSHOT_SLOT_CLASS}
+            >
+              <PoolQuotaStackedBar
+                window={window}
+                w={aggregate?.windows.find((entry) => entry.window === window)}
+                loading={loading}
+              />
+            </div>
+          ))}
         </div>
-        <div className="h-px bg-border" />
-        <div className="flex-1 flex flex-col gap-2 min-h-0">
+        <div className="border-t border-row" />
+        <div className="flex flex-col gap-3">
           <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
-              Trend · {chart.range}
+            <div className="text-label text-text-muted">
+              {`Last ${chart.range}`}
             </div>
             <PoolQuotaLegend
               latest={chart.latest}
@@ -1087,7 +1184,6 @@ export function PoolQuotaThemedChart({
   rangeEndUnix: number;
   showFable: boolean;
 }) {
-  const chartId = useId();
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
   const cFable = getWindowColor('7d_fable');
@@ -1095,7 +1191,7 @@ export function PoolQuotaThemedChart({
   return (
     <div className="relative size-full min-h-0 min-w-0">
       {!seriesData.length ? (
-        <div className="absolute inset-0 flex items-center justify-center text-xs text-text-faint pointer-events-none z-10">
+        <div className="absolute inset-0 z-10 flex items-center justify-center text-body-sm text-text-muted pointer-events-none">
           No timeline data yet for this range
         </div>
       ) : null}
@@ -1103,130 +1199,69 @@ export function PoolQuotaThemedChart({
         responsive
         className="size-full"
         data={seriesData}
-        margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+        margin={{ top: 8, right: 0, bottom: 0, left: 0 }}
       >
-        <defs>
-          <linearGradient id={`${chartId}-grad-5h`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={c5h.stroke} stopOpacity={0.55} />
-            <stop offset="100%" stopColor={c5h.stroke} stopOpacity={0} />
-          </linearGradient>
-          <linearGradient id={`${chartId}-grad-7d`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={c7d.stroke} stopOpacity={0.55} />
-            <stop offset="100%" stopColor={c7d.stroke} stopOpacity={0} />
-          </linearGradient>
-          {showFable ? (
-            <linearGradient
-              id={`${chartId}-grad-fable`}
-              x1="0"
-              y1="0"
-              x2="0"
-              y2="1"
-            >
-              <stop offset="0%" stopColor={cFable.fill} stopOpacity={0.55} />
-              <stop offset="100%" stopColor={cFable.stroke} stopOpacity={0} />
-            </linearGradient>
-          ) : null}
-        </defs>
-        <CartesianGrid stroke="var(--color-border)" />
+        <CartesianGrid vertical={false} stroke="var(--color-border-row)" />
         <XAxis
           dataKey="unix"
           type="number"
           domain={[rangeStartUnix, rangeEndUnix]}
           allowDataOverflow
-          tick={{
-            fill: 'var(--color-text-muted)',
-            fontSize: 10,
-          }}
+          tick={{ fontSize: 11 }}
           tickFormatter={fmtChartTick}
           axisLine={false}
           tickLine={false}
-          minTickGap={40}
+          minTickGap={48}
           tickMargin={8}
         />
         <YAxis
-          tick={{
-            fill: 'var(--color-text-muted)',
-            fontSize: 10,
-          }}
+          tick={{ fontSize: 11 }}
           tickFormatter={(v) => `${v}%`}
           axisLine={false}
           tickLine={false}
-          width={48}
+          width={44}
           tickMargin={8}
           domain={[0, maxValue]}
-          ticks={
-            maxValue <= 100
-              ? [0, 25, 50, 75, 100]
-              : [0, 25, 50, 75, 100, maxValue]
-          }
+          ticks={maxValue <= 100 ? [0, 50, 100] : [0, 50, 100, maxValue]}
           allowDataOverflow={false}
         />
-        {maxValue > 95 ? (
-          <ReferenceArea
-            y1={95}
-            y2={maxValue}
-            fill="var(--color-danger)"
-            fillOpacity={0.06}
-            ifOverflow="hidden"
-          />
-        ) : null}
         <ReferenceLine
           y={80}
           stroke="var(--color-warn)"
           strokeOpacity={0.5}
-          strokeDasharray="4 4"
+          strokeDasharray="3 3"
           label={{
-            position: 'insideBottomLeft',
-            value: '80% Warn',
-            fill: 'var(--color-text-muted)',
+            position: 'insideTopRight',
+            value: '80%',
+            fill: 'var(--color-warn-text)',
             fontSize: 11,
-            opacity: 0.9,
           }}
         />
         <ReferenceLine
           y={95}
           stroke="var(--color-danger)"
-          strokeOpacity={0.6}
-          strokeDasharray="4 4"
+          strokeOpacity={0.5}
+          strokeDasharray="3 3"
           label={{
-            position: 'insideBottomLeft',
-            value: '95% Critical',
-            fill: 'var(--color-text-muted)',
+            position: 'insideTopRight',
+            value: '95%',
+            fill: 'var(--color-danger-text)',
             fontSize: 11,
-            opacity: 0.9,
           }}
         />
         <RTooltip
           cursor={{
-            stroke: 'var(--color-accent)',
+            stroke: 'var(--color-border-strong)',
             strokeWidth: 1,
-            strokeOpacity: 0.3,
           }}
           content={({ active, payload, label }) => {
             if (!active || !payload?.length) return null;
             return (
-              <div
-                style={{
-                  background: 'var(--color-bg-sub)',
-                  border: '1px solid var(--color-subtle-strong)',
-                  borderRadius: 6,
-                  color: 'var(--color-text)',
-                  fontSize: 11,
-                  padding: '8px 12px',
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.32)',
-                  minWidth: 140,
-                }}
-              >
-                <div
-                  style={{
-                    color: 'var(--color-text-muted)',
-                    marginBottom: 6,
-                    fontWeight: 500,
-                  }}
-                >
+              <div className="glass-strong min-w-36 rounded-md px-3 py-2 text-caption text-text">
+                <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(Number(label))}
                 </div>
-                {payload.map((p, i) => {
+                {payload.map((p) => {
                   const w = String(p.dataKey);
                   const wLabel =
                     w === '5h'
@@ -1238,31 +1273,23 @@ export function PoolQuotaThemedChart({
                           : w;
                   return (
                     <div
-                      key={i}
-                      style={{
-                        padding: '2px 0',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                      }}
+                      key={w}
+                      className="flex items-center justify-between gap-3 py-0.5"
                     >
-                      <span
-                        style={{
-                          color:
-                            typeof p.color === 'string'
-                              ? p.color
-                              : 'var(--color-text)',
-                          fontWeight: 500,
-                        }}
-                      >
+                      <span className="inline-flex items-center gap-1.5 text-text-muted">
+                        <span
+                          aria-hidden="true"
+                          className="h-0.5 w-2.5 rounded-xs"
+                          style={{
+                            background:
+                              typeof p.color === 'string'
+                                ? p.color
+                                : 'var(--color-text)',
+                          }}
+                        />
                         {wLabel}
                       </span>
-                      <span
-                        style={{
-                          fontVariantNumeric: 'tabular-nums',
-                          fontWeight: 500,
-                        }}
-                      >
+                      <span className="font-medium tabular-nums">
                         {typeof p.value === 'number'
                           ? `${p.value.toFixed(1)}%`
                           : '—'}
@@ -1274,14 +1301,15 @@ export function PoolQuotaThemedChart({
             );
           }}
         />
+        {/* Series overlap, so only the 5h window carries a flat fill; the
+        longer windows draw as lines. */}
         {showFable ? (
           <Area
             type="monotone"
             dataKey="7d_fable"
             stroke={cFable.stroke}
-            strokeWidth={1.4}
-            fill={`url(#${chartId}-grad-fable)`}
-            fillOpacity={1}
+            strokeWidth={1.5}
+            fill="none"
             isAnimationActive={false}
             connectNulls={false}
           />
@@ -1290,9 +1318,8 @@ export function PoolQuotaThemedChart({
           type="monotone"
           dataKey="7d"
           stroke={c7d.stroke}
-          strokeWidth={1.4}
-          fill={`url(#${chartId}-grad-7d)`}
-          fillOpacity={1}
+          strokeWidth={1.5}
+          fill="none"
           isAnimationActive={false}
           connectNulls={false}
         />
@@ -1300,9 +1327,9 @@ export function PoolQuotaThemedChart({
           type="monotone"
           dataKey="5h"
           stroke={c5h.stroke}
-          strokeWidth={1.4}
-          fill={`url(#${chartId}-grad-5h)`}
-          fillOpacity={1}
+          strokeWidth={1.5}
+          fill={c5h.fill}
+          fillOpacity={SERIES_FILL_OPACITY}
           isAnimationActive={false}
           connectNulls={false}
         />
@@ -1321,7 +1348,7 @@ export function PoolQuotaLegend({
   loading?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-3 text-[11px] text-text-faint">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-text-muted">
       {POOL_QUOTA_WINDOWS.filter(
         (window) => showFable || window !== '7d_fable',
       ).map((window) => {
@@ -1335,14 +1362,18 @@ export function PoolQuotaLegend({
             data-testid="pool-quota-legend-slot"
           >
             <span
-              className="w-2 h-2 rounded-sm"
+              aria-hidden="true"
+              className="h-0.5 w-2.5 rounded-xs"
               style={{ background: color.stroke }}
             />
             {label}
             {loading ? (
               <Skeleton as="span" className="inline-block h-3 w-8" />
             ) : value != null ? (
-              ` · ${value.toFixed(0)}%`
+              <>
+                {' · '}
+                <span className="tabular-nums text-text">{`${value.toFixed(0)}%`}</span>
+              </>
             ) : null}
           </span>
         );
@@ -1443,6 +1474,15 @@ function OverviewPage() {
       : 0;
   const latency = totals?.avg_latency_ms ?? 0;
   const latencyLabel = 'Avg latency';
+  // With zero requests, averages and ratios are undefined, not zero.
+  const noTraffic = totals?.request_count === 0;
+  const requestSeen =
+    recentRows.length > 0 || (totals?.request_count ?? 0) > 0
+      ? true
+      : events.isPending
+        ? undefined
+        : false;
+  const firstRunIncomplete = useFirstRunIncomplete(requestSeen);
 
   const cacheMissAvg = totals ? cacheMissRatio(totals) : null;
 
@@ -1618,181 +1658,208 @@ function OverviewPage() {
         onRetry={live.forceReconnect}
       />
       <OAuthReconnectSummary />
-      <div className="flex items-center justify-between mb-2">
-        <h1 className="text-lg font-medium">Overview</h1>
-        <BaseToggleGroup
-          aria-label="Time range"
-          className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5"
-          onValueChange={(values) => {
-            const first = values[0];
-            if (first) selectRange(first);
-          }}
-          value={[range]}
-        >
-          {RANGES.map((r) => (
-            <BaseToggle
-              key={r}
-              className="px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]"
-              value={r}
-            >
-              {r}
-            </BaseToggle>
-          ))}
-        </BaseToggleGroup>
-      </div>
-
-      {/* KPI Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
-        <ValueTile
-          size="sm"
-          chartId="request-rate"
-          icon={<Activity className="w-3.5 h-3.5" />}
-          label="avg req/s"
-          loading={summary.isPending}
-          value={formatRate(reqPerSec)}
-          sub={`${formatCount(totals?.request_count)} / ${range}`}
-          spark={kpiPoints.rate}
-          sparkColor="var(--color-accent)"
-          chartLabel="Req/s"
-          formatChartValue={formatRate}
-          activeIndex={activeKpiIndex}
-          onActiveIndexChange={setActiveKpiIndex}
-        />
-        <ValueTile
-          size="sm"
-          chartId="tokens"
-          icon={<Database className="w-3.5 h-3.5" />}
-          label="tokens"
-          loading={summary.isPending}
-          value={formatCount(totalTokens)}
-          sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
-          spark={kpiPoints.tokens}
-          sparkColor={TOKENS_COLOR}
-          chartLabel="Tokens"
-          formatChartValue={formatCount}
-          secondary={TOKENS_CACHE_MISS_SERIES}
-          activeIndex={activeKpiIndex}
-          onActiveIndexChange={setActiveKpiIndex}
-        />
-        <ValueTile
-          size="sm"
-          chartId="cost"
-          icon={<TrendingUp className="w-3.5 h-3.5" />}
-          label="equiv $"
-          loading={summary.isPending}
-          value={formatUsdAmount(virtualUsd)}
-          spark={kpiPoints.cost}
-          sparkColor="#10b981"
-          tone="accent"
-          chartLabel="Equiv $"
-          formatChartValue={formatUsdAmount}
-          activeIndex={activeKpiIndex}
-          onActiveIndexChange={setActiveKpiIndex}
-        />
-        <ValueTile
-          size="sm"
-          chartId="latency"
-          icon={<Timer className="w-3.5 h-3.5" />}
-          label={latencyLabel}
-          loading={summary.isPending}
-          value={fmtMs(latency)}
-          spark={kpiPoints.latency}
-          sparkColor="#f59e0b"
-          chartLabel={latencyLabel}
-          formatChartValue={fmtMs}
-          activeIndex={activeKpiIndex}
-          onActiveIndexChange={setActiveKpiIndex}
-        />
-        <ValueTile
-          size="sm"
-          chartId="error-rate"
-          icon={<ShieldCheck className="w-3.5 h-3.5" />}
-          label="err rate"
-          loading={summary.isPending}
-          value={fmtErrorPercent(errRate)}
-          spark={kpiPoints.error}
-          sparkColor="var(--color-danger)"
-          chartLabel="Err rate"
-          formatChartValue={fmtErrorPercent}
-          activeIndex={activeKpiIndex}
-          onActiveIndexChange={setActiveKpiIndex}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
-        <PoolQuotaCard
-          aggregate={quotaAggregate.data}
-          loading={quotaLoading}
-          chart={poolQuotaChart}
-        />
-
-        <TopPrincipalsCard
-          range={range}
-          principals={topPrincipals}
-          loading={
-            principalUsage.data === undefined && principalUsage.isPending
-          }
-        />
-      </div>
-
-      {/* Recent Requests */}
-      <Section
-        title="Recent Requests"
-        subtitle={
-          <span className="flex items-center gap-2">
-            <span>
-              Live preview — full view on Logs page
-              {streamStatus === 'live' ? ' · streaming' : ''}
-            </span>
-            {live.permanentFailure ? (
-              <AlertTriangle className="w-3 h-3 text-[color:var(--color-danger)]" />
-            ) : (
-              <span
-                className={cx(
-                  'status-dot',
-                  streamStatus === 'live'
-                    ? 'live'
-                    : streamStatus === 'error'
-                      ? 'danger'
-                      : streamStatus === 'connecting' ||
-                          streamStatus === 'reconnecting'
-                        ? 'warn animate-pulse'
-                        : 'neutral',
-                )}
-              />
-            )}
-          </span>
-        }
-        action={
-          <a
-            href="/logs"
-            className="text-xs text-accent hover:underline inline-flex items-center gap-1"
-          >
-            See all <ArrowUpRight className="w-3 h-3" />
-          </a>
-        }
-      >
-        <Card className="min-w-0">
-          <div
-            className="overflow-auto h-[50vh] scroll-fade-right"
-            ref={scrollContainerRef}
-          >
-            <RequestEventsTable
-              events={recentRows}
-              principalNameMap={principalNameMap}
-              upstreamNameMap={upstreamNameMap}
-              loading={events.isLoading}
-              liveFlashIds={recentLiveIds}
-              columns={OVERVIEW_TABLE_COLUMNS}
-              sentinelRef={sentinelRef}
-              loadingMore={events.isFetchingNextPage}
-              hasMore={events.hasNextPage}
-              minWidthClass="min-w-[1080px]"
-              emptyTitle="No recent requests"
+      <PageHeader
+        title="Overview"
+        actions={
+          // Nothing below reads the range until the first-run state lifts.
+          firstRunIncomplete ? undefined : (
+            <SegmentedControl
+              ariaLabel="Time range"
+              options={RANGE_OPTIONS}
+              value={range}
+              onChange={selectRange}
             />
+          )
+        }
+      />
+
+      {/* The checklist is the whole first-run state: it says what fills in
+      once traffic flows, so nothing else renders until it lifts. */}
+      <FirstRunChecklist requestSeen={requestSeen} />
+
+      {firstRunIncomplete ? null : (
+        <>
+          <ClosestToLimitCard
+            aggregate={quotaAggregate.data}
+            loading={quotaLoading}
+          />
+
+          {/* Quota comes first in the DOM (and on mobile); desktop shows the
+          traffic strip above it. */}
+          <div className="flex flex-col gap-4 min-w-0">
+            <div className="grid grid-cols-1 items-start xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
+              <PoolQuotaCard
+                aggregate={quotaAggregate.data}
+                loading={quotaLoading}
+                chart={poolQuotaChart}
+              />
+
+              <TopPrincipalsCard
+                range={range}
+                principals={topPrincipals}
+                loading={
+                  principalUsage.data === undefined && principalUsage.isPending
+                }
+              />
+            </div>
+
+            <section
+              aria-label="Traffic"
+              className="glass rounded-md min-w-0 md:order-first"
+              data-testid="overview-kpi-strip"
+            >
+              {!summary.isPending && noTraffic ? (
+                <p className="border-b border-row px-3 py-2 text-caption text-text-faint md:px-4">
+                  {`No traffic in the last ${range}.`}
+                </p>
+              ) : null}
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
+                <ValueTile
+                  className={KPI_CELL_CLASS[0]}
+                  chartId="request-rate"
+                  icon={<Activity />}
+                  label="Requests/s"
+                  loading={summary.isPending}
+                  value={formatRate(reqPerSec)}
+                  sub={`${formatCount(totals?.request_count)} in ${range}`}
+                  spark={kpiPoints.rate}
+                  sparkColor={KPI_SERIES_COLOR}
+                  chartLabel="Req/s"
+                  formatChartValue={formatRate}
+                  activeIndex={activeKpiIndex}
+                  onActiveIndexChange={setActiveKpiIndex}
+                />
+                <ValueTile
+                  className={KPI_CELL_CLASS[1]}
+                  chartId="tokens"
+                  icon={<Database />}
+                  label="Tokens"
+                  loading={summary.isPending}
+                  value={formatCount(totalTokens)}
+                  sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
+                  spark={kpiPoints.tokens}
+                  sparkColor={KPI_SERIES_COLOR}
+                  formatChartValue={formatCount}
+                  secondary={TOKENS_CACHE_MISS_SERIES}
+                  activeIndex={activeKpiIndex}
+                  onActiveIndexChange={setActiveKpiIndex}
+                />
+                <ValueTile
+                  className={KPI_CELL_CLASS[2]}
+                  chartId="cost"
+                  icon={<TrendingUp />}
+                  label="Cost at list price"
+                  loading={summary.isPending}
+                  value={formatUsdAmount(virtualUsd)}
+                  spark={kpiPoints.cost}
+                  sparkColor={KPI_SERIES_COLOR}
+                  chartLabel="Cost"
+                  formatChartValue={formatUsdAmount}
+                  activeIndex={activeKpiIndex}
+                  onActiveIndexChange={setActiveKpiIndex}
+                />
+                <ValueTile
+                  className={KPI_CELL_CLASS[3]}
+                  chartId="latency"
+                  icon={<Timer />}
+                  label={latencyLabel}
+                  loading={summary.isPending}
+                  value={noTraffic ? '—' : fmtMs(latency)}
+                  spark={kpiPoints.latency}
+                  sparkColor={KPI_SERIES_COLOR}
+                  formatChartValue={fmtMs}
+                  activeIndex={activeKpiIndex}
+                  onActiveIndexChange={setActiveKpiIndex}
+                />
+                <ValueTile
+                  className={KPI_CELL_CLASS[4]}
+                  chartId="error-rate"
+                  icon={<ShieldCheck />}
+                  label="Error rate"
+                  loading={summary.isPending}
+                  value={noTraffic ? '—' : fmtErrorPercent(errRate)}
+                  spark={kpiPoints.error}
+                  sparkColor={
+                    errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
+                  }
+                  formatChartValue={fmtErrorPercent}
+                  activeIndex={activeKpiIndex}
+                  onActiveIndexChange={setActiveKpiIndex}
+                />
+              </div>
+            </section>
           </div>
-        </Card>
-      </Section>
+
+          {/* Latest requests: the feed is not range-scoped (newest events of any
+          age), so its label must not suggest it follows the range picker. */}
+          <Section
+            title="Latest requests (any time)"
+            subtitle={
+              <span className="flex items-center gap-2">
+                <span>
+                  Newest first, not limited to the range above — full view on
+                  Logs page
+                  {streamStatus === 'live' ? ' · streaming' : ''}
+                </span>
+                {live.permanentFailure ? (
+                  <AlertTriangle className="w-3 h-3 text-danger-text" />
+                ) : (
+                  <span
+                    className={cx(
+                      'status-dot',
+                      streamStatus === 'live'
+                        ? 'live'
+                        : streamStatus === 'error'
+                          ? 'danger'
+                          : streamStatus === 'connecting' ||
+                              streamStatus === 'reconnecting'
+                            ? 'warn animate-pulse'
+                            : 'neutral',
+                    )}
+                  />
+                )}
+              </span>
+            }
+            action={
+              <Link
+                to="/logs"
+                className="text-label text-accent-text hover:underline inline-flex items-center gap-1 rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+              >
+                See all <ArrowUpRight className="w-3 h-3" />
+              </Link>
+            }
+          >
+            <Card className="min-w-0">
+              <div
+                className={cx(
+                  'relative overflow-auto scroll-fade-right',
+                  // A fixed box keeps loading → loaded from jumping; an empty
+                  // feed collapses to its one-line empty row instead of
+                  // leaving a tall blank frame.
+                  !events.isLoading && recentRows.length === 0
+                    ? 'max-h-[50vh]'
+                    : 'h-[50vh]',
+                )}
+                ref={scrollContainerRef}
+              >
+                <RequestEventsTable
+                  events={recentRows}
+                  principalNameMap={principalNameMap}
+                  upstreamNameMap={upstreamNameMap}
+                  loading={events.isLoading}
+                  liveFlashIds={recentLiveIds}
+                  columns={OVERVIEW_TABLE_COLUMNS}
+                  sentinelRef={sentinelRef}
+                  loadingMore={events.isFetchingNextPage}
+                  hasMore={events.hasNextPage}
+                  minWidthClass="min-w-[1080px]"
+                  emptyTitle="No recent requests"
+                />
+              </div>
+            </Card>
+          </Section>
+        </>
+      )}
     </PageContainer>
   );
 }

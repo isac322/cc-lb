@@ -1,6 +1,4 @@
-import { Toggle as BaseToggle } from '@base-ui/react/toggle';
-import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
-import { useId, useMemo } from 'react';
+import { useMemo } from 'react';
 import {
   Area,
   AreaChart,
@@ -11,9 +9,43 @@ import {
   YAxis,
 } from 'recharts';
 import type { DashboardUsageResponse } from '../../lib/api';
-import { getWindowColor } from '../../lib/colors';
+import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
 import { fmtUsd, sumTokens } from '../../lib/format';
-import { Card, CardBody, CardHeader, Skeleton } from '../ui/primitives';
+import {
+  Card,
+  CardBody,
+  CardHeader,
+  EmptyState,
+  SegmentedControl,
+  Skeleton,
+} from '../ui/primitives';
+
+// Model families reuse the quota series tokens so the same model reads in
+// the same hue everywhere; anything else cycles through the remaining ones.
+const MODEL_FAMILY_SERIES: [string, string][] = [
+  ['opus', '7d_opus'],
+  ['sonnet', '7d_sonnet'],
+  ['haiku', '5h'],
+  ['fable', '7d_fable'],
+];
+const FALLBACK_SERIES = ['7d', '5h', '7d_fable', '7d_sonnet', '7d_opus'];
+
+function modelSeriesColor(model: string, index: number): string {
+  const lower = model.toLowerCase();
+  const family = MODEL_FAMILY_SERIES.find(([name]) => lower.includes(name));
+  return getWindowColor(
+    family?.[1] ?? FALLBACK_SERIES[index % FALLBACK_SERIES.length]!,
+  ).stroke;
+}
+
+const RANGE_OPTIONS = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+] as const;
+const METRIC_OPTIONS = [
+  { value: 'tokens', label: 'Tokens' },
+  { value: 'cost', label: 'Cost' },
+] as const;
 
 type Props = {
   data: DashboardUsageResponse | undefined;
@@ -32,7 +64,6 @@ export function ApiUsageCard({
   metric,
   onMetricChange,
 }: Props) {
-  const chartId = useId();
   const showLoading = data === undefined && isLoading;
 
   const chartData = useMemo(() => {
@@ -88,170 +119,51 @@ export function ApiUsageCard({
     return val.toLocaleString();
   };
 
-  const toggleClass =
-    'rounded px-2 py-1 text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 data-[pressed]:bg-white data-[pressed]:text-zinc-900 data-[pressed]:shadow-sm dark:data-[pressed]:bg-zinc-700 dark:data-[pressed]:text-zinc-100';
-
   const action = (
-    <div className="flex items-center gap-2">
-      <BaseToggleGroup
-        aria-label="Time range"
-        className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
-        onValueChange={(values) => {
-          const first = values[0];
-          if (first === '24h' || first === '7d') onRangeChange(first);
-        }}
-        value={[range]}
-      >
-        <BaseToggle className={toggleClass} value="24h">
-          24h
-        </BaseToggle>
-        <BaseToggle className={toggleClass} value="7d">
-          7d
-        </BaseToggle>
-      </BaseToggleGroup>
-      <BaseToggleGroup
-        aria-label="Metric"
-        className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
-        onValueChange={(values) => {
-          const first = values[0];
-          if (first === 'tokens' || first === 'cost') onMetricChange(first);
-        }}
-        value={[metric]}
-      >
-        <BaseToggle className={toggleClass} value="tokens">
-          Tokens
-        </BaseToggle>
-        <BaseToggle className={toggleClass} value="cost">
-          Cost
-        </BaseToggle>
-      </BaseToggleGroup>
+    <div className="flex flex-wrap items-center gap-2">
+      <SegmentedControl
+        ariaLabel="Time range"
+        value={range}
+        onChange={onRangeChange}
+        options={RANGE_OPTIONS}
+      />
+      <SegmentedControl
+        ariaLabel="Metric"
+        value={metric}
+        onChange={onMetricChange}
+        options={METRIC_OPTIONS}
+      />
     </div>
   );
 
   return (
     <Card data-testid="api-usage-card">
       <CardHeader
-        title="API Usage"
-        subtitle="Token + cost breakdown by model"
+        title="API usage"
+        subtitle="Token and cost breakdown by model"
         action={action}
       />
       <CardBody>
-        <div className="flex flex-col gap-4">
-          <div className="h-64 w-full">
-            {showLoading ? (
-              <Skeleton className="h-full w-full" />
-            ) : chartData.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-sm text-zinc-500">
-                No usage in selected range
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart
-                  data={chartData}
-                  margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
-                >
-                  <defs>
-                    {models.map((model) => {
-                      const color = getWindowColor(model).fill;
-                      return (
-                        <linearGradient
-                          key={`${chartId}-${model}`}
-                          id={`${chartId}-${model}`}
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor={color}
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor={color}
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      );
-                    })}
-                  </defs>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    vertical={false}
-                    stroke="currentColor"
-                    className="text-zinc-200 dark:text-zinc-800"
-                  />
-                  <XAxis
-                    dataKey="ts"
-                    tickFormatter={formatXAxis}
-                    tick={{ fontSize: 12 }}
-                    tickLine={false}
-                    axisLine={false}
-                    minTickGap={30}
-                    stroke="currentColor"
-                    className="text-zinc-500"
-                  />
-                  <YAxis
-                    tickFormatter={formatYAxis}
-                    tick={{ fontSize: 12 }}
-                    tickLine={false}
-                    axisLine={false}
-                    width={60}
-                    stroke="currentColor"
-                    className="text-zinc-500"
-                  />
-                  <Tooltip
-                    labelFormatter={(label) => formatXAxis(label as number)}
-                    formatter={(value: unknown, name: unknown) => [
-                      formatTooltip(Number(value ?? 0)),
-                      String(name),
-                    ]}
-                    contentStyle={{
-                      backgroundColor: 'var(--bg-popover, #fff)',
-                      borderColor: 'var(--border, #e4e4e7)',
-                      borderRadius: '0.5rem',
-                      fontSize: '0.875rem',
-                    }}
-                  />
-                  {models.map((model) => {
-                    const color = getWindowColor(model).fill;
-                    return (
-                      <Area
-                        key={model}
-                        type="monotone"
-                        dataKey={model}
-                        stackId="1"
-                        stroke={color}
-                        fill={`url(#${chartId}-${model})`}
-                        strokeWidth={2}
-                        isAnimationActive={false}
-                      />
-                    );
-                  })}
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
+        <div className="flex flex-col gap-3">
           <div
             data-testid="api-usage-legend-slot"
-            className="flex flex-wrap items-center gap-4 text-sm min-h-[28px]"
+            className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-caption min-h-[28px]"
           >
             {!showLoading && chartData.length > 0
-              ? models.map((model) => {
-                  const color = getWindowColor(model).fill;
+              ? models.map((model, index) => {
                   const lastBucket = chartData[chartData.length - 1];
                   const val = lastBucket ? lastBucket[model] || 0 : 0;
                   return (
-                    <div key={model} className="flex items-center gap-2">
-                      <div
-                        className="h-3 w-3 rounded-full"
-                        style={{ backgroundColor: color }}
+                    <div key={model} className="flex items-center gap-1.5">
+                      <span
+                        aria-hidden="true"
+                        className="h-0.5 w-2.5 shrink-0 rounded-xs"
+                        style={{
+                          backgroundColor: modelSeriesColor(model, index),
+                        }}
                       />
-                      <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                        {model}
-                      </span>
-                      <span className="text-zinc-500">
+                      <span className="text-text-muted">{model}</span>
+                      <span className="tabular-nums text-text">
                         {formatTooltip(val)}
                       </span>
                     </div>
@@ -259,6 +171,68 @@ export function ApiUsageCard({
                 })
               : null}
           </div>
+          {!showLoading && chartData.length === 0 ? (
+            <EmptyState title="No usage in selected range" />
+          ) : (
+            <div className="h-64 w-full">
+              {showLoading ? (
+                <Skeleton className="h-full w-full" />
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart
+                    data={chartData}
+                    margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                  >
+                    <CartesianGrid
+                      vertical={false}
+                      stroke="var(--color-border-row)"
+                    />
+                    <XAxis
+                      dataKey="ts"
+                      tickFormatter={formatXAxis}
+                      tickLine={false}
+                      axisLine={false}
+                      minTickGap={60}
+                    />
+                    <YAxis
+                      tickFormatter={formatYAxis}
+                      tickLine={false}
+                      axisLine={false}
+                      tickCount={3}
+                      width={60}
+                    />
+                    <Tooltip
+                      labelFormatter={(label) => formatXAxis(label as number)}
+                      formatter={(value: unknown, name: unknown) => [
+                        formatTooltip(Number(value ?? 0)),
+                        String(name),
+                      ]}
+                      cursor={{
+                        stroke: 'var(--color-border-strong)',
+                        strokeWidth: 1,
+                      }}
+                    />
+                    {models.map((model, index) => {
+                      const color = modelSeriesColor(model, index);
+                      return (
+                        <Area
+                          key={model}
+                          type="monotone"
+                          dataKey={model}
+                          stackId="1"
+                          stroke={color}
+                          fill={color}
+                          fillOpacity={SERIES_FILL_OPACITY}
+                          strokeWidth={1.5}
+                          isAnimationActive={false}
+                        />
+                      );
+                    })}
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          )}
         </div>
       </CardBody>
     </Card>

@@ -1,7 +1,6 @@
 import { Field as BaseField } from '@base-ui/react/field';
 import { Form as BaseForm } from '@base-ui/react/form';
 import { Input as BaseInput } from '@base-ui/react/input';
-import { Lock } from 'lucide-react';
 import {
   type ReactNode,
   useCallback,
@@ -139,7 +138,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
       <AuthGateFrame>
         <Card
           aria-label="Checking admin session"
-          className="p-6 flex items-center gap-3 text-sm text-text-muted"
+          className="p-6 flex items-center gap-3 text-body-sm text-text-muted"
           role="status"
         >
           <Spinner />
@@ -153,17 +152,15 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     return (
       <AuthGateFrame>
         <Card className="p-6">
-          <div className="flex flex-col gap-2 mb-5">
-            <h1 className="text-base font-medium text-text leading-tight">
-              Unable to verify admin session
-            </h1>
-            <p className="text-xs text-text-faint">
-              Check the admin service connection, then try again.
-            </p>
+          <h1 className="text-title-section text-text">
+            Unable to verify admin session
+          </h1>
+          <p className="mt-1 text-body-sm text-text-muted">
+            Check the admin service connection, then try again.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <Button onClick={() => void loadSession(true)}>Retry</Button>
           </div>
-          <Button fullWidth onClick={() => void loadSession(true)}>
-            Retry
-          </Button>
         </Card>
       </AuthGateFrame>
     );
@@ -173,17 +170,15 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     return (
       <AuthGateFrame>
         <Card className="p-6">
-          <div className="flex flex-col gap-2 mb-5">
-            <h1 className="text-base font-medium text-text leading-tight">
-              External authentication required
-            </h1>
-            <p className="text-xs text-text-faint">
-              Sign in with the configured identity provider, then try again.
-            </p>
+          <h1 className="text-title-section text-text">
+            External authentication required
+          </h1>
+          <p className="mt-1 text-body-sm text-text-muted">
+            Sign in with the configured identity provider, then try again.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <Button onClick={() => void loadSession(true)}>Retry</Button>
           </div>
-          <Button fullWidth onClick={() => void loadSession(true)}>
-            Retry
-          </Button>
         </Card>
       </AuthGateFrame>
     );
@@ -215,27 +210,17 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   return (
     <AuthGateFrame>
       <Card className="p-6">
-        <div className="flex flex-col gap-2 mb-5">
-          <div className="flex items-center gap-2 text-text-faint">
-            <Lock className="w-3.5 h-3.5" />
-            <span className="text-[11px] uppercase tracking-wider font-mono">
-              cc-lb admin
-            </span>
-          </div>
-          <h1 className="text-base font-medium text-text leading-tight">
-            Admin token required
-          </h1>
-          <p className="text-xs text-text-faint">
-            Paste the admin Bearer token to continue.
-          </p>
-        </div>
+        <h1 className="text-title-section text-text">Admin token required</h1>
+        <p className="mt-1 text-body-sm text-text-muted">
+          Paste the admin Bearer token to continue.
+        </p>
         <BaseForm
-          className="flex flex-col gap-4"
+          className="mt-5 flex flex-col gap-5"
           errors={errors}
           onSubmit={handleSubmit}
         >
           <BaseField.Root className="flex flex-col gap-1.5" name="token">
-            <BaseField.Label className="text-[11px] uppercase tracking-wider text-text-faint">
+            <BaseField.Label className="text-label text-text-muted">
               Bearer token
             </BaseField.Label>
             <BaseField.Control
@@ -249,17 +234,18 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
               type="password"
               value={value}
             />
-            <BaseField.Error className="text-[11px] text-red-400" />
+            <BaseField.Error className="text-caption text-danger-text" />
           </BaseField.Root>
-          <Button
-            disabled={submitting || !value.trim()}
-            fullWidth
-            loading={submitting}
-            type="submit"
-            variant="primary"
-          >
-            Sign in
-          </Button>
+          <div className="flex justify-end">
+            <Button
+              disabled={submitting || !value.trim()}
+              loading={submitting}
+              type="submit"
+              variant="primary"
+            >
+              Sign in
+            </Button>
+          </div>
         </BaseForm>
       </Card>
     </AuthGateFrame>
@@ -269,7 +255,18 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
 function AuthGateFrame({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-bg text-text px-4 py-8">
-      <div className="w-full max-w-sm">{children}</div>
+      <div className="w-full max-w-sm">
+        <div className="mb-4 flex items-center justify-center gap-2.5">
+          <div
+            aria-hidden="true"
+            className="flex h-6 w-6 items-center justify-center rounded-sm border border-subtle bg-overlay-6 text-2xs font-semibold text-text"
+          >
+            CC
+          </div>
+          <span className="text-sm font-medium text-text">cc-lb admin</span>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }

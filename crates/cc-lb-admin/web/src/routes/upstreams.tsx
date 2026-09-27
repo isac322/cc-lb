@@ -1,7 +1,4 @@
 import { Meter as BaseMeter } from '@base-ui/react/meter';
-import { Switch as BaseSwitch } from '@base-ui/react/switch';
-import { Toggle as BaseToggle } from '@base-ui/react/toggle';
-import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ChevronLeft,
@@ -26,8 +23,8 @@ import {
 } from 'recharts';
 import { toast } from 'sonner';
 import * as z from 'zod';
+import { UpstreamsListEmpty } from '../components/onboarding/ListEmptyStates';
 import {
-  Badge,
   Button,
   Card,
   CardBody,
@@ -36,10 +33,14 @@ import {
   cx,
   EmptyState,
   Hint,
+  Notice,
+  PageHeader,
   Section,
+  SegmentedControl,
   Skeleton,
   Spinner,
   StatusBadge,
+  ToggleSwitch,
 } from '../components/ui/primitives';
 import {
   RelativeOffsetTime,
@@ -67,6 +68,10 @@ import {
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
+import {
+  QuotaFreshnessCaption,
+  upstreamHealth,
+} from '../components/upstreams/upstreamHealth';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
@@ -74,7 +79,7 @@ import {
   type QuotaSnapshot,
   type UpstreamOAuthStatusResponse,
 } from '../lib/api';
-import { getWindowColor } from '../lib/colors';
+import { getWindowColor, SERIES_FILL_OPACITY } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs, sumTokens } from '../lib/format';
 import { isMessagesRequestEvent } from '../lib/logRows';
@@ -102,6 +107,16 @@ import {
   useUpstreams,
   useUsage,
 } from '../lib/queries';
+import {
+  QUOTA_SEVERITY_FILL_CLASS,
+  QUOTA_SEVERITY_TEXT_CLASS,
+  quotaSeverity,
+} from '../lib/quotaSeverity';
+import {
+  TIME_PRESET_OPTIONS,
+  TIME_PRESETS,
+  type TimePreset,
+} from '../lib/timePresets';
 
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
@@ -191,6 +206,8 @@ function UpstreamsPage() {
     () => upstreams.data?.upstreams ?? [],
     [upstreams.data],
   );
+  // The kind badge only helps tell rows apart when the list mixes kinds.
+  const showKindBadge = new Set(visibleUpstreams.map((u) => u.kind)).size > 1;
 
   // Reconnect nudges derive from the same oauth/status queries the detail
   // view reads; disabled upstreams stay in the map so their rows still carry
@@ -223,25 +240,24 @@ function UpstreamsPage() {
           selected ? 'hidden md:flex' : 'flex',
         )}
       >
-        <div className="h-12 px-4 flex items-center justify-between border-b border-subtle shrink-0">
-          <div>
-            <h1 className="text-sm font-medium">Upstreams</h1>
-            <div className="mt-0.5 h-3 text-[11px] text-text-faint">
-              {upstreams.isLoading ? (
-                <Skeleton className="h-3 w-14" />
-              ) : (
-                `${visibleUpstreams.length} total`
-              )}
-            </div>
-          </div>
-          <Button
-            size="sm"
-            variant="primary"
-            iconLeft={<Plus className="w-3 h-3" />}
-            onClick={openCreate}
-          >
-            New
-          </Button>
+        <div className="px-4 py-3 border-b border-subtle shrink-0 [&>header]:mb-0">
+          <PageHeader
+            title="Upstreams"
+            description={
+              <span className="flex h-4 items-center text-caption text-text-faint">
+                {upstreams.isLoading ? (
+                  <Skeleton className="h-3 w-14" />
+                ) : (
+                  `${visibleUpstreams.length} total`
+                )}
+              </span>
+            }
+            actions={
+              <Button size="sm" iconLeft={<Plus />} onClick={openCreate}>
+                New
+              </Button>
+            }
+          />
         </div>
         <div className="flex-1 overflow-y-auto p-2 pb-8 space-y-1">
           {upstreams.isLoading ? (
@@ -255,13 +271,13 @@ function UpstreamsPage() {
               );
               const reconnectNudge = reconnectNudges.get(u.id);
               const runtimeStatus = statusByUpstreamId.get(u.id);
-              const dotTone = !u.enabled
-                ? 'neutral'
-                : runtimeStatus?.status === 'error'
-                  ? 'danger'
-                  : runtimeStatus?.status === 'active'
-                    ? 'ok'
-                    : 'neutral';
+              const health = upstreamHealth(
+                u.enabled,
+                runtimeStatus?.status,
+                reconnectNudge,
+              );
+              const dotTone = health.tone;
+              const dotLabel = health.label;
               const barWindows = quotaLatestPending
                 ? ['5h', '7d']
                 : selectSidebarQuotaWindows({
@@ -274,34 +290,54 @@ function UpstreamsPage() {
                   type="button"
                   onClick={() => select(u.id)}
                   className={cx(
-                    '@container w-full text-left p-3 rounded-sm border transition-colors',
-                    u.id === selectedId
-                      ? 'border-accent/40 bg-accent/5 text-text'
-                      : 'border-subtle hover:bg-overlay-3 text-text',
+                    '@container w-full text-left px-3 py-2.5 rounded-sm transition-colors text-text',
+                    u.id === selectedId ? 'bg-overlay-5' : 'hover:bg-overlay-2',
                   )}
+                  aria-current={u.id === selectedId ? 'true' : undefined}
                   title={runtimeStatus?.last_apply_error ?? undefined}
                 >
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-2 min-w-0">
+                  <div className="mb-2 flex flex-col gap-1.5">
+                    <div className="flex min-w-0 items-start gap-2">
                       {statusPending ? (
-                        <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
+                        <Skeleton className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full" />
                       ) : (
-                        <span className={cx('status-dot', dotTone)} />
+                        <>
+                          <span
+                            aria-hidden="true"
+                            className={cx('status-dot mt-2 shrink-0', dotTone)}
+                          />
+                          <span className="sr-only">{dotLabel}:</span>
+                        </>
                       )}
-                      <span className="font-medium text-sm truncate">
+                      <span className="min-w-0 break-words text-body font-medium">
                         {u.name}
                       </span>
                     </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {reconnectNudge ? (
-                        <Badge tone={reconnectNudge.tone}>
-                          {reconnectNudge.label}
-                        </Badge>
-                      ) : null}
-                      <div className="hidden @[240px]:flex items-center">
-                        <Badge tone="mono">{u.kind}</Badge>
+                    {reconnectNudge || showKindBadge ? (
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-3.5">
+                        {reconnectNudge ? (
+                          <span
+                            className={cx(
+                              'text-caption',
+                              reconnectNudge.tone === 'danger'
+                                ? 'text-danger-text'
+                                : 'text-warn-text',
+                            )}
+                          >
+                            {reconnectNudge.label}
+                          </span>
+                        ) : null}
+                        {showKindBadge ? (
+                          <span className="text-caption text-text-faint">
+                            {u.kind === 'anthropic_oauth'
+                              ? 'OAuth'
+                              : u.kind === 'anthropic_api_key'
+                                ? 'API key'
+                                : u.kind}
+                          </span>
+                        ) : null}
                       </div>
-                    </div>
+                    ) : null}
                   </div>
                   {u.kind === 'anthropic_oauth' ? (
                     <div className="flex flex-col gap-1.5 w-full">
@@ -309,7 +345,6 @@ function UpstreamsPage() {
                         const snap = latest?.windows.find(
                           (w) => w.window === windowName,
                         );
-                        const color = getWindowColor(windowName);
                         const label = windowLabel(windowName);
                         let utilization = snap?.utilization ?? null;
                         if (
@@ -327,18 +362,15 @@ function UpstreamsPage() {
                           utilization == null
                             ? '—%'
                             : `${(utilization * 100).toFixed(0)}%`;
-                        const stateDot =
-                          snap?.state === 'fresh'
-                            ? 'bg-green-400'
-                            : snap?.state === 'stale'
-                              ? 'bg-amber-400'
-                              : '';
+                        const severity = quotaSeverity(
+                          utilization == null ? null : utilization * 100,
+                        );
                         return (
                           <div
                             key={windowName}
-                            className="flex items-center gap-2 w-full text-[10px] font-mono"
+                            className="flex items-center gap-2 w-full text-caption"
                           >
-                            <div className="w-8 shrink-0 text-text-faint truncate">
+                            <div className="w-10 shrink-0 text-text-faint truncate">
                               {windowName === 'overage'
                                 ? 'Extra'
                                 : windowName === '7d_fable'
@@ -347,9 +379,8 @@ function UpstreamsPage() {
                             </div>
                             {quotaLatestPending ? (
                               <>
-                                <Skeleton className="h-[5px] flex-1" />
+                                <Skeleton className="h-1.5 flex-1 rounded-xs" />
                                 <Skeleton className="h-3 w-8 shrink-0" />
-                                <div className="hidden @[240px]:block w-2 shrink-0" />
                               </>
                             ) : (
                               <>
@@ -363,46 +394,40 @@ function UpstreamsPage() {
                                         )
                                   }
                                   max={100}
-                                  className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden"
+                                  className="flex-1 h-1.5 bg-progress-track rounded-xs overflow-hidden"
                                 >
                                   <BaseMeter.Track className="h-full">
                                     <BaseMeter.Indicator
-                                      className="h-full rounded-full"
-                                      style={{ backgroundColor: color.stroke }}
+                                      className={cx(
+                                        'h-full',
+                                        QUOTA_SEVERITY_FILL_CLASS[severity],
+                                      )}
                                     />
                                   </BaseMeter.Track>
                                 </BaseMeter.Root>
-                                <div className="w-8 shrink-0 text-right tabular-nums">
-                                  {pct}
-                                </div>
-                                <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
-                                  {stateDot && (
-                                    <Hint
-                                      label={
-                                        <span>
-                                          {snap?.state} · {snap?.source} ·{' '}
-                                          {snap ? (
-                                            <QuotaObservedAt snapshot={snap} />
-                                          ) : (
-                                            '—'
-                                          )}
-                                        </span>
-                                      }
-                                    >
-                                      <div
-                                        className={cx(
-                                          'w-1.5 h-1.5 rounded-full',
-                                          stateDot,
-                                        )}
-                                      />
-                                    </Hint>
+                                <div
+                                  className={cx(
+                                    'w-8 shrink-0 text-right tabular-nums',
+                                    QUOTA_SEVERITY_TEXT_CLASS[severity],
                                   )}
+                                >
+                                  {pct}
                                 </div>
                               </>
                             )}
                           </div>
                         );
                       })}
+                      {quotaLatestPending ? null : (
+                        <QuotaFreshnessCaption
+                          snapshots={barWindows.flatMap((windowName) => {
+                            const snap = latest?.windows.find(
+                              (w) => w.window === windowName,
+                            );
+                            return snap ? [snap] : [];
+                          })}
+                        />
+                      )}
                       <SidebarCouponNudge
                         upstream={u}
                         windows={
@@ -411,7 +436,7 @@ function UpstreamsPage() {
                       />
                     </div>
                   ) : (
-                    <div className="flex min-h-3 items-center gap-2 text-[10px] font-mono text-text-faint">
+                    <div className="flex min-h-4 items-center gap-2 text-caption text-text-faint">
                       {listUsagePending ? (
                         <Skeleton className="h-3 w-32" />
                       ) : (
@@ -441,15 +466,7 @@ function UpstreamsPage() {
               );
             })
           ) : (
-            <EmptyState
-              title="No upstreams"
-              description="Create your first upstream to start routing traffic."
-              action={
-                <Button variant="primary" onClick={openCreate}>
-                  New upstream
-                </Button>
-              }
-            />
+            <UpstreamsListEmpty onCreate={openCreate} />
           )}
         </div>
       </aside>
@@ -474,10 +491,19 @@ function UpstreamsPage() {
           <UpstreamDetailLoadingShell />
         ) : (
           <div className="flex-1 flex items-center justify-center">
-            <EmptyState
-              title="Select an upstream"
-              description="Pick an upstream from the list to see its configuration, OAuth state, and recent requests."
-            />
+            {visibleUpstreams.length ? (
+              <EmptyState
+                headingLevel={2}
+                title="Select an upstream"
+                description="Pick an upstream from the list to see its configuration, OAuth state, and recent requests."
+              />
+            ) : (
+              <EmptyState
+                headingLevel={2}
+                title="Upstream details appear here"
+                description="Configuration, OAuth state, quota, and recent requests show here once you add an upstream."
+              />
+            )}
           </div>
         )}
       </section>
@@ -493,22 +519,25 @@ function UpstreamsPage() {
 
 const QUOTA_SNAPSHOT_GRID_CLASS =
   'grid min-h-[203px] gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]';
-const QUOTA_HISTORY_RANGES = ['1h', '6h', '24h', '7d'] as const;
+const QUOTA_HISTORY_RANGES = TIME_PRESETS;
+const QUOTA_HISTORY_RANGE_OPTIONS = TIME_PRESET_OPTIONS;
+// Loading placeholder mirrors SegmentedControl (size md) so nothing shifts.
 const QUOTA_HISTORY_RANGE_GROUP_CLASS =
-  'flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full';
+  'inline-flex items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5';
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
-  'px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint';
+  'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
+
+const METADATA_GRID_CLASS = 'flex flex-wrap gap-x-6 gap-y-1.5';
 
 function MetadataStripSkeleton() {
   return (
     <div
       data-testid="upstream-metadata-loading"
-      className="flex min-w-max items-center gap-3"
+      className={METADATA_GRID_CLASS}
     >
-      {['w-28', 'w-24', 'w-32', 'w-40', 'w-36'].map((width, index) => (
-        <span key={width} className="flex items-center gap-2">
+      {['w-28', 'w-24', 'w-32', 'w-40', 'w-36'].map((width) => (
+        <span key={width} className="flex h-5 items-center">
           <Skeleton className={cx('h-3', width)} />
-          {index < 4 ? <span className="text-text-muted/50">·</span> : null}
         </span>
       ))}
     </div>
@@ -519,29 +548,25 @@ function SidebarUpstreamRowSkeleton() {
   return (
     <div
       data-testid="upstream-list-loading-row"
-      className="@container w-full rounded-sm border border-subtle p-3"
+      className="@container w-full rounded-sm px-3 py-2.5"
     >
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
-          <Skeleton className="h-4 w-32" />
-        </div>
-        <Skeleton className="hidden h-5 w-20 shrink-0 @[240px]:block" />
+      <div className="mb-2 flex items-center gap-2">
+        <Skeleton className="h-1.5 w-1.5 shrink-0 rounded-full" />
+        <Skeleton className="h-4 w-32" />
       </div>
       <div className="flex w-full flex-col gap-1.5">
         {['5h', '7d'].map((windowName) => (
           <div
             key={windowName}
-            className="flex w-full items-center gap-2 text-[10px] font-mono"
+            className="flex w-full items-center gap-2 text-caption"
           >
-            <span className="w-8 shrink-0 text-text-faint">{windowName}</span>
-            <Skeleton className="h-[5px] flex-1" />
+            <span className="w-10 shrink-0 text-text-faint">{windowName}</span>
+            <Skeleton className="h-1.5 flex-1 rounded-xs" />
             <Skeleton className="h-3 w-8 shrink-0" />
-            <div className="hidden w-2 shrink-0 @[240px]:block" />
           </div>
         ))}
       </div>
-      <div className="mt-2 min-h-3">
+      <div className="mt-1.5 min-h-4">
         <Skeleton className="h-3 w-32" />
       </div>
     </div>
@@ -551,13 +576,13 @@ function SidebarUpstreamRowSkeleton() {
 function QuotaSnapshotCardSkeleton() {
   return (
     <Card data-testid="quota-snapshot-skeleton-card">
-      <CardBody className="flex min-h-[168px] flex-col gap-3 p-3">
+      <CardBody className="flex min-h-[168px] flex-col gap-3">
         <div className="flex items-center justify-between">
-          <Skeleton className="h-3 w-20" />
-          <Skeleton className="h-4 w-24" />
+          <Skeleton className="h-4 w-20" />
+          <Skeleton className="h-3 w-24" />
         </div>
-        <Skeleton className="h-7 w-20" />
-        <Skeleton className="h-1 w-full" />
+        <Skeleton className="h-8 w-20" />
+        <Skeleton className="h-2 w-full rounded-xs" />
         <Skeleton className="mt-auto h-3 w-32" />
       </CardBody>
     </Card>
@@ -572,28 +597,27 @@ function UpstreamDetailLoadingShell() {
       aria-busy="true"
       aria-label="Loading upstream details"
     >
-      <div className="sticky top-0 z-30 border-b border-subtle bg-bg-sub backdrop-blur-sm">
+      <div className="sticky top-0 z-30 border-b border-subtle bg-bg-sub">
         <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-6">
           <div className="flex items-center gap-3">
             <Skeleton className="h-7 w-48" />
-            <Skeleton className="h-6 w-20" />
-            <Skeleton className="h-5 w-28" />
+            <Skeleton className="h-5 w-20" />
           </div>
           <Skeleton className="h-7 w-20" />
         </div>
         <div
           data-testid="upstream-detail-loading-metadata"
-          className="flex h-9 min-h-9 items-center border-t border-subtle bg-overlay-1 px-4 py-2 md:px-6"
+          className="min-h-9 border-t border-subtle px-4 py-2 md:px-6"
         >
           <MetadataStripSkeleton />
         </div>
       </div>
 
-      <div className="flex-1 space-y-6 overflow-y-auto p-4 pb-8 md:p-6 md:pb-12">
+      <div className="flex-1 space-y-8 overflow-y-auto p-4 pb-8 md:p-6 md:pb-12">
         <Section>
           <Card>
             <CardHeader
-              title="Quota History"
+              title="Quota history"
               action={
                 <div
                   aria-hidden="true"
@@ -614,16 +638,16 @@ function UpstreamDetailLoadingShell() {
                 </div>
               }
             />
-            <CardBody className="p-4 pt-2">
-              <div className="h-full min-h-[300px] w-full">
-                <Skeleton className="h-[300px] w-full" />
-              </div>
+            <CardBody className="pt-3">
               <div
                 data-testid="quota-history-legend-slot"
-                className="mt-2 flex min-h-5 items-center justify-center gap-4"
+                className="mb-2 flex min-h-5 items-center justify-end gap-4"
               >
                 <Skeleton className="h-3 w-20" />
                 <Skeleton className="h-3 w-20" />
+              </div>
+              <div className="h-full min-h-[300px] w-full">
+                <Skeleton className="h-[300px] w-full" />
               </div>
             </CardBody>
           </Card>
@@ -679,15 +703,6 @@ function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
   return { tone: 'ok', label: 'Connected' };
 }
 
-const DETAIL_WINDOWS = [
-  '5h',
-  '7d',
-  '7d_sonnet',
-  '7d_opus',
-  '7d_fable',
-  'overage',
-];
-
 function windowLabel(windowName: string): string {
   switch (windowName) {
     case '7d_sonnet':
@@ -697,48 +712,38 @@ function windowLabel(windowName: string): string {
     case '7d_fable':
       return '7d (Fable)';
     case 'overage':
-      return 'Extra Usage';
+      return 'Extra usage';
     default:
       return windowName;
   }
 }
 
+/** Card-header caption: when the reading was taken, with a warn dot only
+ *  when it is stale. The source sits in the hint. */
 function SnapshotStatusComposite({ snap }: { snap: QuotaSnapshot }) {
   const source =
     snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
-  const label =
-    snap.state === 'fresh'
-      ? 'live'
-      : snap.state === 'stale'
-        ? 'stale'
-        : 'no data';
-  const dot =
-    snap.state === 'fresh'
-      ? 'bg-green-500'
-      : snap.state === 'stale'
-        ? 'bg-amber-500'
-        : 'bg-gray-400';
+  const observed = snap.state === 'fresh' || snap.state === 'stale';
   return (
-    <Hint
-      label={
-        <span>
-          observed <QuotaObservedAt snapshot={snap} /> · source: {source}
-        </span>
-      }
-    >
-      <div className="flex items-center gap-1.5 mt-0.5">
-        <div
-          className={cx('w-2 h-2 rounded-full', dot)}
-          style={
-            snap.state === 'fresh'
-              ? { animation: 'pulse-glow 2s infinite' }
-              : undefined
-          }
-        />
-        <span className="text-[9px] text-text-faint font-mono">
-          {label} · {source} · <QuotaObservedAt snapshot={snap} />
-        </span>
-      </div>
+    <Hint label={`Source: ${source}`}>
+      <span
+        tabIndex={0}
+        className="inline-flex cursor-help items-center gap-1.5 self-start whitespace-nowrap rounded-sm text-caption text-text-faint"
+      >
+        {snap.state === 'stale' ? (
+          <>
+            <span aria-hidden="true" className="status-dot warn" />
+            <span className="sr-only">Stale:</span>
+          </>
+        ) : null}
+        {observed ? (
+          <span>
+            Updated <QuotaObservedAt snapshot={snap} />
+          </span>
+        ) : (
+          'No data'
+        )}
+      </span>
     </Hint>
   );
 }
@@ -762,19 +767,16 @@ function PromotionalCreditsBadge({
     amount == null
       ? '—'
       : `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
-  const tone = orgMeta.overage_credit_granted ? 'ok' : 'neutral';
   const status = orgMeta.overage_credit_granted
     ? 'Granted'
     : orgMeta.overage_credit_eligible
       ? 'Eligible'
       : 'Available';
   return (
-    <div className="rounded-sm border border-subtle bg-overlay-1 px-3 py-2 text-xs font-mono flex items-center gap-2">
-      <span className="text-text-faint">Promo credits:</span>
-      <span className="text-text">{amountText}</span>
-      <span className="text-text-muted/50">·</span>
-      <StatusBadge tone={tone} label={status} />
-    </div>
+    <Notice tone={orgMeta.overage_credit_granted ? 'success' : 'info'}>
+      Promo credits:{' '}
+      <span className="tabular-nums text-text">{amountText}</span> · {status}
+    </Notice>
   );
 }
 
@@ -785,10 +787,10 @@ function TrialBanner({
 }) {
   if (!orgMeta?.claude_code_trial_ends_at) return null;
   return (
-    <div className="rounded-sm border border-accent/30 bg-accent/10 p-3 text-xs text-accent">
+    <Notice>
       Claude Code trial ends{' '}
       <RelativeTime ts={orgMeta.claude_code_trial_ends_at * 1000} />
-    </div>
+    </Notice>
   );
 }
 
@@ -799,17 +801,21 @@ function PaymentWarning({
 }) {
   if (!orgMeta?.payment_auth_hosted_invoice_url) return null;
   return (
-    <div className="rounded-sm border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-200 flex items-center justify-between gap-3">
-      <span>Payment authorization is required for this organization.</span>
-      <a
-        href={orgMeta.payment_auth_hosted_invoice_url}
-        target="_blank"
-        rel="noreferrer"
-        className="inline-flex items-center gap-1 text-amber-100 hover:underline"
-      >
-        Open invoice <ExternalLink className="w-3 h-3" />
-      </a>
-    </div>
+    <Notice
+      tone="warning"
+      action={
+        <a
+          href={orgMeta.payment_auth_hosted_invoice_url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-text underline-offset-2 hover:underline"
+        >
+          Open invoice <ExternalLink className="w-3 h-3" />
+        </a>
+      }
+    >
+      Payment authorization is required for this organization.
+    </Notice>
   );
 }
 
@@ -841,7 +847,14 @@ function DetailView({
     [statusQ.data, upstream.id],
   );
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
-  const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
+  // Requested `enabled` value awaiting confirmation. `enabled` outlives
+  // `open` so the dialog copy stays put during its close transition.
+  const [enabledConfirm, setEnabledConfirm] = useState({
+    open: false,
+    enabled: false,
+  });
+  const confirmEnabled = enabledConfirm.enabled;
+  const [range, setRange] = useState<TimePreset>('7d');
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const [showMoreMeta, setShowMoreMeta] = useState(false);
   const isOauth = upstream.kind === 'anthropic_oauth';
@@ -912,6 +925,15 @@ function DetailView({
     () => allUpstreams.data?.upstreams.map((u) => u.id).join(',') ?? '',
     [allUpstreams.data],
   );
+  // Disabling this upstream leaves the other enabled ones serving the pool.
+  const poolImpact = allUpstreams.data
+    ? {
+        total: allUpstreams.data.upstreams.length,
+        remaining: allUpstreams.data.upstreams.filter(
+          (u) => u.enabled && u.id !== upstream.id,
+        ).length,
+      }
+    : null;
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds: allUpstreamIds,
     windows: '5h,7d,overage,7d_sonnet,7d_opus,7d_fable',
@@ -1038,6 +1060,11 @@ function DetailView({
         nowUnixSecs,
       )
     : null;
+  const headerHealth = upstreamHealth(
+    upstream.enabled,
+    upstreamRuntimeStatus?.status,
+    reconnectNudge,
+  );
 
   // The toggle PATCH is not optimistic, so `upstream.enabled` still holds the
   // pre-request value while it is in flight; the requested value lives in the
@@ -1061,7 +1088,11 @@ function DetailView({
     const commonIdFields: typeof fields = [
       {
         label: 'ID',
-        value: <span className="font-mono">{upstream.id.slice(0, 8)}…</span>,
+        value: (
+          <span className="font-mono text-data">
+            {upstream.id.slice(0, 8)}…
+          </span>
+        ),
         tooltip: `Internal upstream identifier (${upstream.id})`,
       },
     ];
@@ -1071,26 +1102,34 @@ function DetailView({
         'ID',
         'Plan',
         'Rate',
-        'Extra Usage Billing',
+        'Extra usage billing',
         'Account',
       ]);
       fields.push(...commonIdFields);
       if (orgMeta?.organization_type)
         fields.push({
           label: 'Plan',
-          value: orgMeta.organization_type,
+          value: (
+            <span className="font-mono text-data">
+              {orgMeta.organization_type}
+            </span>
+          ),
           tooltip: 'Anthropic subscription tier',
         });
       if (orgMeta?.rate_limit_tier)
         fields.push({
           label: 'Rate',
-          value: orgMeta.rate_limit_tier,
+          value: (
+            <span className="font-mono text-data">
+              {orgMeta.rate_limit_tier}
+            </span>
+          ),
           tooltip:
             'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)',
         });
       if (orgMeta?.has_extra_usage_enabled != null)
         fields.push({
-          label: 'Extra Usage Billing',
+          label: 'Extra usage billing',
           value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
           tooltip:
             'Whether overage spending beyond plan quota is enabled (paid extra)',
@@ -1132,7 +1171,9 @@ function DetailView({
       if (orgMeta?.billing_type)
         fields.push({
           label: 'Billing',
-          value: orgMeta.billing_type,
+          value: (
+            <span className="font-mono text-data">{orgMeta.billing_type}</span>
+          ),
           tooltip: 'How the subscription is billed',
         });
     } else {
@@ -1141,7 +1182,7 @@ function DetailView({
       fields.push({
         label: 'Base URL',
         value: (
-          <span className="font-mono">
+          <span className="font-mono text-data">
             {upstream.base_url || DEFAULT_ANTHROPIC_BASE_URL}
           </span>
         ),
@@ -1151,21 +1192,25 @@ function DetailView({
       });
       if (upstream.api_key_env)
         fields.push({
-          label: 'API Key',
-          value: <span className="font-mono">env:{upstream.api_key_env}</span>,
+          label: 'API key',
+          value: (
+            <span className="font-mono text-data">
+              env:{upstream.api_key_env}
+            </span>
+          ),
           tooltip: `Loaded from the ${upstream.api_key_env} environment variable on the server`,
         });
       else if (upstream.kind === 'anthropic_api_key')
         fields.push({
-          label: 'API Key',
-          value: 'literal',
+          label: 'API key',
+          value: 'Literal',
           tooltip: 'Stored inline (literal API key)',
         });
       if (upstreamRuntimeStatus?.last_apply_error)
         fields.push({
           label: 'Apply error',
           value: (
-            <span className="text-red-400">
+            <span className="text-danger-text">
               {upstreamRuntimeStatus.last_apply_error}
             </span>
           ),
@@ -1181,90 +1226,43 @@ function DetailView({
       : 0;
 
     return (
-      <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle backdrop-blur-sm">
+      <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle">
         <div className="px-4 md:px-6 py-3 flex items-start justify-between gap-3 flex-wrap shrink-0">
           <div className="min-w-0">
             <button
               type="button"
               onClick={onBack}
-              className="md:hidden inline-flex items-center gap-1 text-xs text-text-faint hover:text-text mb-1"
+              className="md:hidden -ml-1 mb-1 inline-flex min-h-9 items-center gap-1 rounded-sm px-1 text-body-sm text-text-muted hover:text-text"
             >
-              <ChevronLeft className="w-3 h-3" /> Back
+              <ChevronLeft className="size-3.5" strokeWidth={1.75} /> Back
             </button>
             <div className="flex items-center gap-3 flex-wrap">
               <InlineNameEditor upstream={upstream} />
-              <Hint
-                label={
-                  togglePendingLabel ??
-                  (upstream.enabled ? 'Click to disable' : 'Click to enable')
+              <ToggleSwitch
+                variant="compact"
+                role="switch"
+                aria-label="Enabled"
+                label={upstream.enabled ? 'Enabled' : 'Disabled'}
+                checked={upstream.enabled}
+                disabled={toggle.isPending}
+                onChange={(e) =>
+                  setEnabledConfirm({ open: true, enabled: e.target.checked })
                 }
-              >
-                <BaseSwitch.Root
-                  aria-checked={upstream.enabled}
-                  checked={upstream.enabled}
-                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
-                  disabled={toggle.isPending}
-                  nativeButton
-                  onCheckedChange={(nextEnabled) => {
-                    const body: UpdateUpstreamWarmupSettingsRequest = {
-                      enabled: nextEnabled,
-                    };
-                    if (upstream.warmup_enabled !== nextEnabled) {
-                      body.warmup_enabled = nextEnabled;
-                    }
-                    toggle.mutate(
-                      {
-                        id: upstream.id,
-                        body,
-                        spec_revision: upstream.spec_revision,
-                      },
-                      {
-                        onSuccess: () =>
-                          toast.success(
-                            upstream.enabled
-                              ? 'Upstream disabled'
-                              : 'Upstream enabled',
-                          ),
-                      },
-                    );
-                  }}
-                  render={<button role="switch" type="button" />}
-                >
-                  <div
-                    className={cx(
-                      'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
-                      upstream.enabled
-                        ? 'bg-emerald-500 border-emerald-500'
-                        : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
-                    )}
-                  >
-                    <BaseSwitch.Thumb
-                      className={cx(
-                        'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                        upstream.enabled ? 'translate-x-4' : 'translate-x-0.5',
-                      )}
-                    />
-                  </div>
-                  <span
-                    className={cx(
-                      'text-[11px] font-mono uppercase tracking-wider',
-                      upstream.enabled
-                        ? 'text-emerald-400'
-                        : 'text-text-muted group-hover:text-text',
-                    )}
-                  >
-                    {upstream.enabled ? 'Enabled' : 'Disabled'}
-                  </span>
-                </BaseSwitch.Root>
-              </Hint>
+                className="flex-row-reverse"
+              />
+              {/* One danger surface per problem: when the reconnect notice
+                  below owns the diagnosis, the header stays quiet. */}
+              {headerHealth.tone === 'danger' && !reconnectNudge ? (
+                <StatusBadge tone="danger" label={headerHealth.label} />
+              ) : null}
               {togglePendingLabel ? (
                 <span
                   role="status"
                   aria-live="polite"
                   data-testid="upstream-enabled-pending"
-                  className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                  className="inline-flex items-center gap-1.5 text-caption text-text-muted"
                 >
-                  <Spinner className="w-3 h-3 text-accent" />
+                  <Spinner className="w-3 h-3 text-text-muted" />
                   {togglePendingLabel}
                 </span>
               ) : null}
@@ -1281,7 +1279,7 @@ function DetailView({
             <Button
               size="sm"
               variant="danger"
-              iconLeft={<Trash2 className="w-3 h-3" />}
+              iconLeft={<Trash2 />}
               onClick={() => setConfirmDeleteOpen(true)}
             >
               Delete
@@ -1291,37 +1289,50 @@ function DetailView({
         {fields.length > 0 && (
           <div
             data-testid="upstream-metadata-strip"
-            className="flex h-9 min-h-9 items-center gap-3 border-t border-subtle bg-overlay-1 px-4 py-2 md:px-6"
+            className="flex min-h-9 items-start gap-3 border-t border-subtle px-4 py-2 md:px-6"
           >
-            <div className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap scrollbar-none">
+            <div className="flex-1 min-w-0">
               {metadataPending ? (
                 <MetadataStripSkeleton />
               ) : (
-                <div className="flex items-center gap-2 text-xs font-mono text-text-faint">
-                  {visibleFields.map((f, i) => (
-                    <span key={f.label} className="flex items-center gap-2">
-                      <Hint label={f.tooltip}>
-                        <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
-                          <span className="text-text-muted">{f.label}:</span>{' '}
-                          <span className="text-text">{f.value}</span>
-                        </span>
-                      </Hint>
-                      {i < visibleFields.length - 1 && (
-                        <span className="text-text-muted/50">·</span>
-                      )}
-                    </span>
+                <dl className={METADATA_GRID_CLASS}>
+                  {visibleFields.map((f) => (
+                    <div
+                      key={f.label}
+                      className="flex min-h-5 min-w-0 items-baseline gap-2"
+                    >
+                      <dt className="shrink-0 text-label text-text-faint">
+                        <Hint label={f.tooltip}>
+                          <span
+                            tabIndex={0}
+                            className="inline-flex cursor-help items-center gap-1 rounded-sm hover:text-text-muted"
+                          >
+                            {f.label}
+                            <Info
+                              aria-hidden="true"
+                              strokeWidth={1.75}
+                              className="size-3 opacity-60"
+                            />
+                          </span>
+                        </Hint>
+                      </dt>
+                      <dd className="min-w-0 break-words text-body-sm text-text">
+                        {f.value}
+                      </dd>
+                    </div>
                   ))}
-                </div>
+                </dl>
               )}
             </div>
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex h-5 items-center gap-1 shrink-0">
               {!metadataPending && hiddenCount > 0 && (
                 <button
                   type="button"
+                  aria-expanded={showMoreMeta}
                   onClick={() => setShowMoreMeta((v) => !v)}
-                  className="text-[11px] font-mono text-text-faint hover:text-text underline underline-offset-2"
+                  className="rounded-sm px-1 text-caption text-text-muted hover:text-text"
                 >
-                  {showMoreMeta ? 'Less' : `+${hiddenCount} more`}
+                  {showMoreMeta ? 'Show less' : `Show ${hiddenCount} more`}
                 </button>
               )}
               {isOauth && (
@@ -1344,12 +1355,13 @@ function DetailView({
                         },
                       });
                     }}
-                    className="text-text-faint hover:text-text disabled:opacity-50"
+                    className="inline-flex size-6 items-center justify-center rounded-sm text-text-faint hover:bg-overlay-3 hover:text-text disabled:opacity-40"
                     aria-label="Refresh subscription metadata"
                   >
                     <RefreshCw
+                      strokeWidth={1.75}
                       className={cx(
-                        'w-3.5 h-3.5',
+                        'size-3.5',
                         triggerSubscriptionMetadataRefresh.isPending &&
                           'animate-spin',
                       )}
@@ -1368,7 +1380,7 @@ function DetailView({
     <>
       {renderHeader()}
 
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-8">
         {reconnectNudge ? (
           <OAuthReconnectNotice
             nudge={reconnectNudge}
@@ -1394,34 +1406,73 @@ function DetailView({
           <Section>
             <Card>
               <CardHeader
-                title="Quota History"
+                title="Quota history"
                 action={
-                  <BaseToggleGroup
-                    value={[range]}
-                    onValueChange={(values) => {
-                      const first = values[0];
-                      if (first) setRange(first);
-                    }}
-                    className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
-                    data-testid="quota-history-range-control"
-                  >
-                    {QUOTA_HISTORY_RANGES.map((rangeOption) => (
-                      <BaseToggle
-                        key={rangeOption}
-                        type="button"
-                        value={rangeOption}
-                        className={cx(
-                          QUOTA_HISTORY_RANGE_ITEM_CLASS,
-                          'hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]',
-                        )}
-                      >
-                        {rangeOption}
-                      </BaseToggle>
-                    ))}
-                  </BaseToggleGroup>
+                  <div data-testid="quota-history-range-control">
+                    <SegmentedControl
+                      ariaLabel="Quota history range"
+                      value={range}
+                      onChange={setRange}
+                      options={QUOTA_HISTORY_RANGE_OPTIONS}
+                    />
+                  </div>
                 }
               />
-              <CardBody className="p-4 pt-2">
+              <CardBody className="pt-3">
+                <div
+                  data-testid="quota-history-legend-slot"
+                  className="mb-2 flex min-h-5 flex-wrap items-center justify-end gap-x-4 gap-y-1"
+                >
+                  {quotaHistoryPending ? (
+                    <>
+                      <Skeleton className="h-3 w-20" />
+                      <Skeleton className="h-3 w-20" />
+                    </>
+                  ) : chartData.rows.length > 0 &&
+                    visibleGraphWindows.length > 0 ? (
+                    visibleGraphWindows.map((windowName) => {
+                      const dimmed =
+                        effectiveIsolatedWindow !== null &&
+                        effectiveIsolatedWindow !== windowName;
+                      const current = selectedLatest?.windows.find(
+                        (w) => w.window === windowName,
+                      )?.utilization;
+                      return (
+                        <button
+                          key={windowName}
+                          type="button"
+                          onClick={() =>
+                            setIsolatedWindow((prev) =>
+                              prev === windowName ? null : windowName,
+                            )
+                          }
+                          aria-pressed={effectiveIsolatedWindow === windowName}
+                          className={cx(
+                            'flex cursor-pointer items-center gap-1.5 rounded-sm text-caption transition-opacity',
+                            dimmed ? 'opacity-40 hover:opacity-70' : '',
+                          )}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="h-0.5 w-2.5 rounded-xs"
+                            style={{
+                              backgroundColor:
+                                getWindowColor(windowName).stroke,
+                            }}
+                          />
+                          <span className="text-text-muted">
+                            {windowLabel(windowName)}
+                          </span>
+                          {current != null ? (
+                            <span className="tabular-nums text-text">
+                              {(current * 100).toFixed(0)}%
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })
+                  ) : null}
+                </div>
                 <div className="w-full h-[300px]" style={{ minWidth: 0 }}>
                   {quotaHistoryPending ? (
                     <Skeleton className="h-full w-full" />
@@ -1431,44 +1482,26 @@ function DetailView({
                     <ResponsiveContainer width="100%" height={300}>
                       <AreaChart
                         data={chartRows}
-                        margin={{ top: 20, right: 8, bottom: 0, left: 0 }}
+                        margin={{ top: 20, right: 28, bottom: 0, left: 0 }}
                       >
-                        <defs>
-                          {DETAIL_WINDOWS.map((windowName) => {
-                            const color = getWindowColor(windowName);
-                            return (
-                              <linearGradient
-                                key={windowName}
-                                id={`quota-detail-grad-${windowName}`}
-                                x1="0"
-                                y1="0"
-                                x2="0"
-                                y2="1"
-                              >
-                                <stop
-                                  offset="0%"
-                                  stopColor={color.stroke}
-                                  stopOpacity={0.55}
-                                />
-                                <stop
-                                  offset="100%"
-                                  stopColor={color.stroke}
-                                  stopOpacity={0}
-                                />
-                              </linearGradient>
-                            );
-                          })}
-                        </defs>
-                        <CartesianGrid stroke="var(--color-border)" />
+                        <CartesianGrid
+                          vertical={false}
+                          stroke="var(--color-border-row)"
+                        />
                         <XAxis
                           dataKey="unix"
                           type="number"
                           domain={xDomain}
-                          tick={{
-                            fill: 'var(--color-text-faint)',
-                            fontSize: 10,
-                            fontFamily: 'Geist Mono',
-                          }}
+                          // Four ticks inset from the edges so the first and
+                          // last labels never clip.
+                          ticks={[1, 3, 5, 7].map(
+                            (i) =>
+                              seriesSinceUnixSecs +
+                              ((seriesUntilUnixSecs - seriesSinceUnixSecs) *
+                                i) /
+                                8,
+                          )}
+                          interval={0}
                           tickFormatter={(val) => {
                             const d = new Date(Number(val) * 1000);
                             return range === '7d' || range === '24h'
@@ -1477,50 +1510,47 @@ function DetailView({
                           }}
                           axisLine={false}
                           tickLine={false}
-                          minTickGap={40}
                         />
                         <YAxis
-                          tick={{
-                            fill: 'var(--color-text-faint)',
-                            fontSize: 10,
-                            fontFamily: 'Geist Mono',
-                          }}
                           tickFormatter={(val) => `${val}%`}
+                          ticks={[0, 50, 100]}
                           axisLine={false}
                           tickLine={false}
                           width={40}
                           domain={[0, 100]}
                           allowDataOverflow={false}
                         />
+                        {[
+                          { y: 80, tone: 'warn' },
+                          { y: 95, tone: 'danger' },
+                        ].map(({ y, tone }) => (
+                          <ReferenceLine
+                            key={y}
+                            y={y}
+                            stroke={`var(--color-${tone})`}
+                            strokeOpacity={0.5}
+                            strokeDasharray="3 3"
+                            ifOverflow="extendDomain"
+                          >
+                            <Label
+                              value={`${y}%`}
+                              position="right"
+                              fontSize={11}
+                              fill={`var(--color-${tone}-text)`}
+                            />
+                          </ReferenceLine>
+                        ))}
                         <Tooltip
                           cursor={{
-                            stroke: 'var(--color-accent)',
+                            stroke: 'var(--color-border-strong)',
                             strokeWidth: 1,
-                            strokeOpacity: 0.3,
                           }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
                             const first = selectedLatest?.windows[0];
                             return (
-                              <div
-                                style={{
-                                  background: 'var(--color-bg-sub)',
-                                  border: '1px solid var(--color-border)',
-                                  borderRadius: 2,
-                                  color: 'var(--color-text)',
-                                  fontSize: 11,
-                                  fontFamily: 'Geist Mono Variable, monospace',
-                                  padding: '6px 10px',
-                                  boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-                                  minWidth: 80,
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    color: 'var(--color-text-faint)',
-                                    marginBottom: 4,
-                                  }}
-                                >
+                              <div className="glass-strong min-w-36 rounded-md px-2.5 py-2 text-caption text-text">
+                                <div className="mb-1 text-text-faint">
                                   {fmtChartTooltipTs(Number(label))}
                                 </div>
                                 {payload.map((p, i) => {
@@ -1528,37 +1558,20 @@ function DetailView({
                                   return (
                                     <div
                                       key={i}
-                                      style={{
-                                        color: 'var(--color-text)',
-                                        padding: '1px 0',
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
-                                        gap: 8,
-                                      }}
+                                      className="flex items-center justify-between gap-3 py-px"
                                     >
-                                      <div
-                                        style={{
-                                          display: 'flex',
-                                          alignItems: 'center',
-                                          gap: 6,
-                                        }}
-                                      >
-                                        <div
+                                      <span className="flex items-center gap-1.5 text-text-muted">
+                                        <span
+                                          aria-hidden="true"
+                                          className="h-0.5 w-2.5 rounded-xs"
                                           style={{
-                                            width: 8,
-                                            height: 8,
-                                            borderRadius: '50%',
                                             backgroundColor:
-                                              getWindowColor(key).fill,
+                                              getWindowColor(key).stroke,
                                           }}
                                         />
-                                        <span>{windowLabel(key)}</span>
-                                      </div>
-                                      <span
-                                        style={{
-                                          fontVariantNumeric: 'tabular-nums',
-                                        }}
-                                      >
+                                        {windowLabel(key)}
+                                      </span>
+                                      <span className="tabular-nums">
                                         {typeof p.value === 'number'
                                           ? `${p.value.toFixed(1)}%`
                                           : '—'}
@@ -1567,17 +1580,8 @@ function DetailView({
                                   );
                                 })}
                                 {first?.source && (
-                                  <div
-                                    style={{
-                                      marginTop: 6,
-                                      paddingTop: 6,
-                                      borderTop:
-                                        '1px solid var(--color-border)',
-                                      color: 'var(--color-text-faint)',
-                                      fontSize: 10,
-                                    }}
-                                  >
-                                    from: {first.source} · observed{' '}
+                                  <div className="mt-1.5 border-t border-subtle pt-1.5 text-text-faint">
+                                    Source: {first.source} · observed{' '}
                                     <QuotaObservedAt snapshot={first} />
                                   </div>
                                 )}
@@ -1618,362 +1622,368 @@ function DetailView({
                               if (pair.reset) markers.push(pair.reset);
                             }
                           }
-                          return markers.map((marker, i) => {
+                          const span =
+                            seriesUntilUnixSecs - seriesSinceUnixSecs;
+                          // Markers that land on (nearly) the same instant
+                          // share one line and one label, so "7d start" and
+                          // "7d (Fable) start" never print over each other.
+                          const groups: {
+                            ts: number;
+                            kind: ChartMarker['kind'];
+                            windows: string[];
+                          }[] = [];
+                          for (const marker of [...markers].sort(
+                            (a, b) => a.ts - b.ts,
+                          )) {
                             if (
                               marker.ts < seriesSinceUnixSecs ||
-                              marker.ts >
-                                seriesUntilUnixSecs +
-                                  (seriesUntilUnixSecs - seriesSinceUnixSecs) ||
+                              marker.ts > seriesUntilUnixSecs + span ||
                               !visibleGraphWindows.includes(marker.window) ||
                               (effectiveIsolatedWindow !== null &&
                                 effectiveIsolatedWindow !== marker.window)
                             )
-                              return null;
-                            const color = getWindowColor(marker.window);
+                              continue;
+                            const group = groups.find(
+                              (g) =>
+                                g.kind === marker.kind &&
+                                Math.abs(g.ts - marker.ts) <= span * 0.01,
+                            );
+                            if (group) group.windows.push(marker.window);
+                            else
+                              groups.push({
+                                ts: marker.ts,
+                                kind: marker.kind,
+                                windows: [marker.window],
+                              });
+                          }
+                          // Labels of neighbouring lines alternate between
+                          // above the plot and just inside its top edge.
+                          let previousTs = Number.NEGATIVE_INFINITY;
+                          let previousRaised = false;
+                          return groups.map((group) => {
+                            const crowded = group.ts - previousTs < span * 0.15;
+                            const raised = !(crowded && previousRaised);
+                            previousTs = group.ts;
+                            previousRaised = raised;
+                            const firstWindow = group.windows[0] ?? '';
+                            const names = group.windows
+                              .map(windowLabel)
+                              .join(', ');
                             return (
                               <ReferenceLine
-                                key={`marker-${i}`}
-                                x={marker.ts}
-                                stroke={color.stroke}
-                                strokeOpacity={0.6}
+                                key={`marker-${group.kind}-${group.ts}`}
+                                x={group.ts}
+                                stroke={getWindowColor(firstWindow).stroke}
+                                strokeOpacity={0.5}
                                 strokeDasharray={
-                                  marker.kind === 'start' ? '4 6' : '2 4'
+                                  group.kind === 'start' ? '4 6' : '2 4'
                                 }
                               >
                                 <Label
                                   value={
-                                    marker.kind === 'start'
-                                      ? `${windowLabel(marker.window)} start`
-                                      : `${windowLabel(marker.window)} reset`
+                                    group.kind === 'start'
+                                      ? `${names} start`
+                                      : `${names} reset`
                                   }
-                                  position="top"
-                                  fontSize={10}
-                                  fill={color.stroke}
+                                  position={raised ? 'top' : 'insideTop'}
+                                  fontSize={11}
+                                  fill="var(--color-text-muted)"
                                 />
                               </ReferenceLine>
                             );
                           });
                         })()}
-                        {visibleGraphWindows.map((windowName) => (
-                          <Area
-                            key={windowName}
-                            type="monotone"
-                            dataKey={windowName}
-                            stroke={getWindowColor(windowName).stroke}
-                            strokeWidth={1.4}
-                            fill={`url(#quota-detail-grad-${windowName})`}
-                            fillOpacity={1}
-                            isAnimationActive={false}
-                            connectNulls={false}
-                            hide={
-                              effectiveIsolatedWindow !== null &&
-                              effectiveIsolatedWindow !== windowName
-                            }
-                          />
-                        ))}
+                        {visibleGraphWindows.map((windowName) => {
+                          // Overlapping fills turn murky: only the isolated
+                          // (or first) series gets the flat fill; the rest
+                          // are lines.
+                          const filled =
+                            windowName ===
+                            (effectiveIsolatedWindow ?? visibleGraphWindows[0]);
+                          return (
+                            <Area
+                              key={windowName}
+                              type="monotone"
+                              dataKey={windowName}
+                              stroke={getWindowColor(windowName).stroke}
+                              strokeWidth={1.5}
+                              fill={getWindowColor(windowName).fill}
+                              fillOpacity={filled ? SERIES_FILL_OPACITY : 0}
+                              isAnimationActive={false}
+                              connectNulls={false}
+                              hide={
+                                effectiveIsolatedWindow !== null &&
+                                effectiveIsolatedWindow !== windowName
+                              }
+                            />
+                          );
+                        })}
                       </AreaChart>
                     </ResponsiveContainer>
                   )}
                 </div>
-                <div
-                  data-testid="quota-history-legend-slot"
-                  className="mt-2 flex min-h-5 flex-wrap items-center justify-center gap-x-4 gap-y-1"
-                >
-                  {quotaHistoryPending ? (
-                    <>
-                      <Skeleton className="h-3 w-20" />
-                      <Skeleton className="h-3 w-20" />
-                    </>
-                  ) : chartData.rows.length > 0 &&
-                    visibleGraphWindows.length > 0 ? (
-                    visibleGraphWindows.map((windowName) => {
-                      const dimmed =
-                        effectiveIsolatedWindow !== null &&
-                        effectiveIsolatedWindow !== windowName;
-                      return (
-                        <button
-                          key={windowName}
-                          type="button"
-                          onClick={() =>
-                            setIsolatedWindow((prev) =>
-                              prev === windowName ? null : windowName,
-                            )
-                          }
-                          aria-pressed={effectiveIsolatedWindow === windowName}
-                          className="flex cursor-pointer items-center gap-1.5 border-0 bg-transparent p-0 transition-opacity hover:opacity-100"
-                          style={{ opacity: dimmed ? 0.35 : 1 }}
-                        >
-                          <div
-                            className="w-3 h-0.5"
-                            style={{
-                              backgroundColor:
-                                getWindowColor(windowName).stroke,
-                            }}
-                          />
-                          <span className="text-[11px] text-text-muted font-mono">
-                            {windowLabel(windowName)}
-                          </span>
-                        </button>
-                      );
-                    })
-                  ) : null}
-                </div>
               </CardBody>
             </Card>
 
-            {(() => {
-              const latest = selectedLatest;
-              if (quotaLatestPending) {
-                return (
-                  <div
-                    data-testid="quota-snapshot-grid"
-                    className={QUOTA_SNAPSHOT_GRID_CLASS}
-                  >
-                    {Array.from({ length: 3 }).map((_, index) => (
-                      <QuotaSnapshotCardSkeleton key={index} />
-                    ))}
-                  </div>
-                );
-              }
-              if (!latest) {
-                return (
-                  <div
-                    data-testid="quota-snapshot-grid"
-                    className={QUOTA_SNAPSHOT_GRID_CLASS}
-                  >
-                    <Card className="col-span-full">
-                      <CardBody className="flex min-h-[168px] items-center justify-center p-6">
+            {/* On phones the current window numbers lead; the chart follows. */}
+            <div className="order-first md:order-none">
+              {(() => {
+                const latest = selectedLatest;
+                if (quotaLatestPending) {
+                  return (
+                    <div
+                      data-testid="quota-snapshot-grid"
+                      className={QUOTA_SNAPSHOT_GRID_CLASS}
+                    >
+                      {Array.from({ length: 3 }).map((_, index) => (
+                        <QuotaSnapshotCardSkeleton key={index} />
+                      ))}
+                    </div>
+                  );
+                }
+                if (!latest) {
+                  return (
+                    <div
+                      data-testid="quota-snapshot-grid"
+                      className={QUOTA_SNAPSHOT_GRID_CLASS}
+                    >
+                      <Card className="col-span-full flex items-center justify-center">
                         <EmptyState
                           title={`No subscription quota data for ${upstream.name}`}
                         />
-                      </CardBody>
-                    </Card>
-                  </div>
-                );
-              }
-              return (
-                <div className="space-y-4">
-                  <div
-                    data-testid="quota-snapshot-grid"
-                    className={QUOTA_SNAPSHOT_GRID_CLASS}
-                  >
-                    {selectQuotaCardSnapshots({
-                      latestWindows: latest.windows,
-                      nowUnixSecs,
-                    }).map((snap) => {
-                      const color = getWindowColor(snap.window);
-                      const isOverage =
-                        snap.window === 'overage' &&
-                        (snap.extra_usage_enabled ||
-                          snap.extra_usage_monthly_limit != null);
-                      const windowAnalysis = analysis?.windows.find(
-                        (w) => w.window === snap.window,
-                      );
-                      const actualBurn =
-                        windowAnalysis?.actual_account_burn
-                          .utilization_per_second;
-                      const projBurn =
-                        windowAnalysis?.proxy_projected_burn
-                          .utilization_per_hour;
-                      const eta =
-                        windowAnalysis?.actual_account_burn.eta_to_limit_secs;
-                      const windowNotStarted =
-                        !isOverage &&
-                        (snap.utilization == null ||
-                          snap.resets_at_unix_secs == null ||
-                          snap.resets_at_unix_secs <= nowUnixSecs);
-                      const waitingForGrowth =
-                        !isOverage &&
-                        !windowNotStarted &&
-                        (!windowAnalysis ||
-                          windowAnalysis.actual_account_burn.reason ===
-                            'insufficient_growth_intervals');
-                      return (
-                        <Card key={snap.window}>
-                          <CardBody className="p-3 flex min-h-[168px] flex-col gap-1.5">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                                {windowLabel(snap.window)}
-                              </span>
-                            </div>
-                            <SnapshotStatusComposite snap={snap} />
-                            {isOverage ? (
-                              snap.extra_usage_monthly_limit != null &&
-                              snap.extra_usage_used_credits != null ? (
-                                <>
-                                  <div className="text-xl font-medium tabular-nums">
-                                    {(
-                                      (snap.extra_usage_used_credits /
-                                        snap.extra_usage_monthly_limit) *
-                                      100
-                                    ).toFixed(1)}
-                                    %
-                                  </div>
-                                  <BaseMeter.Root
-                                    value={Math.min(
-                                      100,
-                                      Math.max(
-                                        0,
+                      </Card>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-4">
+                    <div
+                      data-testid="quota-snapshot-grid"
+                      className={QUOTA_SNAPSHOT_GRID_CLASS}
+                    >
+                      {selectQuotaCardSnapshots({
+                        latestWindows: latest.windows,
+                        nowUnixSecs,
+                      }).map((snap) => {
+                        const isOverage =
+                          snap.window === 'overage' &&
+                          (snap.extra_usage_enabled ||
+                            snap.extra_usage_monthly_limit != null);
+                        const usedPct = isOverage
+                          ? snap.extra_usage_monthly_limit != null &&
+                            snap.extra_usage_used_credits != null
+                            ? (snap.extra_usage_used_credits /
+                                snap.extra_usage_monthly_limit) *
+                              100
+                            : null
+                          : snap.utilization == null
+                            ? null
+                            : snap.utilization * 100;
+                        const severity = quotaSeverity(usedPct);
+                        const windowAnalysis = analysis?.windows.find(
+                          (w) => w.window === snap.window,
+                        );
+                        const actualBurn =
+                          windowAnalysis?.actual_account_burn
+                            .utilization_per_second;
+                        const projBurn =
+                          windowAnalysis?.proxy_projected_burn
+                            .utilization_per_hour;
+                        const eta =
+                          windowAnalysis?.actual_account_burn.eta_to_limit_secs;
+                        const windowNotStarted =
+                          !isOverage &&
+                          (snap.utilization == null ||
+                            snap.resets_at_unix_secs == null ||
+                            snap.resets_at_unix_secs <= nowUnixSecs);
+                        const waitingForGrowth =
+                          !isOverage &&
+                          !windowNotStarted &&
+                          (!windowAnalysis ||
+                            windowAnalysis.actual_account_burn.reason ===
+                              'insufficient_growth_intervals');
+                        const meterPct = isOverage
+                          ? usedPct
+                          : snap.utilization == null
+                            ? null
+                            : snap.utilization * 100;
+                        return (
+                          <Card key={snap.window}>
+                            <CardBody className="flex min-h-[168px] flex-col gap-2">
+                              <div className="flex flex-col gap-0.5">
+                                <h3 className="text-title-card text-text">
+                                  {isOverage
+                                    ? windowLabel(snap.window)
+                                    : `${windowLabel(snap.window)} window`}
+                                </h3>
+                                <SnapshotStatusComposite snap={snap} />
+                              </div>
+                              {isOverage ? (
+                                snap.extra_usage_monthly_limit != null &&
+                                snap.extra_usage_used_credits != null ? (
+                                  <>
+                                    <div
+                                      className={cx(
+                                        'text-display tabular-nums',
+                                        QUOTA_SEVERITY_TEXT_CLASS[severity],
+                                      )}
+                                    >
+                                      {(
                                         (snap.extra_usage_used_credits /
                                           snap.extra_usage_monthly_limit) *
-                                          100,
-                                      ),
-                                    )}
-                                    max={100}
-                                    className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
-                                  >
-                                    <BaseMeter.Track className="h-full">
-                                      <BaseMeter.Indicator
-                                        className="h-full rounded-full"
-                                        style={{
-                                          backgroundColor: color.fill,
-                                        }}
-                                      />
-                                    </BaseMeter.Track>
-                                  </BaseMeter.Root>
-                                  <div className="text-sm font-medium tabular-nums mt-1">
-                                    $
-                                    {(
-                                      snap.extra_usage_used_credits / 100
-                                    ).toFixed(2)}{' '}
-                                    / $
-                                    {(
-                                      snap.extra_usage_monthly_limit / 100
-                                    ).toLocaleString('en-US', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}{' '}
-                                    USD
-                                  </div>
-                                </>
-                              ) : (
-                                <span className="text-sm text-text-faint">
-                                  Enabled — no limit set
-                                </span>
-                              )
-                            ) : (
-                              <div className="text-xl font-medium tabular-nums">
-                                {snap.utilization == null
-                                  ? (snap.status ?? '—')
-                                  : `${(snap.utilization * 100).toFixed(1)}%`}
-                              </div>
-                            )}
-                            {!isOverage && snap.utilization != null && (
-                              <BaseMeter.Root
-                                value={Math.min(
-                                  100,
-                                  Math.max(0, snap.utilization * 100),
-                                )}
-                                max={100}
-                                className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
-                              >
-                                <BaseMeter.Track className="h-full">
-                                  <BaseMeter.Indicator
-                                    className="h-full rounded-full"
-                                    style={{ backgroundColor: color.fill }}
-                                  />
-                                </BaseMeter.Track>
-                              </BaseMeter.Root>
-                            )}
-                            {windowNotStarted ? (
-                              <div className="text-[10px] text-text-faint font-mono mt-1">
-                                not started — begins on first request or warm-up
-                              </div>
-                            ) : snap.resets_at_unix_secs ? (
-                              <div className="text-[10px] text-text-faint font-mono mt-1">
-                                <ResetCountdown
-                                  compact
-                                  ts={snap.resets_at_unix_secs * 1000}
-                                />
-                              </div>
-                            ) : null}
-                            {!isOverage && !windowNotStarted && (
-                              <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
-                                <div className="flex items-baseline justify-between gap-2">
-                                  <span className="text-[10px] uppercase tracking-wider text-text-faint">
-                                    ETA to limit
+                                        100
+                                      ).toFixed(1)}
+                                      %
+                                    </div>
+                                    <div className="text-body-sm tabular-nums text-text-muted">
+                                      $
+                                      {(
+                                        snap.extra_usage_used_credits / 100
+                                      ).toFixed(2)}{' '}
+                                      / $
+                                      {(
+                                        snap.extra_usage_monthly_limit / 100
+                                      ).toLocaleString('en-US', {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}{' '}
+                                      USD
+                                    </div>
+                                  </>
+                                ) : (
+                                  <span className="text-body-sm text-text-muted">
+                                    Enabled — no limit set
                                   </span>
-                                  {quotaAnalysisPending ? (
-                                    <Skeleton className="h-5 w-28" />
-                                  ) : (
-                                    <span className="font-mono tabular-nums text-sm">
-                                      {eta != null && eta <= 0 ? (
-                                        'Already saturated'
-                                      ) : (
-                                        <RelativeOffsetTime
-                                          compact
-                                          offsetSeconds={eta}
-                                        />
-                                      )}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="flex min-h-3 items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
-                                  <span>burn</span>
-                                  {quotaAnalysisPending ? (
-                                    <Skeleton className="h-3 w-32" />
-                                  ) : (
-                                    <span className="tabular-nums">
-                                      {actualBurn == null
-                                        ? '—'
-                                        : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
-                                      {' · proj '}
-                                      {projBurn == null
-                                        ? '—'
-                                        : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
-                                    </span>
-                                  )}
-                                </div>
-                                {!quotaAnalysisPending && waitingForGrowth && (
-                                  <div className="text-[10px] text-amber-400">
-                                    Waiting for utilization to rise — burn
-                                    appears once growth is observed.
+                                )
+                              ) : snap.utilization == null ? (
+                                snap.status ? (
+                                  <div className="text-body text-text-muted">
+                                    {snap.status}
                                   </div>
-                                )}
-                              </div>
-                            )}
-                          </CardBody>
-                        </Card>
-                      );
-                    })}
+                                ) : (
+                                  <div className="text-display text-text-faint">
+                                    —
+                                  </div>
+                                )
+                              ) : (
+                                <div
+                                  className={cx(
+                                    'text-display tabular-nums',
+                                    QUOTA_SEVERITY_TEXT_CLASS[severity],
+                                  )}
+                                >
+                                  {`${(snap.utilization * 100).toFixed(1)}%`}
+                                </div>
+                              )}
+                              {meterPct != null ? (
+                                <BaseMeter.Root
+                                  value={Math.min(100, Math.max(0, meterPct))}
+                                  max={100}
+                                  className="w-full h-2 bg-progress-track rounded-xs overflow-hidden"
+                                >
+                                  <BaseMeter.Track className="h-full">
+                                    <BaseMeter.Indicator
+                                      className={cx(
+                                        'h-full',
+                                        QUOTA_SEVERITY_FILL_CLASS[severity],
+                                      )}
+                                    />
+                                  </BaseMeter.Track>
+                                </BaseMeter.Root>
+                              ) : null}
+                              {windowNotStarted ? (
+                                <div className="text-caption text-text-faint">
+                                  Not started — begins on first request or
+                                  warm-up
+                                </div>
+                              ) : snap.resets_at_unix_secs ? (
+                                <div className="text-caption text-text-faint">
+                                  <ResetCountdown
+                                    compact
+                                    ts={snap.resets_at_unix_secs * 1000}
+                                  />
+                                </div>
+                              ) : null}
+                              {!isOverage && !windowNotStarted && (
+                                <div className="mt-auto flex flex-col gap-1 border-t border-subtle pt-2.5">
+                                  <div className="flex items-baseline justify-between gap-2">
+                                    <span className="text-label text-text-faint">
+                                      ETA to limit
+                                    </span>
+                                    {quotaAnalysisPending ? (
+                                      <Skeleton className="h-5 w-28" />
+                                    ) : (
+                                      <span className="text-body-sm tabular-nums text-text">
+                                        {eta != null && eta <= 0 ? (
+                                          'Already saturated'
+                                        ) : (
+                                          <RelativeOffsetTime
+                                            compact
+                                            offsetSeconds={eta}
+                                          />
+                                        )}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex min-h-4 items-baseline justify-between gap-2">
+                                    <span className="text-label text-text-faint">
+                                      Burn
+                                    </span>
+                                    {quotaAnalysisPending ? (
+                                      <Skeleton className="h-3 w-32" />
+                                    ) : (
+                                      <span className="text-caption tabular-nums text-text-muted">
+                                        {actualBurn == null
+                                          ? '—'
+                                          : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
+                                        {' · projected '}
+                                        {projBurn == null
+                                          ? '—'
+                                          : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {!quotaAnalysisPending &&
+                                    waitingForGrowth && (
+                                      <div className="text-caption text-warn-text">
+                                        Waiting for utilization to rise — burn
+                                        appears once growth is observed.
+                                      </div>
+                                    )}
+                                </div>
+                              )}
+                            </CardBody>
+                          </Card>
+                        );
+                      })}
+                    </div>
                   </div>
-                </div>
-              );
-            })()}
+                );
+              })()}
+            </div>
           </Section>
         )}
 
         {!isOauth && (
-          <Section title="API Usage">
-            <ApiUsageCard
-              data={apiUsageQ.data}
-              isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
-              range={apiUsageRange}
-              onRangeChange={setApiUsageRange}
-              metric={apiUsageMetric}
-              onMetricChange={setApiUsageMetric}
-            />
-          </Section>
+          <ApiUsageCard
+            data={apiUsageQ.data}
+            isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
+            range={apiUsageRange}
+            onRangeChange={setApiUsageRange}
+            metric={apiUsageMetric}
+            onMetricChange={setApiUsageMetric}
+          />
         )}
 
         {isOauth ? (
           <div className="grid gap-4 2xl:grid-cols-[3fr_2fr]">
-            <WarmupCardMinimal upstream={upstream} />
+            <WarmupCardMinimal
+              upstream={upstream}
+              credentialNoticeShown={reconnectNudge != null}
+            />
             <Card className="w-full h-full flex flex-col">
               <CardHeader
-                title={
-                  oauthStatusPending ? (
-                    <Skeleton className="h-5 w-36" />
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <StatusBadge
-                        tone={oauthStatusBadge.tone}
-                        label={oauthStatusBadge.label}
-                      />
-                      <span>OAuth Status</span>
-                    </div>
-                  )
-                }
+                title="OAuth status"
                 subtitle={
                   oauthStatusPending ? (
                     <Skeleton className="h-3 w-32" />
@@ -1985,23 +1995,31 @@ function DetailView({
                 }
                 action={
                   oauthStatusPending ? (
-                    <Skeleton className="h-7 w-24" />
+                    <>
+                      <Skeleton className="h-5 w-24" />
+                      <Skeleton className="h-7 w-24" />
+                    </>
                   ) : (
-                    <Button
-                      size="sm"
-                      className="self-center"
-                      iconLeft={<KeyRound className="h-3 w-3" />}
-                      onClick={onConnect}
-                    >
-                      {hasBoundToken ? 'Reconnect' : 'Connect'}
-                    </Button>
+                    <>
+                      <StatusBadge
+                        tone={oauthStatusBadge.tone}
+                        label={oauthStatusBadge.label}
+                      />
+                      <Button
+                        size="sm"
+                        iconLeft={<KeyRound />}
+                        onClick={onConnect}
+                      >
+                        {hasBoundToken ? 'Reconnect' : 'Connect'}
+                      </Button>
+                    </>
                   )
                 }
                 align="center"
               />
               <CardBody
                 data-testid="oauth-status-card-body"
-                className="min-h-28 flex-1 text-sm"
+                className="min-h-28 flex-1 text-body-sm"
               >
                 {oauthStatusPending ? (
                   <div
@@ -2022,15 +2040,10 @@ function DetailView({
                     </div>
                   </div>
                 ) : !hasBoundToken ? (
-                  <div className="flex flex-wrap items-center gap-3">
-                    <StatusBadge
-                      tone={oauthStatusBadge.tone}
-                      label={oauthStatusBadge.label}
-                    />
-                    <p className="text-xs text-text-faint">
-                      Run "Connect via OAuth" to authorize this upstream.
-                    </p>
-                  </div>
+                  <p className="text-body-sm text-text-muted">
+                    Use Connect to authorize this upstream with a Claude
+                    account.
+                  </p>
                 ) : principalEntry ? (
                   <div
                     data-testid="oauth-status-loaded-grid"
@@ -2038,49 +2051,51 @@ function DetailView({
                   >
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       <div>
-                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                        <div className="text-label text-text-faint">
                           Access token
                         </div>
-                        <div className="mt-0.5 font-mono">
-                          <Badge tone="neutral">
-                            <RelativeTime
-                              ts={
-                                principalEntry.expires_at_unix_secs
-                                  ? new Date(
-                                      principalEntry.expires_at_unix_secs *
-                                        1000,
-                                    )
-                                  : null
-                              }
-                            />
-                          </Badge>
+                        <div className="mt-1">
+                          {principalEntry.expires_at_unix_secs ? (
+                            <span>
+                              Expires{' '}
+                              <RelativeTime
+                                ts={
+                                  new Date(
+                                    principalEntry.expires_at_unix_secs * 1000,
+                                  )
+                                }
+                              />
+                            </span>
+                          ) : (
+                            <span className="text-text-faint">—</span>
+                          )}
                         </div>
                         {principalEntry.mode === 'refreshing' ? (
-                          <div className="mt-1 text-[10px] text-text-faint">
+                          <div className="mt-0.5 text-caption text-text-faint">
                             Renews automatically while the refresh token is
                             valid.
                           </div>
                         ) : null}
                       </div>
                       <div>
-                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                        <div className="text-label text-text-faint">
                           Credential mode
                         </div>
                         <div
                           data-testid="oauth-credential-mode"
-                          className="mt-0.5"
+                          className="mt-1"
                         >
                           {principalEntry.mode === 'long_lived_365d' ? (
                             <>
-                              <Badge tone="accent">365-day token</Badge>
-                              <div className="mt-1 text-xs text-text-faint">
+                              <span>365-day token</span>
+                              <div className="mt-0.5 text-caption text-text-faint">
                                 Never refreshed — reauthorize once a year
                               </div>
                             </>
                           ) : principalEntry.mode === 'refreshing' ? (
                             <>
-                              <Badge tone="neutral">Refreshing</Badge>
-                              <div className="mt-1 text-xs text-text-faint">
+                              <span>Refreshing</span>
+                              <div className="mt-0.5 text-caption text-text-faint">
                                 Auto-refreshes; reauthorize about every 30 days
                               </div>
                             </>
@@ -2090,22 +2105,22 @@ function DetailView({
                         </div>
                       </div>
                       <div>
-                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                        <div className="text-label text-text-faint">
                           Refresh token
                         </div>
-                        <div className="mt-0.5">
+                        <div className="mt-1">
                           {principalEntry.can_refresh ? (
                             principalEntry.refresh_token_present ? (
-                              'present'
+                              'Present'
                             ) : (
-                              <span className="text-amber-400">missing</span>
+                              <span className="text-warn-text">Missing</span>
                             )
                           ) : principalEntry.refresh_token_present ? (
-                            <span className="text-text-faint">
-                              stored, unused
+                            <span className="text-text-muted">
+                              Stored, unused
                             </span>
                           ) : (
-                            <span className="text-text-faint">not stored</span>
+                            <span className="text-text-muted">Not stored</span>
                           )}
                         </div>
                         {/* The refresh-token clock only matters when the
@@ -2117,24 +2132,30 @@ function DetailView({
                           null ? (
                           <div
                             data-testid="oauth-refresh-token-expiry"
-                            className="mt-1 flex items-center gap-1.5 text-xs"
+                            className="mt-0.5 text-caption text-text-faint"
                           >
-                            <span className="text-text-faint">expires</span>
-                            <span className="font-mono">
-                              <Badge
-                                tone={refreshTokenExpiryTone(
-                                  principalEntry.refresh_token_expires_at_unix_secs,
-                                )}
-                              >
-                                <RelativeTime
-                                  ts={
-                                    new Date(
-                                      principalEntry.refresh_token_expires_at_unix_secs *
-                                        1000,
-                                    )
-                                  }
-                                />
-                              </Badge>
+                            Expires{' '}
+                            <span
+                              className={
+                                {
+                                  ok: 'text-text-muted',
+                                  warn: 'text-warn-text',
+                                  danger: 'text-danger-text',
+                                }[
+                                  refreshTokenExpiryTone(
+                                    principalEntry.refresh_token_expires_at_unix_secs,
+                                  )
+                                ]
+                              }
+                            >
+                              <RelativeTime
+                                ts={
+                                  new Date(
+                                    principalEntry.refresh_token_expires_at_unix_secs *
+                                      1000,
+                                  )
+                                }
+                              />
                             </span>
                           </div>
                         ) : null}
@@ -2142,17 +2163,15 @@ function DetailView({
                     </div>
                     {principalEntry.scopes.length ? (
                       <div>
-                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
-                          Scopes
-                        </div>
-                        <div className="mt-0.5 break-all font-mono text-xs">
+                        <div className="text-label text-text-faint">Scopes</div>
+                        <div className="mt-1 break-all font-mono text-data text-text-muted">
                           {principalEntry.scopes.join(', ')}
                         </div>
                       </div>
                     ) : null}
                   </div>
                 ) : (
-                  <p className="text-xs text-text-faint">
+                  <p className="text-body-sm text-text-muted">
                     Token is bound on the upstream but no credential details are
                     available right now.
                   </p>
@@ -2168,7 +2187,7 @@ function DetailView({
 
         <Card data-testid="recent-requests-card">
           <CardHeader
-            title="Recent Requests"
+            title="Recent requests"
             subtitle={
               recentPending ? (
                 <Skeleton className="h-3 w-52" />
@@ -2199,54 +2218,58 @@ function DetailView({
           </div>
         </Card>
         {selectedLatest && (a5h?.deficit || caveats.length > 0) && (
-          <Section title="Quota Analysis">
+          <Section title="Quota analysis">
             <div className="space-y-4">
               {a5h?.deficit && (
                 <Card>
-                  <CardHeader title="Quota deficit" />
-                  <CardBody className="p-3">
-                    <div className="flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-text-faint">
-                          Shortfall
-                        </span>
-                        <span className="font-mono text-amber-400">
-                          {Math.round(
-                            a5h.deficit.shortfall_tokens,
-                          ).toLocaleString()}{' '}
-                          tokens
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm text-text-faint">
-                          Recommended Multiplier
-                        </span>
-                        <span className="font-mono text-amber-400">
-                          {a5h.deficit.recommended_multiplier}x
-                        </span>
-                      </div>
-                      <div className="text-[10px] text-text-faint mt-1">
-                        Confidence:{' '}
-                        <span className="text-text">
-                          {a5h.deficit.confidence}
-                        </span>
-                      </div>
-                    </div>
+                  <CardHeader title="Quota deficit" headingLevel={3} />
+                  <CardBody>
+                    <dl className="grid grid-cols-[auto_1fr] items-baseline gap-x-6 gap-y-2 text-body-sm">
+                      <dt className="text-label text-text-faint">Shortfall</dt>
+                      <dd className="text-right tabular-nums text-warn-text">
+                        {Math.round(
+                          a5h.deficit.shortfall_tokens,
+                        ).toLocaleString()}{' '}
+                        <span className="text-text-muted">tokens</span>
+                      </dd>
+                      <dt className="text-label text-text-faint">
+                        Recommended multiplier
+                      </dt>
+                      <dd className="text-right tabular-nums text-warn-text">
+                        {a5h.deficit.recommended_multiplier}×
+                      </dd>
+                      <dt className="text-label text-text-faint">Confidence</dt>
+                      <dd className="text-right text-text">
+                        {a5h.deficit.confidence}
+                      </dd>
+                    </dl>
                   </CardBody>
                 </Card>
               )}
               {caveats.length > 0 && (
-                <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
-                  <div className="font-medium flex items-center gap-1.5">
-                    <Info className="w-3.5 h-3.5" />
-                    Analysis Caveats
-                  </div>
-                  <ul className="list-disc list-inside opacity-90 ml-1">
-                    {caveats.map((c, i) => (
-                      <li key={i}>{c}</li>
-                    ))}
+                <Notice tone="warning" title="Analysis caveats">
+                  <ul className="list-disc list-inside ml-1">
+                    {caveats.map((c) => {
+                      // The backend names its config key; operators read
+                      // the actual freshness limit instead.
+                      const limit = quotaAnalysis.data?.max_staleness_secs;
+                      const text = c
+                        .toLowerCase()
+                        .startsWith(
+                          'latest observation is older than max_staleness_secs',
+                        )
+                        ? `Latest reading is older than ${
+                            limit == null
+                              ? 'the freshness limit'
+                              : limit >= 60
+                                ? `${Math.round(limit / 60)} min`
+                                : `${limit} s`
+                          }; analysis may be outdated`
+                        : c.charAt(0).toUpperCase() + c.slice(1);
+                      return <li key={c}>{text}</li>;
+                    })}
                   </ul>
-                </div>
+                </Notice>
               )}
             </div>
           </Section>
@@ -2259,8 +2282,8 @@ function DetailView({
         title="Delete upstream?"
         description={
           <>
-            <span className="font-mono">{upstream.name}</span> will be
-            permanently removed. This cannot be undone.
+            <span className="font-medium text-text">{upstream.name}</span> will
+            be permanently removed. This cannot be undone.
           </>
         }
         confirmLabel={del.isPending ? 'Deleting...' : 'Delete'}
@@ -2279,6 +2302,63 @@ function DetailView({
             },
           )
         }
+      />
+
+      <ConfirmDialog
+        open={enabledConfirm.open}
+        onOpenChange={(open) =>
+          setEnabledConfirm((prev) => ({ ...prev, open }))
+        }
+        title={confirmEnabled ? 'Enable upstream?' : 'Disable upstream?'}
+        description={
+          confirmEnabled ? (
+            <>
+              <span className="font-medium text-text">{upstream.name}</span>{' '}
+              will start receiving requests again.
+              {upstream.warmup_enabled
+                ? null
+                : ' Warm-up is turned back on too.'}
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-text">{upstream.name}</span>{' '}
+              will stop receiving requests.
+              {upstream.warmup_enabled ? ' Warm-up is turned off too.' : null}
+              {poolImpact ? (
+                <span
+                  className="block mt-2 text-text-muted"
+                  data-testid="upstream-disable-pool-impact"
+                >
+                  {poolImpact.remaining === 0
+                    ? `No other upstream is enabled — requests will fail until one is.`
+                    : `${poolImpact.remaining} of ${poolImpact.total} upstreams will remain enabled.`}
+                </span>
+              ) : null}
+            </>
+          )
+        }
+        confirmLabel={confirmEnabled ? 'Enable' : 'Disable'}
+        destructive={!confirmEnabled}
+        onConfirm={() => {
+          const nextEnabled = confirmEnabled;
+          // Warm-up follows the upstream: disabling pauses it, enabling
+          // turns it back on.
+          const body: UpdateUpstreamWarmupSettingsRequest = {
+            enabled: nextEnabled,
+          };
+          if (upstream.warmup_enabled !== nextEnabled) {
+            body.warmup_enabled = nextEnabled;
+          }
+          toggle.mutate(
+            { id: upstream.id, body, spec_revision: upstream.spec_revision },
+            {
+              onSuccess: () =>
+                toast.success(
+                  nextEnabled ? 'Upstream enabled' : 'Upstream disabled',
+                ),
+            },
+          );
+        }}
       />
     </>
   );

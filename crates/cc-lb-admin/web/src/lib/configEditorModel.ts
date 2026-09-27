@@ -1903,14 +1903,89 @@ export function isConfigLeafActive(
   );
 }
 
+/**
+ * Whole-key labels where word-by-word humanizing reads poorly (a bare unit
+ * suffix would leave "Drain" or "Tick"). Units are dropped because the control
+ * shows them beside the input.
+ */
+const CONFIG_KEY_LABELS: Record<string, string> = {
+  drain_secs: 'Shutdown drain period',
+  tick_secs: 'Tick interval',
+  writer_flush_ms: 'Writer flush interval',
+  upstream_total_secs: 'Upstream total timeout',
+  half_open_after_secs: 'Half-open after',
+  files_cap_bytes: 'Files size cap',
+  messages_cap_bytes: 'Messages size cap',
+  memory_guard_bytes: 'Memory guard',
+  memory_reservation_bytes: 'Memory reservation',
+  pg_notify_channel: 'PostgreSQL notify channel',
+  sslmode: 'SSL mode',
+  dlq_retention_days: 'Dead-letter retention',
+  cloudflare_access: 'Cloudflare Access',
+  ondemand: 'On demand',
+  sqlite: 'SQLite',
+  postgres: 'PostgreSQL',
+};
+
+/** Words that are acronyms, proper names, or abbreviations in config keys. */
+const CONFIG_KEY_WORDS: Record<string, string> = {
+  addr: 'address',
+  aead: 'AEAD',
+  api: 'API',
+  cert: 'certificate',
+  conns: 'connections',
+  dir: 'directory',
+  dlq: 'dead-letter',
+  env: 'environment variable',
+  http: 'HTTP',
+  id: 'ID',
+  jwt: 'JWT',
+  oauth: 'OAuth',
+  otlp: 'OTLP',
+  sighup: 'SIGHUP',
+  sql: 'SQL',
+  tls: 'TLS',
+  ttl: 'TTL',
+  uri: 'URI',
+  url: 'URL',
+  wasmtime: 'Wasmtime',
+};
+
+/** Trailing unit words: the control renders the unit, so the label omits it. */
+const CONFIG_KEY_UNIT_WORDS: Record<string, true> = {
+  secs: true,
+  ms: true,
+  days: true,
+};
+
+/**
+ * Sentence-case label for a raw config key (`admin_addr` → "Admin address",
+ * `idle_timeout_secs` → "Idle timeout", `max_header_value_bytes` → "Max header
+ * value size"). The raw key stays available in the field details.
+ */
+export function configKeyLabel(key: string): string {
+  const bare = key.replace(/\[\d+\]$/, '');
+  const known = CONFIG_KEY_LABELS[bare];
+  if (known) return known;
+  const words = bare.split('_').filter(Boolean);
+  if (words.length > 1) {
+    const last = words.at(-1) as string;
+    if (CONFIG_KEY_UNIT_WORDS[last]) words.pop();
+    else if (last === 'bytes') words[words.length - 1] = 'size';
+  }
+  const text = words.map((word) => CONFIG_KEY_WORDS[word] ?? word).join(' ');
+  if (!text) return 'Value';
+  return /^[a-z]/.test(text)
+    ? text.charAt(0).toUpperCase() + text.slice(1)
+    : text;
+}
+
 export function configLeafLabel(
   leaf: Pick<ConfigSchemaLeaf, 'path' | 'schema'>,
 ): string {
   const title = leaf.schema.title;
   if (typeof title === 'string' && title) return title;
-  const segment = leaf.path.at(-1);
-  const text = String(segment ?? 'value').replaceAll('_', ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  return configKeyLabel(String(leaf.path.at(-1) ?? 'value'));
 }
 
 export interface ConfigSearchResult {

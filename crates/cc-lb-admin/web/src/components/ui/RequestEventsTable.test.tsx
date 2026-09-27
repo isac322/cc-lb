@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as FormatModule from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
-import { Sparkline } from './Sparkline';
 
 type GetRequestOutcome = typeof FormatModule.getRequestOutcome;
 
@@ -136,26 +135,27 @@ describe('RequestEventsTable', () => {
     const headerCells = container.querySelectorAll('thead th');
     const body = container.querySelector('tbody');
     const rows = container.querySelectorAll('tbody > tr');
+    // Session is off and, with no rows yet, so are the columns that only
+    // appear when a row has a value (request kind, cache hit).
     const expectedSkeletonWidths = [
       'max-w-24',
       'max-w-24',
       'max-w-28',
-      'max-w-12',
       'max-w-40',
       'max-w-12',
       'max-w-16',
-      'max-w-36',
       'max-w-20',
+      'max-w-16',
     ];
 
-    expect(headerCells).toHaveLength(9);
+    expect(headerCells).toHaveLength(8);
     expect(rows).toHaveLength(3);
-    expect(body?.style.height).toBe('7.59375rem');
+    expect(body?.style.height).toBe('7.5rem');
 
     for (const row of rows) {
       expect(row.className).toContain('border-b');
       expect(row.className).toContain('border-row');
-      expect((row as HTMLTableRowElement).style.height).toBe('2.53125rem');
+      expect((row as HTMLTableRowElement).style.height).toBe('2.5rem');
       const cells = row.querySelectorAll('td');
       expect(cells).toHaveLength(headerCells.length);
 
@@ -163,7 +163,7 @@ describe('RequestEventsTable', () => {
         const skeleton = cell.querySelector('.skeleton');
         expect(skeleton?.className).toContain(expectedSkeletonWidths[index]);
 
-        if (index >= 5) {
+        if (index >= 4) {
           expect(cell.className).toContain('text-right');
           expect(cell.className).toContain('tabular-nums');
           expect(skeleton?.className).toContain('ml-auto');
@@ -196,7 +196,7 @@ describe('RequestEventsTable', () => {
     ) as HTMLTableRowElement;
     const loadingRowHeight = loadingRow.style.height;
 
-    expect(loadingRowHeight).toBe('2.53125rem');
+    expect(loadingRowHeight).toBe('2.5rem');
 
     rerender(
       <RequestEventsTable
@@ -224,7 +224,7 @@ describe('RequestEventsTable', () => {
     );
 
     const loadingHeight = container.querySelector('tbody')?.style.height;
-    expect(loadingHeight).toBe('10.125rem');
+    expect(loadingHeight).toBe('10rem');
 
     rerender(
       <RequestEventsTable
@@ -239,7 +239,7 @@ describe('RequestEventsTable', () => {
     const emptyRow = emptyBody?.querySelector('tr');
     expect(emptyBody?.style.height).toBe(loadingHeight);
     expect(emptyRow?.className).toContain('h-full');
-    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('10');
+    expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('8');
     expect(screen.getByText('No requests')).toBeDefined();
   });
 
@@ -403,6 +403,33 @@ describe('RequestEventsTable', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('leaves Enter on a control inside the row to that control', async () => {
+    const user = userEvent.setup();
+    render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'evt_nested',
+            request_id: 'req_nested',
+            ts: 1718553120,
+            ts_ms: 1718553120000,
+            status: 200,
+            duration_ms: 100,
+            _phase: 'final',
+          } satisfies RequestEventWithPhase,
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    screen.getByRole('button', { name: /^Latency .* show breakdown$/ }).focus();
+    await user.keyboard('{Enter}');
+
+    expect(screen.queryByRole('dialog', { name: 'Request detail' })).toBeNull();
+    expect(screen.getByText('Latency by responsibility')).toBeDefined();
+  });
+
   it('handles JS int overflow gracefully', () => {
     const events: RequestEventWithPhase[] = [
       {
@@ -436,6 +463,62 @@ describe('RequestEventsTable', () => {
     // Should contain em-dash for overflowed values
     const dashes = screen.getAllByText('—');
     expect(dashes.length).toBeGreaterThan(0);
+  });
+
+  it('shows optional columns only when a visible row has a value', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    const { container, rerender } = render(
+      <RequestEventsTable
+        events={[
+          { ...base, event_id: 'evt_a', request_id: 'req_a', input_tokens: 10 },
+          { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+    const headers = () =>
+      Array.from(
+        container.querySelectorAll('thead th'),
+        (th) => th.textContent,
+      );
+
+    expect(headers()).not.toContain('Session');
+    expect(headers()).not.toContain('Request kind');
+    expect(headers()).not.toContain('Cache hit');
+
+    rerender(
+      <RequestEventsTable
+        events={[
+          {
+            ...base,
+            event_id: 'evt_a',
+            request_id: 'req_a',
+            input_tokens: 10,
+            cache_read_input_tokens: 30,
+            thread_id: 'session-a',
+            request_kind: 'subagent',
+          },
+          { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    expect(headers()).toEqual(
+      expect.arrayContaining(['Session', 'Request kind', 'Cache hit']),
+    );
+    const hitColumn = headers().indexOf('Cache hit');
+    const cells = (row: number) =>
+      container.querySelectorAll('tbody > tr')[row].querySelectorAll('td');
+    expect(cells(0)[hitColumn].textContent).toBe('75%');
+    expect(cells(1)[hitColumn].textContent).toBe('—');
   });
 
   describe('Cost Tooltip', () => {
@@ -552,7 +635,7 @@ describe('RequestEventsTable', () => {
       expect(inputLabel.length).toBeGreaterThan(0);
 
       // Check tooltip contents
-      const tooltips = await screen.findAllByText('Estimated Cost');
+      const tooltips = await screen.findAllByText('Estimated cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
       // Check all 5 rows are present
@@ -759,85 +842,6 @@ describe('RequestEventsTable', () => {
       expect(screen.queryByText('priority')).toBeNull();
       expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('batch')).toBeNull();
-    });
-  });
-
-  describe('Sparkline', () => {
-    it('applies Tailwind bg-* utility colors through className', () => {
-      const { container } = render(
-        <Sparkline segments={[{ value: 10, color: 'bg-sky-400' }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).toContain('bg-sky-400');
-      expect(segments[0]?.style.backgroundColor).toBe('');
-    });
-
-    it('applies raw CSS colors through inline style', () => {
-      const { container } = render(
-        <Sparkline segments={[{ value: 20, color: '#ff0000' }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).not.toContain('#ff0000');
-      expect(segments[0]?.style.backgroundColor).toBe('rgb(255, 0, 0)');
-    });
-
-    it('keeps compound Tailwind bg-* utility colors in className', () => {
-      const compoundColor =
-        'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]';
-      const { container } = render(
-        <Sparkline segments={[{ value: 30, color: compoundColor }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).toContain('bg-slate-700/30');
-      expect(segments[0]?.className).toContain(
-        'bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
-      );
-      expect(segments[0]?.style.backgroundColor).toBe('');
-    });
-
-    it('leaves explicit unobserved total as empty track space', () => {
-      const { container } = render(
-        <Sparkline
-          segments={[
-            { value: 10, color: 'bg-sky-400' },
-            { value: 20, color: 'bg-violet-400' },
-          ]}
-          total={100}
-        />,
-      );
-
-      expect(
-        Array.from(
-          container.querySelectorAll<HTMLElement>('span'),
-          (segment) => segment.style.width,
-        ),
-      ).toEqual(['10%', '20%']);
-    });
-
-    it('renders empty track when total is zero or negative', () => {
-      const { container } = render(
-        <Sparkline
-          segments={[
-            { value: 0, color: 'bg-sky-400' },
-            { value: -10, color: '#ff0000' },
-          ]}
-        />,
-      );
-
-      const segments = container.querySelectorAll('span');
-      expect(segments).toHaveLength(0);
-
-      const track = container.querySelector('div');
-      expect(track?.className).toContain('bg-overlay-1');
     });
   });
 });

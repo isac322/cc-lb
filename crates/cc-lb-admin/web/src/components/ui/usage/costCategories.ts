@@ -27,14 +27,12 @@ export type CostCategoryKey = (typeof COST_CATEGORIES)[number]['key'];
 /**
  * Cost an authoritative total reports that no category accounts for — windows
  * rolled up before per-category cost was persisted. Neutral on purpose: it is
- * missing bookkeeping, not a sixth kind of token. The literal is the value
- * `--color-neutral` carries in both themes (gray-500), so a bar segment and a
- * breakdown dot can paint it the same way the categories paint theirs.
+ * missing bookkeeping, not a sixth kind of token.
  */
 export const UNATTRIBUTED_CATEGORY = {
   key: 'unattributed',
   label: 'Unattributed',
-  color: '#6b7280',
+  color: 'var(--color-neutral)',
 } as const;
 
 /** Per-category cost in integer micros. */

@@ -16,11 +16,12 @@ export interface TimeRangeStripProps {
   readonly onSelectionCommit: (sel: { a: number; b: number } | null) => void;
 }
 
-const TOTAL_BASELINE_Y = 62;
-const ERROR_LANE_Y = 66;
-const ERROR_LANE_H = 14;
-const AXIS_TEXT_Y = 94;
-const STRIP_H = 104;
+/** Bars grow up from this line; below it is the time axis (the pan handle). */
+const BASELINE_Y = 64;
+const AXIS_TEXT_Y = 80;
+const STRIP_H = 88;
+/** A bucket with any error keeps at least this much red so one failure shows. */
+const MIN_ERROR_PX = 2;
 const EDGE_PX = 6;
 /** Below this width a drag is treated as a click that clears the selection. */
 const MIN_DRAG_MS = 2000;
@@ -54,49 +55,33 @@ interface DragState {
 
 interface Palette {
   grid: string;
-  gridStrong: string;
   total: string;
   totalMuted: string;
   danger: string;
-  dangerMuted: string;
-  dangerWash: string;
   accent: string;
   accentWash: string;
   text: string;
-}
-
-function cssVar(styles: CSSStyleDeclaration, name: string, fallback: string) {
-  const raw = styles.getPropertyValue(name).trim();
-  return raw.length > 0 ? raw : fallback;
+  /** Canvas text cannot inherit the CSS font stack. */
+  font: string;
 }
 
 /**
  * Canvas cannot resolve CSS custom properties, so the palette is sampled from
  * the document element and re-sampled whenever the theme attribute flips.
+ * index.css defines every token in both themes.
  */
 function readPalette(): Palette {
   const styles = getComputedStyle(document.documentElement);
-  const accent = cssVar(styles, '--color-accent', '#00d4ff');
-  const danger = cssVar(styles, '--color-danger', '#ef4444');
+  const token = (name: string) => styles.getPropertyValue(name).trim();
   return {
-    grid: cssVar(styles, '--color-border-row', 'rgba(127,127,127,0.06)'),
-    gridStrong: cssVar(styles, '--color-border', 'rgba(127,127,127,0.12)'),
-    total: accent,
-    totalMuted: cssVar(
-      styles,
-      '--color-border-strong',
-      'rgba(127,127,127,0.2)',
-    ),
-    danger,
-    dangerMuted: cssVar(
-      styles,
-      '--color-border-strong',
-      'rgba(127,127,127,0.2)',
-    ),
-    dangerWash: cssVar(styles, '--color-overlay-2', 'rgba(127,127,127,0.03)'),
-    accent,
-    accentWash: cssVar(styles, '--color-accent-dim', 'rgba(0,212,255,0.10)'),
-    text: cssVar(styles, '--color-text-faint', '#6b7280'),
+    grid: token('--color-border-row'),
+    total: token('--color-text-faint'),
+    totalMuted: token('--color-border-strong'),
+    danger: token('--color-danger'),
+    accent: token('--color-accent'),
+    accentWash: token('--color-accent-dim'),
+    text: token('--color-text-faint'),
+    font: getComputedStyle(document.body).fontFamily || 'sans-serif',
   };
 }
 
@@ -210,40 +195,32 @@ export function TimeRangeStrip({
     ctx.strokeStyle = palette.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(0, TOTAL_BASELINE_Y + 0.5);
-    ctx.lineTo(width, TOTAL_BASELINE_Y + 0.5);
+    ctx.moveTo(0, BASELINE_Y + 0.5);
+    ctx.lineTo(width, BASELINE_Y + 0.5);
     ctx.stroke();
-    ctx.fillStyle = palette.dangerWash;
-    ctx.fillRect(0, ERROR_LANE_Y, width, ERROR_LANE_H);
 
-    // Ticks: widest ladder step that keeps labels at least 96px apart.
+    // Ticks: widest ladder step that keeps labels at least 96px apart. Only
+    // the labels are drawn; the chart keeps horizontal rules only.
     const tickMs =
       TICK_LADDER_MS.find((ms) => (ms / span) * width >= 96) ??
       TICK_LADDER_MS[TICK_LADDER_MS.length - 1];
     const showDateOnly = tickMs >= 6 * 3_600_000;
-    ctx.font = '10px ui-monospace, monospace';
+    ctx.font = `11px ${palette.font}`;
+    ctx.fillStyle = palette.text;
     for (let t = Math.ceil(view.a / tickMs) * tickMs; t < view.b; t += tickMs) {
-      const x = Math.round(t2x(t)) + 0.5;
-      ctx.strokeStyle = palette.grid;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, TOTAL_BASELINE_Y);
-      ctx.stroke();
-      ctx.fillStyle = palette.text;
+      const x = Math.round(t2x(t));
       const label = formatInTimezone(t, tz);
       ctx.fillText(
         showDateOnly ? label.slice(5, 10) : label.slice(11),
-        x + 3,
+        x + 2,
         AXIS_TEXT_Y,
       );
     }
 
     if (buckets.length > 0) {
       let maxTotal = 1;
-      let maxError = 1;
       for (const bucket of buckets) {
         if (bucket.total_count > maxTotal) maxTotal = bucket.total_count;
-        if (bucket.error_count > maxError) maxError = bucket.error_count;
       }
       const slot = width / buckets.length;
       const barW = Math.max(2, slot - 0.6);
@@ -252,68 +229,58 @@ export function TimeRangeStrip({
         (startMs + bucketMs / 2 >= active.a &&
           startMs + bucketMs / 2 < active.b);
 
-      // Total lane uses a sqrt scale so short spikes survive next to a peak.
+      // Neutral bars on a sqrt scale so short spikes survive next to a peak;
+      // the bucket's errors are stacked at the bottom of its bar in danger.
       for (let i = 0; i < buckets.length; i++) {
         const bucket = buckets[i];
         if (bucket.total_count === 0) continue;
         const startMs = bucket.bucket_start_unix_secs * 1000;
+        const selected = inSelection(startMs);
+        const x = t2x(startMs);
         const h = Math.max(
-          1,
-          Math.sqrt(bucket.total_count / maxTotal) * (TOTAL_BASELINE_Y - 6),
+          MIN_ERROR_PX,
+          Math.sqrt(bucket.total_count / maxTotal) * (BASELINE_Y - 4),
         );
-        ctx.fillStyle = inSelection(startMs)
-          ? palette.total
-          : palette.totalMuted;
-        ctx.globalAlpha = inSelection(startMs) ? 0.5 : 1;
-        ctx.fillRect(t2x(startMs), TOTAL_BASELINE_Y - h, barW, h);
-      }
-      ctx.globalAlpha = 1;
-
-      // Error lane is separate and guarantees 3px so a single failure is visible.
-      for (let i = 0; i < buckets.length; i++) {
-        const bucket = buckets[i];
-        if (bucket.error_count === 0) continue;
-        const startMs = bucket.bucket_start_unix_secs * 1000;
-        const h = Math.max(
-          3,
-          Math.sqrt(bucket.error_count / maxError) * ERROR_LANE_H,
-        );
-        ctx.fillStyle = inSelection(startMs)
-          ? palette.danger
-          : palette.dangerMuted;
-        ctx.globalAlpha = inSelection(startMs) ? 0.95 : 0.35;
-        ctx.fillRect(t2x(startMs), ERROR_LANE_Y + ERROR_LANE_H - h, barW, h);
+        ctx.fillStyle = selected ? palette.total : palette.totalMuted;
+        ctx.globalAlpha = selected ? 0.6 : 1;
+        ctx.fillRect(x, BASELINE_Y - h, barW, h);
+        if (bucket.error_count > 0) {
+          const errorH = Math.min(
+            h,
+            Math.max(
+              MIN_ERROR_PX,
+              (bucket.error_count / bucket.total_count) * h,
+            ),
+          );
+          ctx.fillStyle = palette.danger;
+          ctx.globalAlpha = selected ? 0.9 : 0.4;
+          ctx.fillRect(x, BASELINE_Y - errorH, barW, errorH);
+        }
       }
       ctx.globalAlpha = 1;
     }
-
-    ctx.fillStyle = palette.danger;
-    ctx.globalAlpha = 0.55;
-    ctx.font = '9px ui-monospace, monospace';
-    ctx.fillText('err', 2, ERROR_LANE_Y + ERROR_LANE_H - 3);
-    ctx.globalAlpha = 1;
 
     if (active != null) {
       const xa = t2x(active.a);
       const xb = t2x(active.b);
       ctx.fillStyle = palette.accentWash;
-      ctx.fillRect(xa, 0, xb - xa, ERROR_LANE_Y + ERROR_LANE_H);
+      ctx.fillRect(xa, 0, xb - xa, BASELINE_Y);
       for (const x of [xa, xb]) {
         const px = Math.round(x) + 0.5;
         ctx.strokeStyle = palette.accent;
         ctx.beginPath();
         ctx.moveTo(px, 0);
-        ctx.lineTo(px, ERROR_LANE_Y + ERROR_LANE_H);
+        ctx.lineTo(px, BASELINE_Y);
         ctx.stroke();
         ctx.fillStyle = palette.accent;
-        ctx.fillRect(Math.round(x) - 2.5, TOTAL_BASELINE_Y / 2 - 11, 5, 22);
+        ctx.fillRect(Math.round(x) - 2, BASELINE_Y / 2 - 10, 4, 20);
       }
     }
   }, [buckets, bucketMs, view, active, palette, width, dpr, tz, timeToX]);
 
   const hitKind = useCallback(
     (x: number, y: number): DragKind => {
-      if (y > ERROR_LANE_Y + ERROR_LANE_H) return 'pan';
+      if (y > BASELINE_Y) return 'pan';
       const sel = draftRef.current ?? selectionRef.current;
       if (sel != null) {
         const w = widthRef.current;
@@ -410,7 +377,7 @@ export function TimeRangeStrip({
       setHint({
         x: Math.max(52, Math.min(Math.max(52, widthRef.current - 52), x)),
         text: `${formatDuration(next.b - next.a)} · ~${stats.total} requests${
-          stats.errors > 0 ? ` / ~${stats.errors} err` : ''
+          stats.errors > 0 ? ` · ~${stats.errors} errors` : ''
         }`,
       });
     };
@@ -495,11 +462,9 @@ export function TimeRangeStrip({
       const x = event.clientX - rect.left;
       const y = event.clientY - rect.top;
       const sel = selectionRef.current;
-      // The error lane counts as inside the selection; zooming from a red
-      // spike is the whole point of having the lane.
       if (
         sel != null &&
-        y <= ERROR_LANE_Y + ERROR_LANE_H &&
+        y <= BASELINE_Y &&
         x > timeToX(sel.a, widthRef.current, viewRef.current) &&
         x < timeToX(sel.b, widthRef.current, viewRef.current)
       ) {
@@ -559,7 +524,7 @@ export function TimeRangeStrip({
       />
       {hint != null ? (
         <div
-          className="pointer-events-none absolute top-2 -translate-x-1/2 whitespace-nowrap rounded-sm border border-subtle bg-panel-strong px-1.5 py-0.5 font-mono text-[10px] text-muted"
+          className="pointer-events-none absolute top-2 -translate-x-1/2 whitespace-nowrap rounded-sm border border-subtle-strong bg-bg-sub px-1.5 py-0.5 text-caption tabular-nums text-text-muted shadow-overlay"
           style={{ left: hint.x }}
         >
           {hint.text}
@@ -570,7 +535,7 @@ export function TimeRangeStrip({
           className="pointer-events-none absolute right-2 top-2 z-10"
           data-testid="time-range-strip-error"
         >
-          <span className="rounded-sm border border-subtle bg-panel-strong px-2 py-1 text-[11px] text-[color:var(--color-danger)]">
+          <span className="rounded-sm bg-danger/8 px-2 py-1 text-caption text-danger-text">
             Failed to load request density
           </span>
         </div>

@@ -1,5 +1,4 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
-import { X } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import type {
   CacheKeepaliveHorizon,
@@ -16,7 +15,10 @@ import {
   Badge,
   Button,
   cx,
+  Drawer,
   EmptyState,
+  SegmentedControl,
+  type SegmentedOption,
   Skeleton,
   Spinner,
 } from '../../ui/primitives';
@@ -38,7 +40,11 @@ interface Props {
   principal: Principal;
 }
 
-const HORIZONS: CacheKeepaliveHorizon[] = ['24h', '7d', 'all'];
+const HORIZON_OPTIONS: SegmentedOption<CacheKeepaliveHorizon>[] = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+  { value: 'all', label: 'All' },
+];
 
 const FILTERS: { key: CacheKeepaliveStatusFilter; label: string }[] = [
   { key: 'all', label: 'All' },
@@ -50,38 +56,15 @@ const FILTERS: { key: CacheKeepaliveStatusFilter; label: string }[] = [
   { key: 'error', label: 'Error' },
 ];
 
-const FILTER_TONE: Record<CacheKeepaliveStatusFilter, string> = {
-  all: 'bg-accent/15 text-accent border-accent/40',
-  renewed:
-    'bg-[color:var(--color-ok)]/15 text-[color:var(--color-ok)] border-[color:var(--color-ok)]/40',
-  scheduled: 'bg-accent/15 text-accent border-accent/40',
-  capped: 'bg-overlay-4 text-text border-subtle',
-  expired:
-    'bg-[color:var(--color-warn)]/15 text-[color:var(--color-warn)] border-[color:var(--color-warn)]/40',
-  not_tracked: 'bg-overlay-3 text-text-faint border-subtle',
-  error:
-    'bg-[color:var(--color-danger)]/15 text-[color:var(--color-danger)] border-[color:var(--color-danger)]/40',
-};
-
-const FILTER_ACTIVE_RING: Record<CacheKeepaliveStatusFilter, string> = {
-  all: 'ring-[color:var(--color-accent)]/50',
-  renewed: 'ring-[color:var(--color-ok)]/50',
-  scheduled: 'ring-[color:var(--color-accent)]/50',
-  capped: 'ring-[color:var(--color-border-strong)]/70',
-  expired: 'ring-[color:var(--color-warn)]/50',
-  not_tracked: 'ring-[color:var(--color-border-strong)]/70',
-  error: 'ring-[color:var(--color-danger)]/50',
-};
-
 const STATE_TONE: Record<
   CacheKeepaliveState,
-  'ok' | 'warn' | 'danger' | 'neutral' | 'accent' | 'mono'
+  'ok' | 'warn' | 'danger' | 'neutral' | 'accent'
 > = {
   renewed: 'ok',
   scheduled: 'accent',
   capped: 'neutral',
   expired: 'warn',
-  not_tracked: 'mono',
+  not_tracked: 'neutral',
 };
 
 const STATE_LABEL: Record<CacheKeepaliveState, string> = {
@@ -91,34 +74,6 @@ const STATE_LABEL: Record<CacheKeepaliveState, string> = {
   expired: 'Expired',
   not_tracked: 'Not tracked',
 };
-
-function HorizonToggle({
-  value,
-  onChange,
-}: {
-  value: CacheKeepaliveHorizon;
-  onChange: (h: CacheKeepaliveHorizon) => void;
-}) {
-  return (
-    <div className="flex items-center gap-1 shrink-0">
-      {HORIZONS.map((o) => (
-        <button
-          key={o}
-          type="button"
-          onClick={() => onChange(o)}
-          className={cx(
-            'h-6 px-2 text-[11px] rounded-sm border',
-            value === o
-              ? 'bg-accent/15 border-accent/40 text-accent'
-              : 'bg-overlay-2 border-subtle text-text-muted hover:bg-overlay-4',
-          )}
-        >
-          {o === 'all' ? 'All' : o}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 function formatMoney(val: number) {
   return `$${val.toFixed(2)}`;
@@ -136,16 +91,18 @@ function OverviewStrip({
   horizon,
   summary,
   isLoading,
+  onHorizonChange,
 }: {
   horizon: CacheKeepaliveHorizon;
   summary: CacheKeepaliveSummary | undefined;
   isLoading: boolean;
+  onHorizonChange: (h: CacheKeepaliveHorizon) => void;
 }) {
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
-    <div className="px-4 py-3 border-b border-subtle shrink-0">
-      <div className="flex items-baseline gap-2 flex-wrap">
-        <span className="text-xs text-text-muted">{label}</span>
+    <div className="px-4 py-3 border-b border-subtle shrink-0 flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-baseline gap-2 flex-wrap min-w-0">
+        <span className="text-caption text-text-muted">{label}</span>
         {isLoading ? (
           <>
             <Skeleton className="h-5 w-32" />
@@ -153,11 +110,11 @@ function OverviewStrip({
           </>
         ) : (
           <>
-            <span className="text-sm font-medium text-text">
+            <span className="text-body-sm font-medium text-text tabular-nums">
               {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
               fired
             </span>
-            <span className="text-[11px] text-text-faint">
+            <span className="text-caption text-text-faint tabular-nums">
               · {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
               {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}{' '}
               sessions tracked
@@ -165,6 +122,13 @@ function OverviewStrip({
           </>
         )}
       </div>
+      <SegmentedControl
+        ariaLabel="Time range"
+        size="sm"
+        value={horizon}
+        onChange={onHorizonChange}
+        options={HORIZON_OPTIONS}
+      />
     </div>
   );
 }
@@ -180,8 +144,7 @@ function SessionListRow({
 }) {
   const isError = row.error != null;
   const showTicks = row.state !== 'scheduled' && row.state !== 'not_tracked';
-  const tickColor =
-    row.state === 'renewed' ? 'bg-[var(--color-ok)]' : 'bg-text-muted';
+  const tickColor = row.state === 'renewed' ? 'bg-ok' : 'bg-text-muted';
 
   const reasonText =
     isError && row.error === row.reason
@@ -195,26 +158,36 @@ function SessionListRow({
       <button
         type="button"
         onClick={onSelect}
+        aria-current={isSelected || undefined}
         className={cx(
-          'w-full min-h-[68px] text-left rounded-sm border-b border-subtle px-4 py-3 transition-colors',
-          isSelected ? 'bg-accent/10 border-accent/40' : 'hover:bg-overlay-2',
-          isError && 'border-l-2 border-l-red-500',
-          isError && !isSelected && 'bg-red-500/5',
+          'w-full min-h-[68px] text-left rounded-sm border-b px-4 py-3 transition-colors',
+          'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+          isSelected
+            ? 'bg-accent-dim border-subtle'
+            : isError
+              ? 'bg-danger/5 border-subtle hover:bg-danger/10'
+              : 'border-subtle hover:bg-overlay-2',
         )}
       >
         <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-mono text-text">{row.id}</span>
+          <div className="flex items-center gap-2 min-w-0">
+            {isError && (
+              <AlertCircle
+                className="w-3.5 h-3.5 shrink-0 text-danger-text"
+                aria-hidden="true"
+              />
+            )}
+            <span className="font-mono text-data text-text">{row.id}</span>
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
             {isError && <Badge tone="danger">Error</Badge>}
           </div>
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-caption tabular-nums">
             <span
               className={cx(
                 row.net_pnl > 0
-                  ? 'text-[var(--color-ok)]'
+                  ? 'text-success-text'
                   : row.net_pnl < 0
-                    ? 'text-[var(--color-danger)]'
+                    ? 'text-danger-text'
                     : 'text-text-muted',
               )}
             >
@@ -234,24 +207,24 @@ function SessionListRow({
         <div className="flex items-center justify-between mt-2">
           <p
             className={cx(
-              'text-[12px] truncate',
-              isError ? 'text-red-400' : 'text-text-muted',
+              'text-caption truncate',
+              isError ? 'text-danger-text' : 'text-text-muted',
             )}
           >
             {reasonText}
           </p>
           {showTicks && row.attempts != null && (
-            <div className="flex items-center gap-0.5 shrink-0 ml-2">
+            <div className="flex items-center gap-px shrink-0 ml-2">
               {Array.from({ length: row.max_attempts }).map((_, i) => (
                 <div
                   key={i}
                   className={cx(
-                    'w-1 h-2 rounded-sm',
+                    'w-1 h-2 rounded-xs',
                     i < row.attempts! ? tickColor : 'bg-overlay-4',
                   )}
                 />
               ))}
-              <span className="text-[10px] text-text-faint ml-1 tabular-nums">
+              <span className="text-caption text-text-faint ml-1.5 tabular-nums">
                 {row.attempts}/{row.max_attempts}
               </span>
             </div>
@@ -333,7 +306,7 @@ function useFlipReorder(
           child.style.transition = 'none';
           child.style.position = 'relative';
           child.style.zIndex = '10';
-          child.style.backgroundColor = '#161616';
+          child.style.backgroundColor = 'var(--color-bg-sub)';
           child.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.45)';
 
           requestAnimationFrame(() => {
@@ -412,148 +385,108 @@ export function CacheKeepaliveSessionsDrawer({
   const enabled = principal.cache_keepalive?.enabled ?? false;
 
   return (
-    <BaseDialog.Root onOpenChange={handleOpenChange} open={open}>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <BaseDialog.Popup
-          className="fixed right-0 top-0 bottom-0 w-full max-w-[960px] bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full"
-          data-testid="cache-keepalive-sessions-drawer"
-        >
-          <BaseDialog.Title className="sr-only">
-            Cache keepalive sessions
-          </BaseDialog.Title>
-          <BaseDialog.Description className="sr-only">
-            Full list of cache keepalive sessions for {principal.name}.
-          </BaseDialog.Description>
+    <Drawer
+      open={open}
+      onOpenChange={handleOpenChange}
+      title="Cache keepalive sessions"
+      description={principal.name}
+      width="xl"
+    >
+      <div
+        className="h-full flex flex-col min-h-0"
+        data-testid="cache-keepalive-sessions-body"
+      >
+        <OverviewStrip
+          horizon={horizon}
+          summary={summary}
+          isLoading={query.isLoading}
+          onHorizonChange={setHorizon}
+        />
 
-          <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-subtle shrink-0">
-            <div className="min-w-0 flex items-center gap-3">
-              <div className="min-w-0">
-                <h3 className="text-sm font-medium text-text">
-                  Cache keepalive sessions
-                </h3>
-                <p className="text-[11px] text-text-faint font-mono truncate">
-                  {principal.name}
-                </p>
-              </div>
-              <HorizonToggle value={horizon} onChange={setHorizon} />
-            </div>
-            <button
-              type="button"
-              onClick={() => handleOpenChange(false)}
-              aria-label="Close history"
-              className="inline-flex items-center justify-center w-7 h-7 rounded-sm text-text-muted hover:text-text hover:bg-overlay-5 shrink-0"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </header>
-
-          <OverviewStrip
-            horizon={horizon}
-            summary={summary}
-            isLoading={query.isLoading}
+        <div className="px-4 py-2.5 border-b border-subtle shrink-0 overflow-x-auto no-scrollbar">
+          <SegmentedControl
+            ariaLabel="Session status"
+            size="sm"
+            value={filter}
+            onChange={setFilter}
+            options={FILTERS.map((f) => ({ value: f.key, label: f.label }))}
           />
+        </div>
 
-          <div className="px-4 py-2.5 border-b border-subtle shrink-0 flex gap-1.5 overflow-x-auto no-scrollbar">
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                type="button"
-                aria-pressed={filter === f.key}
-                onClick={() => setFilter(f.key)}
-                className={cx(
-                  'inline-flex items-center gap-1.5 px-2 h-6 rounded-sm text-[11px] transition-opacity border whitespace-nowrap shrink-0',
-                  FILTER_TONE[f.key],
-                  filter === f.key
-                    ? cx(
-                        'opacity-100 ring-1 ring-inset',
-                        FILTER_ACTIVE_RING[f.key],
-                      )
-                    : 'opacity-60 hover:opacity-100',
-                )}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex-1 flex min-h-0">
+        <div className="flex-1 flex min-h-0">
+          <div
+            className={cx(
+              'overflow-y-auto p-2',
+              selected
+                ? 'max-[960px]:hidden w-[440px] shrink-0 border-r border-subtle'
+                : 'flex-1',
+            )}
+          >
             <div
-              className={cx(
-                'overflow-y-auto p-2',
-                selected
-                  ? 'max-[960px]:hidden w-[440px] shrink-0 border-r border-subtle'
-                  : 'flex-1',
-              )}
+              data-testid="cache-keepalive-session-list-region"
+              aria-busy={query.isLoading}
+              className="min-h-[340px]"
             >
-              <div
-                data-testid="cache-keepalive-session-list-region"
-                aria-busy={query.isLoading}
-                className="min-h-[340px]"
-              >
-                {query.isLoading ? (
-                  <SessionListSkeleton />
-                ) : !enabled && allRows.length === 0 ? (
-                  <EmptyState
-                    title="Cache keepalive disabled"
-                    description="Enable cache keepalive to start tracking sessions."
-                  />
-                ) : allRows.length === 0 ? (
-                  <EmptyState
-                    title={
-                      filter === 'all' ? 'No sessions' : 'No matching sessions'
-                    }
-                    description={
-                      filter === 'all'
-                        ? 'No sessions recorded yet.'
-                        : 'Try a different filter.'
-                    }
-                  />
-                ) : (
-                  <ul ref={setListElement} className="flex flex-col">
-                    {allRows.map((r) => (
-                      <SessionListRow
-                        key={r.id}
-                        row={r}
-                        isSelected={selected?.id === r.id}
-                        onSelect={() => setSelected(r)}
-                      />
-                    ))}
-                  </ul>
-                )}
-              </div>
-              {query.hasNextPage && (
-                <div className="flex justify-center pt-3 pb-4">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => query.fetchNextPage()}
-                    disabled={query.isFetchingNextPage}
-                    iconLeft={
-                      query.isFetchingNextPage ? <Spinner /> : undefined
-                    }
-                  >
-                    Loading older sessions...
-                  </Button>
-                </div>
-              )}
-              {!query.hasNextPage && allRows.length > 0 && (
-                <div className="text-center py-4 text-xs text-text-faint">
-                  · No more sessions ·
-                </div>
+              {query.isLoading ? (
+                <SessionListSkeleton />
+              ) : !enabled && allRows.length === 0 ? (
+                <EmptyState
+                  title="Cache keepalive disabled"
+                  description="Enable cache keepalive to start tracking sessions."
+                />
+              ) : allRows.length === 0 ? (
+                <EmptyState
+                  title={
+                    filter === 'all' ? 'No sessions' : 'No matching sessions'
+                  }
+                  description={
+                    filter === 'all'
+                      ? 'No sessions recorded yet.'
+                      : 'Try a different filter.'
+                  }
+                />
+              ) : (
+                <ul ref={setListElement} className="flex flex-col">
+                  {allRows.map((r) => (
+                    <SessionListRow
+                      key={r.id}
+                      row={r}
+                      isSelected={selected?.id === r.id}
+                      onSelect={() => setSelected(r)}
+                    />
+                  ))}
+                </ul>
               )}
             </div>
-
-            {selected && (
-              <SessionDetailPane
-                principalId={principal.id}
-                sessionId={selected.id}
-                onClose={() => setSelected(null)}
-              />
+            {query.hasNextPage && (
+              <div className="flex justify-center pt-3 pb-4">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => query.fetchNextPage()}
+                  disabled={query.isFetchingNextPage}
+                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+                >
+                  Loading older sessions...
+                </Button>
+              </div>
+            )}
+            {!query.hasNextPage && allRows.length > 0 && (
+              <div className="text-center py-4 text-caption text-text-faint">
+                · No more sessions ·
+              </div>
             )}
           </div>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+
+          {selected && (
+            <SessionDetailPane
+              principalId={principal.id}
+              sessionId={selected.id}
+              onClose={() => setSelected(null)}
+            />
+          )}
+        </div>
+      </div>
+    </Drawer>
   );
 }

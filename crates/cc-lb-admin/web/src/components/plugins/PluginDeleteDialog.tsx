@@ -35,26 +35,22 @@ export function PluginDeleteDialog({
         if (!o) onClose();
       }}
       title={
-        <div className="flex flex-col">
-          <span>
-            {pendingDelete?.refcount
-              ? 'Delete Plugin and Remove References?'
-              : 'Delete Plugin?'}
-          </span>
-        </div>
+        pendingDelete?.refcount
+          ? 'Delete plugin and remove references?'
+          : 'Delete plugin?'
       }
       description={
         pendingDelete ? (
-          <span className="space-y-2 block">
-            <span className="flex flex-col space-y-1">
-              <span>
-                <span className="font-mono">{pendingDelete.name}</span> will be
-                permanently deleted.
-              </span>
+          <span className="block space-y-3">
+            <span className="block">
+              <span className="font-medium text-text">
+                {pendingDelete.name}
+              </span>{' '}
+              will be permanently deleted.
             </span>
             {pendingDelete.refcount > 0 && (
-              <span className="text-xs bg-overlay-1 p-2 rounded-sm border border-subtle block mt-2">
-                <span className="font-medium text-red-400 mb-1 block">
+              <span className="well block p-3 text-body-sm">
+                <span className="mb-1 block font-medium text-danger-text">
                   Used in {pendingDelete.refcount} location
                   {pendingDelete.refcount === 1 ? '' : 's'}.
                 </span>
@@ -93,11 +89,8 @@ export function PluginDeleteDialog({
                     )}
                   </span>
                 )}
-                <span className="mt-2 flex flex-col space-y-1">
-                  <span>
-                    Deleting this plugin will also remove it from these
-                    locations.
-                  </span>
+                <span className="mt-2 block">
+                  Deleting this plugin will also remove it from these locations.
                 </span>
               </span>
             )}

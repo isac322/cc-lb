@@ -326,7 +326,7 @@ export function CouponActionButton({
           sideOffset={6}
           collisionPadding={8}
         >
-          <BasePopover.Popup className="max-w-[240px] rounded-sm border border-subtle-strong bg-bg-sub px-2.5 py-1.5 text-[11px] leading-snug text-text shadow-lg">
+          <BasePopover.Popup className="max-w-[240px] rounded-md glass-strong px-2.5 py-1.5 text-caption text-text">
             <BasePopover.Description>{disabledReason}</BasePopover.Description>
           </BasePopover.Popup>
         </BasePopover.Positioner>
@@ -338,7 +338,7 @@ export function CouponActionButton({
   return (
     <span className="inline-flex items-center gap-2">
       {action}
-      <span className="shrink-0 whitespace-nowrap text-[11px] text-[color:var(--color-warn-text)]">
+      <span className="shrink-0 whitespace-nowrap text-caption text-warn-text">
         {expiryLabel}
       </span>
     </span>
@@ -376,12 +376,7 @@ export function SidebarCouponNudge({
   if (!nudge || (nudge.kind === 'quiet' && expiryMs == null)) return null;
   const tone = TONE[nudge.kind];
   return (
-    <div
-      className={cx(
-        'flex items-center gap-1.5 text-[10px] font-mono',
-        tone.text,
-      )}
-    >
+    <div className={cx('flex items-center gap-1.5 text-caption', tone.text)}>
       <Ticket className="h-3 w-3 shrink-0" />
       {nudge.label ? <span className="truncate">{nudge.label}</span> : null}
       {nudge.activeCount > 0 ? (

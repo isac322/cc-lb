@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   Button,
@@ -219,5 +225,36 @@ describe('ConfirmDialog pending state', () => {
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConfirmDialog initial focus', () => {
+  it('focuses Cancel for a destructive confirm', async () => {
+    render(
+      <ConfirmDialog
+        open
+        destructive
+        onOpenChange={() => {}}
+        onConfirm={() => {}}
+        title="Delete item?"
+        confirmLabel="Delete"
+      />,
+    );
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    await waitFor(() => expect(document.activeElement).toBe(cancel));
+  });
+
+  it('focuses the confirm button for a non-destructive confirm', async () => {
+    render(
+      <ConfirmDialog
+        open
+        onOpenChange={() => {}}
+        onConfirm={() => {}}
+        title="Apply change?"
+        confirmLabel="Apply"
+      />,
+    );
+    const confirm = screen.getByRole('button', { name: 'Apply' });
+    await waitFor(() => expect(document.activeElement).toBe(confirm));
   });
 });

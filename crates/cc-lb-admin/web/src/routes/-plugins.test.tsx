@@ -380,7 +380,7 @@ test('keeps deferred inline replacement confirmation actionable after the upload
     );
   });
 
-  expect(await screen.findByText('Confirm Plugin Replacement')).toBeDefined();
+  expect(await screen.findByText('Confirm plugin replacement')).toBeDefined();
   fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
 
   await waitFor(() => {
@@ -465,11 +465,11 @@ test('shows references, cascade deletes, and returns a deleted detail to catalog
 
   renderWithProviders();
 
-  const deleteBtn = screen.getByRole('button', { name: 'Delete Plugin' });
+  const deleteBtn = screen.getByRole('button', { name: 'Delete plugin' });
   fireEvent.click(deleteBtn);
 
   expect(
-    await screen.findByText('Delete Plugin and Remove References?'),
+    await screen.findByText('Delete plugin and remove references?'),
   ).toBeDefined();
   expect(screen.getByText('Principal principal-1 (router)')).toBeDefined();
   expect(screen.getByText('Upstream upstream-1 warmup')).toBeDefined();
@@ -532,13 +532,14 @@ test('shows catalog and opens detail view', async () => {
   renderWithProviders();
 
   expect(screen.getByText('My Plugin')).toBeDefined();
-  expect(screen.getByText('Built-in')).toBeDefined();
+  // The badge, plus the Added column: built-ins have no upload time.
+  expect(screen.getAllByText('Built-in')).toHaveLength(2);
   expect(screen.getByText('Router')).toBeDefined();
   expect(screen.getByText('Test description')).toBeDefined();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Inspect' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect My Plugin' }));
 
-  expect(await screen.findByText('Back to Catalog')).toBeDefined();
+  expect(await screen.findByText('Back to catalog')).toBeDefined();
   expect(screen.getByText('What this plugin does')).toBeDefined();
   expect(screen.getByText('Test usage')).toBeDefined();
   expect(screen.getByText('test_hook')).toBeDefined();

@@ -2,7 +2,7 @@ import { type ReactNode, useId } from 'react';
 import { fmtBytes, fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
 import { cx, Hint } from '../primitives';
-import { Sparkline } from '../Sparkline';
+import { StackedBar } from '../StackedBar';
 import {
   CACHE_SETUP_TIMING_STAGES,
   computeLatencyAttribution,
@@ -63,8 +63,8 @@ function Section({
           {description}
         </span>
       ) : null}
-      <div className="flex items-center gap-2 text-[11px] mb-1">
-        <span className={cx('h-2 w-2 rounded-full shrink-0', color)} />
+      <div className="flex items-center gap-2 text-caption mb-1">
+        <span className={cx('h-2 w-2 rounded-xs shrink-0', color)} />
         <span className="text-text-muted flex-1 font-medium flex items-center gap-2">
           <span
             className={cx(
@@ -90,7 +90,7 @@ function Section({
           {visibleItems.map((item) => (
             <div
               key={item.label}
-              className="flex items-center gap-2 text-[10px]"
+              className="flex items-center gap-2 text-caption"
             >
               <span
                 className={cx(
@@ -117,7 +117,14 @@ function Section({
   );
 }
 
-export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
+export function LatencyCell({
+  event: e,
+  className,
+}: {
+  event: RequestEventWithPhase;
+  className?: string;
+}) {
+  const stagesId = useId();
   const attribution = computeLatencyAttribution(e);
   const isRenewal = attribution.isFinalRenewal;
   const hasFinalize = e.finalize_ms != null;
@@ -204,9 +211,7 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
       ? [`Ingress body ${fmtBytes(e.request_body_bytes)}`]
       : []),
   ];
-  const triggerLabel = `Latency ${value} ${unit}${
-    triggerStages.length > 0 ? `, ${triggerStages.join(', ')}` : ''
-  }, show breakdown`;
+  const triggerLabel = `Latency ${value} ${unit}, show breakdown`;
 
   const proxySections = (
     <div className="flex flex-col">
@@ -325,7 +330,7 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
         ]}
         pill={
           e.connection_reused ? (
-            <span className="px-1 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] leading-none">
+            <span className="px-1 py-0.5 rounded-sm bg-ok/12 text-success-text text-caption leading-none">
               Warm pool
             </span>
           ) : null
@@ -404,13 +409,28 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
     </div>
   );
 
+  const responsibilitySegments = isRenewal
+    ? [
+        {
+          value: duration,
+          color: LATENCY_RESPONSIBILITY_META.renewal.color,
+        },
+      ]
+    : attribution.responsibilities
+        .filter((group) => group.key !== 'renewal' && group.valueMs > 0)
+        .map((group) => ({ value: group.valueMs, color: group.color }));
+
   const popover = (
-    <div className="min-w-[260px] max-w-[320px] font-mono">
-      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-2">
-        Latency by responsibility
-      </div>
+    <div className="min-w-[260px] max-w-[320px] py-1">
+      <div className="text-label text-text mb-2">Latency by responsibility</div>
+      <StackedBar
+        className="mb-2"
+        total={duration}
+        segments={responsibilitySegments}
+        ariaLabel={sparklineLabel}
+      />
       {e.request_body_bytes != null && !isRenewal ? (
-        <div className="text-[9px] leading-3 text-text-faint mb-2">
+        <div className="text-caption text-text-faint mb-2">
           Ingress body: {fmtBytes(e.request_body_bytes)}
         </div>
       ) : null}
@@ -429,9 +449,9 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
         proxySections
       )}
 
-      <div className="border-t border-subtle mt-2 pt-1.5 flex items-center gap-2 text-[11px]">
+      <div className="border-t border-row mt-2 pt-1.5 flex items-center gap-2 text-caption">
         <span className="h-2 w-2 shrink-0" />
-        <span className="text-text-faint flex-1">Total</span>
+        <span className="text-text-muted flex-1">Total</span>
         <span className="tabular-nums text-text w-16 text-right">
           {fmtMs(duration)}
         </span>
@@ -444,45 +464,27 @@ export function LatencyCell({ event: e }: { event: RequestEventWithPhase }) {
 
   return (
     <td
-      className="p-0 text-right whitespace-nowrap"
+      className={cx('p-0 text-right whitespace-nowrap', className)}
       onClick={(ev) => ev.stopPropagation()}
     >
-      <Hint label={popover}>
+      <Hint label={popover} openOnFocus={false}>
         <button
           type="button"
           aria-label={triggerLabel}
-          className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit"
+          aria-describedby={triggerStages.length > 0 ? stagesId : undefined}
+          className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
         >
-          <div className="flex items-baseline justify-end tabular-nums leading-tight">
-            <span className="shrink-0 w-[5ch] text-right text-text">
-              {value}
+          {triggerStages.length > 0 ? (
+            <span className="sr-only" id={stagesId}>
+              {triggerStages.join(', ')}
             </span>
-            <span className="shrink-0 w-[2ch] text-left text-text-faint">
+          ) : null}
+          <span className="flex items-baseline justify-end tabular-nums max-md:justify-start">
+            <span className="text-text">{value}</span>
+            <span className="ml-1 w-[2ch] shrink-0 text-left text-text-muted">
               {unit}
             </span>
-          </div>
-          <div role="img" aria-label={sparklineLabel}>
-            <Sparkline
-              total={duration}
-              segments={
-                isRenewal
-                  ? [
-                      {
-                        value: duration,
-                        color: LATENCY_RESPONSIBILITY_META.renewal.color,
-                      },
-                    ]
-                  : attribution.responsibilities
-                      .filter(
-                        (group) => group.key !== 'renewal' && group.valueMs > 0,
-                      )
-                      .map((group) => ({
-                        value: group.valueMs,
-                        color: group.color,
-                      }))
-              }
-            />
-          </div>
+          </span>
         </button>
       </Hint>
     </td>

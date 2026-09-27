@@ -1,17 +1,17 @@
 import { useNavigate } from '@tanstack/react-router';
-import { ArrowLeft } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePluginRegistry, useUploadWasm } from '../../lib/queries';
 import { Route } from '../../routes/plugins';
 import {
-  Button,
   Card,
   CardBody,
   Modal,
   PageContainer,
+  PageHeader,
   Section,
   Skeleton,
 } from '../ui/primitives';
+import { BackToCatalogLink } from './BackToCatalogLink';
 import { PluginCatalog } from './PluginCatalog';
 import { PluginDetail } from './PluginDetail';
 import { PluginUploadCard } from './PluginUploadCard';
@@ -21,24 +21,17 @@ function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
     <div
       aria-busy="true"
       aria-label="Loading plugin details"
-      className="space-y-6 mt-6"
+      className="space-y-8"
       role="status"
     >
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to Catalog
-        </Button>
-        <Skeleton className="h-7 w-52 max-w-full" />
+      <div>
+        <BackToCatalogLink onBack={onBack} />
+        <Skeleton className="mt-1 h-7 w-52 max-w-full" />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
-          <Section
-            title={
-              <span className="text-lg font-medium">What this plugin does</span>
-            }
-          >
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-8">
+        <div className="lg:col-span-2 space-y-8">
+          <Section title="What this plugin does">
             <Card>
               <CardBody className="space-y-4 min-h-64">
                 <div className="space-y-2">
@@ -78,14 +71,8 @@ function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
           </Section>
         </div>
 
-        <div className="space-y-6">
-          <Section
-            title={
-              <span className="text-lg font-medium font-sans">
-                File details
-              </span>
-            }
-          >
+        <div className="space-y-8">
+          <Section title="File details">
             <Card>
               <CardBody className="space-y-3 text-sm min-h-64">
                 <div className="flex justify-between">
@@ -112,11 +99,7 @@ function PluginDetailSkeleton({ onBack }: { onBack: () => void }) {
             </Card>
           </Section>
 
-          <Section
-            title={
-              <span className="text-lg font-medium">Manage this plugin</span>
-            }
-          >
+          <Section title="Manage this plugin">
             <Card>
               <CardBody className="space-y-4 min-h-72">
                 <Skeleton className="h-16" />
@@ -176,15 +159,10 @@ export function PluginsPage() {
 
   return (
     <PageContainer>
-      <div className="mb-6">
-        <h1 className="text-xl font-medium font-sans text-text">Plugins</h1>
-        <div className="mt-1 space-y-1">
-          <p className="text-sm text-text-faint">
-            Upload and manage WebAssembly plugins. Apply them to Principals or
-            Upstreams to customize behavior.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Plugins"
+        description="Upload and manage WebAssembly plugins. Apply them to Principals or Upstreams to customize behavior."
+      />
       {selectedPluginId && reg.isLoading ? (
         <PluginDetailSkeleton onBack={() => setSelectedPluginId(null)} />
       ) : selectedPlugin ? (
@@ -193,7 +171,7 @@ export function PluginsPage() {
           onBack={() => setSelectedPluginId(null)}
         />
       ) : (
-        <div className="space-y-6">
+        <div className="space-y-8">
           <div hidden={uploadOpen}>
             <PluginUploadCard
               upload={upload}
@@ -213,6 +191,7 @@ export function PluginsPage() {
       >
         <PluginUploadCard
           upload={upload}
+          bare
           autoFocus
           onAutoFocus={consumeUploadAction}
           onUploaded={handleUploaded}

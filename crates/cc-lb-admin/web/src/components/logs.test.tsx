@@ -258,10 +258,13 @@ describe('LogsPage', () => {
     ).toEqual(['target']);
   });
 
-  it('renders Session select with an enforced w-64 and Clear button with h-9', async () => {
+  it('shows applied filters as removable chips behind a collapsed panel', async () => {
     const queryClient = new QueryClient();
 
-    vi.spyOn(Route, 'useSearch').mockReturnValue({ session: '123' } as never);
+    vi.spyOn(Route, 'useSearch').mockReturnValue({
+      session: '123',
+      status: '4xx',
+    } as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -274,14 +277,21 @@ describe('LogsPage', () => {
       </QueryClientProvider>,
     );
 
-    const clearButton = await screen.findByRole('button', { name: /Clear/i });
+    const filtersButton = await screen.findByRole('button', {
+      name: /^Filters/,
+    });
+    expect(filtersButton.getAttribute('aria-expanded')).toBe('false');
+    expect(filtersButton.textContent).toContain('2');
 
-    expect(clearButton.className).not.toContain('h-7');
-    expect(clearButton.className).toContain('h-9');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Remove session filter' }),
+    );
+    expect(routerMocks.navigate).toHaveBeenCalledWith({
+      search: { session: undefined, status: '4xx' },
+    });
 
-    const sessionSelect = screen.getByText('123').closest('button');
-    expect(sessionSelect).not.toBeNull();
-    expect(sessionSelect?.className).toContain('!w-64');
+    fireEvent.click(filtersButton);
+    expect(filtersButton.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('commits the model filter once typing settles', () => {
@@ -301,7 +311,8 @@ describe('LogsPage', () => {
         </QueryClientProvider>,
       );
 
-      const modelInput = screen.getByPlaceholderText('claude-sonnet-4-5');
+      fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
+      const modelInput = screen.getByRole('textbox', { name: 'Model' });
       for (const value of ['c', 'cl', 'claude ']) {
         fireEvent.change(modelInput, { target: { value } });
         act(() => {

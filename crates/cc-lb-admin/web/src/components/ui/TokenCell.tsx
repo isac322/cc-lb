@@ -1,8 +1,6 @@
-import { splitNum } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover, fmtTokens } from './BreakdownPopover';
 import { cx, Hint } from './primitives';
-import { Sparkline } from './Sparkline';
 import { SLICE_COLORS } from './usage/sliceColors';
 
 type TokenBreakdown = {
@@ -36,23 +34,29 @@ function totalInputTokens(b: TokenBreakdown): number {
   return b.input + b.cc_5m + b.cc_1h + b.cr;
 }
 
-function hitRatioPercent(b: TokenBreakdown): number {
+/**
+ * Share of the prompt served from cache, as a whole percent, or null when the
+ * request read nothing from cache (the table hides the column when every row
+ * is null).
+ */
+export function cacheHitPercent(e: RequestEventWithPhase): number | null {
+  const b = tokenBreakdown(e);
   const denom = totalInputTokens(b);
-  if (denom <= 0) return 0;
+  if (denom <= 0 || b.cr <= 0) return null;
   return Math.round((b.cr / denom) * 100);
 }
 
+/** "2.8k → 8": prompt tokens in, output tokens out, one size, tabular. */
 export function TokenCell({
   event,
   isPartial,
+  className,
 }: {
   event: RequestEventWithPhase;
   isPartial?: boolean;
+  className?: string;
 }) {
   const b = tokenBreakdown(event);
-  const hit = hitRatioPercent(b);
-  const inp = splitNum(totalInputTokens(b));
-  const out = splitNum(b.output);
 
   const popover = (
     <BreakdownPopover
@@ -94,57 +98,22 @@ export function TokenCell({
 
   return (
     <td
-      className="p-0 text-right whitespace-nowrap"
+      className={cx(
+        'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+        className,
+      )}
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div
-          className={cx(
-            'px-3 py-2 cursor-help block',
-            isPartial ? 'animate-pulse' : '',
-          )}
-        >
-          <div className="flex items-baseline justify-end tabular-nums leading-tight">
-            <span className="shrink-0 w-[4ch] text-right text-sky-400">
-              {inp.value}
-            </span>
-            <span className="shrink-0 w-[1ch] text-left text-text-faint">
-              {inp.unit}
-            </span>
-            <span className="shrink-0 w-[2ch] text-center text-text-faint">
-              /
-            </span>
-            <span className="shrink-0 w-[4ch] text-right text-violet-400">
-              {out.value}
-            </span>
-            <span className="shrink-0 w-[1ch] text-left text-text-faint">
-              {out.unit}
-            </span>
-            <span className="shrink-0 w-[3ch] text-right text-[10px] text-text-faint ml-3">
-              hit
-            </span>
-            <span
-              className={cx(
-                'shrink-0 w-[3ch] text-right text-[10px] tabular-nums ml-1',
-                hit > 0 ? 'text-emerald-400' : 'text-text-faint',
-              )}
-            >
-              {hit}
-            </span>
-            <span className="shrink-0 w-[1ch] text-left text-[10px] text-text-faint">
-              %
-            </span>
-          </div>
-          <Sparkline
-            segments={[
-              { value: b.input, color: SLICE_COLORS.input },
-              { value: b.output, color: SLICE_COLORS.output },
-              { value: b.cc_5m, color: SLICE_COLORS.cache_create_5m },
-              { value: b.cc_1h, color: SLICE_COLORS.cache_create_1h },
-              { value: b.cr, color: SLICE_COLORS.cache_read },
-            ]}
-          />
-        </div>
+        <span className={cx('cursor-help', isPartial ? 'animate-pulse' : '')}>
+          <span className="text-text">{fmtTokens(totalInputTokens(b))}</span>
+          <span aria-hidden="true" className="px-1 text-text-faint">
+            →
+          </span>
+          <span className="sr-only"> in, </span>
+          <span className="text-text">{fmtTokens(b.output)}</span>
+          <span className="sr-only"> out</span>
+        </span>
       </Hint>
     </td>
   );

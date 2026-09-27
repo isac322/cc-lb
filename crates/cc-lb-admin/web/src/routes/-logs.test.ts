@@ -5,6 +5,7 @@ import {
   buildLiveFilters,
   getLogsRouteState,
   logsSearchSchema,
+  presetFor,
 } from './logs';
 
 describe('logsSearchSchema', () => {
@@ -171,5 +172,21 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).toEqual(live);
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
+  });
+});
+
+describe('presetFor', () => {
+  const now = 1_700_000_000;
+
+  it('treats an unbounded range as All time and a fixed end as custom', () => {
+    expect(presetFor(undefined, undefined, now)).toBe('all');
+    expect(presetFor(now - 3600, now - 60, now)).toBeNull();
+  });
+
+  it('keeps a preset selected while its window has only grown slightly', () => {
+    expect(presetFor(now - 3600, undefined, now)).toBe('1h');
+    expect(presetFor(now - 3600 - 72, undefined, now)).toBe('1h');
+    expect(presetFor(now - 3600 - 73, undefined, now)).toBeNull();
+    expect(presetFor(now - 7 * 86_400 - 3 * 3600, undefined, now)).toBe('7d');
   });
 });

@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveApiRows } from '../../../../lib/test-utils/cacheKeepalive-fixtures';
@@ -261,15 +267,15 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const popup = screen.getByTestId('cache-keepalive-sessions-drawer');
-    expect(popup.getAttribute('role')).toBe('dialog');
-    expect(popup.getAttribute('aria-labelledby')).toBeDefined();
+    const dialog = screen.getByRole('dialog', {
+      name: 'Cache keepalive sessions',
+    });
 
-    const closeBtn = screen.getByLabelText('Close history');
-    fireEvent.click(closeBtn);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
 
-    fireEvent.keyDown(popup, { key: 'Escape', code: 'Escape' });
+    onOpenChange.mockClear();
+    fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
@@ -291,7 +297,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(screen.getByText('Session detail')).toBeDefined();
   });
 
-  it('filter chips expose selected state via aria-pressed', () => {
+  it('status filter exposes selected state via aria-checked', () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -300,16 +306,19 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const allBtn = screen.getAllByText('All')[1];
-    const renewedBtn = screen.getAllByText('Renewed')[0];
+    const filter = within(
+      screen.getByRole('radiogroup', { name: 'Session status' }),
+    );
+    const allBtn = filter.getByRole('radio', { name: 'All' });
+    const renewedBtn = filter.getByRole('radio', { name: 'Renewed' });
 
-    expect(allBtn.getAttribute('aria-pressed')).toBe('true');
-    expect(renewedBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(allBtn.getAttribute('aria-checked')).toBe('true');
+    expect(renewedBtn.getAttribute('aria-checked')).toBe('false');
 
     fireEvent.click(renewedBtn);
 
-    expect(allBtn.getAttribute('aria-pressed')).toBe('false');
-    expect(renewedBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(allBtn.getAttribute('aria-checked')).toBe('false');
+    expect(renewedBtn.getAttribute('aria-checked')).toBe('true');
   });
 
   it('applies responsive layout classes when a row is selected', () => {
@@ -357,7 +366,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
     expect(listContainer?.className).not.toContain('max-[960px]:hidden');
   });
 
-  it('renders drawer with correct max-w, title, principal name, horizon pills, and close button', () => {
+  it('renders drawer title, principal name, and time range with 24h default', () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -366,24 +375,26 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    const popup = screen.getByTestId('cache-keepalive-sessions-drawer');
-    expect(popup.className).toContain('max-w-[960px]');
+    const dialog = screen.getByRole('dialog', {
+      name: 'Cache keepalive sessions',
+    });
+    expect(within(dialog).getAllByText('Test Principal')[0]).toBeDefined();
 
-    expect(screen.getAllByText('Cache keepalive sessions')[0]).toBeDefined();
-    expect(screen.getAllByText('Test Principal')[0]).toBeDefined();
+    const range = within(
+      screen.getByRole('radiogroup', { name: 'Time range' }),
+    );
+    expect(
+      range.getByRole('radio', { name: '24h' }).getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(
+      range.getByRole('radio', { name: '7d' }).getAttribute('aria-checked'),
+    ).toBe('false');
+    expect(range.getByRole('radio', { name: 'All' })).toBeDefined();
 
-    expect(screen.getByText('24h')).toBeDefined();
-    expect(screen.getByText('7d')).toBeDefined();
-    expect(screen.getAllByText('All')[0]).toBeDefined();
-
-    // 24h is default
-    const btn24h = screen.getAllByText('24h')[0];
-    expect(btn24h.className).toContain('text-accent');
-
-    expect(screen.getByLabelText('Close history')).toBeDefined();
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
   });
 
-  it('renders filter chip row with hidden scrollbar and correct labels', () => {
+  it('renders the status filter with every status label', () => {
     renderWithProviders(
       <CacheKeepaliveSessionsDrawer
         open={true}
@@ -392,16 +403,20 @@ describe('CacheKeepaliveSessionsDrawer', () => {
       />,
     );
 
-    expect(screen.getAllByText('All')[1]).toBeDefined();
-    expect(screen.getAllByText('Renewed')[0]).toBeDefined();
-    expect(screen.getAllByText('Scheduled')[0]).toBeDefined();
-    expect(screen.getAllByText('Capped')[0]).toBeDefined();
-    expect(screen.getAllByText('Expired')[0]).toBeDefined();
-    expect(screen.getAllByText('Not tracked')[0]).toBeDefined();
-    expect(screen.getAllByText('Error')[0]).toBeDefined();
-
-    const filterContainer = screen.getAllByText('All')[1].parentElement;
-    expect(filterContainer?.className).toContain('no-scrollbar');
+    const filter = within(
+      screen.getByRole('radiogroup', { name: 'Session status' }),
+    );
+    for (const label of [
+      'All',
+      'Renewed',
+      'Scheduled',
+      'Capped',
+      'Expired',
+      'Not tracked',
+      'Error',
+    ]) {
+      expect(filter.getByRole('radio', { name: label })).toBeDefined();
+    }
   });
 
   it('renders row full session id first, not truncated, with status badge, optional Error chip, Net P&L, reason-only second line', () => {

@@ -14,11 +14,12 @@ export function SessionChip({ sessionId }: { sessionId: string | null }) {
   return (
     <span
       title={sessionId}
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border text-[10px] font-mono tabular-nums leading-none"
+      className="inline-flex h-5 items-center gap-1 px-1.5 rounded-sm font-mono text-data tabular-nums leading-none"
       style={{
         backgroundColor: color.bg,
-        color: color.fg,
-        borderColor: color.border,
+        // The shared hue is tuned for dark surfaces; light theme needs a
+        // darker shade of the same hue to stay readable.
+        color: `light-dark(hsl(${color.hue} 60% 32%), ${color.fg})`,
       }}
     >
       <span

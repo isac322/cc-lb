@@ -1,82 +1,84 @@
 import { Copy } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { PluginEntry } from '../../lib/queries';
 import { useCopyButton } from '../../lib/useCopyButton';
-import { Card, CardBody, Hint, Section } from '../ui/primitives';
+import { Card, CardBody, Hint, IconButton, Section } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
+import { EmptyValue } from '../ui/Table';
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-h-7 items-center justify-between gap-4">
+      <dt className="text-label text-text-muted">{label}</dt>
+      <dd className="min-w-0 text-right text-body-sm text-text">{children}</dd>
+    </div>
+  );
+}
 
 export function PluginDetailIntegrity({ plugin }: { plugin: PluginEntry }) {
   const { copy } = useCopyButton();
+  const builtinFile = plugin.is_builtin && plugin.size_bytes === 0;
 
   return (
-    <Section
-      title={
-        <span className="flex items-baseline gap-2">
-          <span className="text-lg font-medium">File details</span>
-        </span>
-      }
-    >
+    <Section title="File details">
       <Card>
-        <CardBody className="space-y-3 text-sm">
-          <div className="flex justify-between">
-            <span className="text-text-faint">Version</span>
-            <span className="font-mono">{plugin.version || 'N/A'}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-faint">Revision</span>
-            <span className="font-mono">{plugin.revision}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-faint">Size</span>
-            <span className="font-mono">
-              {(plugin.size_bytes / 1024).toFixed(1)} KB
-            </span>
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-text-faint">SHA256</span>
-            <div className="flex items-center gap-1">
-              <Hint label={plugin.sha256_hex}>
-                <code className="font-mono text-xs cursor-help">
-                  {plugin.sha256_hex.slice(0, 12)}…
-                </code>
-              </Hint>
-              <button
-                type="button"
-                aria-label="Copy SHA256"
-                className="text-text-faint hover:text-text"
-                onClick={() => copy(plugin.sha256_hex, 'SHA256')}
+        <CardBody>
+          <dl className="space-y-1.5">
+            <Row label="Version">
+              {plugin.version ? `v${plugin.version}` : <EmptyValue />}
+            </Row>
+            <Row label="Revision">{plugin.revision}</Row>
+            <Row label="Size">
+              {builtinFile ? (
+                <span className="text-text-muted">Built-in</span>
+              ) : (
+                <>
+                  {(plugin.size_bytes / 1024).toFixed(1)}{' '}
+                  <span className="text-text-muted">KB</span>
+                </>
+              )}
+            </Row>
+            <Row label="SHA256">
+              <span className="-my-2 inline-flex items-center gap-1">
+                <Hint label={plugin.sha256_hex}>
+                  <code className="cursor-help font-mono text-data">
+                    {plugin.sha256_hex.slice(0, 12)}…
+                  </code>
+                </Hint>
+                <IconButton
+                  label="Copy SHA256"
+                  className="-mr-2"
+                  onClick={() => copy(plugin.sha256_hex, 'SHA256')}
+                >
+                  <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                </IconButton>
+              </span>
+            </Row>
+            <Row label="Uploaded">
+              {plugin.is_builtin && plugin.uploaded_at_unix_secs === 0 ? (
+                <span className="text-text-muted">Built-in</span>
+              ) : (
+                <RelativeTime
+                  ts={new Date(plugin.uploaded_at_unix_secs * 1000)}
+                />
+              )}
+            </Row>
+            <Row label="Filename">
+              <span
+                className="block max-w-[12rem] truncate font-mono text-data"
+                title={plugin.original_filename}
               >
-                <Copy className="w-3 h-3" />
-              </button>
-            </div>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-faint">Uploaded</span>
-            <span>
-              <RelativeTime
-                ts={new Date(plugin.uploaded_at_unix_secs * 1000)}
-              />
-            </span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-text-faint">Filename</span>
-            <span
-              className="font-mono text-xs truncate max-w-[150px]"
-              title={plugin.original_filename}
-            >
-              {plugin.original_filename}
-            </span>
-          </div>
-          <div className="pt-4 border-t border-subtle mt-4">
-            <h3 className="text-sm font-medium text-text mb-2 flex items-baseline gap-2">
-              <span>Updating this plugin</span>
-            </h3>
-            <div className="text-xs space-y-1">
-              <p className="text-text-faint">
-                Upload a file with the same name to update this plugin. If the
-                version is clearly newer, it replaces the current file;
-                otherwise you will be asked to confirm.
-              </p>
-            </div>
+                {plugin.original_filename}
+              </span>
+            </Row>
+          </dl>
+          <div className="mt-4 border-t border-subtle pt-4">
+            <h3 className="text-label text-text-muted">Updating this plugin</h3>
+            <p className="mt-1 text-caption text-text-faint">
+              Upload a file with the same name to update this plugin. If the
+              version is clearly newer, it replaces the current file; otherwise
+              you will be asked to confirm.
+            </p>
           </div>
         </CardBody>
       </Card>

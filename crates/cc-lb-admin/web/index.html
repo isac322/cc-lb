@@ -1,9 +1,21 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" data-theme="system">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>cc-lb Admin</title>
+    <!-- Pre-paint theme: mirrors readStoredTheme() in src/lib/theme.ts so the
+         first frame already uses the stored theme instead of flashing dark. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('cclb.theme');
+          if (t === 'dark' || t === 'light' || t === 'system') {
+            document.documentElement.setAttribute('data-theme', t);
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body class="antialiased">
     <div id="root"></div>

@@ -10,13 +10,13 @@ import {
   FileWarning,
   Plus,
   RotateCcw,
-  Save,
   Search,
   Trash2,
   X,
 } from 'lucide-react';
 import {
   createContext,
+  memo,
   type ReactNode,
   type Ref,
   useContext,
@@ -48,6 +48,7 @@ import {
   type ConfigSchema,
   type ConfigSearchResult,
   classifyConfigLeaf,
+  configKeyLabel,
   configPathToString,
   countConfigEditorLeaves,
   getConfigSchemaVariants,
@@ -76,23 +77,28 @@ import {
   Button,
   Card,
   CardBody,
-  CardHeader,
   ConfirmDialog,
   cx,
+  Hint,
+  IconButton,
   INPUT_CLASS,
+  INPUT_SM_CLASS,
   Notice,
   Section,
   Skeleton,
+  Spinner,
+  StatusBadge,
   ToggleSwitch,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
+import { Select } from '../ui/Select';
+import { Tabs } from '../ui/Tabs';
 import {
   cloneJson,
   isJsonObject,
   isSameJson,
   type JsonObject,
   objectProperties,
-  titleForKey,
 } from './schema';
 
 interface EditorState {
@@ -120,7 +126,7 @@ interface ConfigEditorSectionProps {
   onNavigate: (next: ConfigEditorNavigateTarget) => void;
 }
 
-const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} aria-[invalid=true]:border-red-400`;
+const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} aria-[invalid=true]:border-danger`;
 const OPAQUE_STORAGE_URL_PATH = 'storage.url';
 const ADMIN_PROVIDERS_PATH = 'admin.auth.providers';
 const RECURRING_JOBS_PATH = 'scheduler.recurring_jobs';
@@ -723,7 +729,11 @@ function sectionRenderRoots(
   );
 }
 
-export function ConfigEditorSection({
+/**
+ * Memoized so a parent re-render (e.g. the status poll on the Settings page)
+ * does not re-run this large editor; callers must pass stable props.
+ */
+export const ConfigEditorSection = memo(function ConfigEditorSection({
   history,
   category,
   field,
@@ -1227,17 +1237,14 @@ export function ConfigEditorSection({
       title="Configuration"
       subtitle="Edit the startup configuration, validate it, then save or download TOML."
     >
-      <div data-testid="config-status-zone" className="space-y-2">
-        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-text-faint">
-          <EditorMetadata
-            loading={loading}
-            revision={state?.revision ?? null}
-            savedAtUnixSecs={state?.savedAtUnixSecs ?? null}
-            validatedRevision={validatedRevision}
-            filePath={editorData?.file.path}
-          />
-          {editorData ? <RunningSummary data={editorData} /> : null}
-        </div>
+      <div data-testid="config-status-zone" className="space-y-3">
+        <ConfigStatusFacts
+          loading={loading}
+          revision={state?.revision ?? null}
+          savedAtUnixSecs={state?.savedAtUnixSecs ?? null}
+          validatedRevision={validatedRevision}
+          data={editorData}
+        />
 
         {loadError ? (
           <Notice
@@ -1349,140 +1356,134 @@ export function ConfigEditorSection({
         />
       </div>
 
-      <div>
-        {activeCategory ? (
-          <nav
-            aria-label="Configuration categories"
-            data-testid="config-category-nav"
-            className="overflow-hidden rounded-t-sm border border-subtle border-b-0"
-          >
-            <CategoryNavList
-              categories={categories}
-              activeCategoryId={activeCategory.id}
-              onSelect={selectCategory}
-            />
-          </nav>
-        ) : null}
-        <Card
-          data-testid="config-editor-card"
-          className={activeCategory ? 'rounded-t-none border-t-0!' : undefined}
+      <Card data-testid="config-editor-card">
+        <div
+          data-testid="config-editor-toolbar"
+          className="flex flex-col gap-2 border-b border-subtle px-4 py-3 md:flex-row md:items-center md:justify-between"
         >
-          <CardHeader
-            titleId={CONFIG_CATEGORY_HEADING_ID}
-            title={activeCategory?.label ?? 'Configuration'}
-            subtitle={
-              activeCategory ? (
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                  <span>{activeCategory.description}</span>
-                  <CategoryStatusBadges counts={activeCategory.counts} />
-                </span>
-              ) : (
-                <Skeleton className="h-3 w-56 max-w-full" />
-              )
-            }
-            action={
-              <div className="flex w-full flex-wrap items-center justify-end gap-2">
-                <ConfigSearch
-                  searchText={searchText}
-                  results={searchResults}
-                  open={searchOpen}
-                  wrapperRef={searchWrapperRef}
-                  onOpenChange={setSearchOpen}
-                  onSearchTextChange={setSearchText}
-                  onActivate={activateSearchResult}
-                />
-                <Button
-                  size="sm"
-                  iconLeft={<Save className="h-3.5 w-3.5" />}
-                  loading={saveDraft.isPending}
-                  disabled={!canSaveDraft}
-                  onClick={handleSaveDraft}
-                >
-                  Save draft
-                </Button>
-                <Button
-                  size="sm"
-                  iconLeft={<FileCheck2 className="h-3.5 w-3.5" />}
-                  loading={validate.isPending}
-                  disabled={!canValidate}
-                  onClick={handleValidate}
-                >
-                  Validate
-                </Button>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  iconLeft={<Save className="h-3.5 w-3.5" />}
-                  loading={saveFile.isPending}
-                  disabled={!canSaveFile}
-                  onClick={handleSaveFileRequest}
-                >
-                  Save to config file
-                </Button>
-                <Button
-                  size="sm"
-                  iconLeft={<Download className="h-3.5 w-3.5" />}
-                  loading={downloadPending}
-                  disabled={!canDownload}
-                  onClick={() => void handleDownload()}
-                >
-                  Download TOML
-                </Button>
-              </div>
-            }
+          <ConfigSearch
+            searchText={searchText}
+            results={searchResults}
+            open={searchOpen}
+            wrapperRef={searchWrapperRef}
+            onOpenChange={setSearchOpen}
+            onSearchTextChange={setSearchText}
+            onActivate={activateSearchResult}
           />
-          <CardBody className="space-y-4">
-            {loading ? (
-              <ConfigEditorSkeleton />
-            ) : editorData && state && model && activeCategory ? (
-              <StorageUrlReplacementContext.Provider
-                value={{
-                  value: storageUrlReplacement,
-                  onChange: (next) => {
-                    setStorageUrlReplacement(next);
-                    setLocalValidation(null);
-                    setActionError(null);
-                    setDownloadError(null);
-                  },
-                }}
+          <div
+            data-testid="config-editor-actions"
+            className="flex flex-wrap items-center gap-2"
+          >
+            <Button
+              loading={saveDraft.isPending}
+              disabled={!canSaveDraft}
+              onClick={handleSaveDraft}
+            >
+              Save draft
+            </Button>
+            <Button
+              loading={validate.isPending}
+              disabled={!canValidate}
+              onClick={handleValidate}
+            >
+              Validate
+            </Button>
+            <span
+              aria-hidden="true"
+              className="mx-1 hidden h-5 w-px bg-border md:block"
+            />
+            <Button
+              variant="primary"
+              className="order-last w-full md:order-none md:w-auto"
+              loading={saveFile.isPending}
+              disabled={!canSaveFile}
+              onClick={handleSaveFileRequest}
+            >
+              Save to config file
+            </Button>
+            <Hint label="Download the validated draft as TOML">
+              <IconButton
+                label="Download TOML"
+                className="ml-auto md:ml-0"
+                aria-busy={downloadPending || undefined}
+                disabled={!canDownload || downloadPending}
+                onClick={() => void handleDownload()}
               >
-                <ConfigSourcesContext.Provider
-                  value={{ fileConfig: editorData.file_config }}
-                >
-                  <div
-                    className="space-y-3"
-                    data-testid="structured-config-editor"
-                  >
-                    <CategoryPanel
-                      category={activeCategory}
-                      model={model}
-                      rootSchema={editorData.schema as ConfigSchema}
-                      value={state.value}
-                      defaultConfig={editorData.default_config}
-                      effectiveConfig={editorData.effective_config}
-                      overrides={editorData.overrides ?? []}
-                      issues={issues}
-                      openAdvanced={openAdvanced}
-                      onToggleAdvanced={(sectionId, open) =>
-                        setOpenAdvanced((current) => ({
-                          ...current,
-                          [sectionId]: open,
-                        }))
-                      }
-                      onChange={updateValue}
-                    />
+                {downloadPending ? (
+                  <Spinner className="size-4" />
+                ) : (
+                  <Download />
+                )}
+              </IconButton>
+            </Hint>
+          </div>
+        </div>
+        {activeCategory ? (
+          <CategoryTabs
+            categories={categories}
+            activeCategoryId={activeCategory.id}
+            onSelect={selectCategory}
+          />
+        ) : (
+          <CategoryTabsSkeleton />
+        )}
+        <CardBody>
+          {loading ? (
+            <ConfigEditorSkeleton />
+          ) : editorData && state && model && activeCategory ? (
+            <StorageUrlReplacementContext.Provider
+              value={{
+                value: storageUrlReplacement,
+                onChange: (next) => {
+                  setStorageUrlReplacement(next);
+                  setLocalValidation(null);
+                  setActionError(null);
+                  setDownloadError(null);
+                },
+              }}
+            >
+              <ConfigSourcesContext.Provider
+                value={{ fileConfig: editorData.file_config }}
+              >
+                <div data-testid="structured-config-editor">
+                  <div className="mb-6 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                    <h3 id={CONFIG_CATEGORY_HEADING_ID} className="sr-only">
+                      {activeCategory.label}
+                    </h3>
+                    <p className="text-body-sm text-text-muted">
+                      {activeCategory.description}
+                    </p>
+                    <CategoryStatusSummary counts={activeCategory.counts} />
                   </div>
-                </ConfigSourcesContext.Provider>
-              </StorageUrlReplacementContext.Provider>
-            ) : (
-              <div
-                className="min-h-[420px]"
-                data-testid="config-editor-reserved"
-              />
-            )}
-          </CardBody>
-        </Card>
-      </div>
+                  <CategoryPanel
+                    category={activeCategory}
+                    model={model}
+                    rootSchema={editorData.schema as ConfigSchema}
+                    value={state.value}
+                    defaultConfig={editorData.default_config}
+                    effectiveConfig={editorData.effective_config}
+                    overrides={editorData.overrides ?? []}
+                    issues={issues}
+                    openAdvanced={openAdvanced}
+                    onToggleAdvanced={(sectionId, open) =>
+                      setOpenAdvanced((current) => ({
+                        ...current,
+                        [sectionId]: open,
+                      }))
+                    }
+                    onChange={updateValue}
+                  />
+                </div>
+              </ConfigSourcesContext.Provider>
+            </StorageUrlReplacementContext.Provider>
+          ) : (
+            <div
+              className="min-h-[420px]"
+              data-testid="config-editor-reserved"
+            />
+          )}
+        </CardBody>
+      </Card>
 
       <ConfirmDialog
         open={confirmationOpen}
@@ -1508,9 +1509,9 @@ export function ConfigEditorSection({
             {reviewEntries.length ? (
               <span
                 data-testid="config-review-list"
-                className="block space-y-2"
+                className="well block max-h-72 space-y-3 overflow-y-auto p-3"
               >
-                <span className="block text-[10px] uppercase tracking-wider text-text-faint">
+                <span className="block text-label text-text-muted">
                   Changes in this save
                 </span>
                 {(() => {
@@ -1544,25 +1545,29 @@ export function ConfigEditorSection({
                     }
                   }
                   return groups.map((group) => (
-                    <span key={group.key} className="block">
-                      <span className="block text-xs font-medium text-text">
+                    <span key={group.key} className="block space-y-1">
+                      <span
+                        className={cx(
+                          'block text-label',
+                          group.key === 'dangerous'
+                            ? 'text-warn-text'
+                            : 'text-text',
+                        )}
+                      >
                         {group.label}
                       </span>
                       {group.entries.map((entry) => (
                         <span
                           key={entry.pathString}
-                          className={cx(
-                            'block break-all py-0.5 text-xs',
-                            entry.dangerous
-                              ? 'text-[color:var(--color-warn-text)]'
-                              : 'text-text-muted',
-                          )}
+                          className="block break-all text-body-sm text-text-muted"
                         >
-                          <span className="font-mono">{entry.pathString}</span>:{' '}
-                          {displayValue(entry.oldValue, entry.sensitive)} →{' '}
+                          <span className="font-mono text-data text-text">
+                            {entry.pathString}
+                          </span>
+                          : {displayValue(entry.oldValue, entry.sensitive)} →{' '}
                           {displayValue(entry.newValue, entry.sensitive)}
                           {entry.dangerous && entry.dangerImpact ? (
-                            <span className="block text-[10px]">
+                            <span className="block text-caption text-warn-text">
                               {entry.dangerImpact}
                             </span>
                           ) : null}
@@ -1575,16 +1580,16 @@ export function ConfigEditorSection({
             ) : null}
             {requiresSelfLockoutConfirmation ? (
               <span className="block space-y-2">
-                <span className="block font-medium text-[color:var(--color-warn-text)]">
+                <span className="block text-body-sm font-medium text-warn-text">
                   Admin authentication providers changed. A wrong provider kind,
                   ID, token environment variable, domain, or audience can lock
                   you out after restart.
                 </span>
-                <label className="flex items-start gap-2 text-xs text-text">
+                <label className="flex items-start gap-2 text-body-sm text-text">
                   <input
                     type="checkbox"
                     data-testid="self-lockout-ack"
-                    className="mt-0.5"
+                    className="mt-0.5 size-4 accent-[var(--color-accent)]"
                     checked={selfLockoutAcknowledged}
                     onChange={(event) =>
                       setSelfLockoutAcknowledged(event.target.checked)
@@ -1614,128 +1619,163 @@ export function ConfigEditorSection({
       />
     </Section>
   );
+});
+
+/**
+ * The facts strip above the editor: two definition lists, *Draft* (what this
+ * editor will save) and *Running* (what cc-lb started with). No panel chrome;
+ * mono only for addresses and paths.
+ */
+function ConfigStatusFacts({
+  loading,
+  revision,
+  validatedRevision,
+  savedAtUnixSecs,
+  data,
+}: {
+  loading: boolean;
+  revision: number | null;
+  validatedRevision: number | null;
+  savedAtUnixSecs: number | null;
+  data?: ConfigEditorResponse;
+}) {
+  return (
+    <div className="grid gap-x-12 gap-y-5 sm:grid-cols-2">
+      <FactGroup testId="config-editor-metadata" title="Draft">
+        <Fact label="Revision" loading={loading}>
+          <span className="tabular-nums">{revision ?? '—'}</span>
+        </Fact>
+        <Fact label="Validated revision" loading={loading}>
+          <span className="tabular-nums">{validatedRevision ?? '—'}</span>
+        </Fact>
+        <Fact label="Saved" loading={loading}>
+          {savedAtUnixSecs ? (
+            <RelativeTime ts={new Date(savedAtUnixSecs * 1000)} />
+          ) : (
+            '—'
+          )}
+        </Fact>
+        <Fact label="Config file" loading={loading}>
+          <span className="break-all font-mono text-data">
+            {data?.file.path ?? '—'}
+          </span>
+          {data ? <ConfigFileState file={data.file} /> : null}
+        </Fact>
+      </FactGroup>
+      {data ? (
+        <RunningFacts data={data} />
+      ) : loading ? (
+        <FactGroup testId="config-running-summary-loading" title="Running">
+          {['Proxy', 'Admin', 'Storage', 'Admin providers'].map((label) => (
+            <Fact key={label} label={label} loading>
+              {null}
+            </Fact>
+          ))}
+        </FactGroup>
+      ) : null}
+    </div>
+  );
 }
 
-function RunningSummary({ data }: { data: ConfigEditorResponse }) {
+function RunningFacts({ data }: { data: ConfigEditorResponse }) {
   const effective = data.effective_config;
   const proxyAddr = getConfigValue(effective, 'listener.proxy_addr');
   const adminAddr = getConfigValue(effective, 'listener.admin_addr');
   const storageKind = getConfigValue(effective, 'storage.kind');
   const providers = getConfigValue(effective, ADMIN_PROVIDERS_PATH);
   const providerCount = Array.isArray(providers) ? providers.length : 0;
-  const fileReason =
-    data.file.reason ??
-    'This process cannot atomically replace the config file. You can still save and validate a draft, then download TOML for manual deployment.';
   return (
-    <div data-testid="config-running-summary" className="contents">
-      <span className="font-medium text-text-muted">Running configuration</span>
-      <span>
-        proxy{' '}
-        <span className="font-mono text-text">
+    <FactGroup testId="config-running-summary" title="Running">
+      <Fact label="Proxy">
+        <span className="break-all font-mono text-data">
           {typeof proxyAddr === 'string' ? proxyAddr : '—'}
         </span>
-      </span>
-      <span>
-        admin{' '}
-        <span className="font-mono text-text">
+      </Fact>
+      <Fact label="Admin">
+        <span className="break-all font-mono text-data">
           {typeof adminAddr === 'string' ? adminAddr : '—'}
         </span>
-      </span>
-      <span>
-        storage{' '}
-        <span className="font-mono text-text">
-          {typeof storageKind === 'string' ? storageKind : '—'}
+      </Fact>
+      <Fact label="Storage">
+        {typeof storageKind === 'string'
+          ? (STORAGE_KIND_LABELS[storageKind] ?? storageKind)
+          : '—'}
+      </Fact>
+      <Fact label="Admin providers">
+        <span className="tabular-nums">{providerCount}</span>
+      </Fact>
+    </FactGroup>
+  );
+}
+
+/** Exception line under the config file path: read-only or missing. */
+function ConfigFileState({ file }: { file: ConfigEditorResponse['file'] }) {
+  if (file.mode === 'read_only') {
+    return (
+      <span className="mt-1 flex flex-col items-start gap-0.5">
+        <StatusBadge
+          tone="warn"
+          label={file.exists ? 'Read-only' : 'Missing and read-only'}
+        />
+        <span className="text-caption text-text-faint">
+          {file.reason ??
+            'This process cannot atomically replace the config file. You can still save and validate a draft, then download TOML for manual deployment.'}
         </span>
       </span>
-      <span>
-        {providerCount} admin provider{providerCount === 1 ? '' : 's'}
+    );
+  }
+  if (!file.exists) {
+    return (
+      <span className="mt-1 flex flex-col items-start gap-0.5">
+        <StatusBadge tone="neutral" label="Missing" />
+        <span className="text-caption text-text-faint">
+          Saving will create this file.
+        </span>
       </span>
-      {data.file.mode === 'read_only' ? (
-        <>
-          <Badge tone="warn">
-            {data.file.exists
-              ? 'Config file read-only'
-              : 'Config file missing — read-only'}
-          </Badge>
-          <span className="basis-full">{fileReason}</span>
-        </>
-      ) : !data.file.exists ? (
-        <>
-          <Badge tone="neutral">Config file missing</Badge>
-          <span className="basis-full">
-            Saving will create {data.file.path}.
-          </span>
-        </>
-      ) : null}
-    </div>
-  );
+    );
+  }
+  return null;
 }
 
-function EditorMetadata({
-  loading,
-  revision,
-  validatedRevision,
-  savedAtUnixSecs,
-  filePath,
+function FactGroup({
+  testId,
+  title,
+  children,
 }: {
-  loading: boolean;
-  revision: number | null;
-  validatedRevision: number | null;
-  savedAtUnixSecs: number | null;
-  filePath?: string;
+  testId: string;
+  title: string;
+  children: ReactNode;
 }) {
   return (
-    <div data-testid="config-editor-metadata" className="contents">
-      <MetadataValue
-        label="Draft revision"
-        loading={loading}
-        value={revision ?? '—'}
-      />
-      <MetadataValue
-        label="Validated revision"
-        loading={loading}
-        value={validatedRevision ?? '—'}
-      />
-      <MetadataValue
-        label="Draft saved"
-        loading={loading}
-        value={
-          savedAtUnixSecs ? (
-            <RelativeTime ts={new Date(savedAtUnixSecs * 1000)} />
-          ) : (
-            '—'
-          )
-        }
-      />
-      <MetadataValue
-        label="Config file"
-        loading={loading}
-        value={<span className="break-all font-mono">{filePath ?? '—'}</span>}
-      />
+    <div data-testid={testId} className="min-w-0">
+      <p className="text-label text-text-muted">{title}</p>
+      <dl className="mt-2 grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+        {children}
+      </dl>
     </div>
   );
 }
 
-function MetadataValue({
+function Fact({
   label,
-  loading,
-  value,
+  loading = false,
+  children,
 }: {
   label: string;
-  loading: boolean;
-  value: ReactNode;
+  loading?: boolean;
+  children: ReactNode;
 }) {
   return (
-    <span className="inline-flex min-w-0 items-baseline gap-1.5">
-      <span>{label}</span>
-      <span className="min-w-0 text-text-muted">
+    <div className="contents">
+      <dt className="text-caption leading-5 text-text-faint">{label}</dt>
+      <dd className="min-w-0 text-body-sm text-text">
         {loading ? (
           <Skeleton as="span" className="inline-block h-3 w-16 max-w-full" />
         ) : (
-          value
+          children
         )}
-      </span>
-    </span>
+      </dd>
+    </div>
   );
 }
 
@@ -1764,142 +1804,177 @@ function ValidationSummary({
   if (!report) return null;
   const errors = issues.filter((issue) => issue.severity === 'error');
   const warnings = issues.filter((issue) => issue.severity !== 'error');
+  // Only exceptions are listed: a valid file or effective config is implied.
+  const statusParts = [
+    !current ? { key: 'stale', tone: 'warn', text: 'Stale' } : null,
+    !report.file.valid
+      ? { key: 'file', tone: 'danger', text: 'File invalid' }
+      : null,
+    !report.effective.valid
+      ? { key: 'effective', tone: 'danger', text: 'Effective invalid' }
+      : null,
+    errors.length
+      ? {
+          key: 'errors',
+          tone: 'danger',
+          text: `${errors.length} ${errors.length === 1 ? 'error' : 'errors'}`,
+        }
+      : null,
+    warnings.length
+      ? {
+          key: 'warnings',
+          tone: 'warn',
+          text: `${warnings.length} ${warnings.length === 1 ? 'warning' : 'warnings'}`,
+        }
+      : null,
+  ].filter((part) => part !== null);
   return (
     <div
       ref={ref}
       tabIndex={-1}
       data-testid="config-validation-summary"
-      className="outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent)]/60"
+      className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
     >
       <details
         open={errors.length > 0}
         className={cx(
-          'rounded-sm border',
-          errors.length
-            ? 'border-red-500/35 bg-red-500/5'
-            : 'border-subtle bg-panel-strong',
+          'group/validation rounded-sm',
+          errors.length ? 'bg-danger/8' : 'bg-overlay-3',
         )}
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2">
-          <span className="inline-flex items-center gap-2">
+        <summary className="flex min-h-10 cursor-pointer list-none flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-body-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
+          <span className="inline-flex items-center gap-2 font-medium text-text">
+            <ChevronRight
+              aria-hidden="true"
+              className="size-3.5 text-text-faint transition-transform group-open/validation:rotate-90 motion-reduce:transition-none"
+            />
             {errors.length ? (
-              <FileWarning className="h-4 w-4 text-[color:var(--color-danger-text)]" />
+              <FileWarning
+                aria-hidden="true"
+                className="size-3.5 text-danger-text"
+              />
             ) : (
-              <FileCheck2 className="h-4 w-4 text-[color:var(--color-ok)]" />
+              <FileCheck2 aria-hidden="true" className="size-3.5 text-ok" />
             )}
             Validation summary
           </span>
-          <span className="flex flex-wrap justify-end gap-1.5">
-            {!current ? <Badge tone="warn">Stale</Badge> : null}
-            <Badge tone={report.file.valid ? 'ok' : 'danger'}>
-              File {report.file.valid ? 'valid' : 'invalid'}
-            </Badge>
-            <Badge tone={report.effective.valid ? 'ok' : 'danger'}>
-              Effective {report.effective.valid ? 'valid' : 'invalid'}
-            </Badge>
-            {errors.length ? (
-              <Badge tone="danger">{errors.length} errors</Badge>
-            ) : null}
-            {warnings.length ? (
-              <Badge tone="warn">{warnings.length} warnings</Badge>
-            ) : null}
-          </span>
+          {statusParts.length ? (
+            <span className="text-caption">
+              {statusParts.map((part, index) => (
+                <span
+                  key={part.key}
+                  className={
+                    part.tone === 'danger'
+                      ? 'text-danger-text'
+                      : 'text-warn-text'
+                  }
+                >
+                  {index ? <span className="text-text-faint"> · </span> : null}
+                  {part.text}
+                </span>
+              ))}
+            </span>
+          ) : null}
         </summary>
         {issues.length ? (
-          <div className="space-y-1 border-t border-subtle px-3 py-2">
+          <div className="space-y-0.5 border-t border-row p-1.5">
             {issues.map((issue, index) => (
               <button
                 key={`${issue.path}-${issue.code}-${index}`}
                 type="button"
-                className="flex w-full min-w-0 items-start gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
+                className="flex w-full min-w-0 items-start gap-2.5 rounded-sm px-2 py-1.5 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                 onClick={() => issue.path && onIssueClick(issue.path)}
               >
-                <Badge tone={validationTone(issue)}>{issue.severity}</Badge>
+                <Badge tone={validationTone(issue)}>
+                  {issue.severity === 'error' ? 'Error' : 'Warning'}
+                </Badge>
                 <span className="min-w-0">
-                  <span className="block break-all font-mono text-text">
+                  <span className="block text-body-sm text-text">
+                    {issue.message}
+                  </span>
+                  <span className="block break-all font-mono text-data text-text-faint">
                     {issue.path || 'configuration'} · {issue.code}
                   </span>
-                  <span className="block text-text-muted">{issue.message}</span>
                 </span>
               </button>
             ))}
           </div>
         ) : (
-          <div className="border-t border-subtle px-3 py-2 text-xs text-text-muted">
+          <p className="border-t border-row px-3 py-2 text-body-sm text-text-muted">
             No validation issues.
-          </div>
+          </p>
         )}
       </details>
     </div>
   );
 }
 
-/**
- * Full status badges shown in the CardHeader subtitle for the active
- * category. Counts come from the visible-leaf tally computed for each
- * category; the nav grid uses the compact CategoryStatusDots instead.
- */
-function CategoryStatusBadges({ counts }: { counts: ConfigEditorCounts }) {
-  if (!counts.modified && !counts.overrides && !counts.errors) return null;
-  return (
-    <span className="flex flex-wrap items-center gap-1">
-      {counts.modified ? (
-        <Badge tone="accent">{counts.modified} modified</Badge>
-      ) : null}
-      {counts.overrides ? (
-        <Badge tone="neutral">{counts.overrides} overridden</Badge>
-      ) : null}
-      {counts.errors ? (
-        <Badge tone="danger">{counts.errors} invalid</Badge>
-      ) : null}
-    </span>
-  );
-}
-
-/**
- * Compact per-category status for the inline nav grid: one dot per non-empty
- * tally (modified / overridden / invalid) plus a screen-reader summary. The
- * row keeps a fixed height so badge changes never re-layout the grid.
- */
-function CategoryStatusDots({ counts }: { counts: ConfigEditorCounts }) {
-  const summary = [
+function categoryStatusSummary(counts: ConfigEditorCounts): string {
+  return [
     counts.modified ? `${counts.modified} modified` : null,
     counts.overrides ? `${counts.overrides} overridden` : null,
     counts.errors ? `${counts.errors} invalid` : null,
   ]
     .filter(Boolean)
     .join(', ');
+}
+
+/**
+ * Quiet status line for the active category's intro: only the exceptions
+ * (modified, overridden, invalid), invalid in the danger tone.
+ */
+function CategoryStatusSummary({ counts }: { counts: ConfigEditorCounts }) {
+  if (!counts.modified && !counts.overrides && !counts.errors) return null;
+  const parts: ReactNode[] = [];
+  if (counts.modified) parts.push(`${counts.modified} modified`);
+  if (counts.overrides) parts.push(`${counts.overrides} overridden`);
+  if (counts.errors) {
+    parts.push(
+      <span key="errors" className="text-danger-text">
+        {counts.errors} invalid
+      </span>,
+    );
+  }
   return (
-    <span className="flex h-2 items-center gap-1">
+    <p className="text-caption text-text-faint">
+      {parts.map((part, index) => (
+        <span key={typeof part === 'string' ? part : 'errors'}>
+          {index ? ' · ' : null}
+          {part}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+/**
+ * Per-category status for the tab row: one dot per non-empty tally
+ * (modified / overridden / invalid). The tab's `srDescription` carries the
+ * same tally as text.
+ */
+function CategoryStatusDots({ counts }: { counts: ConfigEditorCounts }) {
+  if (!counts.modified && !counts.overrides && !counts.errors) return null;
+  return (
+    <span aria-hidden="true" className="inline-flex items-center gap-1">
       {counts.modified ? (
-        <span
-          aria-hidden="true"
-          className="h-1.5 w-1.5 rounded-full bg-accent"
-        />
+        <span className="size-1.5 rounded-full bg-accent" />
       ) : null}
       {counts.overrides ? (
-        <span
-          aria-hidden="true"
-          className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-text-faint)]"
-        />
+        <span className="size-1.5 rounded-full bg-text-faint" />
       ) : null}
       {counts.errors ? (
-        <span
-          aria-hidden="true"
-          className="h-1.5 w-1.5 rounded-full bg-[color:var(--color-danger)]"
-        />
+        <span className="size-1.5 rounded-full bg-danger" />
       ) : null}
-      {summary ? <span className="sr-only">{summary}</span> : null}
     </span>
   );
 }
 
 /**
- * Flat category grid rendered once inside the inline nav — no drawer, sheet,
- * or per-viewport copies. This is navigation, not a tab widget: items carry
- * aria-current and no tablist/tab roles.
+ * Category navigation: one underline tab row that scrolls horizontally on
+ * narrow screens. This is navigation (it syncs the URL), not a tab widget:
+ * items carry aria-current and no tablist/tab roles.
  */
-function CategoryNavList({
+function CategoryTabs({
   categories,
   activeCategoryId,
   onSelect,
@@ -1909,48 +1984,25 @@ function CategoryNavList({
   onSelect: (id: string) => void;
 }) {
   return (
-    <ul className="grid grid-cols-2 gap-px bg-[color:var(--color-border)] sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-      {categories.map((entry) => {
-        const active = entry.id === activeCategoryId;
-        const statusSummary = [
-          entry.counts.modified ? `${entry.counts.modified} modified` : null,
-          entry.counts.overrides
-            ? `${entry.counts.overrides} overridden`
-            : null,
-          entry.counts.errors ? `${entry.counts.errors} invalid` : null,
-        ]
-          .filter(Boolean)
-          .join(', ');
-        return (
-          <li
-            key={entry.id}
-            className="min-w-0 last:col-span-2 sm:last:col-span-3 lg:last:col-span-2 xl:last:col-span-1"
-          >
-            <button
-              type="button"
-              data-config-category={entry.id}
-              aria-current={active ? 'page' : undefined}
-              title={statusSummary || undefined}
-              className={cx(
-                'flex h-full min-h-[44px] w-full min-w-0 items-start border-t-2 px-3 py-2.5 text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[color:var(--color-accent)]',
-                active
-                  ? 'border-accent bg-bg-sub font-medium text-text'
-                  : 'border-transparent bg-bg text-text-muted hover:bg-bg-sub hover:text-[color:var(--color-text)]',
-              )}
-              onClick={() => onSelect(entry.id)}
-            >
-              <span className="min-w-0 flex-1">
-                <span className="line-clamp-2">{entry.label}</span>
-                <span className="sr-only">{entry.description}</span>
-                <span className="mt-1 block">
-                  <CategoryStatusDots counts={entry.counts} />
-                </span>
-              </span>
-            </button>
-          </li>
-        );
+    <Tabs
+      mode="nav"
+      ariaLabel="Configuration categories"
+      data-testid="config-category-nav"
+      className="px-4"
+      value={activeCategoryId}
+      onChange={onSelect}
+      items={categories.map((entry) => {
+        const summary = categoryStatusSummary(entry.counts);
+        return {
+          value: entry.id,
+          label: entry.label,
+          trailing: summary ? (
+            <CategoryStatusDots counts={entry.counts} />
+          ) : undefined,
+          srDescription: summary || undefined,
+        };
       })}
-    </ul>
+    />
   );
 }
 
@@ -2088,8 +2140,8 @@ function ConfigSearch({
         aria-label="Search settings"
         data-testid="config-search"
         className={cx(
-          INPUT_CLASS,
-          '!h-8 pl-8 pr-9 [&::-webkit-search-cancel-button]:appearance-none',
+          INPUT_SM_CLASS,
+          'pl-8 pr-9 [&::-webkit-search-cancel-button]:appearance-none',
         )}
         placeholder="Search settings"
         value={searchText}
@@ -2127,7 +2179,7 @@ function ConfigSearch({
         <button
           type="button"
           aria-label="Clear search"
-          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-faint hover:bg-overlay-5 hover:text-[color:var(--color-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]"
+          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-faint hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           onClick={() => {
             onSearchTextChange('');
             onOpenChange(false);
@@ -2154,7 +2206,7 @@ function ConfigSearch({
           role="listbox"
           aria-label="Search results"
           data-testid="config-search-results"
-          className="glass-strong absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-sm shadow-2xl"
+          className="glass-strong absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-md p-1"
         >
           {results.length ? (
             results.map((result, index) => (
@@ -2166,7 +2218,7 @@ function ConfigSearch({
                 aria-selected={index === activeOptionIndex}
                 tabIndex={-1}
                 className={cx(
-                  'flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 px-3 py-2 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]',
+                  'flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
                   index === activeOptionIndex && 'bg-overlay-5',
                 )}
                 // Keep focus on the input: preventing the default mousedown
@@ -2180,12 +2232,12 @@ function ConfigSearch({
                 onClick={() => activateOption(index)}
               >
                 <span className="min-w-0">
-                  <span className="block truncate text-sm text-text">
+                  <span className="block truncate text-body-sm text-text">
                     {result.label}
                   </span>
-                  <span className="block truncate text-[10px] text-text-faint">
+                  <span className="block truncate text-caption text-text-faint">
                     {result.breadcrumb} ·{' '}
-                    <span className="font-mono">{result.path}</span>
+                    <span className="font-mono text-data">{result.path}</span>
                   </span>
                 </span>
                 {result.leaf.advanced ? (
@@ -2198,7 +2250,7 @@ function ConfigSearch({
               role="option"
               aria-selected={false}
               aria-disabled="true"
-              className="px-3 py-2 text-xs text-text-faint"
+              className="px-3 py-2 text-body-sm text-text-muted"
               onMouseDown={(event) => event.preventDefault()}
             >
               No settings match this search.
@@ -2210,41 +2262,43 @@ function ConfigSearch({
   );
 }
 
+/** Body placeholder while the editor loads; mirrors the section layout. */
 function ConfigEditorSkeleton() {
   return (
     <div
       data-testid="config-editor-skeleton"
-      className="min-h-[560px] space-y-3"
+      className="space-y-5"
       aria-hidden="true"
     >
-      <Skeleton className="h-9 w-full" />
-      <div className="grid grid-cols-2 gap-px bg-[color:var(--color-border)] sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
-        {CONFIG_EDITOR_CATEGORIES.map((category) => (
-          <Skeleton
-            key={category.id}
-            className="h-14 w-full last:col-span-2 sm:last:col-span-3 lg:last:col-span-2 xl:last:col-span-1"
-          />
-        ))}
-      </div>
-      <div className="space-y-6">
-        <div className="space-y-1.5">
-          <Skeleton className="h-5 w-40" />
-          <Skeleton className="h-3 w-64" />
-        </div>
-        {[0, 1, 2].map((index) => (
-          <div
-            key={index}
-            className={index === 0 ? undefined : 'border-t border-subtle pt-5'}
-          >
-            <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
-            <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="hidden h-16 w-full 2xl:block" />
-            </div>
+      <Skeleton className="h-4 w-72 max-w-full" />
+      {[0, 1, 2].map((index) => (
+        <div
+          key={index}
+          className={index === 0 ? undefined : 'border-t border-subtle pt-5'}
+        >
+          <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
+          <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2 2xl:grid-cols-3">
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="h-24 w-full" />
+            <Skeleton className="hidden h-24 w-full 2xl:block" />
           </div>
-        ))}
-      </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Tab-row placeholder while categories load: same 36px row as `Tabs`. */
+function CategoryTabsSkeleton() {
+  return (
+    <div
+      data-testid="config-category-nav-skeleton"
+      aria-hidden="true"
+      className="flex h-9 items-center gap-6 overflow-hidden border-b border-subtle px-4"
+    >
+      {CONFIG_EDITOR_CATEGORIES.map((category) => (
+        <Skeleton key={category.id} className="h-3 w-20 shrink-0" />
+      ))}
     </div>
   );
 }
@@ -2282,7 +2336,7 @@ function CategoryPanel({
   const hasSchemaKnown = unassignedLeaves.some((leaf) => !leaf.unknown);
   return (
     <section
-      className="space-y-6"
+      className="space-y-5"
       data-config-category-panel={category.id}
       aria-labelledby={CONFIG_CATEGORY_HEADING_ID}
     >
@@ -2309,7 +2363,7 @@ function CategoryPanel({
           className="border-t border-subtle pt-5 first:border-t-0 first:pt-0"
         >
           <div className="flex flex-wrap items-center gap-2">
-            <h4 className="text-sm font-medium text-text">
+            <h4 className="text-title-card text-text">
               {CONFIG_EDITOR_UNASSIGNED_LABEL}
             </h4>
             <Badge tone="warn">
@@ -2317,13 +2371,13 @@ function CategoryPanel({
             </Badge>
           </div>
           {hasUnknownKeys ? (
-            <p className="mt-0.5 text-xs text-text-faint">
+            <p className="mt-0.5 text-caption text-text-faint">
               These file keys are not recognized by the schema. They are
               preserved for review — remove or correct them before validation.
             </p>
           ) : null}
           {hasSchemaKnown ? (
-            <p className="mt-0.5 text-xs text-text-faint">
+            <p className="mt-0.5 text-caption text-text-faint">
               These settings are recognized by the schema but not covered by a
               settings section.
             </p>
@@ -2420,9 +2474,9 @@ function SectionCard({
     >
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <div className="min-w-0">
-          <h4 className="text-sm font-medium text-text">{section.label}</h4>
+          <h4 className="text-title-card text-text">{section.label}</h4>
           {section.description ? (
-            <p className="mt-0.5 text-xs text-text-faint">
+            <p className="mt-0.5 text-caption text-text-faint">
               {section.description}
             </p>
           ) : null}
@@ -2450,7 +2504,7 @@ function SectionCard({
         ) : null}
       </div>
       {primaryRoots.length ? (
-        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2 2xl:grid-cols-3">
           {primaryRoots.map(renderRoot)}
         </div>
       ) : null}
@@ -2459,19 +2513,22 @@ function SectionCard({
           data-testid="config-advanced"
           open={open}
           onToggle={(event) => onToggleAdvanced(event.currentTarget.open)}
-          className="mt-3 rounded-sm border border-subtle bg-panel-strong"
+          className="group/advanced mt-5 border-t border-subtle"
         >
-          <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]">
-            <ChevronDown className="h-3.5 w-3.5" />
+          <summary className="flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1.5 py-2 text-body-sm font-medium text-text-muted transition-colors hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+            <ChevronRight
+              aria-hidden="true"
+              className="size-3.5 transition-transform group-open/advanced:rotate-90 motion-reduce:transition-none"
+            />
             Advanced ({advancedRoots.length})
           </summary>
-          <div className="grid grid-cols-1 gap-3 border-t border-subtle px-3 py-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-5 pt-3 md:grid-cols-2 2xl:grid-cols-3">
             {advancedRoots.map(renderRoot)}
           </div>
         </details>
       ) : null}
       {!primaryRoots.length && !advancedRoots.length ? (
-        <p className="mt-3 text-xs text-text-faint">
+        <p className="mt-3 text-caption text-text-faint">
           These settings only apply to a different configuration variant.
         </p>
       ) : null}
@@ -2583,9 +2640,7 @@ function ConfigNode({
       <div
         className={cx(
           'col-span-full space-y-3',
-          depth === 0
-            ? ''
-            : 'rounded-sm border border-subtle bg-panel-strong p-3',
+          depth === 0 ? '' : 'border-t border-subtle pt-4',
         )}
         data-config-path={path}
         tabIndex={-1}
@@ -2599,16 +2654,9 @@ function ConfigNode({
           >
             {!hideHeading ? (
               <div className="min-w-0 flex-1">
-                <h5
-                  className={cx(
-                    'font-medium text-text',
-                    depth === 0 ? 'text-sm' : 'text-xs',
-                  )}
-                >
-                  {titleForKey(path.split('.').at(-1) ?? path)}
-                </h5>
+                <ConfigGroupHeading depth={depth} path={path} />
                 {typeof schema.description === 'string' ? (
-                  <p className="mt-0.5 text-xs leading-relaxed text-text-faint">
+                  <p className="mt-0.5 text-caption text-text-faint">
                     {schema.description}
                   </p>
                 ) : null}
@@ -2633,7 +2681,12 @@ function ConfigNode({
           </div>
         ) : null}
         {showChildren ? (
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          <div
+            className={cx(
+              'grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3',
+              embedded ? 'gap-x-6 gap-y-4' : 'gap-x-6 gap-y-5',
+            )}
+          >
             {Object.entries(properties).map(([key, childSchema]) =>
               childKeys && !childKeys.has(key) ? null : (
                 <ConfigNode
@@ -2677,35 +2730,151 @@ function ConfigNode({
   );
 }
 
-/**
- * Compact trade-off block for a scalar field: what moving a numeric value in
- * either direction does, or what toggling a boolean does, plus any
- * operational recommendation. Rendered as a dl so the labels stay visible.
- */
-function GuidanceTradeoffs({ guidance }: { guidance: ConfigFieldGuidance }) {
-  const rows: { label: string; text: string }[] = [];
-  if (guidance.lower) rows.push({ label: 'Lower', text: guidance.lower });
-  if (guidance.higher) rows.push({ label: 'Higher', text: guidance.higher });
-  if (guidance.enabled) rows.push({ label: 'On', text: guidance.enabled });
-  if (guidance.disabled) rows.push({ label: 'Off', text: guidance.disabled });
+/** DOM id for a config path's control (`listener.admin_addr` → `config-listener-admin_addr`). */
+function inputIdFor(path: string): string {
+  return `config-${path.replace(/[.[\]]+/g, '-').replace(/-$/, '')}`;
+}
+
+/** A raw config key or path: the copyable machine string, so mono. */
+function ConfigKey({ path }: { path: string }) {
+  return <code className="break-all font-mono text-data">{path}</code>;
+}
+
+/** Heading for a nested config object inside a section. */
+function ConfigGroupHeading({ depth, path }: { depth: number; path: string }) {
+  const label = configKeyLabel(path.split('.').at(-1) ?? path);
+  return depth === 0 ? (
+    <h5 className="text-body-sm font-semibold text-text">{label}</h5>
+  ) : (
+    <h6 className="text-body-sm font-medium text-text-muted">{label}</h6>
+  );
+}
+
+/** Trade-off rows: what moving a number either way or toggling a boolean does. */
+function guidanceRows(guidance: ConfigFieldGuidance) {
+  const rows: { label: string; value: string }[] = [];
+  if (guidance.lower) rows.push({ label: 'Lower', value: guidance.lower });
+  if (guidance.higher) rows.push({ label: 'Higher', value: guidance.higher });
+  if (guidance.enabled) rows.push({ label: 'On', value: guidance.enabled });
+  if (guidance.disabled) rows.push({ label: 'Off', value: guidance.disabled });
   if (guidance.recommendation) {
-    rows.push({ label: 'Recommendation', text: guidance.recommendation });
+    rows.push({ label: 'Recommendation', value: guidance.recommendation });
   }
-  if (!rows.length) return null;
+  return rows;
+}
+
+function DetailRows({
+  rows,
+  className,
+}: {
+  rows: readonly { label: string; value: ReactNode }[];
+  className?: string;
+}) {
   return (
-    <dl className="mt-2 space-y-1">
-      {rows.map((row) => (
-        <div
-          key={row.label}
-          className="flex gap-1.5 text-[10px] leading-relaxed"
-        >
-          <dt className="shrink-0 font-medium uppercase tracking-wide text-text-muted">
-            {row.label}
-          </dt>
-          <dd className="min-w-0 text-text-faint">{row.text}</dd>
+    <dl
+      className={cx(
+        'grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5',
+        className,
+      )}
+    >
+      {rows.map((row, index) => (
+        <div key={`${row.label}-${index}`} className="contents">
+          <dt className="text-label text-text-muted">{row.label}</dt>
+          <dd className="min-w-0 break-words text-caption text-text-faint">
+            {row.value}
+          </dd>
         </div>
       ))}
     </dl>
+  );
+}
+
+/**
+ * A field's quiet "Details" disclosure: trade-offs and format hints first,
+ * then provenance (file, default, source, raw key). It never repeats the
+ * effective value shown under the control.
+ */
+function FieldDetails({
+  guidance,
+  hints = [],
+  facts,
+}: {
+  guidance: readonly ConfigFieldGuidance[];
+  hints?: readonly string[];
+  facts: readonly { label: string; value: ReactNode }[];
+}) {
+  const tradeoffs = guidance.flatMap(guidanceRows);
+  return (
+    <details data-testid="config-value-details" className="group/details">
+      <summary className="inline-flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1 text-caption text-text-faint transition-colors hover:text-text-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          aria-hidden="true"
+          className="size-3 transition-transform group-open/details:rotate-90 motion-reduce:transition-none"
+        />
+        Details
+      </summary>
+      <div className="well space-y-3 p-3">
+        {hints.length ? (
+          <div className="space-y-1">
+            {hints.map((hint) => (
+              <p key={hint} className="text-caption text-text-muted">
+                {hint}
+              </p>
+            ))}
+          </div>
+        ) : null}
+        {tradeoffs.length ? <DetailRows rows={tradeoffs} /> : null}
+        <DetailRows
+          rows={facts}
+          className={
+            hints.length || tradeoffs.length
+              ? 'border-t border-row pt-3'
+              : undefined
+          }
+        />
+      </div>
+    </details>
+  );
+}
+
+/** The one faint line under a control: the value cc-lb actually runs with. */
+function EffectiveLine({
+  value,
+  inherited,
+  approx,
+}: {
+  value: string;
+  inherited: boolean;
+  approx?: string | null;
+}) {
+  return (
+    <p className="mt-1.5 min-w-0 break-words text-caption text-text-faint">
+      {approx ? <>≈ {approx} · </> : null}
+      Effective: <span className="text-text-muted">{value}</span>
+      {inherited ? ' · inherited' : null}
+    </p>
+  );
+}
+
+function IssueLine({ issue }: { issue: ConfigValidationIssue }) {
+  return (
+    <p
+      className={cx(
+        'mt-1.5 text-caption',
+        issue.severity === 'error' ? 'text-danger-text' : 'text-warn-text',
+      )}
+    >
+      {issue.message}
+    </p>
+  );
+}
+
+/** Inline warn well under a control whose change can disrupt operations. */
+function OperationalRiskNotice({ impact }: { impact: string | null }) {
+  return (
+    <Notice tone="warning" title="Operational risk" className="mt-2">
+      {impact}
+    </Notice>
   );
 }
 
@@ -2749,7 +2918,7 @@ function ScalarField({
   const error = issues.find((issue) => issue.severity === 'error');
   const isSensitive =
     Boolean(override?.sensitive) || path === OPAQUE_STORAGE_URL_PATH;
-  const label = titleForKey(path.split('.').at(-1) ?? path);
+  const label = configKeyLabel(path.split('.').at(-1) ?? path);
   const resolvedInput = resolveConfigSchema(rootSchema, schema);
   const schemaVariants = getConfigSchemaVariants(rootSchema, resolvedInput);
   // Union-merged leaf schemas put the inferred branch first (e.g. a field
@@ -2813,19 +2982,39 @@ function ScalarField({
               : 'unknown';
   const classification = classifyConfigLeaf(path, leafKind);
   const guidance = resolveConfigFieldGuidance(path, description, leafKind);
-  const inputId = `config-${path.replaceAll('.', '-')}`;
-  const humanized =
+  const inputId = inputIdFor(path);
+  const approxValue = configured ? current : effectiveValue;
+  const approx =
     classification.presentation === 'duration' ||
     classification.presentation === 'bytes'
-      ? humanizeConfigValue(
-          configured ? current : effectiveValue,
-          classification.unit,
-        )
+      ? humanizeConfigValue(approxValue, classification.unit)
       : null;
+  // "≈ 250 ms" beside a 250 ms field repeats the raw value; only show the
+  // approximation when it rescales the number.
+  const humanized =
+    approx && !approx.startsWith(`${String(approxValue)} `) ? approx : null;
   const minimum =
     typeof concrete.minimum === 'number' ? concrete.minimum : undefined;
   const maximum =
     typeof concrete.maximum === 'number' ? concrete.maximum : undefined;
+  const hints = [
+    numeric && minimum !== undefined && maximum !== undefined
+      ? `Allowed range ${minimum}–${maximum}.`
+      : numeric && minimum !== undefined
+        ? `Minimum ${minimum}.`
+        : numeric && maximum !== undefined
+          ? `Maximum ${maximum}.`
+          : null,
+    classification.presentation === 'env'
+      ? 'Environment variable name — the secret value itself is never stored or shown here.'
+      : classification.presentation === 'address'
+        ? 'Listen address in host:port form.'
+        : classification.presentation === 'url'
+          ? 'Connection or endpoint URL.'
+          : classification.presentation === 'path'
+            ? 'Filesystem path on the cc-lb host.'
+            : null,
+  ].filter((hint): hint is string => hint !== null);
 
   useEffect(() => {
     if (storageUrlReplacement.value === null) {
@@ -2847,28 +3036,19 @@ function ScalarField({
       data-field-embedded={embedded ? '' : undefined}
       tabIndex={-1}
       className={cx(
-        'min-w-0 outline-none focus:ring-2 focus:ring-[color:var(--color-accent)]/60',
+        'min-w-0 rounded-sm outline-none focus:outline-2 focus:outline-offset-4 focus:outline-accent/60',
         isStringArray ? 'col-span-full' : undefined,
-        embedded
-          ? 'rounded-sm'
-          : cx(
-              'rounded-sm border bg-panel-strong p-3',
-              error ? 'border-red-500/45' : 'border-subtle',
-            ),
       )}
     >
-      <div className="mb-2 flex min-w-0 flex-wrap items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-2 gap-y-1">
+        <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1">
           <label
             htmlFor={inputId}
-            className="min-w-0 text-xs font-medium text-text"
+            className="min-w-0 text-body-sm font-medium text-text"
           >
             {label}
           </label>
           {modified ? <Badge tone="accent">Modified</Badge> : null}
-          {classification.dangerous ? (
-            <Badge tone="warn">Operational risk</Badge>
-          ) : null}
         </div>
         {suppressActions ? null : (
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
@@ -2925,98 +3105,94 @@ function ScalarField({
           </div>
         )}
       </div>
-      <p className="mb-2 text-xs leading-relaxed text-text-faint">
-        {guidance.description}
-      </p>
-      {nullable && !configured && !(numeric && clearedWhileEditing) ? (
-        <Button
-          size="sm"
-          iconLeft={<Plus className="h-3 w-3" />}
-          onClick={() => {
-            const initial =
-              defaultValue !== undefined && defaultValue !== null
-                ? cloneJson(defaultValue)
-                : effectiveValue !== undefined && effectiveValue !== null
-                  ? cloneJson(effectiveValue)
-                  : boolean
-                    ? false
-                    : numeric
-                      ? 0
-                      : schemaTypes.includes('array')
-                        ? []
-                        : '';
-            onChange(setConfigValue(value, path, initial));
-          }}
-        >
-          Set value
-        </Button>
-      ) : path === OPAQUE_STORAGE_URL_PATH &&
-        storageUrlReplacement.value === null &&
-        !replacingOpaque ? (
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge tone="mono">
-            {configured
-              ? 'Stored value hidden'
-              : override
-                ? `Supplied by ${override.name}; not stored in file`
-                : 'No stored URL'}
-          </Badge>
-          <Button size="sm" onClick={() => setReplacingOpaque(true)}>
-            Replace URL
+      <p className="text-caption text-text-muted">{guidance.description}</p>
+      <div className="mt-2">
+        {nullable && !configured && !(numeric && clearedWhileEditing) ? (
+          <Button
+            size="sm"
+            iconLeft={<Plus className="h-3 w-3" />}
+            onClick={() => {
+              const initial =
+                defaultValue !== undefined && defaultValue !== null
+                  ? cloneJson(defaultValue)
+                  : effectiveValue !== undefined && effectiveValue !== null
+                    ? cloneJson(effectiveValue)
+                    : boolean
+                      ? false
+                      : numeric
+                        ? 0
+                        : schemaTypes.includes('array')
+                          ? []
+                          : '';
+              onChange(setConfigValue(value, path, initial));
+            }}
+          >
+            Set value
           </Button>
-        </div>
-      ) : isStringArray ? (
-        <StringArrayControl
-          id={inputId}
-          values={
-            Array.isArray(current)
-              ? current.filter(
-                  (item): item is string => typeof item === 'string',
-                )
-              : []
-          }
-          error={error?.message}
-          onChange={(next) => onChange(setConfigValue(value, path, next))}
-        />
-      ) : boolean ? (
-        <ToggleSwitch
-          id={inputId}
-          data-field-control
-          checked={configured ? current === true : effectiveValue === true}
-          label={
-            (configured ? current : effectiveValue) === true
-              ? 'Enabled'
-              : 'Disabled'
-          }
-          onChange={(event) =>
-            onChange(setConfigValue(value, path, event.target.checked))
-          }
-        />
-      ) : enumValues.length ? (
-        <select
-          id={inputId}
-          data-field-control
-          className={INPUT_WITH_ERROR_CLASS}
-          aria-invalid={Boolean(error)}
-          value={
-            typeof current === 'string' || typeof current === 'number'
-              ? String(current)
-              : ''
-          }
-          onChange={(event) => {
-            const raw = event.target.value;
-            onChange(setConfigValue(value, path, numeric ? Number(raw) : raw));
-          }}
-        >
-          {!configured ? <option value="">Inherited / not set</option> : null}
-          {enumValues.map((option) => (
-            <option key={String(option)} value={String(option)}>
-              {titleForKey(String(option))}
-            </option>
-          ))}
-        </select>
-      ) : (
-        <div>
+        ) : path === OPAQUE_STORAGE_URL_PATH &&
+          storageUrlReplacement.value === null &&
+          !replacingOpaque ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone="neutral">
+              {configured
+                ? 'Stored value hidden'
+                : override
+                  ? `Supplied by ${override.name}; not stored in file`
+                  : 'No stored URL'}
+            </Badge>
+            <Button size="sm" onClick={() => setReplacingOpaque(true)}>
+              Replace URL
+            </Button>
+          </div>
+        ) : isStringArray ? (
+          <StringArrayControl
+            id={inputId}
+            values={
+              Array.isArray(current)
+                ? current.filter(
+                    (item): item is string => typeof item === 'string',
+                  )
+                : []
+            }
+            error={error?.message}
+            onChange={(next) => onChange(setConfigValue(value, path, next))}
+          />
+        ) : boolean ? (
+          <ToggleSwitch
+            id={inputId}
+            variant="compact"
+            data-field-control
+            checked={configured ? current === true : effectiveValue === true}
+            label={
+              (configured ? current : effectiveValue) === true
+                ? 'Enabled'
+                : 'Disabled'
+            }
+            onChange={(event) =>
+              onChange(setConfigValue(value, path, event.target.checked))
+            }
+          />
+        ) : enumValues.length ? (
+          <Select
+            id={inputId}
+            data-field-control
+            className="aria-[invalid=true]:border-danger"
+            aria-invalid={Boolean(error)}
+            placeholder="Inherited / not set"
+            value={
+              typeof current === 'string' || typeof current === 'number'
+                ? String(current)
+                : ''
+            }
+            options={enumValues.map((option) => ({
+              value: String(option),
+              label: configKeyLabel(String(option)),
+            }))}
+            onChange={(raw) =>
+              onChange(setConfigValue(value, path, numeric ? Number(raw) : raw))
+            }
+          />
+        ) : (
           <div className="flex items-center gap-2">
             <input
               id={inputId}
@@ -3073,89 +3249,51 @@ function ScalarField({
               }}
             />
             {classification.unit ? (
-              <span className="shrink-0 text-xs text-text-faint">
+              <span className="shrink-0 text-caption text-text-faint">
                 {unitSuffix(classification.unit)}
               </span>
             ) : null}
           </div>
-          {humanized ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              ≈ {humanized}
-            </div>
-          ) : null}
-          {numeric && (minimum !== undefined || maximum !== undefined) ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              Range: {minimum ?? 'no min'} – {maximum ?? 'no max'}
-            </div>
-          ) : null}
-          {classification.presentation === 'env' ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              Environment variable name — the secret value itself is never
-              stored or shown here.
-            </div>
-          ) : classification.presentation === 'address' ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              Listen address in host:port form.
-            </div>
-          ) : classification.presentation === 'url' ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              Connection or endpoint URL.
-            </div>
-          ) : classification.presentation === 'path' ? (
-            <div className="mt-1 text-[10px] text-text-faint">
-              Filesystem path on the cc-lb host.
-            </div>
-          ) : null}
-        </div>
-      )}
-
-      <GuidanceTradeoffs guidance={guidance} />
-
-      <div className="mt-2 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-faint">
-        <span>Draft: {displayValue(current, isSensitive)}</span>
-        <span>Effective: {displayValue(effectiveValue, isSensitive)}</span>
-        {!configured ? <Badge tone="neutral">Inherited</Badge> : null}
+        )}
       </div>
-      <details data-testid="config-value-details" className="group mt-1.5">
-        <summary className="inline-flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1 text-[10px] text-text-faint focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)]">
-          <ChevronRight className="h-3 w-3 transition-transform group-open:rotate-90" />
-          Value details
-        </summary>
-        <div className="mt-1 space-y-0.5 text-[10px] text-text-faint">
-          <div>File: {displayValue(fileValue, isSensitive)}</div>
-          <div>Default: {displayValue(defaultValue, isSensitive)}</div>
-          <div>
-            Source:{' '}
-            {override
-              ? `${sourceLabel(override)} · ${override.name}`
-              : 'Config file / defaults'}
-          </div>
-        </div>
-      </details>
+      {issues.map((issue, index) => (
+        <IssueLine key={`${issue.code}-${index}`} issue={issue} />
+      ))}
+      <EffectiveLine
+        value={
+          typeof effectiveValue === 'boolean'
+            ? effectiveValue
+              ? 'Enabled'
+              : 'Disabled'
+            : displayValue(effectiveValue, isSensitive)
+        }
+        inherited={!configured}
+        approx={humanized}
+      />
       {override ? (
-        <div className="mt-1.5 text-[10px] leading-relaxed text-text-muted">
+        <p className="mt-1 text-caption text-text-muted">
           Effective value comes from {sourceLabel(override)} · {override.name}.
           The file value applies only if the override is removed.
-        </div>
+        </p>
       ) : null}
-      {classification.dangerous && classification.dangerImpact ? (
-        <div className="mt-1.5 text-[10px] leading-relaxed text-[color:var(--color-warn-text)]">
-          {classification.dangerImpact}
-        </div>
+      {classification.dangerous ? (
+        <OperationalRiskNotice impact={classification.dangerImpact} />
       ) : null}
-      {issues.map((issue, index) => (
-        <div
-          key={`${issue.code}-${index}`}
-          className={cx(
-            'mt-1.5 text-[11px]',
-            issue.severity === 'error'
-              ? 'text-[color:var(--color-danger-text)]'
-              : 'text-[color:var(--color-warn-text)]',
-          )}
-        >
-          {issue.message}
-        </div>
-      ))}
+      <FieldDetails
+        guidance={[guidance]}
+        hints={hints}
+        facts={[
+          { label: 'File', value: displayValue(fileValue, isSensitive) },
+          { label: 'Default', value: displayValue(defaultValue, isSensitive) },
+          {
+            label: 'Source',
+            value: override
+              ? `${sourceLabel(override)} · ${override.name}`
+              : 'Config file / defaults',
+          },
+          { label: 'Key', value: <ConfigKey path={path} /> },
+        ]}
+      />
     </div>
   );
 }
@@ -3174,7 +3312,7 @@ function StringArrayControl({
   return (
     <div className="space-y-2">
       {values.map((item, index) => (
-        <div key={`${id}-${index}`} className="flex min-w-0 gap-1.5">
+        <div key={`${id}-${index}`} className="flex min-w-0 items-center gap-1">
           <input
             id={index === 0 ? id : undefined}
             data-field-control={index === 0 ? true : undefined}
@@ -3187,10 +3325,8 @@ function StringArrayControl({
               onChange(next);
             }}
           />
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={`Move item ${index + 1} up`}
+          <IconButton
+            label={`Move item ${index + 1} up`}
             disabled={index === 0}
             onClick={() => {
               const next = [...values];
@@ -3198,12 +3334,10 @@ function StringArrayControl({
               onChange(next);
             }}
           >
-            <ChevronUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={`Move item ${index + 1} down`}
+            <ChevronUp />
+          </IconButton>
+          <IconButton
+            label={`Move item ${index + 1} down`}
             disabled={index === values.length - 1}
             onClick={() => {
               const next = [...values];
@@ -3211,23 +3345,21 @@ function StringArrayControl({
               onChange(next);
             }}
           >
-            <ChevronDown className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            aria-label={`Remove item ${index + 1}`}
+            <ChevronDown />
+          </IconButton>
+          <IconButton
+            label={`Remove item ${index + 1}`}
             onClick={() =>
               onChange(values.filter((_, itemIndex) => itemIndex !== index))
             }
           >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
+            <Trash2 />
+          </IconButton>
         </div>
       ))}
       <Button
         size="sm"
-        iconLeft={<Plus className="h-3 w-3" />}
+        iconLeft={<Plus />}
         onClick={() => onChange([...values, ''])}
       >
         Add item
@@ -3307,7 +3439,10 @@ function TaggedUnionEditor({
   };
   return (
     <div
-      className="col-span-full space-y-3 rounded-sm border border-subtle bg-panel-strong p-3"
+      className={cx(
+        'col-span-full space-y-3',
+        depth > 0 && 'border-t border-subtle pt-4',
+      )}
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3316,22 +3451,15 @@ function TaggedUnionEditor({
           className={cx(
             'flex flex-col gap-2 sm:flex-row',
             hideHeading
-              ? 'sm:items-center sm:justify-end'
+              ? 'sm:items-center sm:justify-start'
               : 'sm:items-end sm:justify-between',
           )}
         >
           {!hideHeading ? (
             <div className="min-w-0">
-              <h5
-                className={cx(
-                  'font-medium text-text',
-                  depth === 0 ? 'text-sm' : 'text-xs',
-                )}
-              >
-                {titleForKey(path.split('.').at(-1) ?? path)}
-              </h5>
+              <ConfigGroupHeading depth={depth} path={path} />
               {typeof schema.description === 'string' ? (
-                <p className="mt-0.5 text-xs text-text-faint">
+                <p className="mt-0.5 text-caption text-text-faint">
                   {schema.description}
                 </p>
               ) : null}
@@ -3339,47 +3467,56 @@ function TaggedUnionEditor({
           ) : null}
           {showDiscriminator ? (
             path === 'storage' ? (
-              <BaseRadioGroup
-                aria-label="Storage backend"
-                data-config-path={`${path}.${selected.property}`}
-                required
-                className="inline-flex w-fit items-center gap-0.5 rounded-sm border border-subtle bg-bg p-0.5"
-                value={selected.kind}
-                onValueChange={(kind) => selectKind(kind)}
-              >
-                {variants.map((variant) => (
-                  <BaseRadio.Root
-                    key={variant.kind}
-                    value={variant.kind}
-                    className="cursor-pointer rounded-sm px-2.5 py-1 text-xs text-text-muted transition-colors hover:text-[color:var(--color-text)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] data-[checked]:bg-[color:var(--color-panel-strong)] data-[checked]:font-medium data-[checked]:text-[color:var(--color-text)]"
-                  >
-                    {STORAGE_KIND_LABELS[variant.kind] ??
-                      titleForKey(variant.kind)}
-                  </BaseRadio.Root>
-                ))}
-              </BaseRadioGroup>
-            ) : (
-              <label className="min-w-40 text-[10px] uppercase tracking-wider text-text-faint">
-                Kind
-                <select
+              <div className="flex flex-col gap-1.5">
+                <span aria-hidden="true" className="text-label text-text-muted">
+                  Backend
+                </span>
+                <BaseRadioGroup
+                  aria-label="Storage backend"
                   data-config-path={`${path}.${selected.property}`}
-                  data-field-control
-                  className={cx(INPUT_CLASS, 'mt-1')}
+                  required
+                  className="inline-flex w-fit items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5"
                   value={selected.kind}
-                  onChange={(event) => selectKind(event.target.value)}
+                  onValueChange={(kind) => selectKind(kind)}
                 >
                   {variants.map((variant) => (
-                    <option key={variant.kind} value={variant.kind}>
-                      {titleForKey(variant.kind)}
-                    </option>
+                    <BaseRadio.Root
+                      key={variant.kind}
+                      value={variant.kind}
+                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-body-sm font-medium text-text-muted transition-colors hover:bg-overlay-3 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-overlay-6 data-[checked]:text-text"
+                    >
+                      {STORAGE_KIND_LABELS[variant.kind] ??
+                        configKeyLabel(variant.kind)}
+                    </BaseRadio.Root>
                   ))}
-                </select>
-              </label>
+                </BaseRadioGroup>
+              </div>
+            ) : (
+              <div className="flex min-w-40 flex-col gap-1.5">
+                <span
+                  id={`${inputIdFor(path)}-kind-label`}
+                  className="text-label text-text-muted"
+                >
+                  Kind
+                </span>
+                <Select
+                  aria-labelledby={`${inputIdFor(path)}-kind-label`}
+                  data-config-path={`${path}.${selected.property}`}
+                  data-field-control
+                  size="sm"
+                  value={selected.kind}
+                  options={variants.map((variant) => ({
+                    value: variant.kind,
+                    label: configKeyLabel(variant.kind),
+                  }))}
+                  onChange={selectKind}
+                />
+              </div>
             )
           ) : null}
         </div>
       ) : null}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2 2xl:grid-cols-3">
         {Object.entries(properties).map(([key, child]) =>
           key === selected.property ||
           (childKeys && !childKeys.has(key)) ? null : (
@@ -3453,9 +3590,11 @@ function AdminProvidersEditor({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {!hideHeading ? (
-            <h5 className="text-xs font-medium text-text">Admin Providers</h5>
+            <h5 className="text-body-sm font-semibold text-text">
+              Admin providers
+            </h5>
           ) : null}
-          <p className="mt-0.5 text-xs text-text-faint">
+          <p className="mt-0.5 text-caption text-text-faint">
             Provider order is stable. Environment-backed tokens are referenced
             by name and never displayed.
           </p>
@@ -3477,7 +3616,7 @@ function AdminProvidersEditor({
         </Button>
       </div>
       {providers.length ? (
-        <div className="space-y-3">
+        <div className="divide-y divide-subtle border-t border-subtle">
           {providers.map((provider, index) => {
             const kind =
               typeof provider.kind === 'string'
@@ -3495,19 +3634,29 @@ function AdminProvidersEditor({
                 key={providerKeys.current[index]}
                 data-config-path={providerRoot}
                 tabIndex={-1}
-                className="rounded-sm border border-subtle bg-panel-strong p-3"
+                className="py-3"
               >
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-                  <label className="min-w-44 text-[10px] uppercase tracking-wider text-text-faint">
-                    Provider kind
-                    <select
+                  <div className="flex min-w-44 flex-col gap-1.5">
+                    <span
+                      id={`${inputIdFor(providerRoot)}-kind-label`}
+                      className="text-label text-text-muted"
+                    >
+                      Provider kind
+                    </span>
+                    <Select
+                      aria-labelledby={`${inputIdFor(providerRoot)}-kind-label`}
                       data-config-path={`${providerRoot}.${variant?.property ?? 'kind'}`}
                       data-field-control
-                      className={cx(INPUT_CLASS, 'mt-1')}
-                      value={kind}
-                      onChange={(event) => {
+                      size="sm"
+                      value={kind ?? ''}
+                      options={variants.map((candidate) => ({
+                        value: candidate.kind,
+                        label: configKeyLabel(candidate.kind),
+                      }))}
+                      onChange={(nextKind) => {
                         const nextVariant = variants.find(
-                          (candidate) => candidate.kind === event.target.value,
+                          (candidate) => candidate.kind === nextKind,
                         );
                         if (!nextVariant) return;
                         const nextProvider = {
@@ -3520,19 +3669,11 @@ function AdminProvidersEditor({
                           focusConfigPath(`${providerRoot}.id`),
                         );
                       }}
-                    >
-                      {variants.map((candidate) => (
-                        <option key={candidate.kind} value={candidate.kind}>
-                          {titleForKey(candidate.kind)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                    />
+                  </div>
                   <div className="flex items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      aria-label={`Move provider ${index + 1} up`}
+                    <IconButton
+                      label={`Move provider ${index + 1} up`}
                       disabled={index === 0}
                       onClick={() => {
                         const next = [...providers];
@@ -3550,12 +3691,10 @@ function AdminProvidersEditor({
                         onChange(setConfigValue(value, path, next));
                       }}
                     >
-                      <ChevronUp className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      aria-label={`Move provider ${index + 1} down`}
+                      <ChevronUp />
+                    </IconButton>
+                    <IconButton
+                      label={`Move provider ${index + 1} down`}
                       disabled={index === providers.length - 1}
                       onClick={() => {
                         const next = [...providers];
@@ -3573,12 +3712,12 @@ function AdminProvidersEditor({
                         onChange(setConfigValue(value, path, next));
                       }}
                     >
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    </Button>
+                      <ChevronDown />
+                    </IconButton>
                     <Button
                       size="sm"
-                      variant="danger"
-                      iconLeft={<Trash2 className="h-3 w-3" />}
+                      variant="ghost"
+                      iconLeft={<Trash2 />}
                       onClick={() => {
                         providerKeys.current.splice(index, 1);
                         onChange(
@@ -3596,7 +3735,7 @@ function AdminProvidersEditor({
                     </Button>
                   </div>
                 </div>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                <div className="grid grid-cols-1 gap-x-6 gap-y-4 md:grid-cols-2 2xl:grid-cols-3">
                   {Object.entries(properties).map(([key, child]) =>
                     key === (variant?.property ?? 'kind') ? null : (
                       <ConfigNode
@@ -3672,7 +3811,7 @@ function RecurringJobsEditor({
     : {};
   return (
     <div
-      className="col-span-full space-y-2"
+      className="col-span-full divide-y divide-subtle"
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3695,7 +3834,7 @@ function RecurringJobsEditor({
           />
         ))
       ) : (
-        <p className="text-xs text-text-faint">
+        <p className="py-3 text-body-sm text-text-muted">
           No recurring jobs are configured.
         </p>
       )}
@@ -3755,7 +3894,7 @@ function RecurringJobRow({
   const jobFile = getConfigValue(fileConfig, jobPath);
   const jobModified =
     jobCurrent !== undefined && !isSameJson(jobCurrent, jobFile);
-  const dangerous = classifyConfigLeaf(jobPath).dangerous;
+  const jobClassification = classifyConfigLeaf(jobPath);
   const enabledCurrent = getConfigValue(value, enabledPath);
   const enabledEffective = getConfigValue(effectiveConfig, enabledPath);
   const enabledConfigured =
@@ -3771,21 +3910,16 @@ function RecurringJobRow({
     objectProperties(rootSchema, jobSchema),
   ).filter(([field]) => field !== 'enabled');
   return (
-    <div
-      className="rounded-sm border border-subtle bg-panel-strong p-3"
-      data-config-path={jobPath}
-      tabIndex={-1}
-    >
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-2">
+    <div className="py-4 first:pt-0" data-config-path={jobPath} tabIndex={-1}>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-xs font-medium text-text">
-            {meta?.label ?? titleForKey(jobKey)}
+          <span className="text-body-sm font-medium text-text">
+            {meta?.label ?? configKeyLabel(jobKey)}
           </span>
-          <span className="break-all font-mono text-[10px] text-text-faint">
+          <span className="break-all font-mono text-data text-text-faint">
             {jobKey}
           </span>
           {!hasDefault ? <Badge tone="warn">Unknown key</Badge> : null}
-          {dangerous ? <Badge tone="warn">Operational risk</Badge> : null}
           {jobModified ? <Badge tone="accent">Modified</Badge> : null}
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1">
@@ -3806,7 +3940,7 @@ function RecurringJobRow({
           <Button
             size="sm"
             variant="ghost"
-            iconLeft={<RotateCcw className="h-3 w-3" />}
+            iconLeft={<RotateCcw />}
             disabled={!hasDefault}
             onClick={() =>
               onChange(
@@ -3819,46 +3953,65 @@ function RecurringJobRow({
           <Button
             size="sm"
             variant="ghost"
-            iconLeft={<X className="h-3 w-3" />}
+            iconLeft={<X />}
             onClick={() => onChange(unsetConfigValue(value, jobPath))}
           >
             Unset
           </Button>
         </div>
       </div>
-      <p className="mt-1.5 text-xs leading-relaxed text-text-faint">
+      <p className="mt-1 text-caption text-text-muted">
         {jobGuidance.description}
       </p>
-      <GuidanceTradeoffs guidance={jobGuidance} />
-      <GuidanceTradeoffs guidance={enabledGuidance} />
-      <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-faint">
-        <span className="font-medium text-text-muted">Enabled</span>
-        <span>Draft: {displayValue(enabledCurrent)}</span>
-        <span>Effective: {displayValue(enabledEffective)}</span>
-        {!enabledConfigured ? <Badge tone="neutral">Inherited</Badge> : null}
-      </div>
+      {jobIssues.map((issue, index) => (
+        <IssueLine key={`${issue.code}-${index}`} issue={issue} />
+      ))}
+      <EffectiveLine
+        value={
+          typeof enabledEffective === 'boolean'
+            ? enabledEffective
+              ? 'Enabled'
+              : 'Disabled'
+            : displayValue(enabledEffective)
+        }
+        inherited={!enabledConfigured}
+      />
       {enabledOverride ? (
-        <div className="mt-1 text-[10px] leading-relaxed text-text-muted">
+        <p className="mt-1 text-caption text-text-muted">
           Enabled state comes from {sourceLabel(enabledOverride)} ·{' '}
           {enabledOverride.name}. The file value applies only if the override is
           removed.
-        </div>
+        </p>
       ) : null}
-      {jobIssues.map((issue, index) => (
-        <div
-          key={`${issue.code}-${index}`}
-          className={cx(
-            'mt-1.5 text-[11px]',
-            issue.severity === 'error'
-              ? 'text-[color:var(--color-danger-text)]'
-              : 'text-[color:var(--color-warn-text)]',
-          )}
-        >
-          {issue.message}
-        </div>
-      ))}
+      {jobClassification.dangerous ? (
+        <OperationalRiskNotice impact={jobClassification.dangerImpact} />
+      ) : null}
+      <FieldDetails
+        guidance={[jobGuidance, enabledGuidance]}
+        facts={[
+          {
+            label: 'File',
+            value: displayValue(getConfigValue(fileConfig, enabledPath)),
+          },
+          {
+            label: 'Default',
+            value: displayValue(
+              isJsonObject(defaultJobValue)
+                ? defaultJobValue.enabled
+                : undefined,
+            ),
+          },
+          {
+            label: 'Source',
+            value: enabledOverride
+              ? `${sourceLabel(enabledOverride)} · ${enabledOverride.name}`
+              : 'Config file / defaults',
+          },
+          { label: 'Key', value: <ConfigKey path={enabledPath} /> },
+        ]}
+      />
       {fieldProperties.length ? (
-        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="mt-2 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
           {fieldProperties.map(([field, child]) => {
             const fieldPath = `${jobPath}.${field}`;
             return (

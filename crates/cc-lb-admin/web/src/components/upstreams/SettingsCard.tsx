@@ -128,7 +128,7 @@ export function SettingsCard({ upstream }: Props) {
             </Field>
 
             {upstream.kind === 'anthropic_api_key' && (
-              <Field label="API Key">
+              <Field label="API key">
                 <div className="flex flex-col gap-2">
                   <BaseRadioGroup
                     className="flex items-center gap-4"
@@ -137,23 +137,23 @@ export function SettingsCard({ upstream }: Props) {
                     }
                     value={useLiteral ? 'literal' : 'env'}
                   >
-                    <label className="flex items-center gap-1.5 text-sm text-text">
+                    <label className="flex items-center gap-1.5 text-body-sm text-text">
                       <BaseRadio.Root
-                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle bg-bg data-[checked]:border-[color:var(--color-accent)]"
+                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle-strong bg-input-bg data-[checked]:border-accent"
                         value="env"
                       >
-                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-accent" />
                       </BaseRadio.Root>
-                      Environment Variable
+                      Environment variable
                     </label>
-                    <label className="flex items-center gap-1.5 text-sm text-text">
+                    <label className="flex items-center gap-1.5 text-body-sm text-text">
                       <BaseRadio.Root
-                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle bg-bg data-[checked]:border-[color:var(--color-accent)]"
+                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle-strong bg-input-bg data-[checked]:border-accent"
                         value="literal"
                       >
-                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-accent" />
                       </BaseRadio.Root>
-                      Literal Value
+                      Literal value
                     </label>
                   </BaseRadioGroup>
                   {!useLiteral ? (
@@ -178,11 +178,7 @@ export function SettingsCard({ upstream }: Props) {
             )}
 
             <div className="flex justify-end gap-2 mt-2">
-              <Button
-                variant="ghost"
-                onClick={handleCancel}
-                disabled={update.isPending}
-              >
+              <Button onClick={handleCancel} disabled={update.isPending}>
                 Cancel
               </Button>
               <Button
@@ -196,27 +192,33 @@ export function SettingsCard({ upstream }: Props) {
             </div>
           </div>
         ) : (
-          <div className="grid grid-cols-[120px_1fr] gap-y-3 gap-x-4 text-sm">
-            <div className="text-text-faint">Base URL</div>
-            <div className="text-text">{upstream.base_url || '—'}</div>
+          <dl className="grid grid-cols-[120px_1fr] items-baseline gap-y-3 gap-x-4 text-body-sm">
+            <dt className="text-label text-text-faint">Base URL</dt>
+            <dd className="min-w-0 break-all text-text">
+              {upstream.base_url ? (
+                <span className="font-mono text-data">{upstream.base_url}</span>
+              ) : (
+                <span className="text-text-faint">—</span>
+              )}
+            </dd>
 
             {upstream.kind === 'anthropic_api_key' && (
               <>
-                <div className="text-text-faint">API Key</div>
-                <div className="text-text">
+                <dt className="text-label text-text-faint">API key</dt>
+                <dd className="min-w-0 break-all text-text">
                   {upstream.api_key_env ? (
-                    <span className="font-mono text-xs">
+                    <span className="font-mono text-data">
                       env:{upstream.api_key_env}
                     </span>
                   ) : (
-                    <span className="text-text-muted italic">
-                      literal value (stored)
+                    <span className="text-text-muted">
+                      Literal value (stored)
                     </span>
                   )}
-                </div>
+                </dd>
               </>
             )}
-          </div>
+          </dl>
         )}
       </CardBody>
     </Card>

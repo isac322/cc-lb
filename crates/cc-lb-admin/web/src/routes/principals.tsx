@@ -1,9 +1,7 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { NumberField as BaseNumberField } from '@base-ui/react/number-field';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { Radio as BaseRadio } from '@base-ui/react/radio';
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
-import { Switch as BaseSwitch } from '@base-ui/react/switch';
 import { Tabs as BaseTabs } from '@base-ui/react/tabs';
 import {
   closestCenter,
@@ -39,6 +37,7 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import * as z from 'zod';
+import { PrincipalsListEmpty } from '../components/onboarding/ListEmptyStates';
 import {
   CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
   CacheKeepaliveCard,
@@ -51,18 +50,31 @@ import {
   CardHeader,
   ConfirmDialog,
   cx,
+  Drawer,
   EmptyState,
   Field,
   Hint,
+  IconButton,
   INPUT_CLASS,
   Modal,
+  PageHeader,
   Skeleton,
   SkeletonRow,
   Spinner,
   StatusBadge,
+  ToggleSwitch,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { Select } from '../components/ui/Select';
+import {
+  EmptyValue,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeadCell,
+  TableRow,
+} from '../components/ui/Table';
 import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   type ChainSlot,
@@ -91,6 +103,11 @@ import {
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
+import {
+  PRINCIPAL_LIMITS_ANCHOR,
+  PRINCIPAL_ROUTER_ANCHOR,
+} from '../lib/requestErrorCodes';
+import { undoToast } from '../lib/undoToast';
 import { useCopyButton } from '../lib/useCopyButton';
 
 const principalSearchSchema = z.object({
@@ -105,14 +122,14 @@ const PRINCIPAL_DETAIL_HEADER_CLASS =
 const PRINCIPAL_DETAIL_BODY_CLASS =
   'flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6';
 const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS = 'overflow-x-auto min-h-48';
-// Minimums measured against the production admin fixture at 1440×1000.
+// Minimums measured against the production admin fixture at 1440×1000 so the
+// loading shell and the loaded detail keep the same geometry.
 const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
   cacheKeepalive: CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
-  allowedModels: 'min-h-[103px]',
-  defaultLimits: 'min-h-[113px]',
+  access: 'min-h-[170px]',
   recentRequests: 'min-h-[308px]',
-  router: 'min-h-[336px]',
-  observability: 'min-h-[147px]',
+  router: 'min-h-[340px]',
+  observability: 'min-h-[149px]',
   shape: 'min-h-[236px]',
   apiKeys: 'min-h-[202px]',
 } as const;
@@ -162,11 +179,10 @@ function PrincipalDetailLoadingShell() {
             <Skeleton className="h-5 w-20" />
             <Skeleton className="h-5 w-16" />
           </div>
-          <Skeleton className="mt-0.5 h-4 w-44" />
+          <Skeleton className="mt-1 h-4 w-72" />
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Skeleton className="h-7 w-20" />
-          <Skeleton className="h-7 w-20" />
+          <Skeleton className="h-8 w-20" />
         </div>
       </header>
 
@@ -179,11 +195,19 @@ function PrincipalDetailLoadingShell() {
           data-testid="cache-keepalive-card"
         >
           <CardHeader
+            align="center"
             title={<Skeleton as="span" className="block h-5 w-32" />}
-            action={<Skeleton className="h-5 w-9" />}
+            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+            action={
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-7 w-24" />
+                <Skeleton className="h-7 w-24" />
+                <Skeleton className="h-5 w-9" />
+              </div>
+            }
           />
-          <CardBody className="space-y-4 flex-1 flex flex-col">
-            <div className="grid grid-cols-2 gap-4">
+          <CardBody className="flex-1">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {Array.from({ length: 4 }).map((_, index) => (
                 <div key={index} className="flex flex-col gap-1">
                   <Skeleton className="h-3 w-24" />
@@ -194,33 +218,28 @@ function PrincipalDetailLoadingShell() {
                 </div>
               ))}
             </div>
-            <Skeleton className="h-3 w-56" />
-            <div className="mt-auto grid grid-cols-2 gap-2 border-t border-subtle pt-3">
-              <Skeleton className="h-7 w-full" />
-              <Skeleton className="h-7 w-full" />
-            </div>
           </CardBody>
         </Card>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
+        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}>
           <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-32" />}
-            action={<Skeleton className="h-7 w-24" />}
-          />
-          <CardBody>
-            <Skeleton className="h-4 w-3/5" />
-          </CardBody>
-        </Card>
-
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.defaultLimits}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-32" />}
+            title={<Skeleton as="span" className="block h-5 w-20" />}
             subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-            action={<Skeleton className="h-7 w-24" />}
           />
-          <CardBody>
-            <Skeleton className="h-4 w-2/5" />
-          </CardBody>
+          <div className="divide-y divide-row">
+            {Array.from({ length: 2 }).map((_, index) => (
+              <div
+                key={index}
+                className="flex items-center justify-between gap-4 px-4 py-3"
+              >
+                <div className="flex items-center gap-4 min-w-0 flex-1">
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-4 w-2/5" />
+                </div>
+                <Skeleton className="h-7 w-14" />
+              </div>
+            ))}
+          </div>
         </Card>
 
         <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
@@ -339,45 +358,45 @@ function PrincipalsPage() {
           selected ? 'hidden md:flex' : 'flex',
         )}
       >
-        <div className="h-12 px-4 flex items-center justify-between border-b border-subtle shrink-0">
-          <div>
-            <h1 className="text-sm font-medium">Principals</h1>
-            <div className="h-4 flex items-center text-[11px] text-text-faint">
-              {principals.isLoading ? (
-                <span
-                  className="skeleton inline-block h-3 w-12"
-                  data-testid="principal-count-skeleton"
-                  aria-hidden="true"
-                />
-              ) : (
-                `${principals.data?.principals.length ?? 0} total`
-              )}
-            </div>
-          </div>
-          <Button
-            id="btn-new-principal"
-            size="sm"
-            variant="primary"
-            iconLeft={<Plus className="w-3 h-3" />}
-            onClick={() => setCreateOpen(true)}
-          >
-            New
-          </Button>
+        <div className="px-4 py-3 border-b border-subtle shrink-0 [&>header]:mb-0">
+          <PageHeader
+            title="Principals"
+            description={
+              <span className="flex h-4 items-center text-caption text-text-faint">
+                {principals.isLoading ? (
+                  <span
+                    className="skeleton inline-block h-3 w-12"
+                    data-testid="principal-count-skeleton"
+                    aria-hidden="true"
+                  />
+                ) : (
+                  `${principals.data?.principals.length ?? 0} total`
+                )}
+              </span>
+            }
+            actions={
+              <Button
+                id="btn-new-principal"
+                size="sm"
+                iconLeft={<Plus />}
+                onClick={() => setCreateOpen(true)}
+              >
+                New
+              </Button>
+            }
+          />
         </div>
         <div className="flex-1 overflow-y-auto p-2 pb-8 space-y-1">
           {principals.isLoading ? (
             Array.from({ length: 4 }).map((_, i) => (
               <div
                 key={i}
-                className={cx(PRINCIPAL_LIST_ROW_CLASS, 'border-subtle')}
+                className={cx(PRINCIPAL_LIST_ROW_CLASS, 'border-transparent')}
                 data-testid="principal-list-skeleton"
                 aria-hidden="true"
               >
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Skeleton className="h-2 w-2 rounded-full shrink-0" />
-                    <Skeleton className="h-4 w-28" />
-                  </div>
+                  <Skeleton className="h-4 w-28" />
                   <Skeleton className="h-5 w-14" />
                 </div>
                 <div className="flex items-center justify-between mt-2">
@@ -394,46 +413,43 @@ function PrincipalsPage() {
                 onClick={() => select(p.id)}
                 className={cx(
                   PRINCIPAL_LIST_ROW_CLASS,
-                  'transition-colors',
-                  p.id === selectedId
-                    ? 'border-accent/40 bg-accent/5'
-                    : 'border-subtle hover:bg-overlay-3',
+                  'border-transparent transition-colors',
+                  p.id === selectedId ? 'bg-overlay-5' : 'hover:bg-overlay-2',
                 )}
+                aria-current={p.id === selectedId ? 'true' : undefined}
               >
                 <div className="flex items-center justify-between gap-2 mb-1">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span
-                      className={cx('status-dot', p.enabled ? 'ok' : 'neutral')}
-                    />
-                    <span className="font-medium text-sm truncate">
-                      {p.name}
-                    </span>
-                  </div>
-                  <Badge tone="mono">{p.kind}</Badge>
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-text-faint mt-2">
-                  <span>
-                    {p.allowed_models.length}{' '}
-                    {p.allowed_models.length === 1 ? 'model' : 'models'} ·{' '}
-                    {p.default_limits.length}{' '}
-                    {p.default_limits.length === 1 ? 'limit' : 'limits'}
+                  <span
+                    className={cx(
+                      'text-body-sm font-medium truncate',
+                      p.enabled ? 'text-text' : 'text-text-muted',
+                    )}
+                  >
+                    {p.name}
                   </span>
-                  <span className="font-mono tabular-nums">
+                  <Badge className="capitalize">{p.kind}</Badge>
+                </div>
+                <div className="flex items-center justify-between gap-2 text-caption text-text-faint mt-2">
+                  <span className="truncate">
+                    {p.enabled ? null : (
+                      <span className="text-text-muted">Disabled · </span>
+                    )}
+                    {p.allowed_models.length === 0
+                      ? 'Any model'
+                      : `${p.allowed_models.length} ${p.allowed_models.length === 1 ? 'model' : 'models'}`}
+                    {' · '}
+                    {p.default_limits.length === 0
+                      ? 'No limits'
+                      : `${p.default_limits.length} ${p.default_limits.length === 1 ? 'limit' : 'limits'}`}
+                  </span>
+                  <span className="tabular-nums shrink-0">
                     rev {p.revision}
                   </span>
                 </div>
               </button>
             ))
           ) : (
-            <EmptyState
-              title="No principals"
-              description="Create your first principal."
-              action={
-                <Button variant="primary" onClick={() => setCreateOpen(true)}>
-                  New principal
-                </Button>
-              }
-            />
+            <PrincipalsListEmpty onCreate={() => setCreateOpen(true)} />
           )}
         </div>
       </aside>
@@ -454,10 +470,19 @@ function PrincipalsPage() {
           <PrincipalDetailLoadingShell />
         ) : (
           <div className="flex-1 flex items-center justify-center">
-            <EmptyState
-              title="Select a principal"
-              description="Pick a principal to see allowed models, default limits, plugin chain, and API keys."
-            />
+            {principals.data?.principals.length ? (
+              <EmptyState
+                headingLevel={2}
+                title="Select a principal"
+                description="Pick a principal to see allowed models, default limits, plugin chain, and API keys."
+              />
+            ) : (
+              <EmptyState
+                headingLevel={2}
+                title="Principal details appear here"
+                description="Allowed models, limits, plugin chain, and proxy keys show here once you create a principal."
+              />
+            )}
           </div>
         )}
       </section>
@@ -498,6 +523,8 @@ function PrincipalDetail({
     `${deleteChainCount} plugin chain ${deleteChainCount === 1 ? 'entry' : 'entries'} will be deleted.`
   );
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [confirmToggleOpen, setConfirmToggleOpen] = useState(false);
+  const nextEnabled = !principal.enabled;
   return (
     <>
       <header className={PRINCIPAL_DETAIL_HEADER_CLASS}>
@@ -505,49 +532,51 @@ function PrincipalDetail({
           <button
             type="button"
             onClick={onBack}
-            className="md:hidden inline-flex items-center gap-1 text-xs text-text-faint hover:text-text mb-1"
+            className="md:hidden inline-flex items-center gap-1 text-caption text-text-faint hover:text-text mb-1"
           >
             <ChevronLeft className="w-3 h-3" /> Back
           </button>
-          <div className="flex items-center gap-3 flex-wrap">
-            <h2 className="text-lg font-medium text-text truncate">
+          <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
+            <h2 className="text-title-page text-text truncate">
               {principal.name}
             </h2>
-            <StatusBadge
-              tone={principal.enabled ? 'ok' : 'neutral'}
-              label={principal.enabled ? 'Enabled' : 'Disabled'}
+            <Badge className="capitalize">{principal.kind}</Badge>
+            <ToggleSwitch
+              variant="compact"
+              role="switch"
+              aria-label="Enabled"
+              label={
+                <span className="text-text-muted">
+                  {principal.enabled ? 'Enabled' : 'Disabled'}
+                </span>
+              }
+              checked={principal.enabled}
+              disabled={
+                toggle.isPending || del.isPending || principalWritePending
+              }
+              onChange={() => setConfirmToggleOpen(true)}
+              className="flex-row-reverse"
             />
-            <Badge tone="mono">{principal.kind}</Badge>
+            {toggle.isPending ? (
+              <span
+                role="status"
+                aria-live="polite"
+                className="inline-flex items-center gap-1.5 text-caption text-text-muted"
+              >
+                <Spinner className="w-3 h-3 text-accent" />
+                {nextEnabled ? 'Enabling...' : 'Disabling...'}
+              </span>
+            ) : null}
           </div>
-          <div className="text-xs text-text-faint font-mono mt-0.5">
-            ID {principal.id} · rev {principal.revision}
+          <div className="mt-1 text-caption text-text-faint">
+            ID{' '}
+            <span className="font-mono text-data text-text-muted">
+              {principal.id}
+            </span>
+            <span className="tabular-nums"> · rev {principal.revision}</span>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Button
-            size="sm"
-            loading={toggle.isPending}
-            disabled={del.isPending || principalWritePending}
-            onClick={() =>
-              toggle.mutate(
-                {
-                  id: principal.id,
-                  enabled: !principal.enabled,
-                  revision: principal.revision,
-                },
-                {
-                  onSuccess: () =>
-                    toast.success(
-                      principal.enabled
-                        ? 'Principal disabled'
-                        : 'Principal enabled',
-                    ),
-                },
-              )
-            }
-          >
-            {principal.enabled ? 'Disable' : 'Enable'}
-          </Button>
           <Button
             size="sm"
             variant="danger"
@@ -561,13 +590,56 @@ function PrincipalDetail({
         </div>
       </header>
       <ConfirmDialog
+        open={confirmToggleOpen}
+        onOpenChange={setConfirmToggleOpen}
+        title={nextEnabled ? 'Enable principal?' : 'Disable principal?'}
+        description={
+          nextEnabled ? (
+            <>
+              Requests using API keys of{' '}
+              <span className="font-medium text-text">{principal.name}</span>{' '}
+              will be accepted again.
+            </>
+          ) : (
+            <>
+              Requests using API keys of{' '}
+              <span className="font-medium text-text">{principal.name}</span>{' '}
+              will be rejected with 403 until it is enabled again. Keys, limits
+              and plugin chain are kept.
+            </>
+          )
+        }
+        confirmLabel={nextEnabled ? 'Enable' : 'Disable'}
+        destructive={!nextEnabled}
+        pending={toggle.isPending}
+        confirmDisabled={del.isPending || principalWritePending}
+        closeOnConfirm={false}
+        onConfirm={() =>
+          toggle.mutate(
+            {
+              id: principal.id,
+              enabled: nextEnabled,
+              revision: principal.revision,
+            },
+            {
+              onSuccess: () => {
+                setConfirmToggleOpen(false);
+                toast.success(
+                  nextEnabled ? 'Principal enabled' : 'Principal disabled',
+                );
+              },
+            },
+          )
+        }
+      />
+      <ConfirmDialog
         open={confirmDeleteOpen}
         onOpenChange={setConfirmDeleteOpen}
         title="Delete principal?"
         description={
           <>
-            <span className="font-mono">{principal.name}</span> and all its API
-            keys / plugin chain entries will be permanently removed.
+            <span className="font-medium text-text">{principal.name}</span> and
+            all its API keys / plugin chain entries will be permanently removed.
             <span className="block mt-2 text-text-muted">
               {deleteChainCountLabel}
             </span>
@@ -593,11 +665,10 @@ function PrincipalDetail({
       />
 
       <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
-        <fieldset className="contents" disabled={principalWritePending}>
+        <fieldset className="min-w-0" disabled={principalWritePending}>
           <CacheKeepaliveCard principal={principal} />
         </fieldset>
-        <AllowedModelsCard principal={principal} />
-        <DefaultLimitsCard principal={principal} />
+        <AccessCard principal={principal} />
         <RecentRequestsCard principal={principal} />
         <RouterSlotEditor principal={principal} />
         <ObservabilityHookEditor principalId={principal.id} />
@@ -628,7 +699,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
       <CardHeader
-        title="Recent Requests"
+        title="Recent requests"
         subtitle={
           <span className="inline-flex h-4 items-center">
             {loading ? (
@@ -667,7 +738,62 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   );
 }
 
-function AllowedModelsCard({ principal }: { principal: Principal }) {
+function AccessCard({ principal }: { principal: Principal }) {
+  return (
+    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}>
+      <CardHeader
+        title="Access"
+        subtitle="Which models this principal may call, and the rate caps applied to every API key"
+      />
+      <div className="divide-y divide-row">
+        <AllowedModelsRow principal={principal} />
+        <DefaultLimitsRow principal={principal} />
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * One labelled row of the Access card. Each row is its own region with its
+ * own edit cycle, so the heading names the region its controls belong to.
+ */
+function AccessRow({
+  id,
+  title,
+  action,
+  children,
+}: {
+  id?: string;
+  title: string;
+  action: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const headingId = React.useId();
+  return (
+    <section
+      id={id}
+      aria-labelledby={headingId}
+      className="scroll-mt-4 px-4 py-3"
+    >
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-2 sm:grid-cols-[8rem_minmax(0,1fr)_auto]">
+        <h3
+          id={headingId}
+          className="col-start-1 row-start-1 self-center text-label text-text-muted sm:self-start sm:pt-1.5"
+        >
+          {title}
+        </h3>
+        <div className="col-span-2 row-start-2 min-w-0 text-body-sm text-text sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:pt-1">
+          {children}
+        </div>
+        <div className="col-start-2 row-start-1 flex items-center justify-end gap-2 sm:col-start-3">
+          {action}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AllowedModelsRow({ principal }: { principal: Principal }) {
   const setAllowed = useSetAllowedModels();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const [models, setModels] = useState(principal.allowed_models.join(', '));
@@ -688,89 +814,89 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
   };
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.allowedModels}>
-      <CardHeader
-        title="Allowed Models"
-        action={
-          editing ? (
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                disabled={saving || principalWritePending}
-                onClick={cancelEditing}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                loading={saving}
-                disabled={
-                  saving || principalWritePending || editRevision === null
-                }
-                onClick={() => {
-                  if (editRevision === null) return;
-                  setAllowed.mutate(
-                    {
-                      id: principal.id,
-                      models: models
-                        .split(',')
-                        .map((m) => m.trim())
-                        .filter(Boolean),
-                      expected_revision: editRevision,
-                    },
-                    {
-                      onSuccess: () => {
-                        toast.success('Allowed models updated');
-                        setEditing(false);
-                        setEditRevision(null);
-                      },
-                    },
-                  );
-                }}
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
-          ) : (
+    <AccessRow
+      title="Allowed models"
+      action={
+        editing ? (
+          <>
             <Button
               size="sm"
-              disabled={principalWritePending}
-              onClick={startEditing}
+              disabled={saving || principalWritePending}
+              onClick={cancelEditing}
             >
-              Edit
+              Cancel
             </Button>
-          )
-        }
-      />
-      <CardBody>
-        {editing ? (
-          <textarea
-            className={cx(
-              INPUT_CLASS,
-              PENDING_INPUT_CLASS,
-              'min-h-[80px] font-mono',
-            )}
-            value={models}
-            onChange={(e) => setModels(e.target.value)}
-            placeholder="comma-separated model ids"
-            disabled={saving || principalWritePending}
-          />
-        ) : principal.allowed_models.length ? (
-          <div className="flex flex-wrap gap-2">
-            {principal.allowed_models.map((m) => (
-              <Badge key={m} tone="mono">
-                {m}
-              </Badge>
-            ))}
-          </div>
+            <Button
+              size="sm"
+              variant="primary"
+              loading={saving}
+              disabled={
+                saving || principalWritePending || editRevision === null
+              }
+              onClick={() => {
+                if (editRevision === null) return;
+                setAllowed.mutate(
+                  {
+                    id: principal.id,
+                    models: models
+                      .split(',')
+                      .map((m) => m.trim())
+                      .filter(Boolean),
+                    expected_revision: editRevision,
+                  },
+                  {
+                    onSuccess: () => {
+                      toast.success('Allowed models updated');
+                      setEditing(false);
+                      setEditRevision(null);
+                    },
+                  },
+                );
+              }}
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </Button>
+          </>
         ) : (
-          <p className="text-xs text-text-faint">
-            No restrictions — principal may use any model the upstream supports.
-          </p>
-        )}
-      </CardBody>
-    </Card>
+          <Button
+            size="sm"
+            disabled={principalWritePending}
+            onClick={startEditing}
+          >
+            Edit
+          </Button>
+        )
+      }
+    >
+      {editing ? (
+        <textarea
+          className={cx(
+            INPUT_CLASS,
+            PENDING_INPUT_CLASS,
+            'min-h-[80px] py-2 font-mono text-data',
+          )}
+          value={models}
+          onChange={(e) => setModels(e.target.value)}
+          placeholder="Comma-separated model IDs"
+          disabled={saving || principalWritePending}
+        />
+      ) : principal.allowed_models.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {principal.allowed_models.map((m) => (
+            <Badge key={m} tone="mono">
+              {m}
+            </Badge>
+          ))}
+        </div>
+      ) : (
+        <p>
+          Any model{' '}
+          <span className="text-text-muted">
+            · no restrictions, the upstream decides what it supports
+          </span>
+        </p>
+      )}
+    </AccessRow>
   );
 }
 
@@ -833,9 +959,11 @@ function LimitsEditor({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="@container space-y-2">
       {value.length === 0 ? (
-        <p className="text-xs text-text-faint">No limits. Add one below.</p>
+        <p className="text-caption text-text-faint">
+          No limits. Add one below.
+        </p>
       ) : null}
       {value.map((row, idx) => {
         const isCost = row.kind === 'cost_usd';
@@ -843,27 +971,22 @@ function LimitsEditor({
         return (
           <div
             key={idx}
-            className="flex flex-wrap items-end gap-2 border border-subtle rounded-md p-2"
+            className="well grid grid-cols-2 items-end gap-3 p-3 @xl:grid-cols-[minmax(0,1fr)_7rem_minmax(0,1fr)_auto]"
           >
-            <div className="w-40">
+            <div className="min-w-0">
               <Field label="Kind">
-                <select
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+                <Select
+                  className="w-full"
                   disabled={disabled}
                   value={row.kind}
-                  onChange={(e) =>
-                    updateRow(idx, { kind: e.target.value as LimitKind })
+                  options={LIMIT_KIND_OPTIONS}
+                  onChange={(next) =>
+                    updateRow(idx, { kind: next as LimitKind })
                   }
-                >
-                  {LIMIT_KIND_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
+                />
               </Field>
             </div>
-            <div className="w-32">
+            <div className="min-w-0">
               <Field label="Window (sec)">
                 <BaseNumberField.Root
                   disabled={disabled}
@@ -882,7 +1005,7 @@ function LimitsEditor({
                 </BaseNumberField.Root>
               </Field>
             </div>
-            <div className="w-40">
+            <div className="min-w-0">
               <Field label={isCost ? 'Cap (USD)' : 'Cap'}>
                 <BaseNumberField.Root
                   disabled={disabled}
@@ -909,9 +1032,10 @@ function LimitsEditor({
               </Field>
             </div>
             <Button
-              size="sm"
-              variant="danger"
-              iconLeft={<Trash2 className="w-3 h-3" />}
+              variant="ghost"
+              size="lg"
+              className="justify-self-start hover:text-danger-text"
+              iconLeft={<Trash2 />}
               disabled={disabled}
               onClick={() => removeRow(idx)}
             >
@@ -932,7 +1056,7 @@ function LimitsEditor({
   );
 }
 
-function DefaultLimitsCard({ principal }: { principal: Principal }) {
+function DefaultLimitsRow({ principal }: { principal: Principal }) {
   const update = useUpdatePrincipalDefaultLimits();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const saving = update.isPending;
@@ -955,105 +1079,109 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
   };
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.defaultLimits}>
-      <CardHeader
-        title="Default Limits"
-        subtitle="Per-principal rate caps applied to every API key"
-        action={
-          editing ? (
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                disabled={saving || principalWritePending}
-                onClick={cancelEditing}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                loading={saving}
-                disabled={
-                  saving || principalWritePending || editRevision === null
-                }
-                onClick={() => {
-                  if (editRevision === null) return;
-                  update.mutate(
-                    {
-                      id: principal.id,
-                      default_limits: draft,
-                      expected_revision: editRevision,
-                    },
-                    {
-                      onSuccess: () => {
-                        toast.success('Default limits updated');
-                        setEditing(false);
-                        setEditRevision(null);
-                      },
-                    },
-                  );
-                }}
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
-          ) : (
+    <AccessRow
+      id={PRINCIPAL_LIMITS_ANCHOR}
+      title="Default limits"
+      action={
+        editing ? (
+          <>
             <Button
               size="sm"
-              disabled={principalWritePending}
-              onClick={startEditing}
+              disabled={saving || principalWritePending}
+              onClick={cancelEditing}
             >
-              Edit
+              Cancel
             </Button>
-          )
-        }
-      />
+            <Button
+              size="sm"
+              variant="primary"
+              loading={saving}
+              disabled={
+                saving || principalWritePending || editRevision === null
+              }
+              onClick={() => {
+                if (editRevision === null) return;
+                update.mutate(
+                  {
+                    id: principal.id,
+                    default_limits: draft,
+                    expected_revision: editRevision,
+                  },
+                  {
+                    onSuccess: () => {
+                      toast.success('Default limits updated');
+                      setEditing(false);
+                      setEditRevision(null);
+                    },
+                  },
+                );
+              }}
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </Button>
+          </>
+        ) : (
+          <Button
+            size="sm"
+            disabled={principalWritePending}
+            onClick={startEditing}
+          >
+            Edit
+          </Button>
+        )
+      }
+    >
       {editing ? (
-        <CardBody>
-          <LimitsEditor
-            value={draft}
-            onChange={setDraft}
-            disabled={saving || principalWritePending}
-          />
-        </CardBody>
+        <LimitsEditor
+          value={draft}
+          onChange={setDraft}
+          disabled={saving || principalWritePending}
+        />
       ) : principal.default_limits.length ? (
-        <div className="overflow-x-auto">
-          <table className="w-full font-mono text-xs">
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Kind</th>
-                <th className="text-right px-4 py-2">Window</th>
-                <th className="text-right px-4 py-2">Cap</th>
-              </tr>
-            </thead>
-            <tbody>
-              {principal.default_limits.map((l, idx) => (
-                <tr
-                  key={`${l.kind}-${l.window_secs}-${idx}`}
-                  className="border-b border-row"
-                >
-                  <td className="px-4 py-2">
-                    {LIMIT_KIND_LABEL[l.kind] ?? l.kind}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {formatWindowSecs(l.window_secs)}
-                  </td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {formatLimitCap(l)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="divide-y divide-row">
+          {principal.default_limits.map((l, idx) => (
+            <li
+              key={`${l.kind}-${l.window_secs}-${idx}`}
+              className="flex items-baseline justify-between gap-4 py-1 first:pt-0 last:pb-0"
+            >
+              <span>{LIMIT_KIND_LABEL[l.kind] ?? l.kind}</span>
+              <span className="tabular-nums">
+                {formatLimitCap(l)}
+                <span className="text-text-muted">
+                  {' '}
+                  per {formatWindowSecs(l.window_secs)}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
       ) : (
-        <CardBody>
-          <p className="text-xs text-text-faint">
-            No default limits configured for this principal.
-          </p>
-        </CardBody>
+        <p>
+          None{' '}
+          <span className="text-text-muted">
+            · every API key runs without a default rate cap
+          </span>
+        </p>
       )}
-    </Card>
+    </AccessRow>
+  );
+}
+
+const PLUGIN_DRAWER_HEADING_CLASS =
+  'mb-1.5 flex items-center gap-1.5 text-label text-text-muted';
+
+// Matches the shared underline tabs (DESIGN.md §5 Tabs): 13/500, 36px tall.
+const ROUTER_TAB_CLASS =
+  'h-9 px-3 text-[0.8125rem] font-medium border-b-2 -mb-px transition-colors border-transparent text-text-muted hover:text-text data-[active]:border-accent data-[active]:text-text';
+
+/** Radio ring shared by the slot and terminal-strategy option cards. */
+function RadioMark({ isMutating }: { isMutating: boolean }) {
+  return isMutating ? (
+    <Spinner className="w-3 h-3 text-accent" />
+  ) : (
+    <span className="flex size-4 items-center justify-center rounded-full border border-subtle-strong">
+      <BaseRadio.Indicator className="size-2 rounded-full bg-accent" />
+    </span>
   );
 }
 
@@ -1064,9 +1192,6 @@ function SlotRadioCard({
   isActive,
   isMutating,
   disabled,
-  isDefault,
-  isNone,
-  badge,
 }: {
   value: string;
   name: string;
@@ -1074,56 +1199,30 @@ function SlotRadioCard({
   isActive: boolean;
   isMutating: boolean;
   disabled: boolean;
-  isDefault?: boolean;
-  isNone?: boolean;
-  badge?: string;
 }) {
   return (
     <li role="radio" aria-checked={isActive}>
       <label
         className={cx(
-          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors',
+          'flex items-start gap-3 p-3 border rounded-sm cursor-pointer transition-colors',
           isActive
-            ? cx(
-                'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]',
-                isNone && 'border-dashed',
-              )
-            : 'border-subtle hover:bg-overlay-3',
-          disabled ? 'pointer-events-none opacity-50 cursor-not-allowed' : '',
+            ? 'border-accent/60 bg-accent-dim'
+            : 'border-subtle hover:bg-overlay-2',
+          disabled ? 'pointer-events-none opacity-40 cursor-not-allowed' : '',
         )}
       >
         <BaseRadio.Root
-          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+          className="mt-0.5 flex items-center justify-center w-4 h-4 shrink-0"
           disabled={disabled}
           value={value}
         >
-          {isMutating ? (
-            <Spinner className="w-3 h-3 text-accent" />
-          ) : isNone ? (
-            <>
-              <BaseRadio.Indicator className="sr-only" />
-              <span className="text-text-faint text-xs leading-none">⊘</span>
-            </>
-          ) : isDefault ? (
-            <>
-              <BaseRadio.Indicator className="sr-only" />
-              <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
-            </>
-          ) : (
-            <>
-              <BaseRadio.Indicator className="status-dot ok" />
-              <span
-                className={cx('status-dot neutral', isActive && 'hidden!')}
-              />
-            </>
-          )}
+          <RadioMark isMutating={isMutating} />
         </BaseRadio.Root>
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-sm truncate">{name}</span>
-            {badge && <Badge tone="mono">{badge}</Badge>}
+          <div className="text-body-sm font-medium text-text truncate">
+            {name}
           </div>
-          <div className="text-xs text-text-faint mt-0.5">{desc}</div>
+          <div className="text-caption text-text-faint mt-0.5">{desc}</div>
         </div>
       </label>
     </li>
@@ -1143,121 +1242,103 @@ function PluginDetailDrawer({
   if (!plugin) return null;
 
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop" />
-        <BaseDialog.Popup className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full">
-          <BaseDialog.Title className="sr-only">Plugin detail</BaseDialog.Title>
-          <BaseDialog.Description className="sr-only">
-            Detail view of a plugin
-          </BaseDialog.Description>
-
-          <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 mb-1 flex-wrap">
-                <h2 className="text-lg font-medium text-text truncate">
-                  {plugin.name}
-                </h2>
-                {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
-                {plugin.supported_slots && plugin.supported_slots.length > 0 ? (
-                  plugin.supported_slots.map((slot) => (
-                    <Badge key={slot} tone="accent">
-                      {slotLabel(slot)}
-                    </Badge>
-                  ))
-                ) : (
-                  <Badge tone="warn">Unknown slot</Badge>
-                )}
-              </div>
-            </div>
-            <BaseDialog.Close
-              aria-label="Close"
-              className="text-text-muted hover:text-text shrink-0"
-            >
-              <X className="w-4 h-4" />
-            </BaseDialog.Close>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4 pb-8 space-y-6 text-sm">
-            {plugin.metadata ? (
-              <>
-                <section data-testid="plugin-purpose">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
-                    Purpose
-                  </h3>
-                  <p className="text-text">{plugin.metadata.purpose}</p>
-                </section>
-
-                <section data-testid="plugin-keeps">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />{' '}
-                    Keeps
-                  </h3>
-                  <p className="text-text">{plugin.metadata.keeps}</p>
-                </section>
-
-                <section data-testid="plugin-drops">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
-                    <XCircle className="w-3.5 h-3.5 text-red-400" /> Drops
-                  </h3>
-                  <p className="text-text">{plugin.metadata.drops}</p>
-                </section>
-
-                <section data-testid="plugin-empty-behavior">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
-                    Empty behavior
-                  </h3>
-                  <p className="text-text">{plugin.metadata.empty_behavior}</p>
-                </section>
-
-                <section data-testid="plugin-examples">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
-                    Examples
-                  </h3>
-                  <ul className="list-disc pl-4 space-y-1 text-text">
-                    {plugin.metadata.examples.map((ex, i) => (
-                      <li key={i}>{ex}</li>
-                    ))}
-                  </ul>
-                </section>
-              </>
-            ) : (
-              <Card>
-                <CardBody>
-                  <p className="text-text-faint italic">
-                    Built by operator. No description was supplied with this
-                    plugin.
-                  </p>
-                </CardBody>
-              </Card>
-            )}
-
-            <section className="pt-4 border-t border-subtle">
-              <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
-                Technicals
-              </h3>
-              <div className="space-y-1.5 text-xs font-mono text-text-faint">
-                {plugin.wire_version !== undefined && (
-                  <div>wire_version: {plugin.wire_version}</div>
-                )}
-                <div>sha256: {plugin.sha256_hex.slice(0, 16)}...</div>
-                <div className="flex items-center gap-2">
-                  id: {plugin.id}
-                  <button
-                    type="button"
-                    aria-label="Copy plugin id"
-                    className="hover:text-text"
-                    onClick={() => copy(plugin.id, 'Plugin ID')}
-                  >
-                    <Copy className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
+    <Drawer
+      open={open}
+      onOpenChange={onOpenChange}
+      width="lg"
+      title={plugin.name}
+      description={
+        <span className="flex items-center gap-2 flex-wrap mt-1">
+          {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+          {plugin.supported_slots && plugin.supported_slots.length > 0 ? (
+            plugin.supported_slots.map((slot) => (
+              <Badge key={slot}>{slotLabel(slot)}</Badge>
+            ))
+          ) : (
+            <Badge tone="warn">Unknown slot</Badge>
+          )}
+        </span>
+      }
+    >
+      <div className="p-4 pb-8 space-y-6 text-body-sm text-text">
+        {plugin.metadata ? (
+          <>
+            <section data-testid="plugin-purpose">
+              <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>Purpose</h3>
+              <p>{plugin.metadata.purpose}</p>
             </section>
-          </div>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+
+            <section data-testid="plugin-keeps">
+              <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>
+                <CheckCircle2
+                  className="w-3.5 h-3.5 text-success-text"
+                  aria-hidden="true"
+                />{' '}
+                Keeps
+              </h3>
+              <p>{plugin.metadata.keeps}</p>
+            </section>
+
+            <section data-testid="plugin-drops">
+              <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>
+                <XCircle
+                  className="w-3.5 h-3.5 text-danger-text"
+                  aria-hidden="true"
+                />{' '}
+                Drops
+              </h3>
+              <p>{plugin.metadata.drops}</p>
+            </section>
+
+            <section data-testid="plugin-empty-behavior">
+              <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>Empty behavior</h3>
+              <p>{plugin.metadata.empty_behavior}</p>
+            </section>
+
+            <section data-testid="plugin-examples">
+              <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>Examples</h3>
+              <ul className="list-disc pl-4 space-y-1">
+                {plugin.metadata.examples.map((ex, i) => (
+                  <li key={i}>{ex}</li>
+                ))}
+              </ul>
+            </section>
+          </>
+        ) : (
+          <p className="text-text-muted">
+            Built by operator. No description was supplied with this plugin.
+          </p>
+        )}
+
+        <section className="pt-6 border-t border-row">
+          <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>Technical details</h3>
+          <dl className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5">
+            {plugin.wire_version !== undefined && (
+              <>
+                <dt className="text-label text-text-muted">Wire version</dt>
+                <dd className="tabular-nums">{plugin.wire_version}</dd>
+              </>
+            )}
+            <dt className="text-label text-text-muted">SHA-256</dt>
+            <dd className="font-mono text-data text-text-muted truncate">
+              {plugin.sha256_hex.slice(0, 16)}…
+            </dd>
+            <dt className="text-label text-text-muted">Plugin ID</dt>
+            <dd className="flex min-w-0 items-center gap-1">
+              <span className="font-mono text-data text-text-muted truncate">
+                {plugin.id}
+              </span>
+              <IconButton
+                label="Copy plugin id"
+                onClick={() => copy(plugin.id, 'Plugin ID')}
+              >
+                <Copy className="w-3 h-3" aria-hidden="true" />
+              </IconButton>
+            </dd>
+          </dl>
+        </section>
+      </div>
+    </Drawer>
   );
 }
 
@@ -1351,76 +1432,59 @@ function TerminalStrategyRadioGroup({
   return (
     <div className="space-y-2">
       <BaseRadioGroup
+        aria-label="When multiple upstreams qualify, pick"
         aria-busy={isPending}
         aria-disabled={disabled}
         className="grid grid-cols-1 sm:grid-cols-2 gap-3"
         name={name}
         onValueChange={onSelect}
-        render={<ul />}
         value={value}
       >
         {TERMINAL_STRATEGY_OPTIONS.map((opt) => {
           const isActive = value === opt.value;
           const isMutating = isPending && pendingValue === opt.value;
           return (
-            <li
-              key={opt.value}
-              role="radio"
-              aria-checked={isActive}
-              className="h-full"
-            >
+            // Base UI's Radio.Root is the radio; the wrapper stays neutral so
+            // assistive tech does not announce each option twice.
+            <div key={opt.value} className="h-full">
               <label
                 className={cx(
-                  'flex items-start gap-3 p-3 border rounded-md transition-colors h-full',
+                  'flex items-start gap-3 p-3 border rounded-sm transition-colors h-full',
                   isActive
-                    ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                    : 'border-subtle hover:bg-overlay-3',
+                    ? 'border-accent/60 bg-accent-dim'
+                    : 'border-subtle hover:bg-overlay-2',
                   isPending
                     ? 'cursor-progress'
                     : disabled
                       ? 'cursor-not-allowed'
                       : 'cursor-pointer',
-                  disabled && !isMutating && 'pointer-events-none opacity-50',
+                  disabled && !isMutating && 'pointer-events-none opacity-40',
                 )}
               >
                 <BaseRadio.Root
-                  className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+                  className="mt-0.5 flex items-center justify-center w-4 h-4 shrink-0"
                   disabled={disabled}
                   value={opt.value}
                 >
-                  {isMutating ? (
-                    <Spinner className="w-3 h-3 text-accent" />
-                  ) : (
-                    <>
-                      <BaseRadio.Indicator className="status-dot ok" />
-                      <span
-                        className={cx(
-                          'status-dot neutral',
-                          isActive && 'hidden!',
-                        )}
-                      />
-                    </>
-                  )}
+                  <RadioMark isMutating={isMutating} />
                 </BaseRadio.Root>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-sm truncate">
-                      {opt.name}
-                    </span>
+                  <div className="text-body-sm font-medium text-text truncate">
+                    {opt.name}
                   </div>
-                  <div className="text-xs text-text-faint mt-0.5">
+                  <div className="text-caption text-text-faint mt-0.5">
                     {opt.desc}
                   </div>
                 </div>
               </label>
-            </li>
+            </div>
           );
         })}
       </BaseRadioGroup>
       {isPending && (
         <p
           role="status"
-          className="flex items-center gap-2 text-xs text-text-faint"
+          className="flex items-center gap-2 text-caption text-text-faint"
         >
           <Spinner className="w-3 h-3" />
           Updating strategy...
@@ -1497,27 +1561,77 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
     (deletingEntryId !== null &&
       deletingEntryId === subscriptionPreferenceEntry?.id);
 
+  // Both router controls apply immediately; the toast's Undo re-applies the
+  // previous value through the same mutation, against the revision the
+  // forward write returned.
   const toggleSubscriptionPreference = () => {
     if (routerWriteBlocked) return;
     if (subscriptionPreferenceEntry) {
-      del.mutate({
-        id: subscriptionPreferenceEntry.id,
-        revision: subscriptionPreferenceEntry.revision,
-      });
+      const removed = subscriptionPreferenceEntry;
+      del.mutate(
+        { id: removed.id, revision: removed.revision },
+        {
+          onSuccess: () =>
+            undoToast({
+              message: 'Keep prompt cache warm turned off',
+              onUndo: () =>
+                insert.mutate(
+                  {
+                    pid: principalId,
+                    body: {
+                      slot,
+                      wasm_registry_id: removed.wasm_registry_id,
+                      order: removed.order,
+                      config: removed.config,
+                      sse_per_event: removed.sse_per_event,
+                      batched_events_per_flush:
+                        removed.batched_events_per_flush,
+                      batched_flush_ms: removed.batched_flush_ms,
+                    },
+                  },
+                  {
+                    onSuccess: () =>
+                      toast.success('Keep prompt cache warm restored'),
+                  },
+                ),
+            }),
+        },
+      );
       return;
     }
     if (!subscriptionPreferencePlugin) return;
-    insert.mutate({
-      pid: principalId,
-      body: {
-        slot,
-        wasm_registry_id: subscriptionPreferencePlugin.id,
-        order: 0,
+    insert.mutate(
+      {
+        pid: principalId,
+        body: {
+          slot,
+          wasm_registry_id: subscriptionPreferencePlugin.id,
+          order: 0,
+        },
       },
-    });
+      {
+        onSuccess: (created) =>
+          undoToast({
+            message: 'Keep prompt cache warm turned on',
+            onUndo: () =>
+              del.mutate(
+                { id: created.id, revision: created.revision },
+                {
+                  onSuccess: () =>
+                    toast.success('Keep prompt cache warm turned off'),
+                },
+              ),
+          }),
+      },
+    );
   };
   const setStrategy = (strategy: string) => {
     if (!terminalStrategy.data || routerWriteBlocked) return;
+    const previous = terminalStrategy.data.strategy;
+    const [nextName, previousName] = [strategy, previous].map(
+      (value) =>
+        TERMINAL_STRATEGY_OPTIONS.find((o) => o.value === value)?.name ?? value,
+    );
     updateTerminalStrategy.mutate(
       {
         id: principalId,
@@ -1525,7 +1639,24 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
         revision: terminalStrategy.data.revision,
       },
       {
-        onSuccess: () => toast.success('Terminal strategy updated'),
+        onSuccess: (updated) =>
+          undoToast({
+            message: `Terminal strategy set to ${nextName}`,
+            onUndo: () =>
+              updateTerminalStrategy.mutate(
+                {
+                  id: principalId,
+                  strategy: previous,
+                  revision: updated.revision,
+                },
+                {
+                  onSuccess: () =>
+                    toast.success(
+                      `Terminal strategy restored to ${previousName}`,
+                    ),
+                },
+              ),
+          }),
       },
     );
   };
@@ -1602,7 +1733,10 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}>
+    <Card
+      id={PRINCIPAL_ROUTER_ANCHOR}
+      className={cx(PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router, 'scroll-mt-4')}
+    >
       <CardHeader
         title="Router"
         subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
@@ -1617,7 +1751,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             }
           }}
         >
-          <BaseTabs.List className="flex items-center gap-1 w-fit mt-3">
+          <BaseTabs.List className="flex items-center w-fit mt-2">
             <Hint
               label={
                 isComplex
@@ -1629,7 +1763,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
               <BaseTabs.Tab
                 aria-disabled={isComplex}
                 className={cx(
-                  'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors border-transparent text-text-faint hover:text-text data-[active]:border-[color:var(--color-accent)] data-[active]:text-[color:var(--color-text)]',
+                  ROUTER_TAB_CLASS,
                   isComplex && 'opacity-50 cursor-not-allowed',
                 )}
                 value="basic"
@@ -1637,40 +1771,39 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 Basic
               </BaseTabs.Tab>
             </Hint>
-            <BaseTabs.Tab
-              className={cx(
-                'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors border-transparent text-text-faint hover:text-text data-[active]:border-[color:var(--color-accent)] data-[active]:text-[color:var(--color-text)]',
-              )}
-              value="advanced"
-            >
+            <BaseTabs.Tab className={ROUTER_TAB_CLASS} value="advanced">
               Advanced
             </BaseTabs.Tab>
           </BaseTabs.List>
         </BaseTabs.Root>
         {showMobileNotice && (
-          <div className="absolute left-4 top-full mt-2 z-10 text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-sm px-3 py-2 text-xs shadow-lg flex items-start gap-2 max-w-xs">
-            <span>
+          <div
+            role="status"
+            className="absolute left-4 top-full mt-2 z-10 text-warn-text bg-bg-sub border border-subtle-strong rounded-md pl-3 py-1 pr-1 text-caption shadow-overlay flex items-start gap-2 max-w-xs"
+          >
+            <span className="py-1">
               Basic requires a router chain containing only
               subscription-preference. Open Advanced to edit the full chain.
             </span>
-            <button
+            <IconButton
+              label="Dismiss"
+              className="shrink-0"
               onClick={() => setShowMobileNotice(false)}
-              className="text-amber-300 hover:text-amber-100 shrink-0"
             >
-              &times;
-            </button>
+              <X className="w-3.5 h-3.5" aria-hidden="true" />
+            </IconButton>
           </div>
         )}
       </div>
       <CardBody>
         {activeTab === 'basic' && (
           <div role="tabpanel" className="space-y-5">
-            <div className="flex items-center justify-between p-3 border border-subtle rounded-sm bg-overlay-1">
+            <div className="well flex items-center justify-between gap-4 p-3">
               <div>
-                <div className="text-sm font-medium text-text">
+                <div className="text-body-sm font-medium text-text">
                   Keep prompt cache warm by reusing upstreams
                 </div>
-                <div className="text-xs text-text-faint">
+                <div className="mt-0.5 text-caption text-text-faint">
                   Requests with similar prompts get routed to the upstream that
                   already served them, so the prompt cache hits stay high.
                 </div>
@@ -1680,7 +1813,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   <span
                     role="status"
                     aria-live="polite"
-                    className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                    className="inline-flex items-center gap-1.5 text-caption text-text-muted"
                   >
                     <Spinner className="w-3 h-3 text-accent" />
                     {hasSubscriptionPreference
@@ -1688,38 +1821,20 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                       : 'Turning on...'}
                   </span>
                 ) : null}
-                <BaseSwitch.Root
+                <ToggleSwitch
+                  variant="compact"
+                  role="switch"
+                  aria-label="Keep prompt cache warm by reusing upstreams"
                   checked={hasSubscriptionPreference}
-                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
-                  nativeButton
-                  onCheckedChange={() => toggleSubscriptionPreference()}
-                  render={<button type="button" />}
+                  onChange={toggleSubscriptionPreference}
                   aria-busy={subscriptionPreferencePending || undefined}
                   disabled={isChainMetadataLoading || routerWriteBlocked}
-                >
-                  <div
-                    className={cx(
-                      'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
-                      hasSubscriptionPreference
-                        ? 'bg-emerald-500 border-emerald-500'
-                        : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
-                    )}
-                  >
-                    <BaseSwitch.Thumb
-                      className={cx(
-                        'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                        hasSubscriptionPreference
-                          ? 'translate-x-4'
-                          : 'translate-x-0.5',
-                      )}
-                    />
-                  </div>
-                </BaseSwitch.Root>
+                />
               </div>
             </div>
 
             <div>
-              <div className="text-sm font-medium text-text mb-3">
+              <div className="text-body-sm font-medium text-text mb-2">
                 When multiple upstreams qualify, pick
               </div>
               <TerminalStrategyRadioGroup
@@ -1737,9 +1852,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
         {activeTab === 'advanced' && (
           <div role="tabpanel" className="space-y-4">
             {entries.length === 0 && (
-              <div className="p-4 border border-subtle rounded-sm bg-overlay-1 text-center mb-4">
-                <p className="text-sm text-text mb-1">No filters yet.</p>
-                <p className="text-xs text-text-faint">
+              <div className="well px-4 py-6 text-center">
+                <p className="text-body-sm text-text mb-1">No filters yet.</p>
+                <p className="text-caption text-text-faint">
                   Incoming requests will go straight to the terminal step. Add a
                   filter to narrow candidates by some property (cache prefix,
                   cost, region, ...).
@@ -1750,7 +1865,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             {isChainBusy && (
               <div
                 role="status"
-                className="flex items-center gap-2 text-xs text-text-faint"
+                className="flex items-center gap-2 text-caption text-text-faint"
               >
                 <Spinner className="w-3 h-3" />
                 {insert.isPending
@@ -1785,23 +1900,23 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         </li>
                       )}
                       <li
-                        className="flex items-center gap-3 p-3 border border-subtle rounded-sm bg-overlay-1"
+                        className="well flex items-center gap-3 p-3"
                         data-key={e.id}
                       >
-                        <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0">
+                        <div className="text-caption tabular-nums text-text-faint w-12 shrink-0">
                           Step {idx + 1}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              className="text-sm font-medium text-text truncate hover:underline"
+                              className="text-body-sm font-medium text-text truncate hover:underline"
                               onClick={() => setDetailPlugin(reg ?? null)}
                             >
                               {reg?.name ?? e.wasm_registry_id}
                             </button>
                           </div>
-                          <div className="text-xs text-text-faint truncate mt-0.5">
+                          <div className="text-caption text-text-faint truncate mt-0.5">
                             {reg?.metadata?.purpose ??
                               'User-uploaded filter (no description supplied).'}
                           </div>
@@ -1813,7 +1928,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
                             disabled={idx === 0 || routerWriteBlocked}
                           >
-                            <ArrowUp className="w-4 h-4" />
+                            <ArrowUp className="w-3.5 h-3.5" />
                           </button>
                           <button
                             aria-label="Move filter down"
@@ -1823,18 +1938,18 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                               idx === entries.length - 1 || routerWriteBlocked
                             }
                           >
-                            <ArrowDown className="w-4 h-4" />
+                            <ArrowDown className="w-3.5 h-3.5" />
                           </button>
                           <button
                             aria-label="Remove filter"
                             onClick={() => removeFilter(e.id, e.revision)}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-danger-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
                             disabled={routerWriteBlocked}
                           >
                             {deletingEntryId === e.id ? (
-                              <Spinner className="w-4 h-4 text-red-400" />
+                              <Spinner className="w-3.5 h-3.5 text-danger-text" />
                             ) : (
-                              <Trash2 className="w-4 h-4" />
+                              <Trash2 className="w-3.5 h-3.5" />
                             )}
                           </button>
                         </div>
@@ -1859,7 +1974,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   render={
                     <li
                       className={cx(
-                        'flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 transition-colors',
+                        'flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm transition-colors',
                         isChainBusy
                           ? 'opacity-50 cursor-progress'
                           : principalWritePending
@@ -1874,35 +1989,37 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   {insert.isPending ? (
                     <div className="flex items-center gap-2 text-text-muted">
                       <Spinner className="w-4 h-4" />
-                      <span className="text-sm font-medium">Adding...</span>
+                      <span className="text-body-sm font-medium">
+                        Adding...
+                      </span>
                     </div>
                   ) : (
                     <div className="flex items-center gap-2 text-text-muted hover:text-text">
                       <Plus className="w-4 h-4" />
-                      <span className="text-sm font-medium">Add filter</span>
+                      <span className="text-body-sm font-medium">
+                        Add filter
+                      </span>
                     </div>
                   )}
                 </BasePopover.Trigger>
               </ul>
 
-              <div className="flex flex-col gap-3 p-3 border border-subtle border-l-2 border-l-accent rounded-sm bg-overlay-1 mt-4">
+              <div className="well flex flex-col gap-3 p-3 mt-4">
                 <div className="flex items-center gap-3">
-                  <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0 flex items-center gap-1">
-                    <ChevronDown className="w-3 h-3" />
+                  <div className="text-caption text-text-faint w-12 shrink-0 flex items-center gap-1">
+                    <ChevronDown className="w-3 h-3" aria-hidden="true" />
                     Final
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-text truncate">
-                        Terminal step
-                      </span>
+                    <div className="text-body-sm font-medium text-text truncate">
+                      Terminal step
                     </div>
-                    <div className="text-xs text-text-faint truncate mt-0.5">
+                    <div className="text-caption text-text-faint truncate mt-0.5">
                       Picks the upstream that will serve the request.
                     </div>
                   </div>
                 </div>
-                <div className="pl-11">
+                <div className="sm:pl-15">
                   <TerminalStrategyRadioGroup
                     name="term-strategy"
                     value={strategy}
@@ -1920,7 +2037,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   sideOffset={4}
                 >
                   <BasePopover.Popup
-                    className="w-64 bg-bg-sub border border-subtle rounded-sm shadow-lg z-50 py-1"
+                    className="glass-strong w-64 rounded-md z-50 p-1"
                     onClick={(e) => e.stopPropagation()}
                   >
                     {registry.data?.entries
@@ -1936,12 +2053,12 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                           <button
                             key={p.id}
                             className={cx(
-                              'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
+                              'w-full text-left px-2 py-1.5 rounded-sm text-body-sm flex flex-col gap-0.5',
                               isInserting
                                 ? 'cursor-progress'
                                 : disabled
                                   ? 'opacity-50 cursor-not-allowed'
-                                  : 'hover:bg-overlay-3',
+                                  : 'hover:bg-overlay-5',
                             )}
                             disabled={disabled}
                             onClick={() => addFilter(p.id)}
@@ -1953,12 +2070,12 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                               {isInserting ? (
                                 <Spinner className="w-3 h-3 text-text-faint" />
                               ) : inChain ? (
-                                <span className="text-[10px] text-text-faint">
+                                <span className="text-caption text-text-faint">
                                   Already in chain
                                 </span>
                               ) : null}
                             </div>
-                            <span className="text-xs text-text-faint truncate">
+                            <span className="text-caption text-text-faint truncate">
                               {p.metadata?.purpose ?? 'Custom filter'}
                             </span>
                           </button>
@@ -2073,14 +2190,14 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}>
       <CardHeader
         title={
-          <div className="flex items-center gap-2">
+          <span className="flex items-center gap-2">
             Shape
             {hasMultiple && (
               <Hint label="Database invariant violated: multiple shape entries detected. Selecting a new option will clear them.">
                 <Badge tone="warn">Multiple entries detected</Badge>
               </Hint>
             )}
-          </div>
+          </span>
         }
         subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
       />
@@ -2102,8 +2219,6 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
             isActive={!activeEntry}
             isMutating={mutatingId === 'none'}
             disabled={shapeWriteBlocked}
-            isNone
-            badge="Off"
           />
           {candidates
             .filter((p) => pluginSupportsSlot(p, 'shape'))
@@ -2193,7 +2308,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
               <span
                 role="status"
                 aria-live="polite"
-                className="inline-flex items-center gap-1.5 text-xs text-text-muted"
+                className="inline-flex items-center gap-1.5 text-caption text-text-muted"
               >
                 <Spinner className="w-3 h-3 text-accent" />
                 Saving order...
@@ -2247,14 +2362,10 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
             </SortableContext>
           </DndContext>
         ) : (
-          <button
-            type="button"
-            disabled={chainBusy}
-            className="w-full border border-dashed border-subtle rounded-sm py-4 text-xs text-text-faint hover:text-text hover:border-[color:var(--color-border-strong)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint disabled:hover:border-subtle"
-            onClick={() => setAddOpen(true)}
-          >
-            + Set {label.toLowerCase()} plugin
-          </button>
+          <p className="py-4 text-center text-body-sm text-text-muted">
+            No {label.toLowerCase()} plugins. Add one to run it on every
+            request.
+          </p>
         )}
 
         <Modal
@@ -2297,21 +2408,16 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
           }
         >
           <Field label="Plugin" required>
-            <select
-              className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+            <Select
+              className="w-full"
               value={selectedPluginId}
               disabled={insert.isPending}
-              onChange={(e) => setSelectedPluginId(e.target.value)}
-            >
-              <option value="">— select —</option>
-              {registry.data?.entries
+              placeholder="Select a plugin"
+              onChange={setSelectedPluginId}
+              options={(registry.data?.entries ?? [])
                 .filter((p) => pluginSupportsSlot(p, 'observability_hook'))
-                .map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-            </select>
+                .map((p) => ({ value: p.id, label: p.name }))}
+            />
           </Field>
         </Modal>
 
@@ -2324,8 +2430,10 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
           description={
             pendingRemove ? (
               <>
-                <span className="font-mono">{pendingRemove.name}</span> will be
-                removed from the {label} chain. You can re-add it later.
+                <span className="font-medium text-text">
+                  {pendingRemove.name}
+                </span>{' '}
+                will be removed from the {label} chain. You can re-add it later.
               </>
             ) : null
           }
@@ -2381,7 +2489,7 @@ function SortableChainItem({
     <li
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-2 p-2 border border-subtle rounded-sm bg-overlay-1"
+      className="well flex items-center gap-2 p-2"
     >
       <button
         type="button"
@@ -2391,31 +2499,34 @@ function SortableChainItem({
         disabled={disabled}
         className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
       >
-        <GripVertical className="w-4 h-4" />
+        <GripVertical className="w-3.5 h-3.5" />
       </button>
-      <Badge tone="mono">#{Math.floor(order)}</Badge>
-      <span className="flex-1 text-sm font-medium truncate">{name}</span>
-      <button
-        type="button"
-        aria-label="Remove plugin"
+      <span className="w-8 text-caption tabular-nums text-text-faint">
+        #{Math.floor(order)}
+      </span>
+      <span className="flex-1 text-body-sm font-medium text-text truncate">
+        {name}
+      </span>
+      <IconButton
+        label={`Remove ${name}`}
         disabled={disabled}
-        className="text-text-faint hover:text-red-400 rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
+        className="hover:text-danger-text"
         onClick={onDelete}
       >
-        <Trash2 className="w-4 h-4" />
-      </button>
+        <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+      </IconButton>
     </li>
   );
 }
 
 const API_KEY_SKELETON_CELL_CLASSES = [
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4',
-  'px-4 w-8',
+  'px-3',
+  'px-3',
+  'px-3',
+  'px-3',
+  'px-3',
+  'px-3',
+  'px-2 w-10',
 ] as const;
 
 const API_KEY_SKELETON_CLASSES = [
@@ -2490,7 +2601,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
   return (
     <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
       <CardHeader
-        title="API Keys"
+        title="API keys"
         subtitle="Authenticates as this DB principal; routing selects a DB upstream"
         action={
           <Button
@@ -2498,7 +2609,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
             iconLeft={<KeyRound className="w-3 h-3" />}
             onClick={() => setIssueOpen(true)}
           >
-            Issue Key
+            Issue key
           </Button>
         }
       />
@@ -2506,18 +2617,20 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         className="overflow-x-auto min-h-32"
         data-testid="api-keys-table-slot"
       >
-        <table className="w-full min-w-[840px] font-mono text-xs">
-          <thead className="table-header sticky top-0 z-10">
-            <tr className="text-[10px] uppercase tracking-wider">
-              <th className="text-left px-4 py-2">Label</th>
-              <th className="text-left px-4 py-2">Key ID</th>
-              <th className="text-left px-4 py-2">Last 4</th>
-              <th className="text-left px-4 py-2">Issued</th>
-              <th className="text-left px-4 py-2">Last Used</th>
-              <th className="text-left px-4 py-2">Status</th>
-              <th className="px-4 py-2 w-8"></th>
+        <Table className="min-w-[760px] whitespace-nowrap">
+          <TableHead>
+            <tr>
+              <TableHeadCell>Label</TableHeadCell>
+              <TableHeadCell>Key ID</TableHeadCell>
+              <TableHeadCell>Last 4</TableHeadCell>
+              <TableHeadCell>Issued</TableHeadCell>
+              <TableHeadCell>Last used</TableHeadCell>
+              <TableHeadCell>Status</TableHeadCell>
+              <TableHeadCell className="w-10">
+                <span className="sr-only">Actions</span>
+              </TableHeadCell>
             </tr>
-          </thead>
+          </TableHead>
           <tbody>
             {keys.isLoading ? (
               Array.from({ length: 3 }).map((_, i) => (
@@ -2529,71 +2642,82 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                 />
               ))
             ) : keys.data?.keys.length ? (
-              keys.data.keys.map((k) => (
-                <tr key={k.key_id} className="border-b border-row">
-                  <td className="px-4 py-2">{k.label ?? '—'}</td>
-                  <td className="px-4 py-2">{k.key_id}</td>
-                  <td className="px-4 py-2 text-text-faint">
-                    {k.last_4 ? `···${k.last_4}` : '—'}
-                  </td>
-                  <td className="px-4 py-2">
-                    <RelativeTime
-                      compact
-                      ts={new Date(k.issued_at_unix_secs * 1000)}
-                    />
-                  </td>
-                  <td className="px-4 py-2">
-                    <RelativeTime
-                      compact
-                      ts={
-                        k.last_used_at_unix_secs
-                          ? new Date(k.last_used_at_unix_secs * 1000)
-                          : null
-                      }
-                    />
-                  </td>
-                  <td className="px-4 py-2">
-                    {k.revoked_at_unix_secs ? (
-                      <StatusBadge tone="danger" label="Revoked" />
-                    ) : (
-                      <StatusBadge tone="ok" label="Active" />
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-right">
-                    {!k.revoked_at_unix_secs ? (
-                      <button
-                        type="button"
-                        className={cx(
-                          'text-text-faint hover:text-red-400',
-                          'disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-text-faint',
-                        )}
-                        aria-label="Revoke key"
-                        disabled={revokePending}
-                        onClick={() =>
-                          setPendingRevoke({
-                            key_id: k.key_id,
-                            label: k.label ?? k.key_id,
-                          })
+              keys.data.keys.map((k) => {
+                const revoked = Boolean(k.revoked_at_unix_secs);
+                return (
+                  <TableRow
+                    key={k.key_id}
+                    className={revoked ? 'text-text-faint' : undefined}
+                  >
+                    <TableCell>
+                      {k.label ?? <EmptyValue label="No label" />}
+                    </TableCell>
+                    <TableCell mono>{k.key_id}</TableCell>
+                    <TableCell mono className="text-text-muted">
+                      {k.last_4 ? (
+                        `···${k.last_4}`
+                      ) : (
+                        <EmptyValue label="Unknown" />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <RelativeTime
+                        compact
+                        ts={new Date(k.issued_at_unix_secs * 1000)}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <RelativeTime
+                        compact
+                        ts={
+                          k.last_used_at_unix_secs
+                            ? new Date(k.last_used_at_unix_secs * 1000)
+                            : null
                         }
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {revoked ? (
+                        <StatusBadge tone="neutral" label="Revoked" />
+                      ) : (
+                        <EmptyValue label="Active" />
+                      )}
+                    </TableCell>
+                    <TableCell className="py-1 text-right">
+                      {!revoked ? (
+                        <IconButton
+                          className="hover:text-danger-text"
+                          label={`Revoke key ${k.label ? `${k.label} (${k.key_id})` : k.key_id}`}
+                          disabled={revokePending}
+                          onClick={() =>
+                            setPendingRevoke({
+                              key_id: k.key_id,
+                              label: k.label ?? k.key_id,
+                            })
+                          }
+                        >
+                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                        </IconButton>
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                );
+              })
             ) : (
-              <tr className="border-b border-row">
-                <td
-                  colSpan={7}
-                  className="h-24 px-4 py-4 align-top text-xs text-text-faint"
-                >
-                  No API keys issued.
+              <tr>
+                <td colSpan={7} className="px-4 py-8 text-center">
+                  <p className="text-body-sm text-text-muted">
+                    No API keys issued.
+                  </p>
+                  <p className="mt-1 text-caption text-text-faint whitespace-normal">
+                    Issue a key so this principal can send requests through the
+                    proxy. The plaintext is shown once.
+                  </p>
                 </td>
               </tr>
             )}
           </tbody>
-        </table>
+        </Table>
       </div>
 
       {/*
@@ -2645,12 +2769,12 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
       >
         {issued ? (
           <div className="space-y-3">
-            <p className="text-xs text-text-faint">
+            <p className="text-body-sm text-text-muted">
               Copy the key now. It will not be shown again, so this dialog stays
               open until you choose Done.
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all">
+              <code className="well flex-1 p-2 font-mono text-data text-text break-all">
                 {issued.plaintext_key}
               </code>
               <Button
@@ -2687,8 +2811,11 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         description={
           pendingRevoke ? (
             <>
-              Key <span className="font-mono">{pendingRevoke.label}</span> will
-              stop authenticating new requests immediately.
+              Key{' '}
+              <span className="font-medium text-text">
+                {pendingRevoke.label}
+              </span>{' '}
+              will stop authenticating new requests immediately.
             </>
           ) : null
         }
@@ -2774,7 +2901,7 @@ function CreatePrincipalModal({
         </>
       }
     >
-      <div className="space-y-3">
+      <div className="space-y-5">
         <Field label="Name" required>
           <input
             className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
@@ -2785,29 +2912,28 @@ function CreatePrincipalModal({
           />
         </Field>
         <Field label="Kind" required>
-          <select
-            className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+          <Select
+            className="w-full"
             disabled={creating}
             value={kind}
-            onChange={(e) => setKind(e.target.value as typeof kind)}
-          >
-            <option value="human">human</option>
-            <option value="machine">machine</option>
-            <option value="admin">admin</option>
-          </select>
+            onChange={(next) => setKind(next as typeof kind)}
+            options={[
+              { value: 'human', label: 'Human' },
+              { value: 'machine', label: 'Machine' },
+              { value: 'admin', label: 'Admin' },
+            ]}
+          />
         </Field>
         <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] uppercase tracking-wider text-text-faint">
-            Default limits
+          <span className="text-label text-text-muted">Default limits</span>
+          <span className="-mt-1 text-caption text-text-faint">
+            Optional. Applied to every API key issued for this principal.
           </span>
           <LimitsEditor
             value={defaultLimits}
             onChange={setDefaultLimits}
             disabled={creating}
           />
-          <span className="text-[11px] text-text-faint">
-            Optional. Applied to every API key issued for this principal.
-          </span>
         </div>
       </div>
     </Modal>

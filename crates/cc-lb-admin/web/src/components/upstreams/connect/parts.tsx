@@ -2,7 +2,6 @@
 // variants differ in choreography, not in how a single concept is rendered.
 
 import {
-  AlertTriangle,
   Check,
   CheckCircle2,
   Clock,
@@ -22,7 +21,13 @@ import {
   useState,
 } from 'react';
 import { toast } from 'sonner';
-import { Button, cx, INPUT_CLASS } from '../../ui/primitives';
+import {
+  Button,
+  cx,
+  INPUT_CLASS,
+  INPUT_SM_CLASS,
+  Notice,
+} from '../../ui/primitives';
 import {
   matchPasteToSession,
   type ParsedOAuthPaste,
@@ -52,14 +57,16 @@ export function SignInLink({
   className?: string;
 }) {
   const ready = session.phase === 'ready' && session.authorizeUrl;
+  // Mirrors Button's `primary` look and sizes: this anchor is the step's
+  // commit action, rendered as a real link so it is never popup-blocked.
   const sizeClass =
     size === 'lg'
-      ? 'h-11 px-5 text-sm'
+      ? 'h-9 px-4 text-sm gap-2 [&_svg]:size-4'
       : size === 'sm'
-        ? 'h-7 px-2.5 text-xs'
-        : 'h-9 px-3.5 text-sm';
+        ? 'h-7 px-2.5 text-xs gap-1.5 [&_svg]:size-3.5'
+        : 'h-8 px-3 text-[0.8125rem] gap-1.5 [&_svg]:size-3.5';
   const base = cx(
-    'inline-flex items-center justify-center gap-2 rounded-sm font-medium transition-colors select-none',
+    'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
     sizeClass,
     className,
   );
@@ -69,13 +76,13 @@ export function SignInLink({
         aria-disabled="true"
         className={cx(
           base,
-          'bg-overlay-2 text-text-faint border border-subtle cursor-not-allowed',
+          'bg-panel-strong border border-subtle text-text opacity-40 cursor-not-allowed',
         )}
       >
         {session.phase === 'starting' ? (
-          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <Loader2 className="animate-spin" />
         ) : (
-          <ExternalLink className="w-3.5 h-3.5" />
+          <ExternalLink strokeWidth={1.75} />
         )}
         {session.phase === 'starting' ? 'Preparing sign-in…' : label}
       </span>
@@ -89,10 +96,10 @@ export function SignInLink({
       onClick={onOpened}
       className={cx(
         base,
-        'bg-[color:var(--color-accent)] text-black hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--color-accent)]',
+        'bg-text text-bg hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
       )}
     >
-      <ExternalLink className="w-3.5 h-3.5" />
+      <ExternalLink strokeWidth={1.75} />
       {label}
     </a>
   );
@@ -148,7 +155,7 @@ export function CopyLinkButton({
     <button
       type="button"
       title="Open it in the browser profile where the right Claude account is signed in"
-      className="inline-flex items-center gap-1 text-xs text-text-faint underline underline-offset-2 hover:text-text"
+      className="inline-flex items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
       onClick={() => {
         void copyText(authorizeUrl).then((ok) => {
           if (ok) setCopied(true);
@@ -177,7 +184,7 @@ export function SessionTimer({
     return (
       <span
         className={cx(
-          'inline-flex items-center gap-1.5 text-xs text-[color:var(--color-warn-text)]',
+          'inline-flex items-center gap-1.5 text-caption text-warn-text',
           className,
         )}
       >
@@ -200,8 +207,8 @@ export function SessionTimer({
     <span
       title="The sign-in link is valid for 15 minutes."
       className={cx(
-        'inline-flex items-center gap-1.5 text-xs tabular-nums',
-        low ? 'text-[color:var(--color-warn-text)]' : 'text-text-faint',
+        'inline-flex items-center gap-1.5 text-caption tabular-nums',
+        low ? 'text-warn-text' : 'text-text-faint',
         className,
       )}
     >
@@ -219,15 +226,16 @@ export function SessionStartError({
 }) {
   if (session.phase !== 'start_failed') return null;
   return (
-    <div className="rounded-sm border border-[color:var(--color-danger)]/30 bg-[color:var(--color-danger)]/10 p-3 text-xs text-[color:var(--color-danger-text)] flex items-start justify-between gap-3">
-      <span className="flex items-start gap-2">
-        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-        Could not prepare a sign-in link: {session.startError}
-      </span>
-      <Button size="sm" onClick={() => void session.restart()}>
-        Try again
-      </Button>
-    </div>
+    <Notice
+      tone="danger"
+      action={
+        <Button size="sm" onClick={() => void session.restart()}>
+          Try again
+        </Button>
+      }
+    >
+      Could not prepare a sign-in link: {session.startError}
+    </Notice>
   );
 }
 
@@ -287,26 +295,22 @@ export function CodePasteField({
   let feedback: ReactNode = null;
   if (session.completeError) {
     feedback = (
-      <span className="text-[color:var(--color-danger-text)]">
+      <span className="text-danger-text">
         {friendlyCompleteError(session.completeError)}
       </span>
     );
   } else if (parsed.kind === 'invalid') {
-    feedback = (
-      <span className="text-[color:var(--color-warn-text)]">
-        {parsed.reason}
-      </span>
-    );
+    feedback = <span className="text-warn-text">{parsed.reason}</span>;
   } else if (match === 'other_session') {
     feedback = (
-      <span className="text-[color:var(--color-warn-text)]">
+      <span className="text-warn-text">
         This code is from a different or older sign-in. Use the link above again
         and copy the new code.
       </span>
     );
   } else if (parsed.kind === 'code') {
     feedback = (
-      <span className="text-[color:var(--color-success-text)] inline-flex items-center gap-1">
+      <span className="text-success-text inline-flex items-center gap-1">
         <CheckCircle2 className="w-3.5 h-3.5" />
         {match === 'match'
           ? 'Code recognized for this sign-in'
@@ -323,12 +327,7 @@ export function CodePasteField({
           aria-label="Authorization code"
           aria-describedby={feedbackId}
           aria-invalid={invalid || undefined}
-          className={cx(
-            INPUT_CLASS,
-            'font-mono',
-            compact ? 'h-8 text-xs' : '',
-            'disabled:opacity-50 disabled:cursor-not-allowed',
-          )}
+          className={cx(compact ? INPUT_SM_CLASS : INPUT_CLASS, 'font-mono')}
           value={value}
           disabled={disabled}
           spellCheck={false}
@@ -343,7 +342,7 @@ export function CodePasteField({
         />
         <Button
           variant="primary"
-          size={compact ? 'sm' : 'md'}
+          size={compact ? 'md' : 'lg'}
           loading={session.completing}
           disabled={
             disabled || parsed.kind !== 'code' || match === 'other_session'
@@ -359,7 +358,7 @@ export function CodePasteField({
         id={feedbackId}
         role="status"
         aria-live="polite"
-        className="min-h-[16px] text-xs"
+        className="min-h-4 text-caption"
       >
         {feedback}
       </div>
@@ -389,33 +388,29 @@ export function AccountCard({
   tone?: 'neutral' | 'ok' | 'danger';
   className?: string;
 }) {
-  const border =
+  const labelTone =
     tone === 'ok'
-      ? 'border-[color:var(--color-ok)]/40'
+      ? 'text-success-text'
       : tone === 'danger'
-        ? 'border-[color:var(--color-danger)]/50'
-        : 'border-subtle';
+        ? 'text-danger-text'
+        : 'text-text-muted';
   return (
-    <div
-      className={cx('rounded-sm border bg-overlay-1 p-3', border, className)}
-    >
+    <div className={cx('well p-3', className)}>
       {label ? (
-        <div className="text-[11px] uppercase tracking-wide text-text-faint mb-1.5">
-          {label}
-        </div>
+        <div className={cx('mb-1.5 text-label', labelTone)}>{label}</div>
       ) : null}
       {account && (account.email || account.displayName) ? (
         <div className="flex items-center gap-3 min-w-0">
-          <div className="h-8 w-8 shrink-0 rounded-full bg-[color:var(--color-accent-dim)] text-[color:var(--color-accent-text)] flex items-center justify-center text-sm font-medium">
+          <div className="h-8 w-8 shrink-0 rounded-full bg-accent-dim text-accent-text flex items-center justify-center text-body-sm font-medium">
             {(account.displayName ?? account.email ?? '?')
               .slice(0, 1)
               .toUpperCase()}
           </div>
           <div className="min-w-0">
-            <div className="text-sm text-text truncate">
+            <div className="text-body-sm text-text truncate">
               {account.email ?? account.displayName}
             </div>
-            <div className="text-xs text-text-faint truncate">
+            <div className="text-caption text-text-faint truncate">
               {[account.organizationName, planLabel(account)]
                 .filter(Boolean)
                 .join(' · ') || 'Claude account'}
@@ -423,7 +418,9 @@ export function AccountCard({
           </div>
         </div>
       ) : (
-        <div className="text-xs text-text-faint">No account connected yet</div>
+        <div className="text-body-sm text-text-faint">
+          No account connected yet
+        </div>
       )}
     </div>
   );
@@ -447,34 +444,30 @@ export function IdentityVerdictNotice({
 }) {
   if (outcome.verdict === 'same') {
     return (
-      <div className="flex items-center gap-2 text-xs text-[color:var(--color-success-text)]">
-        <ShieldCheck className="w-4 h-4" />
+      <div className="flex items-center gap-2 text-body-sm text-success-text">
+        <ShieldCheck className="size-4" strokeWidth={1.75} />
         Same account as before — nothing else changed.
       </div>
     );
   }
   if (outcome.verdict === 'different') {
     return (
-      <div className="rounded-sm border border-[color:var(--color-danger)]/40 bg-[color:var(--color-danger)]/10 p-3 text-xs text-[color:var(--color-danger-text)] flex flex-col gap-2">
-        <div className="font-medium flex items-center gap-1.5">
-          <AlertTriangle className="w-3.5 h-3.5" />A different Claude account
-          was connected
-        </div>
-        <div className="grid grid-cols-2 gap-2">
+      <Notice tone="danger" title="A different Claude account was connected">
+        <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
           <AccountCard account={outcome.previousAccount} label="Before" />
           <AccountCard account={outcome.account} label="Now" tone="danger" />
         </div>
-        <p className="opacity-90">
+        <p className="mt-2">
           Traffic for this upstream now bills the new account. If this was a
           mistake, sign out of Claude, sign in as the original account, and
           reconnect again.
         </p>
-      </div>
+      </Notice>
     );
   }
   if (outcome.verdict === 'unknown') {
     return (
-      <div className="text-xs text-text-faint">
+      <div className="text-body-sm text-text-muted">
         Connected. Account details are still loading — check the Subscription
         card to confirm which account this is.
       </div>
@@ -492,8 +485,8 @@ export function TokenLifetimeNote({ outcome }: { outcome: ConnectOutcome }) {
         ? null
         : Math.round(outcome.grantedExpiresInSecs / 86_400);
     return (
-      <div className="text-xs text-text-faint flex items-center gap-1.5">
-        <CheckCircle2 className="w-3.5 h-3.5 text-[color:var(--color-ok)]" />
+      <div className="text-caption text-text-faint flex items-center gap-1.5">
+        <CheckCircle2 className="size-3.5 text-ok" strokeWidth={1.75} />
         {days === null
           ? 'Long-lived connection — it needs no renewal until it expires.'
           : `Long-lived connection — no sign-in needed for about ${days} days.`}
@@ -504,10 +497,8 @@ export function TokenLifetimeNote({ outcome }: { outcome: ConnectOutcome }) {
     <div
       data-testid="oauth-long-lived-fallback-notice"
       data-reason={outcome.fallbackReason ?? 'unknown'}
-      className="rounded-sm border border-[color:var(--color-warn)]/30 bg-[color:var(--color-warn)]/10 p-3 text-xs text-[color:var(--color-warn-text)] flex flex-col gap-1"
     >
-      <div className="font-medium">Connected — renews automatically</div>
-      <p className="opacity-90">
+      <Notice tone="warning" title="Connected — renews automatically">
         {outcome.fallbackReason === 'scope_rejected'
           ? 'Claude will not grant a year-long connection for the scopes configured in oauth.anthropic.scopes, '
           : 'Claude did not grant a year-long connection for this account, '}
@@ -515,7 +506,7 @@ export function TokenLifetimeNote({ outcome }: { outcome: ConnectOutcome }) {
         asked to sign in again in about 30 days. When Claude reports when
         renewal ends, cc-lb reminds you beforehand; otherwise a reconnect notice
         appears if renewal stops working.
-      </p>
+      </Notice>
     </div>
   );
 }

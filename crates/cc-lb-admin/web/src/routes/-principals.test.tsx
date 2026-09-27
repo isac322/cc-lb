@@ -7,7 +7,9 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type React from 'react';
+import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
 import {
@@ -113,8 +115,12 @@ function renderPrincipalDetail(
   return renderWithProviders(<Component />);
 }
 
+// Access rows are headed regions inside one card; every other heading names a
+// card. Either way this scopes queries to the controls that heading owns.
 function cardNamed(title: string) {
-  const card = screen.getByRole('heading', { name: title }).closest('.glass');
+  const card = screen
+    .getByRole('heading', { name: title })
+    .closest('section[aria-labelledby], .glass');
   if (!card) throw new Error(`Card not found: ${title}`);
   return within(card as HTMLElement);
 }
@@ -258,7 +264,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
     for (const className of rowGeometryClasses) {
       expect(card.className).toContain(className);
     }
-    expect(card.querySelectorAll('.skeleton')).toHaveLength(5);
+    expect(card.querySelectorAll('.skeleton')).toHaveLength(4);
   }
 
   const listPane = screen.getByText('Principals').closest('aside');
@@ -271,7 +277,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   const detailPane = detailShell.closest('section');
   expect(detailPane?.className).toContain('hidden');
   expect(detailPane?.className).toContain('md:flex');
-  expect(detailShell.querySelectorAll('.glass')).toHaveLength(8);
+  expect(detailShell.querySelectorAll('.glass')).toHaveLength(7);
   expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
 
   loadingView.unmount();
@@ -312,12 +318,15 @@ test('recent requests delegates pending geometry to the structured table', () =>
   expect(screen.getByTestId('recent-requests-subtitle-skeleton')).toBeDefined();
   const slot = screen.getByTestId('recent-requests-table-slot');
   expect(slot.className).toContain('min-h-48');
-  expect(slot.querySelectorAll('thead th')).toHaveLength(9);
+  // Column visibility belongs to RequestEventsTable; the card only needs every
+  // skeleton row to fill the same columns as its header.
+  const columnCount = slot.querySelectorAll('thead th').length;
+  expect(columnCount).toBeGreaterThan(0);
   const rows = slot.querySelectorAll('tbody tr');
   expect(rows).toHaveLength(5);
   for (const row of rows) {
     expect(row.className).toContain('border-b');
-    expect(row.querySelectorAll('td')).toHaveLength(9);
+    expect(row.querySelectorAll('td')).toHaveLength(columnCount);
   }
   expect(container.textContent).not.toContain('—');
 });
@@ -546,17 +555,20 @@ test('empty router chain keeps Basic available and enables subscription-preferen
   expect(
     screen.getByRole('tab', { name: 'Basic' }).getAttribute('aria-disabled'),
   ).toBe('false');
-  const toggle = screen.getByRole('switch');
-  expect(toggle.getAttribute('aria-checked')).toBe('false');
+  const toggle = screen.getByRole('switch') as HTMLInputElement;
+  expect(toggle.checked).toBe(false);
   fireEvent.click(toggle);
-  expect(insertMock).toHaveBeenCalledWith({
-    pid: 'p-1',
-    body: {
-      slot: 'router',
-      wasm_registry_id: 'subscription-preference-id',
-      order: 0,
+  expect(insertMock).toHaveBeenCalledWith(
+    {
+      pid: 'p-1',
+      body: {
+        slot: 'router',
+        wasm_registry_id: 'subscription-preference-id',
+        order: 0,
+      },
     },
-  });
+    expect.anything(),
+  );
 });
 
 test('toggles terminal strategy', async () => {
@@ -617,8 +629,7 @@ test('toggles terminal strategy', async () => {
   ).toBeDefined();
 
   // In Basic tab
-  const randomRadio = screen.getAllByRole('radio', { name: /Random/ })[0];
-  fireEvent.click(randomRadio.querySelector('input')!);
+  fireEvent.click(screen.getByRole('radio', { name: /Random/ }));
 
   await waitFor(() => {
     expect(mutateMock).toHaveBeenCalledWith(
@@ -626,6 +637,20 @@ test('toggles terminal strategy', async () => {
       expect.anything(),
     );
   });
+
+  // Undo re-applies the previous strategy against the revision the forward
+  // write returned.
+  const successToast = vi.spyOn(toast, 'success');
+  mutateMock.mock.calls[0][1].onSuccess({ strategy: 'random', revision: 2 });
+  const action = successToast.mock.calls[0][1]?.action as unknown as {
+    onClick: () => void;
+  };
+  action.onClick();
+  expect(mutateMock).toHaveBeenLastCalledWith(
+    { id: 'p-1', strategy: 'first-pick', revision: 2 },
+    expect.anything(),
+  );
+  successToast.mockRestore();
 });
 
 test('complex chain forces Advanced and disables Basic with tooltip', () => {
@@ -686,7 +711,7 @@ test('complex chain forces Advanced and disables Basic with tooltip', () => {
   expect(basicTab.getAttribute('aria-disabled')).toBe('true');
 
   fireEvent.click(basicTab);
-  expect(screen.getByRole('button', { name: '×' })).toBeDefined();
+  expect(screen.getByRole('button', { name: 'Dismiss' })).toBeDefined();
   expect(
     screen.getByRole('tab', { name: 'Advanced' }).getAttribute('aria-selected'),
   ).toBe('true');
@@ -739,13 +764,13 @@ test('Subscription preference toggle removes the built-in chain entry', async ()
 
   renderWithProviders(<RouterSlotEditor principal={principalFixture()} />);
 
-  const toggle = screen.getByRole('switch');
-  expect(toggle.getAttribute('aria-checked')).toBe('true');
+  const toggle = screen.getByRole('switch') as HTMLInputElement;
+  expect(toggle.checked).toBe(true);
   fireEvent.click(toggle);
-  expect(deleteMock).toHaveBeenCalledWith({
-    id: 'entry-subscription-preference',
-    revision: 2,
-  });
+  expect(deleteMock).toHaveBeenCalledWith(
+    { id: 'entry-subscription-preference', revision: 2 },
+    expect.anything(),
+  );
 });
 
 test('picker disables already-in-chain entries', () => {
@@ -952,23 +977,23 @@ test('isolates allowed-model and default-limit drafts when principal identity ch
   const view = renderWithProviders(<Component />);
 
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Edit' }),
   );
-  fireEvent.change(cardNamed('Allowed Models').getByRole('textbox'), {
+  fireEvent.change(cardNamed('Allowed models').getByRole('textbox'), {
     target: { value: 'a-draft' },
   });
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Edit' }),
   );
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Add limit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Add limit' }),
   );
 
   selectedId = principalB.id;
   view.rerender(withProviders(<Component />));
 
   expect(screen.getByRole('heading', { name: principalB.name })).toBeDefined();
-  const allowedModels = cardNamed('Allowed Models');
+  const allowedModels = cardNamed('Allowed models');
   expect(allowedModels.queryByRole('textbox')).toBeNull();
   fireEvent.click(allowedModels.getByRole('button', { name: 'Edit' }));
   expect(
@@ -976,7 +1001,7 @@ test('isolates allowed-model and default-limit drafts when principal identity ch
   ).toBe('b-server');
   fireEvent.click(allowedModels.getByRole('button', { name: 'Save' }));
 
-  const defaultLimits = cardNamed('Default Limits');
+  const defaultLimits = cardNamed('Default limits');
   fireEvent.click(defaultLimits.getByRole('button', { name: 'Edit' }));
   expect(defaultLimits.getAllByRole('button', { name: 'Remove' })).toHaveLength(
     1,
@@ -1031,16 +1056,16 @@ test('keeps dirty drafts and their starting revision until cancel, then re-enter
   const view = renderWithProviders(<Component />);
 
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Edit' }),
   );
-  fireEvent.change(cardNamed('Allowed Models').getByRole('textbox'), {
+  fireEvent.change(cardNamed('Allowed models').getByRole('textbox'), {
     target: { value: 'operator-draft' },
   });
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Edit' }),
   );
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Add limit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Add limit' }),
   );
 
   current = {
@@ -1051,11 +1076,11 @@ test('keeps dirty drafts and their starting revision until cancel, then re-enter
   };
   view.rerender(withProviders(<Component />));
 
-  const allowedModels = cardNamed('Allowed Models');
+  const allowedModels = cardNamed('Allowed models');
   expect(
     (allowedModels.getByRole('textbox') as HTMLTextAreaElement).value,
   ).toBe('operator-draft');
-  const defaultLimits = cardNamed('Default Limits');
+  const defaultLimits = cardNamed('Default limits');
   expect(defaultLimits.getAllByRole('button', { name: 'Remove' })).toHaveLength(
     2,
   );
@@ -1085,27 +1110,27 @@ test('keeps dirty drafts and their starting revision until cancel, then re-enter
   fireEvent.click(allowedModels.getByRole('button', { name: 'Cancel' }));
   fireEvent.click(defaultLimits.getByRole('button', { name: 'Cancel' }));
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Edit' }),
   );
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Edit' }),
   );
 
   expect(
-    (cardNamed('Allowed Models').getByRole('textbox') as HTMLTextAreaElement)
+    (cardNamed('Allowed models').getByRole('textbox') as HTMLTextAreaElement)
       .value,
   ).toBe('server-new');
   expect(
-    cardNamed('Default Limits').getAllByRole('button', { name: 'Remove' }),
+    cardNamed('Default limits').getAllByRole('button', { name: 'Remove' }),
   ).toHaveLength(1);
 
   setAllowed.mockClear();
   updateLimits.mockClear();
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Save' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Save' }),
   );
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Save' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Save' }),
   );
   expect(setAllowed).toHaveBeenCalledWith(
     {
@@ -1188,13 +1213,36 @@ test('toggle pending locks both principal header mutations', () => {
 
   renderPrincipalDetail();
 
-  const toggle = screen.getByRole('button', { name: 'Disable' });
+  const toggle = screen.getByRole('switch', { name: 'Enabled' });
   expect(toggle.hasAttribute('disabled')).toBe(true);
-  expect(toggle.getAttribute('aria-busy')).toBe('true');
-  expect(toggle.querySelector('svg.animate-spin')).not.toBeNull();
+  expect(screen.getByRole('status').textContent).toContain('Disabling...');
   expect(
     screen.getByRole('button', { name: 'Delete' }).hasAttribute('disabled'),
   ).toBe(true);
+});
+
+test('principal disable waits for confirmation before mutating', () => {
+  const mutate = vi.fn();
+  vi.mocked(queries.useTogglePrincipal).mockReturnValue({
+    mutate,
+    isPending: false,
+  } as never);
+  renderPrincipalDetail(principalFixture({ name: 'isac-max' }));
+
+  fireEvent.click(screen.getByRole('switch', { name: 'Enabled' }));
+  expect(mutate).not.toHaveBeenCalled();
+  let dialog = screen.getByRole('alertdialog', { name: 'Disable principal?' });
+  expect(dialog.textContent).toContain('isac-max');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  expect(mutate).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole('switch', { name: 'Enabled' }));
+  dialog = screen.getByRole('alertdialog', { name: 'Disable principal?' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Disable' }));
+  expect(mutate).toHaveBeenCalledWith(
+    { id: 'p-1', enabled: false, revision: 7 },
+    expect.anything(),
+  );
 });
 
 test('delete pending keeps principal confirmation context and locks actions', () => {
@@ -1204,7 +1252,7 @@ test('delete pending keeps principal confirmation context and locks actions', ()
     isPending: false,
   } as never);
   const view = renderPrincipalDetail();
-  const principalToggle = screen.getByRole('button', { name: 'Disable' });
+  const principalToggle = screen.getByRole('switch', { name: 'Enabled' });
   const principalDelete = screen.getByRole('button', { name: 'Delete' });
 
   fireEvent.click(principalDelete);
@@ -1248,7 +1296,7 @@ test('allowed-model pending locks its draft and shows saving progress', () => {
   const view = renderPrincipalDetail(selectedPrincipal);
 
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Edit' }),
   );
   vi.mocked(queries.useSetAllowedModels).mockReturnValue({
     mutate,
@@ -1256,7 +1304,7 @@ test('allowed-model pending locks its draft and shows saving progress', () => {
   } as never);
   view.rerender(withProviders(<Component />));
 
-  const card = cardNamed('Allowed Models');
+  const card = cardNamed('Allowed models');
   expect(card.getByRole('textbox').hasAttribute('disabled')).toBe(true);
   expect(
     card.getByRole('button', { name: 'Cancel' }).hasAttribute('disabled'),
@@ -1268,7 +1316,7 @@ test('allowed-model pending locks its draft and shows saving progress', () => {
 
   fireEvent.click(card.getByRole('button', { name: 'Cancel' }));
   expect(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Saving...' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Saving...' }),
   ).toBeDefined();
 });
 
@@ -1284,7 +1332,7 @@ test('default-limit pending locks every draft control and shows saving progress'
   const view = renderPrincipalDetail(selectedPrincipal);
 
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Edit' }),
   );
   vi.mocked(queries.useUpdatePrincipalDefaultLimits).mockReturnValue({
     mutate,
@@ -1292,7 +1340,7 @@ test('default-limit pending locks every draft control and shows saving progress'
   } as never);
   view.rerender(withProviders(<Component />));
 
-  const card = cardNamed('Default Limits');
+  const card = cardNamed('Default limits');
   for (const control of [
     card.getByRole('combobox'),
     ...card.getAllByRole('textbox'),
@@ -1321,19 +1369,19 @@ test('principal-wide pending writes lock every principal record control without 
   } as never);
   const view = renderPrincipalDetail(selectedPrincipal);
 
-  const principalToggle = screen.getByRole('button', { name: 'Disable' });
+  const principalToggle = screen.getByRole('switch', { name: 'Enabled' });
   expect(principalToggle.hasAttribute('disabled')).toBe(true);
-  expect(principalToggle.getAttribute('aria-busy')).toBeNull();
+  expect(screen.queryByText(/Enabling\.\.\.|Disabling\.\.\./)).toBeNull();
   expect(
     screen.getByRole('button', { name: 'Delete' }).hasAttribute('disabled'),
   ).toBe(true);
   expect(
-    cardNamed('Allowed Models')
+    cardNamed('Allowed models')
       .getByRole('button', { name: 'Edit' })
       .hasAttribute('disabled'),
   ).toBe(true);
   expect(
-    cardNamed('Default Limits')
+    cardNamed('Default limits')
       .getByRole('button', { name: 'Edit' })
       .hasAttribute('disabled'),
   ).toBe(true);
@@ -1356,10 +1404,10 @@ test('principal-wide pending writes lock every principal record control without 
   vi.mocked(queries.usePrincipalWritePending).mockReturnValue(0);
   view.rerender(withProviders(<Component />));
   fireEvent.click(
-    cardNamed('Allowed Models').getByRole('button', { name: 'Edit' }),
+    cardNamed('Allowed models').getByRole('button', { name: 'Edit' }),
   );
   fireEvent.click(
-    cardNamed('Default Limits').getByRole('button', { name: 'Edit' }),
+    cardNamed('Default limits').getByRole('button', { name: 'Edit' }),
   );
 
   vi.mocked(queries.usePrincipalWritePending).mockReturnValue(1);
@@ -1369,7 +1417,7 @@ test('principal-wide pending writes lock every principal record control without 
   } as never);
   view.rerender(withProviders(<Component />));
 
-  const allowedModels = cardNamed('Allowed Models');
+  const allowedModels = cardNamed('Allowed models');
   expect(allowedModels.getByRole('textbox').hasAttribute('disabled')).toBe(
     true,
   );
@@ -1384,7 +1432,7 @@ test('principal-wide pending writes lock every principal record control without 
   expect(allowedSaving.hasAttribute('disabled')).toBe(true);
   expect(allowedSaving.getAttribute('aria-busy')).toBe('true');
 
-  const defaultLimits = cardNamed('Default Limits');
+  const defaultLimits = cardNamed('Default limits');
   for (const control of [
     defaultLimits.getByRole('combobox'),
     ...defaultLimits.getAllByRole('textbox'),
@@ -1550,7 +1598,7 @@ test('router reorder locks subscription preference while its own write shows pro
   expect(progress.querySelector('svg.animate-spin')).not.toBeNull();
 });
 
-test('observability add pending locks its modal and shows adding progress', () => {
+test('observability add pending locks its modal and shows adding progress', async () => {
   const mutate = vi.fn();
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: {
@@ -1577,10 +1625,11 @@ test('observability add pending locks its modal and shows adding progress', () =
   let dialog = screen.getByRole('dialog', {
     name: 'Add plugin to Observability',
   });
-  fireEvent.change(within(dialog).getByRole('combobox'), {
-    target: { value: 'observability-plugin' },
-  });
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
+  await userEvent.click(within(dialog).getByRole('combobox'));
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Audit Hook' }),
+  );
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
   expect(mutate).toHaveBeenCalledTimes(1);
 
   vi.mocked(queries.useInsertChainEntry).mockReturnValue({
@@ -1662,7 +1711,7 @@ test('observability remove pending preserves confirmation and locks row actions'
     name: 'Drag to reorder',
   });
   const removeButton = observabilityCard.getByRole('button', {
-    name: 'Remove plugin',
+    name: 'Remove Audit Hook',
   });
   fireEvent.click(removeButton);
   let dialog = screen.getByRole('alertdialog', {
@@ -1711,7 +1760,7 @@ test('API-key issue pending locks actions, ignores dismissal, and submits once',
   const view = renderPrincipalDetail(principal);
 
   fireEvent.click(
-    cardNamed('API Keys').getByRole('button', { name: 'Issue Key' }),
+    cardNamed('API keys').getByRole('button', { name: 'Issue key' }),
   );
   let dialog = screen.getByRole('dialog', { name: 'Issue API key' });
   fireEvent.change(within(dialog).getByRole('textbox'), {
@@ -1777,7 +1826,7 @@ test('issued API-key plaintext cannot be dismissed until Done', () => {
   renderPrincipalDetail(principal);
 
   fireEvent.click(
-    cardNamed('API Keys').getByRole('button', { name: 'Issue Key' }),
+    cardNamed('API keys').getByRole('button', { name: 'Issue key' }),
   );
   const issueDialog = screen.getByRole('dialog', { name: 'Issue API key' });
   fireEvent.click(within(issueDialog).getByRole('button', { name: 'Issue' }));
@@ -1825,9 +1874,9 @@ test('API-key revoke pending preserves confirmation and locks row action', () =>
     isPending: false,
   } as never);
   const view = renderPrincipalDetail(principal);
-  const apiKeysCard = cardNamed('API Keys');
+  const apiKeysCard = cardNamed('API keys');
   const revokeButton = apiKeysCard.getByRole('button', {
-    name: 'Revoke key',
+    name: 'Revoke key CI (key-1)',
   });
 
   fireEvent.click(revokeButton);

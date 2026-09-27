@@ -1,4 +1,3 @@
-import { Switch as BaseSwitch } from '@base-ui/react/switch';
 import { HelpCircle, History, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -9,6 +8,7 @@ import {
   usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
+import { undoToast } from '../../../lib/undoToast';
 import {
   Button,
   Card,
@@ -17,6 +17,7 @@ import {
   cx,
   Hint,
   Skeleton,
+  ToggleSwitch,
 } from '../../ui/primitives';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveSessionsDrawer } from './CacheKeepaliveSessionsDrawer';
@@ -98,14 +99,12 @@ function MetricTile({
 
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11px] uppercase tracking-wider text-text-faint">
-        {label}
-      </span>
+      <span className="text-label text-text-faint">{label}</span>
       <div
         data-testid="cache-keepalive-metric-value"
         aria-busy={isLoading}
         className={cx(
-          'flex h-7 items-center text-lg font-medium tabular-nums',
+          'flex h-7 items-center text-xl font-medium tabular-nums',
           valueClassName,
           flash && 'flash-text-active',
         )}
@@ -119,12 +118,12 @@ function MetricTile({
       >
         {isLoading ? <Skeleton className="h-5 w-16" /> : value}
       </div>
-      <span className="text-[11px] text-text-faint">{subtext}</span>
+      <span className="text-caption text-text-faint">{subtext}</span>
     </div>
   );
 }
 
-export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[323px]';
+export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[171px]';
 
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
@@ -141,14 +140,17 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
 
-  const handleToggle = () => {
-    if (toggleLocked) return;
+  const applyEnabled = (
+    nextEnabled: boolean,
+    base: Pick<Principal, 'revision' | 'cache_keepalive'>,
+    offerUndo: boolean,
+  ) => {
     updateSettings.mutate(
       {
         id: principal.id,
-        expected_revision: principal.revision,
+        expected_revision: base.revision,
         cache_keepalive: {
-          ...(principal.cache_keepalive ?? {
+          ...(base.cache_keepalive ?? {
             refresh_lead_time_5m_secs: 30,
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 12,
@@ -159,14 +161,24 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
               treat_end_turn_as_ambiguous: false,
             },
           }),
-          enabled: !enabled,
+          enabled: nextEnabled,
         },
       },
       {
-        onSuccess: () => {
-          toast.success(
-            !enabled ? 'Cache keepalive enabled' : 'Cache keepalive disabled',
-          );
+        onSuccess: (updated) => {
+          const message = nextEnabled
+            ? 'Cache keepalive enabled'
+            : 'Cache keepalive disabled';
+          if (!offerUndo) {
+            toast.success(message);
+            return;
+          }
+          // Undo re-applies the previous value against the revision this
+          // write produced, so it is rejected if someone else wrote since.
+          undoToast({
+            message,
+            onUndo: () => applyEnabled(!nextEnabled, updated, false),
+          });
         },
         onError: (error) => {
           if (error instanceof ApiError && error.status === 412) {
@@ -185,38 +197,47 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
     );
   };
 
+  const handleToggle = () => {
+    if (toggleLocked) return;
+    applyEnabled(!enabled, principal, true);
+  };
+
   const headerTitle = (
-    <div className="flex items-center gap-2">
+    <span className="flex items-center gap-2">
       <span>Cache keepalive</span>
       <CacheKeepaliveHelpHover />
-    </div>
+    </span>
   );
 
   const headerActions = (
-    <div className="flex items-center">
-      <BaseSwitch.Root
-        aria-busy={togglePending || undefined}
+    <div className="flex flex-wrap items-center gap-2">
+      <Button
+        variant="secondary"
+        iconLeft={<History />}
+        size="sm"
+        onClick={() => setSessionsOpen(true)}
+      >
+        Sessions
+      </Button>
+      <Button
+        variant="secondary"
+        iconLeft={<SlidersHorizontal />}
+        size="sm"
+        onClick={() => setSettingsOpen(true)}
+      >
+        Settings
+      </Button>
+      <ToggleSwitch
+        variant="compact"
+        role="switch"
         aria-label="Toggle cache keepalive"
+        aria-busy={togglePending || undefined}
         checked={enabled}
-        className={cx(
-          'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
-          enabled
-            ? 'bg-[color:var(--color-ok)] border-[color:var(--color-ok)]'
-            : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
-        )}
         data-testid="cache-keepalive-switch"
         disabled={toggleLocked}
-        nativeButton
-        onCheckedChange={handleToggle}
-        render={<button type="button" />}
-      >
-        <BaseSwitch.Thumb
-          className={cx(
-            'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-            enabled ? 'translate-x-4' : 'translate-x-0.5',
-          )}
-        />
-      </BaseSwitch.Root>
+        onChange={handleToggle}
+        className="ml-1"
+      />
     </div>
   );
 
@@ -233,9 +254,14 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
           'w-full flex flex-col',
         )}
       >
-        <CardHeader title={headerTitle} action={headerActions} align="center" />
-        <CardBody className="space-y-4 flex-1 flex flex-col">
-          <div className="grid grid-cols-2 gap-4">
+        <CardHeader
+          title={headerTitle}
+          subtitle="Renews the prompt-cache TTL during idle gaps."
+          action={headerActions}
+          align="center"
+        />
+        <CardBody className="flex-1">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <MetricTile
               label="Renewing now"
               isLoading={summaryQ.isLoading}
@@ -277,31 +303,12 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
                     : '$0.00'
               }
               subtext="net, after renewal spend"
-              valueClassName="text-green-400"
+              valueClassName={
+                (summary?.cost_saved ?? 0) > 0
+                  ? 'text-success-text'
+                  : 'text-text'
+              }
             />
-          </div>
-          <p className="text-[11px] text-text-muted">
-            Renews the prompt-cache TTL during idle gaps.
-          </p>
-          <div className="grid grid-cols-2 gap-2 border-t border-subtle pt-3 mt-auto">
-            <Button
-              variant="secondary"
-              fullWidth
-              iconLeft={<History className="h-3 w-3" />}
-              size="sm"
-              onClick={() => setSessionsOpen(true)}
-            >
-              Sessions
-            </Button>
-            <Button
-              variant="ghost"
-              fullWidth
-              iconLeft={<SlidersHorizontal className="h-3 w-3" />}
-              size="sm"
-              onClick={() => setSettingsOpen(true)}
-            >
-              Settings
-            </Button>
           </div>
         </CardBody>
       </Card>

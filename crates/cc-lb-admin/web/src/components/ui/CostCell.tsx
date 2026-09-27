@@ -2,7 +2,6 @@ import { formatCostMicros } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover } from './BreakdownPopover';
 import { cx, Hint } from './primitives';
-import { Sparkline } from './Sparkline';
 import {
   type CostComponentMicros,
   costCategorySegments,
@@ -38,24 +37,31 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
 export function CostCell({
   event,
   isPartial,
+  className,
 }: {
   event: RequestEventWithPhase;
   isPartial?: boolean;
+  className?: string;
 }) {
   const c = costBreakdown(event);
   const segments = costCategorySegments(c.components);
 
   if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
     return (
-      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap text-text-faint">
-        {DASH}
+      <td
+        className={cx(
+          'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+          className,
+        )}
+      >
+        <span className="text-text-faint">{DASH}</span>
       </td>
     );
   }
 
   const popover = (
     <BreakdownPopover
-      title={isPartial ? 'Estimated Cost' : 'Cost'}
+      title={isPartial ? 'Estimated cost' : 'Cost'}
       showZeroRows={true}
       isPartial={isPartial}
       rows={segments.map((segment) => ({
@@ -70,27 +76,23 @@ export function CostCell({
 
   return (
     <td
-      className="p-0 text-right whitespace-nowrap"
+      className={cx(
+        'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+        className,
+      )}
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div
+        <span
           className={cx(
-            'px-3 py-2 cursor-help block',
+            'cursor-help text-text',
             isPartial ? 'animate-pulse' : '',
           )}
         >
-          <div className="text-right tabular-nums leading-tight">
-            {isPartial
-              ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
-              : formatCostMicros(c.total)}
-          </div>
-          {c.hasComponents ? (
-            <Sparkline segments={segments} />
-          ) : (
-            <div className="mt-1 h-1" />
-          )}
-        </div>
+          {isPartial
+            ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
+            : formatCostMicros(c.total)}
+        </span>
       </Hint>
     </td>
   );
