@@ -516,13 +516,20 @@ function categoryNavItems(nav: HTMLElement) {
 }
 
 // Resolves whether a section element effectively renders a top separator.
-// Sections carry `border-t`/`pt-*` with `first:`-resets so the panel's first
-// child sits flush under the card header; a `divide-y` parent would supply
-// the separator instead. Returns what the reader actually sees.
+// Sections carry no chrome of their own: the parent's `space-y-*` gap
+// separates sibling sections. A `border-t`/`pt-*` on the section or a
+// `divide-y` parent would draw a rule or padding instead. An intro line
+// before the first section is not a section, so the first section stays
+// flush. Returns what the reader sees.
 function sectionTopSeparator(
   section: HTMLElement,
-): 'border' | 'padding' | 'divide' | 'none' {
+): 'border' | 'padding' | 'divide' | 'space' | 'none' {
   const isFirst = section.parentElement?.firstElementChild === section;
+  let previous = section.previousElementSibling;
+  while (previous && previous.tagName !== section.tagName) {
+    previous = previous.previousElementSibling;
+  }
+  const isFirstSection = previous === null;
   const tokens = section.className.split(/\s+/);
   const hasToken = (re: RegExp) => tokens.some((token) => re.test(token));
   const firstReset = (suffix: string) =>
@@ -531,14 +538,19 @@ function sectionTopSeparator(
   const padding = hasToken(/^pt-(?!0\b)/);
   if (border && !(isFirst && firstReset(':border-t-0'))) return 'border';
   if (padding && !(isFirst && firstReset(':pt-0'))) return 'padding';
+  const parentTokens =
+    section.parentElement?.className.split(/\s+/) ?? ([] as string[]);
   if (
-    !isFirst &&
-    (section.parentElement?.className
-      .split(/\s+/)
-      .some((token) => /^divide-y/.test(token)) ??
-      false)
+    !isFirstSection &&
+    parentTokens.some((token) => /^divide-y/.test(token))
   ) {
     return 'divide';
+  }
+  if (
+    !isFirstSection &&
+    parentTokens.some((token) => /^space-y-(?!0\b)/.test(token))
+  ) {
+    return 'space';
   }
   return 'none';
 }
@@ -670,7 +682,7 @@ test('settings cold load shows skeletons for version, editor, and history', () =
     CONFIG_EDITOR_CATEGORIES.length,
   );
   expect(within(editorCard).queryByTestId('config-category-nav')).toBeNull();
-  // The body skeleton mirrors the loaded layout: flat divider-separated
+  // The body skeleton mirrors the loaded layout: flat space-separated
   // sections instead of boxed cards.
   const editorSkeleton = screen.getByTestId('config-editor-skeleton');
   const skeletonSections = Array.from(editorSkeleton.children).slice(
@@ -678,9 +690,9 @@ test('settings cold load shows skeletons for version, editor, and history', () =
   ) as HTMLElement[];
   expect(skeletonSections.length).toBeGreaterThan(0);
   skeletonSections.forEach((section, index) => {
-    // Mirrors the loaded contract: the first section is flush (no top
-    // border/padding), later siblings carry the divider.
-    expect(sectionTopSeparator(section)).toBe(index === 0 ? 'none' : 'border');
+    // Mirrors the loaded contract: the first section is flush, later
+    // siblings are separated by space only — no rule, no padding.
+    expect(sectionTopSeparator(section)).toBe(index === 0 ? 'none' : 'space');
     expect(section.className).not.toMatch(/(^|\s)rounded/);
     expect(section.className).not.toMatch(/(^|\s)bg-/);
   });
@@ -939,14 +951,14 @@ test('sections stay flat on the category canvas and keep advanced fields behind 
   );
   expect(cards.length).toBeGreaterThan(1);
   cards.forEach((card, index) => {
-    // The first section sits flush under the card header — no top border or
-    // top padding. Every later sibling is separated by a top divider and
-    // spacing only; the wrapper itself carries no card chrome (rounded
-    // border, tinted background, or inset padding).
+    // The first section sits flush under the card header. Every later
+    // sibling is separated by space only — no top rule or padding; the
+    // wrapper itself carries no card chrome (rounded border, tinted
+    // background, or inset padding).
     expect(
       sectionTopSeparator(card),
       `section ${card.getAttribute('data-config-section')} separator`,
-    ).toBe(index === 0 ? 'none' : 'border');
+    ).toBe(index === 0 ? 'none' : 'space');
     expect(card.className).not.toMatch(/(^|\s)rounded/);
     expect(card.className).not.toMatch(/(^|\s)bg-/);
     expect(card.className).not.toMatch(/(^|\s)p[xy]?-\d/);
@@ -2659,11 +2671,11 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(
     dataOther?.querySelector('[data-config-path="event_bus.mystery_flag"]'),
   ).not.toBeNull();
-  // The unassigned section is flattened like every other section: a subtle
-  // top divider, no card chrome, and no amber warning border — the warning
-  // lives in a badge/text instead. As a non-first sibling it keeps its
-  // separator; the panel's first section carries none.
-  expect(sectionTopSeparator(dataOther as HTMLElement)).toBe('border');
+  // The unassigned section is flattened like every other section: space
+  // above it, no card chrome, and no amber warning border — the warning
+  // lives in a badge/text instead. As a non-first sibling it is separated by
+  // space; the panel's first section is flush.
+  expect(sectionTopSeparator(dataOther as HTMLElement)).toBe('space');
   const dataSections = Array.from(
     dataPanel?.querySelectorAll<HTMLElement>('[data-config-section]') ?? [],
   );

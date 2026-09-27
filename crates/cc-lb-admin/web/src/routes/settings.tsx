@@ -6,10 +6,7 @@ import { ConfigEditorSection } from '../components/settings-config';
 import {
   Button,
   Card,
-  CardBody,
-  CardHeader,
   cx,
-  EmptyState,
   Field,
   PageContainer,
   PageHeader,
@@ -264,13 +261,12 @@ function SettingsPage() {
 
       <VersionCard status={status} />
 
-      <Card>
-        <CardHeader
-          title="Localization"
-          subtitle="Locale and timezone for absolute timestamp display (stored locally in your browser)."
-        />
-        <CardBody>
-          <div className="grid gap-4 md:grid-cols-2">
+      <Section
+        title="Localization"
+        subtitle="Locale and timezone for absolute timestamp display (stored locally in your browser)."
+      >
+        <div>
+          <div className="grid max-w-3xl gap-4 md:grid-cols-2">
             <Field label="Locale">
               <Select
                 value={locale}
@@ -299,8 +295,8 @@ function SettingsPage() {
             </Field>
           </div>
           <LivePreviewClock locale={effective} timezone={effectiveTz} />
-        </CardBody>
-      </Card>
+        </div>
+      </Section>
 
       <ConfigEditorSection
         history={editorHistory}
@@ -316,24 +312,25 @@ function SettingsPage() {
         title="Data & backups"
         subtitle="Export resources stored in the cc-lb database."
       >
-        <Card>
-          <CardHeader
-            headingLevel={3}
-            title="Database resources snapshot"
-            subtitle="Download a JSON snapshot of upstreams, principals, plugins, and chains stored in the database."
-          />
-          <CardBody>
-            <Button
-              iconLeft={<Download className="w-4 h-4" />}
-              loading={downloadingDatabaseSnapshot}
-              onClick={handleDownloadDatabaseSnapshot}
-            >
-              {downloadingDatabaseSnapshot
-                ? 'Downloading...'
-                : 'Download database snapshot'}
-            </Button>
-          </CardBody>
-        </Card>
+        <div>
+          <h3 className="text-title-card text-text">
+            Database resources snapshot
+          </h3>
+          <p className="mt-1 max-w-[70ch] text-body text-text-muted">
+            Download a JSON snapshot of upstreams, principals, plugins, and
+            chains stored in the database.
+          </p>
+          <Button
+            className="mt-4"
+            iconLeft={<Download className="w-4 h-4" />}
+            loading={downloadingDatabaseSnapshot}
+            onClick={handleDownloadDatabaseSnapshot}
+          >
+            {downloadingDatabaseSnapshot
+              ? 'Downloading...'
+              : 'Download database snapshot'}
+          </Button>
+        </div>
       </Section>
     </PageContainer>
   );
@@ -356,9 +353,9 @@ const LivePreviewClock = memo(function LivePreviewClock({
     return () => clearInterval(id);
   }, []);
   return (
-    <p className="mt-3 text-caption text-text-faint">
+    <p className="mt-3 text-body-sm text-text-muted">
       Preview:{' '}
-      <span className="text-text-muted tabular-nums">
+      <span className="text-text tabular-nums">
         {formatAbsolute(now, locale, timezone)}
       </span>
     </p>
@@ -412,8 +409,8 @@ function VersionCard({
     data !== undefined &&
     buildFacts.every((fact) => fact.value === UNKNOWN_BUILD_VALUE);
   return (
-    <Card data-testid="version-card">
-      <CardHeader
+    <div data-testid="version-card">
+      <Section
         title="Version"
         subtitle={
           status.isLoading ? (
@@ -427,47 +424,56 @@ function VersionCard({
             'Version info unavailable'
           )
         }
-      />
-      <CardBody data-testid="version-metadata">
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
-          {status.isLoading ? (
-            VERSION_LOADING_FACTS.map((fact) => (
-              <VersionFact key={fact.label} label={fact.label} wide={fact.wide}>
-                <Skeleton className={cx('h-4 max-w-full', fact.width)} />
+      >
+        <div data-testid="version-metadata">
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
+            {status.isLoading ? (
+              VERSION_LOADING_FACTS.map((fact) => (
+                <VersionFact
+                  key={fact.label}
+                  label={fact.label}
+                  wide={fact.wide}
+                >
+                  <Skeleton className={cx('h-4 max-w-full', fact.width)} />
+                </VersionFact>
+              ))
+            ) : buildUnavailable ? (
+              <VersionFact label="Build" wide>
+                <span className="text-text-muted">
+                  Unavailable — not embedded in this binary
+                </span>
               </VersionFact>
-            ))
-          ) : buildUnavailable ? (
-            <VersionFact label="Build" wide>
-              <span className="text-text-muted">
-                Unavailable — not embedded in this binary
-              </span>
-            </VersionFact>
-          ) : (
-            buildFacts.map((fact) => (
-              <VersionFact key={fact.label} label={fact.label} wide={fact.wide}>
-                {fact.value === UNKNOWN_BUILD_VALUE ? (
-                  <span className="text-text-faint">Unknown</span>
-                ) : (
-                  <span
-                    className={cx(
-                      'break-all',
-                      fact.mono && 'font-mono text-data',
-                    )}
-                  >
-                    {fact.value}
-                  </span>
-                )}
+            ) : (
+              buildFacts.map((fact) => (
+                <VersionFact
+                  key={fact.label}
+                  label={fact.label}
+                  wide={fact.wide}
+                >
+                  {fact.value === UNKNOWN_BUILD_VALUE ? (
+                    <span className="text-text-faint">Unknown</span>
+                  ) : (
+                    <span
+                      className={cx(
+                        'break-all',
+                        fact.mono && 'font-mono text-data',
+                      )}
+                    >
+                      {fact.value}
+                    </span>
+                  )}
+                </VersionFact>
+              ))
+            )}
+            {status.isLoading ? null : (
+              <VersionFact label="Generation">
+                <span className="tabular-nums">{data?.generation ?? '—'}</span>
               </VersionFact>
-            ))
-          )}
-          {status.isLoading ? null : (
-            <VersionFact label="Generation">
-              <span className="tabular-nums">{data?.generation ?? '—'}</span>
-            </VersionFact>
-          )}
-        </dl>
-      </CardBody>
-    </Card>
+            )}
+          </dl>
+        </div>
+      </Section>
+    </div>
   );
 }
 
@@ -490,8 +496,8 @@ function VersionFact({
 }) {
   return (
     <div className={cx('min-w-0', wide && 'col-span-2')}>
-      <dt className="text-caption text-text-faint">{label}</dt>
-      <dd className="mt-0.5 min-h-5 text-body-sm text-text">{children}</dd>
+      <dt className="text-label text-text-muted">{label}</dt>
+      <dd className="mt-0.5 min-h-5 text-body text-text">{children}</dd>
     </div>
   );
 }
@@ -512,64 +518,73 @@ function ConfigHistorySection({
   history: ConfigHistoryQueryResult;
 }) {
   const entries = history.data?.entries ?? [];
+  const empty = !history.isError && !history.isLoading && !entries.length;
   return (
     <Section title="Saved config history" subtitle="Last 20 saved revisions">
-      <Card data-testid="config-history-slot">
-        {history.isError ? (
-          <div
-            role="alert"
-            className="flex flex-col items-center gap-3 px-4 py-6 text-center"
-          >
-            <p className="max-w-md text-body-sm text-text-muted">
-              Saved config history could not be loaded. Restart status may be
-              incomplete until this request succeeds.
-            </p>
-            <Button
-              size="sm"
-              loading={history.isFetching}
-              onClick={() => void history.refetch()}
+      {/* An empty history is a sentence, not a bordered box. */}
+      {empty ? (
+        <p
+          data-testid="config-history-slot"
+          className="text-body text-text-muted"
+        >
+          No saved config history available.
+        </p>
+      ) : (
+        <Card data-testid="config-history-slot">
+          {history.isError ? (
+            <div
+              role="alert"
+              className="flex flex-col items-center gap-3 px-4 py-6 text-center"
             >
-              Retry history
-            </Button>
-          </div>
-        ) : history.isLoading || entries.length ? (
-          <Table>
-            <TableHead sticky={false}>
-              <tr>
-                <TableHeadCell className="w-32">Revision</TableHeadCell>
-                <TableHeadCell>Saved</TableHeadCell>
-              </tr>
-            </TableHead>
-            <tbody>
-              {history.isLoading
-                ? HISTORY_LOADING_ROW_IDS.map((id) => (
-                    <TableRow key={id} dense aria-hidden="true">
-                      <TableCell>
-                        <Skeleton className="h-3 w-8" />
-                      </TableCell>
-                      <TableCell>
-                        <Skeleton className="h-3 w-24 max-w-full" />
-                      </TableCell>
-                    </TableRow>
-                  ))
-                : entries.map((entry) => (
-                    <TableRow key={entry.revision} dense>
-                      <TableCell className="tabular-nums">
-                        {entry.revision}
-                      </TableCell>
-                      <TableCell className="text-text-muted">
-                        <RelativeTime
-                          ts={new Date(entry.saved_at_unix_secs * 1000)}
-                        />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-            </tbody>
-          </Table>
-        ) : (
-          <EmptyState title="No saved config history available." />
-        )}
-      </Card>
+              <p className="max-w-md text-body text-text-muted">
+                Saved config history could not be loaded. Restart status may be
+                incomplete until this request succeeds.
+              </p>
+              <Button
+                size="sm"
+                loading={history.isFetching}
+                onClick={() => void history.refetch()}
+              >
+                Retry history
+              </Button>
+            </div>
+          ) : history.isLoading || entries.length ? (
+            <Table>
+              <TableHead sticky={false}>
+                <tr>
+                  <TableHeadCell className="w-32">Revision</TableHeadCell>
+                  <TableHeadCell>Saved</TableHeadCell>
+                </tr>
+              </TableHead>
+              <tbody>
+                {history.isLoading
+                  ? HISTORY_LOADING_ROW_IDS.map((id) => (
+                      <TableRow key={id} dense aria-hidden="true">
+                        <TableCell>
+                          <Skeleton className="h-3 w-8" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-3 w-24 max-w-full" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : entries.map((entry) => (
+                      <TableRow key={entry.revision} dense>
+                        <TableCell className="tabular-nums">
+                          {entry.revision}
+                        </TableCell>
+                        <TableCell className="text-text-muted">
+                          <RelativeTime
+                            ts={new Date(entry.saved_at_unix_secs * 1000)}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+              </tbody>
+            </Table>
+          ) : null}
+        </Card>
+      )}
     </Section>
   );
 }

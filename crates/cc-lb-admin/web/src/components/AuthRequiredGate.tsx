@@ -23,6 +23,7 @@ import {
   setAdminToken,
 } from '../lib/auth';
 import { AuthSessionProvider } from '../lib/authSession';
+import { BrandMark } from './layout/Sidebar';
 import { Button, Card, cx, INPUT_CLASS, Spinner } from './ui/primitives';
 
 type SessionState =
@@ -150,7 +151,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
       <AuthGateFrame>
         <Card
           aria-label="Checking admin session"
-          className="p-6 flex items-center gap-3 text-body-sm text-text-muted"
+          className="p-6 flex items-center gap-3 text-body text-text-muted"
           role="status"
         >
           <Spinner />
@@ -167,11 +168,13 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
           <h1 className="text-title-section text-text">
             Unable to verify admin session
           </h1>
-          <p className="mt-1 text-body-sm text-text-muted">
+          <p className="mt-1.5 text-body text-text-muted">
             Check the admin service connection, then try again.
           </p>
           <div className="mt-5 flex justify-end">
-            <Button onClick={() => void loadSession(true)}>Retry</Button>
+            <Button variant="primary" onClick={() => void loadSession(true)}>
+              Retry
+            </Button>
           </div>
         </Card>
       </AuthGateFrame>
@@ -185,11 +188,13 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
           <h1 className="text-title-section text-text">
             External authentication required
           </h1>
-          <p className="mt-1 text-body-sm text-text-muted">
+          <p className="mt-1.5 text-body text-text-muted">
             Sign in with the configured identity provider, then try again.
           </p>
           <div className="mt-5 flex justify-end">
-            <Button onClick={() => void loadSession(true)}>Retry</Button>
+            <Button variant="primary" onClick={() => void loadSession(true)}>
+              Retry
+            </Button>
           </div>
         </Card>
       </AuthGateFrame>
@@ -226,7 +231,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
         <h1 className="text-title-section text-text">
           {rejected ? 'Saved admin token was rejected' : 'Admin token required'}
         </h1>
-        <p className="mt-1 text-body-sm text-text-muted">
+        <p className="mt-1.5 text-body text-text-muted">
           {rejected
             ? 'The admin token saved in this browser no longer works. It may have been rotated. Paste the current admin Bearer token to continue.'
             : 'Paste the admin Bearer token to continue.'}
@@ -269,18 +274,17 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * Signed-out frame: the brand mark and name on the ground, then one flat
+ * panel. The page's single primary action lives inside the panel.
+ */
 function AuthGateFrame({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-bg text-text px-4 py-8">
+    <div className="min-h-dvh w-full flex items-center justify-center bg-bg text-text px-4 py-8">
       <div className="w-full max-w-sm">
-        <div className="mb-4 flex items-center justify-center gap-2.5">
-          <div
-            aria-hidden="true"
-            className="flex h-6 w-6 items-center justify-center rounded-sm border border-subtle bg-overlay-6 text-2xs font-semibold text-text"
-          >
-            CC
-          </div>
-          <span className="text-sm font-medium text-text">cc-lb admin</span>
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <BrandMark size={28} />
+          <span className="text-title-section text-text">cc-lb admin</span>
         </div>
         {children}
       </div>

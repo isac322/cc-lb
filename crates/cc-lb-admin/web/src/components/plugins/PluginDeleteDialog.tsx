@@ -49,7 +49,7 @@ export function PluginDeleteDialog({
               will be permanently deleted.
             </span>
             {pendingDelete.refcount > 0 && (
-              <span className="well block p-3 text-body-sm">
+              <span className="well block p-3 text-body">
                 <span className="mb-1 block font-medium text-danger-text">
                   Used in {pendingDelete.refcount} location
                   {pendingDelete.refcount === 1 ? '' : 's'}.

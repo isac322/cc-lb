@@ -109,7 +109,7 @@ function OverviewStrip({
 }) {
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
-    <div className="px-4 py-3 border-b border-subtle shrink-0 flex items-center justify-between gap-3 flex-wrap">
+    <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
       <div className="flex items-baseline gap-2 flex-wrap min-w-0">
         <span className="text-caption text-text-muted">{label}</span>
         {isLoading ? (
@@ -119,7 +119,7 @@ function OverviewStrip({
           </>
         ) : (
           <>
-            <span className="text-body-sm font-medium text-text tabular-nums">
+            <span className="text-body font-medium text-text tabular-nums">
               {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
               fired
             </span>
@@ -155,7 +155,9 @@ function SessionListRow({
 }) {
   const isError = row.error != null;
   const showTicks = row.state !== 'scheduled' && row.state !== 'not_tracked';
-  const tickColor = row.state === 'renewed' ? 'bg-ok' : 'bg-text-muted';
+  // Attempt ticks are a small meter: brand fill for a renewed session, ink
+  // for any other state (the state badge carries the meaning).
+  const tickColor = row.state === 'renewed' ? 'bg-accent' : 'bg-text-muted';
 
   const reasonText =
     isError && row.error === row.reason
@@ -174,7 +176,7 @@ function SessionListRow({
           'w-full min-h-[68px] text-left rounded-sm border-b px-4 py-3 transition-colors',
           'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
           isSelected
-            ? 'bg-accent-dim border-subtle'
+            ? 'bg-accent-dim border-subtle shadow-[inset_3px_0_0_var(--color-accent)]'
             : isError
               ? 'bg-danger/5 border-subtle hover:bg-danger/10'
               : 'border-subtle hover:bg-overlay-2',
@@ -318,7 +320,6 @@ function useFlipReorder(
           child.style.position = 'relative';
           child.style.zIndex = '10';
           child.style.backgroundColor = 'var(--color-bg-sub)';
-          child.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.45)';
 
           requestAnimationFrame(() => {
             child.style.transform = '';
@@ -330,7 +331,6 @@ function useFlipReorder(
             child.style.position = '';
             child.style.zIndex = '';
             child.style.backgroundColor = '';
-            child.style.boxShadow = '';
             child.removeEventListener('transitionend', clearLift);
           };
           child.addEventListener('transitionend', clearLift);
@@ -419,7 +419,7 @@ export function CacheKeepaliveSessionsDrawer({
         />
 
         {enabled ? (
-          <div className="px-4 py-2.5 border-b border-subtle shrink-0">
+          <div className="px-4 pt-1 pb-3 border-b border-subtle shrink-0">
             <Select
               aria-label="Session status"
               size="sm"
@@ -435,11 +435,11 @@ export function CacheKeepaliveSessionsDrawer({
           </div>
         ) : (
           <p
-            className="px-4 py-2.5 border-b border-subtle shrink-0 text-body-sm text-text-muted"
+            className="px-4 pt-1 pb-3 border-b border-subtle shrink-0 text-body text-text-muted"
             data-testid="cache-keepalive-sessions-off"
           >
             Cache keepalive is off for this principal, so no new sessions are
-            tracked. Turn it on from the Cache keepalive card.
+            tracked. Turn it on from the Cache keepalive section.
           </p>
         )}
 

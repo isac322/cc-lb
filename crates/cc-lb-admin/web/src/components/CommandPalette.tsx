@@ -57,13 +57,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             label="Command palette"
             className="glass-strong rounded-md grid grid-rows-[auto_minmax(0,1fr)_auto] max-h-full overflow-hidden"
           >
-            <div className="flex items-center gap-2 px-3 h-11 border-b border-subtle">
+            <div className="flex items-center gap-2 px-4 h-12 border-b border-subtle">
               <Command.Input
                 placeholder="Search resources or run commands…"
                 autoFocus
                 className="flex-1 bg-transparent text-body text-text placeholder:text-text-faint outline-none"
               />
-              <kbd className="hidden md:inline font-sans text-caption text-text-faint bg-overlay-3 px-1.5 rounded-sm">
+              <kbd className="hidden md:inline font-sans text-caption text-text-faint border border-subtle px-1.5 rounded-sm">
                 Esc
               </kbd>
               <BaseDialog.Close
@@ -142,7 +142,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 )}
               </Command.Group>
             </Command.List>
-            <div className="hidden md:flex items-center justify-between px-3 h-9 border-t border-subtle text-caption text-text-faint">
+            <div className="hidden md:flex items-center justify-between px-4 h-9 border-t border-subtle text-caption text-text-faint">
               <div className="flex items-center gap-3">
                 <span className="inline-flex items-center gap-1">
                   <ArrowUpDown className="size-3" aria-hidden="true" /> Navigate

@@ -6,6 +6,7 @@ import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from 'lucide-react';
 import {
   type ButtonHTMLAttributes,
   cloneElement,
+  createContext,
   type FocusEventHandler,
   type HTMLAttributes,
   type InputHTMLAttributes,
@@ -14,6 +15,7 @@ import {
   type MouseEventHandler,
   type PointerEventHandler,
   type ReactNode,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -26,7 +28,7 @@ export function cx(...parts: Array<string | false | null | undefined>): string {
 }
 
 // ─── Card ────────────────────────────────────────────────────────────────────
-/** Self-contained object: panel fill, hairline border, 6px radius. */
+/** Self-contained object: flat panel on the ground, 1px line, 6px radius. */
 export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cx('glass rounded-md', className)} {...rest} />;
 }
@@ -87,8 +89,9 @@ export function CardBody({
 
 // ─── Button ──────────────────────────────────────────────────────────────────
 /**
- * - `primary`: one per view, the commit action (Save, Create, Continue).
- * - `secondary`: the default; toolbars and paired actions.
+ * - `primary`: one per view, the commit action (Save, Create, Continue):
+ *   solid accent with accent-ink text.
+ * - `secondary`: the default; 1px outline on transparent. Toolbars, pairs.
  * - `ghost`: tertiary, in-row links, icon-adjacent actions.
  * - `danger`: outline; page-level Delete / Revoke.
  * - `danger-solid`: only the confirm button of a destructive `ConfirmDialog`.
@@ -109,18 +112,20 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
 }
 const BTN_VARIANTS: Record<ButtonVariant, string> = {
-  primary: 'bg-text text-bg hover:opacity-90',
+  primary:
+    'bg-accent border border-accent text-accent-ink hover:brightness-110',
   secondary:
-    'bg-panel-strong border border-subtle text-text hover:bg-hover-bg hover:border-subtle-strong',
+    'border border-subtle-strong text-text hover:bg-panel-strong disabled:hover:bg-transparent',
   ghost: 'text-text-muted hover:bg-hover-bg hover:text-text',
   danger:
-    'border border-danger/45 text-danger-text hover:bg-danger/10 disabled:hover:bg-transparent',
-  'danger-solid': 'bg-danger-solid text-white hover:bg-danger-solid-hover',
+    'border border-danger text-danger-text hover:bg-danger/10 disabled:hover:bg-transparent',
+  'danger-solid':
+    'bg-danger-solid border border-danger-solid text-white hover:bg-danger-solid-hover',
 };
 const BTN_SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs gap-1.5 [&_svg]:size-3.5',
   md: 'h-8 px-3 text-[0.8125rem] gap-1.5 [&_svg]:size-3.5',
-  lg: 'h-9 px-4 text-sm gap-2 [&_svg]:size-4',
+  lg: 'h-9 px-3.5 text-sm gap-2 [&_svg]:size-4',
 };
 export function Button({
   variant = 'secondary',
@@ -197,9 +202,10 @@ export function IconButton({
 
 // ─── Badge ───────────────────────────────────────────────────────────────────
 /**
- * 20px sentence-case tag, no border. `mono` is for machine strings (model
- * IDs, key IDs) only. At most one status badge per object header; healthy
- * states are shown by omission.
+ * 20px sentence-case tag. `accent` is an outlined chip (the mockup's
+ * "binds pool"); tones are tone/12 fills. `mono` is for machine strings
+ * (model IDs, key IDs) only. At most one status badge per object header;
+ * healthy states are shown by omission.
  */
 export type BadgeTone =
   | 'neutral'
@@ -209,12 +215,12 @@ export type BadgeTone =
   | 'danger'
   | 'mono';
 const BADGE_TONES: Record<BadgeTone, string> = {
-  neutral: 'bg-overlay-4 text-text-muted text-label',
-  accent: 'bg-accent/12 text-accent-text text-label',
-  ok: 'bg-ok/12 text-success-text text-label',
-  warn: 'bg-warn/12 text-warn-text text-label',
-  danger: 'bg-danger/12 text-danger-text text-label',
-  mono: 'bg-overlay-3 text-text font-mono text-data',
+  neutral: 'bg-overlay-5 text-text-muted text-caption font-medium',
+  accent: 'border border-accent text-accent-text text-caption font-medium',
+  ok: 'bg-overlay-5 text-success-text text-caption font-medium',
+  warn: 'bg-warn/12 text-warn-text text-caption font-medium',
+  danger: 'bg-danger/12 text-danger-text text-caption font-medium',
+  mono: 'bg-overlay-4 text-text font-mono text-data',
 };
 export function Badge({
   tone = 'neutral',
@@ -666,8 +672,17 @@ export function Hint({
 
 // ─── PageHeader (the page's single h1) ───────────────────────────────────────
 /**
+ * The shell's top bar shows the current page's name. `AppShell` publishes
+ * it here so a `PageHeader` whose string title matches keeps its h1 for
+ * assistive tech but does not print the same words twice.
+ */
+const ShellPageTitleContext = createContext<string | null>(null);
+export const ShellPageTitleProvider = ShellPageTitleContext.Provider;
+
+/**
  * `text-title-page` h1 with an optional one-line description and actions.
- * Keeps 24px to the first content even inside `PageContainer`'s 32px rhythm.
+ * When the title equals the top bar's page name the h1 is visually hidden
+ * and only the description and actions show.
  */
 export function PageHeader({
   title,
@@ -678,12 +693,30 @@ export function PageHeader({
   description?: ReactNode;
   actions?: ReactNode;
 }) {
+  const shellTitle = useContext(ShellPageTitleContext);
+  const titleInShell = typeof title === 'string' && title === shellTitle;
+  if (titleInShell && !description && !actions) {
+    return (
+      <header className="sr-only">
+        <h1>{title}</h1>
+      </header>
+    );
+  }
   return (
-    <header className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <header className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0">
-        <h1 className="text-title-page text-text">{title}</h1>
+        <h1 className={titleInShell ? 'sr-only' : 'text-title-page text-text'}>
+          {title}
+        </h1>
         {description ? (
-          <div className="mt-1 text-body text-text-muted">{description}</div>
+          <div
+            className={cx(
+              'max-w-[70ch] text-body text-text-muted',
+              titleInShell ? undefined : 'mt-1',
+            )}
+          >
+            {description}
+          </div>
         ) : null}
       </div>
       {actions ? (
@@ -695,8 +728,9 @@ export function PageHeader({
 
 // ─── Section (used in pages) ─────────────────────────────────────────────────
 /**
- * A flat, titled page region: `text-title-section` h2 on the canvas, 12px to
- * its content, no box. The page title comes from `PageHeader`.
+ * A flat, titled page region: sentence-case `text-title-section` h2 on the
+ * ground, 16px to its content, no box. Sections are separated by space,
+ * not rules. The page title comes from `PageHeader`.
  */
 export function Section({
   title,
@@ -712,16 +746,16 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section className={cx('flex flex-col gap-3', className)}>
+    <section className={cx('flex flex-col gap-4', className)}>
       {title || action ? (
-        <header className="flex flex-wrap items-start justify-between gap-3">
+        <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
           <div className="min-w-0">
             {title ? (
               <h2 className="text-title-section text-text">{title}</h2>
             ) : null}
             {subtitle ? (
               <div
-                className="mt-0.5 min-h-4 text-caption text-text-faint"
+                className="mt-0.5 min-h-4 text-body-sm text-text-muted"
                 data-slot="section-subtitle"
               >
                 {subtitle}
@@ -747,7 +781,7 @@ export function PageContainer({
   return (
     <div
       className={cx(
-        'p-4 md:p-6 pb-8 md:pb-12 w-full max-w-[90rem] mx-auto space-y-8',
+        'px-4 pt-5 pb-10 md:px-8 md:pt-8 lg:px-10 lg:pt-10 lg:pb-16 w-full max-w-[90rem] mx-auto space-y-12 lg:space-y-16',
         className,
       )}
     >
@@ -766,9 +800,10 @@ export function FullPage({
   return (
     <div
       className={cx(
-        // Viewport-fit console with an inner scroller from `md`; below it the
-        // page scrolls normally so open filters never squeeze the rows away.
-        'flex flex-col md:h-[calc(100dvh-3rem)] min-h-0 px-4 md:px-6 pt-4 md:pt-6 pb-4 w-full max-w-[120rem] mx-auto',
+        // Viewport-fit console with an inner scroller from `md` (`h-shell`:
+        // viewport minus top bar and, below `lg`, the tab bar); below `md`
+        // the page scrolls normally so open filters never squeeze the rows away.
+        'flex flex-col md:h-shell min-h-0 px-4 md:px-8 pt-4 md:pt-6 pb-4 w-full max-w-[120rem] mx-auto',
         className,
       )}
     >
@@ -944,8 +979,8 @@ export function ToggleSwitch({
         )}
       >
         <input {...rest} type="checkbox" className="peer sr-only" />
-        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-overlay-6 transition-colors peer-checked:border-accent peer-checked:bg-accent/35 peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted shadow-sm transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink" />
       </span>
     </label>
   );
@@ -960,7 +995,7 @@ export interface SegmentedOption<T extends string | number> {
 /** Desktop outer height 32 (md) / 28 (sm); taller segments below `md` for touch. */
 const SEGMENT_SIZES = {
   sm: 'h-8 md:h-[1.375rem] px-2 text-xs',
-  md: 'h-9 md:h-[1.625rem] px-2.5 text-xs',
+  md: 'h-9 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
 } as const;
 
 /**
@@ -1020,7 +1055,7 @@ export function SegmentedControl<T extends string | number>({
       role="radiogroup"
       aria-label={ariaLabel}
       className={cx(
-        'inline-flex items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5',
+        'inline-flex items-center gap-0.5 rounded-sm border border-subtle-strong p-0.5',
         className,
       )}
     >
@@ -1045,8 +1080,8 @@ export function SegmentedControl<T extends string | number>({
               'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
               SEGMENT_SIZES[size],
               selected
-                ? 'bg-overlay-6 text-text'
-                : 'text-text-muted hover:bg-overlay-3 hover:text-text',
+                ? 'bg-panel-strong text-text shadow-[inset_0_0_0_1px_var(--color-border)]'
+                : 'text-text-muted hover:bg-hover-bg hover:text-text',
             )}
           >
             {option.label}
@@ -1141,22 +1176,23 @@ export type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
  * - `inline` (default): a well inside a card — tone/8 fill, no border, 14px
  *   icon. Use it inside the object that owns the problem.
  * - `banner`: the page-level incident line (at most one per page) — tone/8
- *   fill, tone/30 hairline, 16px icon, title + short summary on one line and
- *   at most one action. Collapse lists into a sentence.
+ *   fill, tone/45 1px line with the left edge in the full tone, 16px
+ *   icon, title + short summary and at most one action. Collapse lists
+ *   into a sentence.
  */
 export type NoticeVariant = 'inline' | 'banner';
 
 const NOTICE_FILL: Record<NoticeTone, string> = {
   info: 'bg-overlay-3',
-  success: 'bg-ok/8',
+  success: 'bg-overlay-3',
   warning: 'bg-warn/8',
   danger: 'bg-danger/8',
 };
 const NOTICE_BORDER: Record<NoticeTone, string> = {
-  info: 'border-subtle',
-  success: 'border-ok/30',
-  warning: 'border-warn/30',
-  danger: 'border-danger/30',
+  info: 'border-subtle border-l-text-faint',
+  success: 'border-subtle border-l-text-muted',
+  warning: 'border-warn/45 border-l-warn',
+  danger: 'border-danger/45 border-l-danger',
 };
 // `info` is neutral: there is no blue in the system.
 const NOTICE_ICON: Record<
@@ -1191,10 +1227,10 @@ export function Notice({
   return (
     <div
       className={cx(
-        'flex gap-2.5 text-body-sm text-text-muted',
+        'flex gap-2.5 text-body text-text-muted',
         banner
           ? cx(
-              'flex-wrap items-center rounded-md border px-3 py-2 sm:flex-nowrap',
+              'flex-wrap items-center rounded-md border px-4 py-3 sm:flex-nowrap',
               NOTICE_BORDER[tone],
             )
           : 'flex-col rounded-sm p-3 sm:flex-row sm:items-start',

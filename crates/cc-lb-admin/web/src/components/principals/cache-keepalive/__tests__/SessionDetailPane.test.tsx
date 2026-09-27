@@ -57,8 +57,9 @@ describe('SessionDetailPane', () => {
       'Loading session detail',
     );
 
-    const overview = screen.getByTestId('session-detail-overview-skeleton');
-    expect(overview.className).toContain('p-3');
+    expect(
+      screen.getByTestId('session-detail-overview-skeleton'),
+    ).toBeDefined();
     expect(screen.getByText('Net P&L')).toBeDefined();
 
     const metadata = screen.getByTestId('session-detail-metadata-skeleton');
@@ -69,12 +70,12 @@ describe('SessionDetailPane', () => {
     const turns = screen.getByTestId('session-detail-turns-skeleton');
     expect(turns.className).toContain('mt-2');
     expect(screen.getByText('Message-by-message')).toBeDefined();
-    const turnCards = screen.getAllByTestId('session-detail-turn-skeleton');
-    expect(turnCards).toHaveLength(3);
-    expect(turnCards[0].className).toContain('px-3');
-    expect(turnCards[0].className).toContain('py-2.5');
-    expect(turnCards[1].className).toContain('px-3');
-    expect(turnCards[1].className).toContain('py-2');
+    const turnRows = screen.getAllByTestId('session-detail-turn-skeleton');
+    expect(turnRows).toHaveLength(3);
+    // Skeleton rows share the loaded turn rows' vertical rhythm.
+    for (const row of turnRows) {
+      expect(row.className).toContain('py-2.5');
+    }
 
     expect(container.querySelector('svg.animate-spin')).toBeNull();
   });

@@ -53,12 +53,14 @@ const TONE: Record<
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[color-mix(in_oklab,var(--color-warn)_50%,transparent)]',
   },
+  // A usable reset is news, not a warning: ink and the strong line, no
+  // brand hue (the accent is reserved for gauges and the one primary action).
   limit: {
-    icon: 'text-accent',
-    text: 'text-accent',
-    divider: 'border-accent/40',
-    fill: 'fill-[var(--color-accent-dim)] group-hover/coupon:fill-[var(--color-hover-bg)]',
-    stroke: 'stroke-[color-mix(in_oklab,var(--color-accent)_50%,transparent)]',
+    icon: 'text-text',
+    text: 'text-text',
+    divider: 'border-[color:var(--color-border-strong)]',
+    fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
+    stroke: 'stroke-[var(--color-border-strong)]',
   },
 };
 

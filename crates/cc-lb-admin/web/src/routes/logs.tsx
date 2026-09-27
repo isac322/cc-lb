@@ -818,7 +818,9 @@ function LogsPage() {
           <>
             <BaseToggle
               aria-label="Live tail logs"
-              className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-sm border border-subtle bg-panel-strong text-[0.8125rem] font-medium text-text whitespace-nowrap transition-colors select-none hover:bg-hover-bg hover:border-subtle-strong data-[pressed]:bg-overlay-4 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+              // Same look as the neighbouring md secondary `Button`s; only the
+              // pressed state adds a fill.
+              className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-sm border border-subtle-strong text-[0.8125rem] font-medium text-text whitespace-nowrap transition-colors select-none hover:bg-panel-strong data-[pressed]:bg-panel-strong disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
               onPressedChange={setUserRequestedTailing}
               pressed={effectiveTailing}
               disabled={filters.until_unix_secs != null}
@@ -850,158 +852,160 @@ function LogsPage() {
           </>
         }
       />
-      <Card className="flex-1 flex flex-col min-h-0">
-        <div className="px-4 py-3 border-b border-row flex flex-col gap-3 shrink-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <SegmentedControl<LogsPreset | 'custom'>
-              ariaLabel="Time range preset"
-              value={activePreset ?? 'custom'}
-              options={LOGS_PRESET_OPTIONS}
-              onChange={(preset) =>
-                stripRef.current?.applyPreset(
-                  preset === 'all' || preset === 'custom'
-                    ? null
-                    : LOGS_PRESET_SECONDS[preset],
-                )
-              }
-            />
-            <Button
-              iconLeft={<SlidersHorizontal />}
-              aria-expanded={filtersOpen}
-              aria-controls={filterPanelId}
-              onClick={() => setFiltersOpen((open) => !open)}
-              className={filtersOpen ? 'bg-overlay-4' : undefined}
-            >
-              Filters
-              {panelFilterCount > 0 ? (
-                <span className="tabular-nums text-text-muted">
-                  {panelFilterCount}
-                </span>
-              ) : null}
-            </Button>
-            {filterChips.map((chip) => (
-              <FilterChip
-                key={chip.key}
-                label={chip.label}
-                value={chip.value}
-                onRemove={() => setFilter(chip.key, '')}
-              />
-            ))}
-            {hasCustomRange ? (
-              <FilterChip
-                label="Range"
-                value="Custom"
-                onRemove={() => stripRef.current?.applyPreset(null)}
-              />
-            ) : null}
-            {activeFilterCount > 0 ? (
-              <Button
-                variant="ghost"
-                iconLeft={<X />}
-                onClick={() => navigate({ search: {} })}
-              >
-                Clear
-              </Button>
-            ) : null}
-          </div>
-          <div
-            id={filterPanelId}
-            hidden={!filtersOpen}
-            className="well grid grid-cols-2 gap-3 p-3 md:flex md:flex-wrap md:items-end"
-          >
-            <Field label="Principal">
-              <Select
-                size="sm"
-                value={filters.principal_id ?? ''}
-                options={principalSelectOptions}
-                onChange={(v) => setFilter('principal_id', v)}
-                allLabel="All principals"
-                className={FILTER_CONTROL_WIDTH}
-              />
-            </Field>
-            <Field label="Upstream">
-              <Select
-                size="sm"
-                value={filters.upstream_id ?? ''}
-                options={upstreamSelectOptions}
-                onChange={(v) => setFilter('upstream_id', v)}
-                allLabel="All upstreams"
-                className={FILTER_CONTROL_WIDTH}
-              />
-            </Field>
-            <Field label="Session">
-              <Select
-                size="sm"
-                value={sessionFilter ?? ''}
-                options={sessionSelectOptions}
-                onChange={(v) => setFilter('session', v)}
-                allLabel="All sessions"
-                className={FILTER_CONTROL_WIDTH}
-              />
-            </Field>
-            <Field label="Model">
-              <input
-                className={cx(
-                  INPUT_SM_CLASS,
-                  FILTER_CONTROL_WIDTH,
-                  'font-mono placeholder:font-sans',
-                )}
-                value={modelDraft}
-                onChange={(e) => setModelDraft(e.target.value)}
-                placeholder="Model prefix"
-              />
-            </Field>
-            <Field label="Status">
-              <Select
-                size="sm"
-                value={filters.status ?? ''}
-                options={statusSelectOptions}
-                onChange={(v) => setFilter('status', v)}
-                allLabel="All statuses"
-                className={FILTER_CONTROL_WIDTH}
-              />
-            </Field>
-            <Field label="Kind">
-              <Select
-                size="sm"
-                value={eventKindFilter ?? ''}
-                options={eventKindSelectOptions}
-                onChange={(v) => setFilter('event_kind', v)}
-                allLabel="All kinds"
-                className={FILTER_CONTROL_WIDTH}
-              />
-            </Field>
-            <div
-              role="group"
-              aria-label="Custom range"
-              className="col-span-full flex flex-wrap items-end gap-3 md:basis-full"
-            >
-              <TimeRangeBounds
-                since={filters.since_unix_secs}
-                until={filters.until_unix_secs}
-                onCommit={({ since, until }) => {
-                  navigate({
-                    search: (prev) => ({
-                      ...prev,
-                      since_unix_secs: since,
-                      until_unix_secs: until,
-                    }),
-                  });
-                }}
-              />
-            </div>
-          </div>
-        </div>
-        <div className="px-4 pt-3 pb-1 border-b border-row shrink-0">
-          <LogsTimeStrip
-            handleRef={stripRef}
-            sinceUnixSecs={filters.since_unix_secs}
-            untilUnixSecs={filters.until_unix_secs}
-            historicalFilters={historicalFilters}
-            firstPageEvents={firstPageEvents}
+      {/* Filters and the density strip sit on the ground; only the table
+          keeps a flat surface. */}
+      <div className="flex flex-col gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <SegmentedControl<LogsPreset | 'custom'>
+            ariaLabel="Time range preset"
+            value={activePreset ?? 'custom'}
+            options={LOGS_PRESET_OPTIONS}
+            onChange={(preset) =>
+              stripRef.current?.applyPreset(
+                preset === 'all' || preset === 'custom'
+                  ? null
+                  : LOGS_PRESET_SECONDS[preset],
+              )
+            }
           />
+          <Button
+            iconLeft={<SlidersHorizontal />}
+            aria-expanded={filtersOpen}
+            aria-controls={filterPanelId}
+            onClick={() => setFiltersOpen((open) => !open)}
+            className={filtersOpen ? 'bg-overlay-4' : undefined}
+          >
+            Filters
+            {panelFilterCount > 0 ? (
+              <span className="tabular-nums text-text-muted">
+                {panelFilterCount}
+              </span>
+            ) : null}
+          </Button>
+          {filterChips.map((chip) => (
+            <FilterChip
+              key={chip.key}
+              label={chip.label}
+              value={chip.value}
+              onRemove={() => setFilter(chip.key, '')}
+            />
+          ))}
+          {hasCustomRange ? (
+            <FilterChip
+              label="Range"
+              value="Custom"
+              onRemove={() => stripRef.current?.applyPreset(null)}
+            />
+          ) : null}
+          {activeFilterCount > 0 ? (
+            <Button
+              variant="ghost"
+              iconLeft={<X />}
+              onClick={() => navigate({ search: {} })}
+            >
+              Clear
+            </Button>
+          ) : null}
         </div>
+        <div
+          id={filterPanelId}
+          hidden={!filtersOpen}
+          className="grid grid-cols-2 gap-3 md:flex md:flex-wrap md:items-end"
+        >
+          <Field label="Principal">
+            <Select
+              size="sm"
+              value={filters.principal_id ?? ''}
+              options={principalSelectOptions}
+              onChange={(v) => setFilter('principal_id', v)}
+              allLabel="All principals"
+              className={FILTER_CONTROL_WIDTH}
+            />
+          </Field>
+          <Field label="Upstream">
+            <Select
+              size="sm"
+              value={filters.upstream_id ?? ''}
+              options={upstreamSelectOptions}
+              onChange={(v) => setFilter('upstream_id', v)}
+              allLabel="All upstreams"
+              className={FILTER_CONTROL_WIDTH}
+            />
+          </Field>
+          <Field label="Session">
+            <Select
+              size="sm"
+              value={sessionFilter ?? ''}
+              options={sessionSelectOptions}
+              onChange={(v) => setFilter('session', v)}
+              allLabel="All sessions"
+              className={FILTER_CONTROL_WIDTH}
+            />
+          </Field>
+          <Field label="Model">
+            <input
+              className={cx(
+                INPUT_SM_CLASS,
+                FILTER_CONTROL_WIDTH,
+                'font-mono placeholder:font-sans',
+              )}
+              value={modelDraft}
+              onChange={(e) => setModelDraft(e.target.value)}
+              placeholder="Model prefix"
+            />
+          </Field>
+          <Field label="Status">
+            <Select
+              size="sm"
+              value={filters.status ?? ''}
+              options={statusSelectOptions}
+              onChange={(v) => setFilter('status', v)}
+              allLabel="All statuses"
+              className={FILTER_CONTROL_WIDTH}
+            />
+          </Field>
+          <Field label="Kind">
+            <Select
+              size="sm"
+              value={eventKindFilter ?? ''}
+              options={eventKindSelectOptions}
+              onChange={(v) => setFilter('event_kind', v)}
+              allLabel="All kinds"
+              className={FILTER_CONTROL_WIDTH}
+            />
+          </Field>
+          <div
+            role="group"
+            aria-label="Custom range"
+            className="col-span-full flex flex-wrap items-end gap-3 md:basis-full"
+          >
+            <TimeRangeBounds
+              since={filters.since_unix_secs}
+              until={filters.until_unix_secs}
+              onCommit={({ since, until }) => {
+                navigate({
+                  search: (prev) => ({
+                    ...prev,
+                    since_unix_secs: since,
+                    until_unix_secs: until,
+                  }),
+                });
+              }}
+            />
+          </div>
+        </div>
+      </div>
+      <div className="shrink-0">
+        <LogsTimeStrip
+          handleRef={stripRef}
+          sinceUnixSecs={filters.since_unix_secs}
+          untilUnixSecs={filters.until_unix_secs}
+          historicalFilters={historicalFilters}
+          firstPageEvents={firstPageEvents}
+        />
+      </div>
 
+      <Card className="flex-1 flex flex-col min-h-0">
         <div
           ref={scrollContainerRef}
           className="flex-1 overflow-auto min-h-0 scroll-mt-16"

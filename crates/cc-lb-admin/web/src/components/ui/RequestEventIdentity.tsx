@@ -23,6 +23,26 @@ import { SessionChip } from './SessionChip';
 
 const DASH = '—';
 
+const PRINCIPAL_KIND_LABEL: Record<string, string> = {
+  human: 'Human',
+  machine: 'Machine',
+  admin: 'Admin',
+  api_key: 'API key',
+  o_auth_subject: 'OAuth subject',
+  oauth_subject: 'OAuth subject',
+  internal_key: 'Internal key',
+  workload_identity: 'Workload identity',
+  subscription_bearer: 'Subscription bearer',
+};
+
+/** Sentence-case label for a server principal kind; unknown kinds keep their words. */
+function principalKindLabel(kind: string): string {
+  const known = PRINCIPAL_KIND_LABEL[kind];
+  if (known) return known;
+  const words = kind.replaceAll('_', ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
   if (outcome.type === 'partial') {
     return (
@@ -146,8 +166,8 @@ export function RequestEventIdentity({
                 {principalLabel}
               </span>
               {event.principal_kind ? (
-                <Badge className="shrink-0 capitalize">
-                  {event.principal_kind}
+                <Badge className="shrink-0">
+                  {principalKindLabel(event.principal_kind)}
                 </Badge>
               ) : isDetailPending ? (
                 <Skeleton className="h-5 w-14 shrink-0" />
@@ -460,7 +480,7 @@ function ConfigLink({
 }) {
   const router = useRouter({ warn: false });
   const className =
-    'text-accent-text underline underline-offset-2 hover:text-text';
+    'text-text underline decoration-border-strong underline-offset-2 hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 rounded-sm';
   if (!router) {
     const href = `${to}?selectedId=${encodeURIComponent(search.selectedId)}${hash ? `#${hash}` : ''}`;
     return (

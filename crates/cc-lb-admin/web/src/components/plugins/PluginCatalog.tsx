@@ -7,10 +7,10 @@ import {
   Badge,
   Button,
   Card,
-  CardHeader,
   ConfirmDialog,
   Hint,
   IconButton,
+  Section,
   Skeleton,
   SkeletonRow,
   Spinner,
@@ -96,51 +96,50 @@ export function PluginCatalog({
 
   return (
     <>
-      <Card>
-        <CardHeader
-          title="Plugin library"
-          subtitle={
-            <span
-              className="flex min-h-5 min-w-56 items-center"
-              data-testid="plugin-count-slot"
-            >
-              {reg.isLoading ? (
-                <Skeleton as="span" className="block h-4 w-48" />
-              ) : (
-                <span className="tabular-nums">
-                  {entries.length} available · {unusedRegisteredCount} not used
-                  anywhere
-                </span>
-              )}
-            </span>
-          }
-          action={
-            <>
-              {gcPending ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className="flex items-center gap-2 text-caption text-text-faint"
-                  data-testid="plugin-gc-progress"
-                >
-                  <Spinner className="w-3 h-3" />
-                  Cleaning orphaned uploads — waiting for the server.
-                </span>
-              ) : null}
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={gcPending}
-                loading={gcPending}
-                title="Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used by is 0."
-                onClick={() => setGcConfirmOpen(true)}
+      <Section
+        title="Plugin library"
+        subtitle={
+          <span
+            className="flex min-h-5 min-w-56 items-center"
+            data-testid="plugin-count-slot"
+          >
+            {reg.isLoading ? (
+              <Skeleton as="span" className="block h-4 w-48" />
+            ) : (
+              <span className="tabular-nums">
+                {entries.length} available · {unusedRegisteredCount} not used
+                anywhere
+              </span>
+            )}
+          </span>
+        }
+        action={
+          <div className="flex flex-wrap items-center gap-3">
+            {gcPending ? (
+              <span
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-body-sm text-text-muted"
+                data-testid="plugin-gc-progress"
               >
-                {gcPending ? 'Cleaning...' : 'Clean orphaned uploads'}
-              </Button>
-            </>
-          }
-        />
-        <div className="overflow-x-auto">
+                <Spinner className="w-3 h-3" />
+                Cleaning orphaned uploads — waiting for the server.
+              </span>
+            ) : null}
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={gcPending}
+              loading={gcPending}
+              title="Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used by is 0."
+              onClick={() => setGcConfirmOpen(true)}
+            >
+              {gcPending ? 'Cleaning...' : 'Clean orphaned uploads'}
+            </Button>
+          </div>
+        }
+      >
+        <Card className="overflow-x-auto">
           <Table className="min-w-[960px] table-fixed">
             <colgroup>
               {PLUGIN_COLUMN_WIDTHS.map((className, index) => (
@@ -282,7 +281,7 @@ export function PluginCatalog({
                           <button
                             type="button"
                             aria-label={`Inspect ${p.name}`}
-                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-accent-text transition-colors hover:bg-hover-bg focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:bg-hover-bg hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                             onClick={(e) => {
                               e.stopPropagation();
                               onSelectPlugin(p.id);
@@ -329,8 +328,8 @@ export function PluginCatalog({
               )}
             </tbody>
           </Table>
-        </div>
-      </Card>
+        </Card>
+      </Section>
 
       <PluginDeleteDialog
         pendingDelete={pendingDelete}

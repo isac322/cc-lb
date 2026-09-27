@@ -1,6 +1,6 @@
 import { CheckCircle2, Circle } from 'lucide-react';
 import { usePrincipals, useUpstreams } from '../../lib/queries';
-import { Card, CardHeader, cx } from '../ui/primitives';
+import { cx, Section } from '../ui/primitives';
 import { OnboardingLink, type OnboardingTarget } from './OnboardingLink';
 
 interface Step {
@@ -92,39 +92,38 @@ export function FirstRunChecklist({
   const nextId = steps.find((step) => !step.done)?.id;
 
   return (
-    <Card>
-      <CardHeader
-        title="Set up the pool"
-        subtitle={`${doneCount} of ${steps.length} done. Quota, traffic and the latest requests show up here once the first request goes through.`}
-      />
-      <ol className="divide-y divide-row">
+    <Section
+      title="Set up the pool"
+      subtitle={`${doneCount} of ${steps.length} done. Quota, traffic and the latest requests show up here once the first request goes through.`}
+    >
+      <ol className="flex max-w-3xl flex-col">
         {steps.map((step) => {
           const isNext = step.id === nextId;
           return (
             <li
               key={step.id}
-              className="flex items-start gap-3 px-4 py-3"
+              className="flex items-start gap-3 border-t border-row py-4 first:border-t-0 first:pt-0"
               aria-current={isNext ? 'step' : undefined}
             >
               {step.done ? (
                 <CheckCircle2
-                  className="mt-0.5 w-4 h-4 shrink-0 text-success-text"
+                  className="mt-0.5 w-4 h-4 shrink-0 text-text-muted"
                   aria-hidden="true"
                 />
               ) : (
                 <Circle
                   className={cx(
                     'mt-0.5 w-4 h-4 shrink-0',
-                    isNext ? 'text-accent-text' : 'text-text-faint',
+                    isNext ? 'text-text' : 'text-text-faint',
                   )}
                   aria-hidden="true"
                 />
               )}
-              <div className="min-w-0 flex-1 flex flex-col sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+              <div className="min-w-0 flex-1 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                 <div className="min-w-0">
                   <p
                     className={cx(
-                      'text-body-sm',
+                      'text-body',
                       step.done ? 'text-text-muted' : 'text-text font-medium',
                     )}
                   >
@@ -134,7 +133,7 @@ export function FirstRunChecklist({
                     </span>
                   </p>
                   {step.done ? null : (
-                    <p className="mt-0.5 max-w-prose text-caption text-text-faint">
+                    <p className="mt-0.5 max-w-prose text-body text-text-muted">
                       {step.detail}
                     </p>
                   )}
@@ -151,6 +150,6 @@ export function FirstRunChecklist({
           );
         })}
       </ol>
-    </Card>
+    </Section>
   );
 }

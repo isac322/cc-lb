@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { PluginEntry } from '../../lib/queries';
-import { Badge, Card, CardBody, Section } from '../ui/primitives';
+import { Badge, Card, Section } from '../ui/primitives';
 import {
   EmptyValue,
   Table,
@@ -30,7 +30,7 @@ function getSlotForHook(hookName: string): string {
   return 'Unknown';
 }
 
-/** A labelled block inside a card: 12px label above 14px copy. */
+/** A labelled block in a section: 13px label above 14px copy. */
 function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
@@ -47,69 +47,65 @@ export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
   return (
     <>
       <Section title="What this plugin does">
-        <Card>
-          <CardBody>
-            <dl className="space-y-5">
-              <Detail label="Description">
-                {plugin.description || (
-                  <span className="text-text-faint">
-                    No description provided.
-                  </span>
+        <div>
+          <dl className="space-y-5">
+            <Detail label="Description">
+              {plugin.description || (
+                <span className="text-text-faint">
+                  No description provided.
+                </span>
+              )}
+            </Detail>
+            <Detail label="Usage">
+              {plugin.usage ? (
+                <span className="whitespace-pre-wrap">{plugin.usage}</span>
+              ) : (
+                <span className="text-text-faint">
+                  No usage instructions provided.
+                </span>
+              )}
+            </Detail>
+            <div>
+              <dt className="text-label text-text-muted">Where it can run</dt>
+              <dd className="mt-1.5 flex flex-col gap-1.5">
+                {plugin.supported_slots?.map((slot) => (
+                  <div key={slot} className="flex items-start gap-2">
+                    <Badge tone="neutral" className="shrink-0">
+                      {SLOTS.find((s) => s.id === slot)?.label ?? slot}
+                    </Badge>
+                    <span className="text-body text-text-muted">
+                      {SLOT_DESCRIPTIONS[slot] ?? ''}
+                    </span>
+                  </div>
+                ))}
+              </dd>
+            </div>
+          </dl>
+          {plugin.metadata && (
+            <div className="mt-10">
+              <h3 className="text-title-card text-text">Built-in metadata</h3>
+              <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2">
+                <Detail label="Purpose">{plugin.metadata.purpose}</Detail>
+                <Detail label="Empty behavior">
+                  {plugin.metadata.empty_behavior}
+                </Detail>
+                <Detail label="Keeps">{plugin.metadata.keeps}</Detail>
+                <Detail label="Drops">{plugin.metadata.drops}</Detail>
+              </dl>
+              {plugin.metadata.examples &&
+                plugin.metadata.examples.length > 0 && (
+                  <div className="mt-5">
+                    <div className="text-label text-text-muted">Examples</div>
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-body text-text">
+                      {plugin.metadata.examples.map((ex, i) => (
+                        <li key={i}>{ex}</li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
-              </Detail>
-              <Detail label="Usage">
-                {plugin.usage ? (
-                  <span className="whitespace-pre-wrap">{plugin.usage}</span>
-                ) : (
-                  <span className="text-text-faint">
-                    No usage instructions provided.
-                  </span>
-                )}
-              </Detail>
-              <div>
-                <dt className="text-label text-text-muted">Where it can run</dt>
-                <dd className="mt-1.5 flex flex-col gap-1.5">
-                  {plugin.supported_slots?.map((slot) => (
-                    <div key={slot} className="flex items-start gap-2">
-                      <Badge tone="neutral" className="shrink-0">
-                        {SLOTS.find((s) => s.id === slot)?.label ?? slot}
-                      </Badge>
-                      <span className="text-body-sm text-text-muted">
-                        {SLOT_DESCRIPTIONS[slot] ?? ''}
-                      </span>
-                    </div>
-                  ))}
-                </dd>
-              </div>
-            </dl>
-            {plugin.metadata && (
-              <div className="mt-5 border-t border-subtle pt-5">
-                <h3 className="text-label text-text-muted">
-                  Built-in metadata
-                </h3>
-                <dl className="mt-3 grid grid-cols-1 gap-x-6 gap-y-4 md:grid-cols-2">
-                  <Detail label="Purpose">{plugin.metadata.purpose}</Detail>
-                  <Detail label="Empty behavior">
-                    {plugin.metadata.empty_behavior}
-                  </Detail>
-                  <Detail label="Keeps">{plugin.metadata.keeps}</Detail>
-                  <Detail label="Drops">{plugin.metadata.drops}</Detail>
-                </dl>
-                {plugin.metadata.examples &&
-                  plugin.metadata.examples.length > 0 && (
-                    <div className="mt-4">
-                      <div className="text-label text-text-muted">Examples</div>
-                      <ul className="mt-1 list-disc space-y-1 pl-4 text-body-sm text-text">
-                        {plugin.metadata.examples.map((ex, i) => (
-                          <li key={i}>{ex}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-              </div>
-            )}
-          </CardBody>
-        </Card>
+            </div>
+          )}
+        </div>
       </Section>
       {hooks.length > 0 && (
         <Section title="Hooks">

@@ -205,7 +205,7 @@ export function TimeRangeStrip({
       TICK_LADDER_MS.find((ms) => (ms / span) * width >= 96) ??
       TICK_LADDER_MS[TICK_LADDER_MS.length - 1];
     const showDateOnly = tickMs >= 6 * 3_600_000;
-    ctx.font = `11px ${palette.font}`;
+    ctx.font = `12px ${palette.font}`;
     ctx.fillStyle = palette.text;
     for (let t = Math.ceil(view.a / tickMs) * tickMs; t < view.b; t += tickMs) {
       const x = Math.round(t2x(t));

@@ -14,47 +14,55 @@
   --color-green-500: #22c55e;
   --color-green-600: #16a34a;
 
-  --font-sans: "Geist Variable", "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Hanken Grotesk for everything; Geist Mono only for IDs, hashes, error
+     codes and model IDs — never for times, dates or prose. */
+  --font-sans: "Hanken Grotesk Variable", "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
 
-  /* Radii (DESIGN.md §5): xs for meters, bars and tiny tags; sm for controls,
-     badges and in-card wells; md for cards, overlays and page banners.
-     `rounded-full` is for status dots, switches and avatars only. */
+  /* Radii: xs for meters and tiny tags; sm (4px) for controls, badges and
+     in-card wells; md (6px) for cards, overlays and page banners.
+     `rounded-full` is for status dots, switches and the theme pill only. */
   --radius-xs: 0.125rem;
   --radius-sm: 0.25rem;
   --radius-md: 0.375rem;
 
-  /* Type roles (DESIGN.md §3). Every step is rem so the browser font-size
-     preference scales it; nothing renders below 11px. Each `text-<role>`
-     utility sets size, line height, weight and tracking together. */
+  /* Type roles. Every step is rem so the browser font-size preference
+     scales it. Nothing renders below 12px except `text-2xs` (11px), which
+     is reserved for the sidebar footer meta. Each `text-<role>` utility
+     sets size, line height, weight and tracking together. Display numerals
+     are the only light (300) weight. */
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
-  --text-display: 1.75rem;
-  --text-display--line-height: 2rem;
-  --text-display--font-weight: 500;
+  --text-display-hero: 3.5rem;
+  --text-display-hero--line-height: 3.75rem;
+  --text-display-hero--font-weight: 300;
+  --text-display-hero--letter-spacing: -0.03em;
+  --text-display: 2rem;
+  --text-display--line-height: 2.25rem;
+  --text-display--font-weight: 300;
   --text-display--letter-spacing: -0.02em;
-  --text-title-page: 1.375rem;
-  --text-title-page--line-height: 1.75rem;
+  --text-title-page: 1.5rem;
+  --text-title-page--line-height: 2rem;
   --text-title-page--font-weight: 600;
   --text-title-page--letter-spacing: -0.01em;
-  --text-title-section: 1rem;
-  --text-title-section--line-height: 1.5rem;
+  --text-title-section: 0.9375rem;
+  --text-title-section--line-height: 1.375rem;
   --text-title-section--font-weight: 600;
-  --text-title-section--letter-spacing: -0.005em;
+  --text-title-section--letter-spacing: 0em;
   --text-title-card: 0.875rem;
   --text-title-card--line-height: 1.25rem;
   --text-title-card--font-weight: 600;
   --text-title-card--letter-spacing: 0em;
   --text-body: 0.875rem;
-  --text-body--line-height: 1.375rem;
+  --text-body--line-height: 1.3125rem;
   --text-body--font-weight: 400;
   --text-body-sm: 0.8125rem;
   --text-body-sm--line-height: 1.25rem;
   --text-body-sm--font-weight: 400;
-  --text-label: 0.75rem;
-  --text-label--line-height: 1rem;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.125rem;
   --text-label--font-weight: 500;
-  --text-label--letter-spacing: 0.005em;
+  --text-label--letter-spacing: 0em;
   --text-caption: 0.75rem;
   --text-caption--line-height: 1rem;
   --text-caption--font-weight: 400;
@@ -62,8 +70,8 @@
   --text-data--line-height: 1rem;
   --text-data--font-weight: 400;
 
-  /* Single overlay elevation (popover, menu, dialog, drawer). */
-  --shadow-overlay: 0 12px 32px -12px var(--color-overlay-shadow);
+  /* Single overlay elevation (popover, menu, dialog, drawer). No glow. */
+  --shadow-overlay: 0 8px 24px -12px var(--color-overlay-shadow);
 }
 
 /* Semantic color tokens registered with Tailwind so variants (`hover:`,
@@ -88,6 +96,7 @@
   --color-accent: var(--color-accent);
   --color-accent-dim: var(--color-accent-dim);
   --color-accent-text: var(--color-accent-text);
+  --color-accent-ink: var(--color-accent-ink);
   --color-ok: var(--color-ok);
   --color-warn: var(--color-warn);
   --color-danger: var(--color-danger);
@@ -104,6 +113,7 @@
   --color-overlay-4: var(--color-overlay-4);
   --color-overlay-5: var(--color-overlay-5);
   --color-overlay-6: var(--color-overlay-6);
+  --color-progress-track: var(--color-progress-track);
   --color-modal-backdrop: var(--color-modal-backdrop);
   --color-drawer-backdrop: var(--color-drawer-backdrop);
   /* Aliases for class names already in use that never had a token. Owning
@@ -133,176 +143,200 @@
 }
 
 @layer base {
+  /* Shell geometry: 48px top bar everywhere; below `lg` the 56px bottom tab
+     bar (plus the home-indicator inset) also takes viewport height.
+     `h-shell` = the viewport minus both, for viewport-fit consoles. */
+  :root {
+    --shell-top: 3rem;
+    --shell-bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+    --shell-chrome: calc(var(--shell-top) + var(--shell-bottom));
+  }
+  @media (min-width: 64rem) {
+    :root {
+      --shell-bottom: 0px;
+    }
+  }
+  /* Night (graphite) is the default; Day (neutral daylight) via data-theme or
+     the OS preference under "system". Contrast (WCAG): text ≥ 12.9:1,
+     text-muted ≥ 6.9:1, text-faint ≥ 4.9:1 on every surface; accent-text,
+     warn-text, danger-text ≥ 4.5:1 on ground, surfaces, their own /12 badge
+     fill and the selected-row fill; white on danger-solid ≥ 5.2:1. */
   :root,
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --color-bg: #000000;
-    --color-bg-sub: #0a0a0a;
-    --color-panel: rgba(255, 255, 255, 0.02);
-    --color-panel-strong: rgba(255, 255, 255, 0.04);
-    --color-border: rgba(255, 255, 255, 0.08);
-    --color-border-strong: rgba(255, 255, 255, 0.14);
-    --color-border-row: rgba(255, 255, 255, 0.04);
-    --color-text: #ededed;
-    --color-text-muted: #9ca3af;
-    --color-text-faint: #7d858f;
-    --color-accent: #00d4ff;
-    --color-accent-dim: rgba(0, 212, 255, 0.12);
-    --color-accent-text: #00d4ff;
-    --color-ok: #10b981;
-    --color-warn: #f59e0b;
-    --color-danger: #ef4444;
-    /* White-text fills: #ef4444 gives only 3.8:1 under 13px labels. */
-    --color-danger-solid: #dc2626;
-    --color-danger-solid-hover: #b91c1c;
-    --color-success-text: #6ee7b7;
-    --color-warn-text: #fcd34d;
-    --color-danger-text: #fca5a5;
-    --color-neutral: #6b7280;
-    --color-scrollbar: rgba(255, 255, 255, 0.08);
-    --color-scrollbar-hover: rgba(255, 255, 255, 0.18);
-    --color-hover-bg: rgba(255, 255, 255, 0.04);
-    --color-overlay-1: rgba(255, 255, 255, 0.02);
-    --color-overlay-2: rgba(255, 255, 255, 0.03);
-    --color-overlay-3: rgba(255, 255, 255, 0.04);
-    --color-overlay-4: rgba(255, 255, 255, 0.05);
-    --color-overlay-5: rgba(255, 255, 255, 0.06);
-    --color-overlay-6: rgba(255, 255, 255, 0.08);
-    --color-overlay-skeleton-base: rgba(255, 255, 255, 0.03);
-    --color-overlay-skeleton-shimmer: rgba(255, 255, 255, 0.08);
-    --color-progress-track: rgba(255, 255, 255, 0.06);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.70);
-    --color-drawer-backdrop: rgba(0, 0, 0, 0.60);
-    --color-toast-bg: #0a0a0a;
-    --color-series-input: #38bdf8;
-    --color-series-output: #a78bfa;
-    --color-series-cache-create-5m: #fbbf24;
-    --color-series-cache-create-1h: #b45309;
-    --color-series-cache-read: #34d399;
-    /* Window/model series: moderate-chroma OKLCH. No amber, orange or red
-       hue; those are reserved for severity. */
-    --color-series-5h: oklch(0.72 0.11 235);
-    --color-series-7d: oklch(0.68 0.12 290);
-    --color-series-fable: oklch(0.72 0.10 155);
-    --color-series-sonnet: oklch(0.72 0.08 195);
-    --color-series-opus: oklch(0.70 0.10 350);
-    --color-series-overage: oklch(0.70 0.005 260);
-    --color-series-unified: oklch(0.55 0.01 260);
+    /* Graphite night. Ground, then flat surfaces one step up; 1px lines. */
+    --color-bg: #15171a;
+    --color-bg-sub: #23272c;
+    --color-panel: #1c1f23;
+    --color-panel-strong: #23272c;
+    --color-border: #2f343a;
+    --color-border-strong: #666d76;
+    --color-border-row: #272b30;
+    --color-text: #eceef0;
+    --color-text-muted: #b3b9c1;
+    --color-text-faint: #959ca5;
+    /* Ion violet: gauge sweeps, meter fills, active nav rule, selected row,
+       the one primary action. `accent-ink` is text on a solid accent fill. */
+    --color-accent: #a493ff;
+    --color-accent-dim: rgb(164 147 255 / 0.14);
+    --color-accent-text: #b3a6ff;
+    --color-accent-ink: #15171a;
+    /* Healthy is neutral: warn and danger are the only other hues. */
+    --color-ok: #b3b9c1;
+    --color-warn: #f0b429;
+    --color-danger: #ff6f61;
+    --color-danger-solid: #c7372c;
+    --color-danger-solid-hover: #b02f25;
+    --color-success-text: #b3b9c1;
+    --color-warn-text: #f0b429;
+    --color-danger-text: #ff8a7e;
+    --color-neutral: #8f969f;
+    --color-scrollbar: #2f343a;
+    --color-scrollbar-hover: #666d76;
+    --color-hover-bg: rgb(255 255 255 / 0.04);
+    --color-overlay-1: rgb(255 255 255 / 0.02);
+    --color-overlay-2: rgb(255 255 255 / 0.03);
+    --color-overlay-3: rgb(255 255 255 / 0.04);
+    --color-overlay-4: rgb(255 255 255 / 0.05);
+    --color-overlay-5: rgb(255 255 255 / 0.06);
+    --color-overlay-6: rgb(255 255 255 / 0.08);
+    --color-overlay-skeleton-base: rgb(255 255 255 / 0.03);
+    --color-overlay-skeleton-shimmer: rgb(255 255 255 / 0.07);
+    --color-progress-track: #2c3036;
+    --color-modal-backdrop: rgb(10 11 13 / 0.72);
+    --color-drawer-backdrop: rgb(10 11 13 / 0.6);
+    --color-toast-bg: #23272c;
+    /* Series: none within OKLab ΔE 0.08 of the accent, warn or danger. */
+    --color-series-input: oklch(0.74 0.120 250);
+    --color-series-output: oklch(0.74 0.120 345);
+    --color-series-cache-create-5m: oklch(0.78 0.100 190);
+    --color-series-cache-create-1h: oklch(0.60 0.090 190);
+    --color-series-cache-read: oklch(0.76 0.130 140);
+    --color-series-5h: oklch(0.76 0.110 235);
+    --color-series-7d: oklch(0.78 0.100 180);
+    --color-series-fable: oklch(0.72 0.140 145);
+    --color-series-sonnet: oklch(0.88 0.060 215);
+    --color-series-opus: oklch(0.66 0.130 330);
+    --color-series-overage: oklch(0.72 0.005 260);
+    --color-series-unified: oklch(0.58 0.010 260);
     --chart-fill-opacity: 0.12;
-    --color-input-bg: rgba(255, 255, 255, 0.03);
-    --color-overlay-shadow: rgb(0 0 0 / 0.6);
+    --color-input-bg: #15171a;
+    --color-overlay-shadow: rgb(0 0 0 / 0.5);
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --color-bg: #f7f7f8;
-    --color-bg-sub: #ffffff;
-    --color-panel: #ffffff;
-    --color-panel-strong: rgba(0, 0, 0, 0.04);
-    --color-border: rgba(0, 0, 0, 0.10);
-    --color-border-strong: rgba(0, 0, 0, 0.18);
-    --color-border-row: rgba(0, 0, 0, 0.05);
-    --color-text: #0a0a0a;
-    --color-text-muted: #4b5563;
-    --color-text-faint: #5b636f;
-    --color-accent: #0086d4;
-    --color-accent-dim: rgba(0, 134, 212, 0.10);
-    --color-accent-text: #00629b;
-    --color-ok: #059669;
-    --color-warn: #d97706;
-    --color-danger: #dc2626;
-    --color-danger-solid: #dc2626;
-    --color-danger-solid-hover: #b91c1c;
-    --color-success-text: #046049;
-    --color-warn-text: #92400e;
-    /* AA (≥5:1) even on a tone/15 pill over the 8% active-row fill. */
-    --color-danger-text: #a51b1b;
-    --color-neutral: #6b7280;
-    --color-scrollbar: rgba(0, 0, 0, 0.12);
-    --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
-    --color-hover-bg: rgba(0, 0, 0, 0.04);
-    --color-overlay-1: rgba(0, 0, 0, 0.02);
-    --color-overlay-2: rgba(0, 0, 0, 0.03);
-    --color-overlay-3: rgba(0, 0, 0, 0.04);
-    --color-overlay-4: rgba(0, 0, 0, 0.05);
-    --color-overlay-5: rgba(0, 0, 0, 0.06);
-    --color-overlay-6: rgba(0, 0, 0, 0.08);
-    --color-overlay-skeleton-base: rgba(0, 0, 0, 0.03);
-    --color-overlay-skeleton-shimmer: rgba(0, 0, 0, 0.08);
-    --color-progress-track: rgba(0, 0, 0, 0.06);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.40);
-    --color-drawer-backdrop: rgba(0, 0, 0, 0.35);
-    --color-toast-bg: #ffffff;
-    --color-series-input: #0284c7;
-    --color-series-output: #7c3aed;
-    --color-series-cache-create-5m: #d97706;
-    --color-series-cache-create-1h: #92400e;
-    --color-series-cache-read: #059669;
-    --color-series-5h: oklch(0.55 0.13 235);
-    --color-series-7d: oklch(0.52 0.14 290);
-    --color-series-fable: oklch(0.55 0.12 155);
-    --color-series-sonnet: oklch(0.55 0.09 195);
-    --color-series-opus: oklch(0.55 0.13 350);
+    /* Cool neutral daylight gray. Surfaces lighten one step at a time. */
+    --color-bg: #e6e7ea;
+    --color-bg-sub: #f8f8f9;
+    --color-panel: #f1f2f4;
+    --color-panel-strong: #f8f8f9;
+    --color-border: #c9ccd2;
+    --color-border-strong: #7e838b;
+    --color-border-row: #d7d9de;
+    --color-text: #17191c;
+    --color-text-muted: #464b52;
+    --color-text-faint: #565a61;
+    --color-accent: #5a3fd6;
+    --color-accent-dim: rgb(90 63 214 / 0.1);
+    --color-accent-text: #4c31c4;
+    --color-accent-ink: #ffffff;
+    --color-ok: #464b52;
+    --color-warn: #8a5a00;
+    --color-danger: #a61e30;
+    --color-danger-solid: #a61e30;
+    --color-danger-solid-hover: #8e1828;
+    --color-success-text: #464b52;
+    --color-warn-text: #7a4f00;
+    --color-danger-text: #a61e30;
+    --color-neutral: #6b6f76;
+    --color-scrollbar: #c9ccd2;
+    --color-scrollbar-hover: #7e838b;
+    --color-hover-bg: rgb(23 25 28 / 0.04);
+    --color-overlay-1: rgb(23 25 28 / 0.02);
+    --color-overlay-2: rgb(23 25 28 / 0.03);
+    --color-overlay-3: rgb(23 25 28 / 0.04);
+    --color-overlay-4: rgb(23 25 28 / 0.05);
+    --color-overlay-5: rgb(23 25 28 / 0.06);
+    --color-overlay-6: rgb(23 25 28 / 0.08);
+    --color-overlay-skeleton-base: rgb(23 25 28 / 0.04);
+    --color-overlay-skeleton-shimmer: rgb(23 25 28 / 0.09);
+    --color-progress-track: #cfd2d8;
+    --color-modal-backdrop: rgb(23 25 28 / 0.4);
+    --color-drawer-backdrop: rgb(23 25 28 / 0.32);
+    --color-toast-bg: #f8f8f9;
+    --color-series-input: oklch(0.50 0.130 250);
+    --color-series-output: oklch(0.52 0.150 345);
+    --color-series-cache-create-5m: oklch(0.54 0.100 195);
+    --color-series-cache-create-1h: oklch(0.40 0.070 195);
+    --color-series-cache-read: oklch(0.56 0.120 140);
+    --color-series-5h: oklch(0.52 0.130 240);
+    --color-series-7d: oklch(0.54 0.100 185);
+    --color-series-fable: oklch(0.54 0.130 145);
+    --color-series-sonnet: oklch(0.40 0.070 210);
+    --color-series-opus: oklch(0.60 0.130 350);
     --color-series-overage: oklch(0.50 0.005 260);
-    --color-series-unified: oklch(0.65 0.01 260);
-    --chart-fill-opacity: 0.10;
-    --color-input-bg: #ffffff;
-    --color-overlay-shadow: rgb(0 0 0 / 0.18);
+    --color-series-unified: oklch(0.62 0.010 260);
+    --chart-fill-opacity: 0.1;
+    --color-input-bg: #f8f8f9;
+    --color-overlay-shadow: rgb(23 25 28 / 0.16);
   }
   @media (prefers-color-scheme: light) {
     :root[data-theme="system"] {
       color-scheme: light;
-      --color-bg: #f7f7f8;
-      --color-bg-sub: #ffffff;
-      --color-panel: #ffffff;
-      --color-panel-strong: rgba(0, 0, 0, 0.04);
-      --color-border: rgba(0, 0, 0, 0.10);
-      --color-border-strong: rgba(0, 0, 0, 0.18);
-      --color-border-row: rgba(0, 0, 0, 0.05);
-      --color-text: #0a0a0a;
-      --color-text-muted: #4b5563;
-      --color-text-faint: #5b636f;
-      --color-accent: #0086d4;
-      --color-accent-dim: rgba(0, 134, 212, 0.10);
-      --color-accent-text: #00629b;
-      --color-ok: #059669;
-      --color-warn: #d97706;
-      --color-danger: #dc2626;
-      --color-danger-solid: #dc2626;
-      --color-danger-solid-hover: #b91c1c;
-      --color-success-text: #046049;
-      --color-warn-text: #92400e;
-      --color-danger-text: #a51b1b;
-      --color-neutral: #6b7280;
-      --color-scrollbar: rgba(0, 0, 0, 0.12);
-      --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
-      --color-hover-bg: rgba(0, 0, 0, 0.04);
-      --color-overlay-1: rgba(0, 0, 0, 0.02);
-      --color-overlay-2: rgba(0, 0, 0, 0.03);
-      --color-overlay-3: rgba(0, 0, 0, 0.04);
-      --color-overlay-4: rgba(0, 0, 0, 0.05);
-      --color-overlay-5: rgba(0, 0, 0, 0.06);
-      --color-overlay-6: rgba(0, 0, 0, 0.08);
-      --color-overlay-skeleton-base: rgba(0, 0, 0, 0.03);
-      --color-overlay-skeleton-shimmer: rgba(0, 0, 0, 0.08);
-      --color-progress-track: rgba(0, 0, 0, 0.06);
-      --color-modal-backdrop: rgba(0, 0, 0, 0.40);
-      --color-drawer-backdrop: rgba(0, 0, 0, 0.35);
-      --color-toast-bg: #ffffff;
-      --color-series-input: #0284c7;
-      --color-series-output: #7c3aed;
-      --color-series-cache-create-5m: #d97706;
-      --color-series-cache-create-1h: #92400e;
-      --color-series-cache-read: #059669;
-      --color-series-5h: oklch(0.55 0.13 235);
-      --color-series-7d: oklch(0.52 0.14 290);
-      --color-series-fable: oklch(0.55 0.12 155);
-      --color-series-sonnet: oklch(0.55 0.09 195);
-      --color-series-opus: oklch(0.55 0.13 350);
+      /* Cool neutral daylight gray. Surfaces lighten one step at a time. */
+      --color-bg: #e6e7ea;
+      --color-bg-sub: #f8f8f9;
+      --color-panel: #f1f2f4;
+      --color-panel-strong: #f8f8f9;
+      --color-border: #c9ccd2;
+      --color-border-strong: #7e838b;
+      --color-border-row: #d7d9de;
+      --color-text: #17191c;
+      --color-text-muted: #464b52;
+      --color-text-faint: #565a61;
+      --color-accent: #5a3fd6;
+      --color-accent-dim: rgb(90 63 214 / 0.1);
+      --color-accent-text: #4c31c4;
+      --color-accent-ink: #ffffff;
+      --color-ok: #464b52;
+      --color-warn: #8a5a00;
+      --color-danger: #a61e30;
+      --color-danger-solid: #a61e30;
+      --color-danger-solid-hover: #8e1828;
+      --color-success-text: #464b52;
+      --color-warn-text: #7a4f00;
+      --color-danger-text: #a61e30;
+      --color-neutral: #6b6f76;
+      --color-scrollbar: #c9ccd2;
+      --color-scrollbar-hover: #7e838b;
+      --color-hover-bg: rgb(23 25 28 / 0.04);
+      --color-overlay-1: rgb(23 25 28 / 0.02);
+      --color-overlay-2: rgb(23 25 28 / 0.03);
+      --color-overlay-3: rgb(23 25 28 / 0.04);
+      --color-overlay-4: rgb(23 25 28 / 0.05);
+      --color-overlay-5: rgb(23 25 28 / 0.06);
+      --color-overlay-6: rgb(23 25 28 / 0.08);
+      --color-overlay-skeleton-base: rgb(23 25 28 / 0.04);
+      --color-overlay-skeleton-shimmer: rgb(23 25 28 / 0.09);
+      --color-progress-track: #cfd2d8;
+      --color-modal-backdrop: rgb(23 25 28 / 0.4);
+      --color-drawer-backdrop: rgb(23 25 28 / 0.32);
+      --color-toast-bg: #f8f8f9;
+      --color-series-input: oklch(0.50 0.130 250);
+      --color-series-output: oklch(0.52 0.150 345);
+      --color-series-cache-create-5m: oklch(0.54 0.100 195);
+      --color-series-cache-create-1h: oklch(0.40 0.070 195);
+      --color-series-cache-read: oklch(0.56 0.120 140);
+      --color-series-5h: oklch(0.52 0.130 240);
+      --color-series-7d: oklch(0.54 0.100 185);
+      --color-series-fable: oklch(0.54 0.130 145);
+      --color-series-sonnet: oklch(0.40 0.070 210);
+      --color-series-opus: oklch(0.60 0.130 350);
       --color-series-overage: oklch(0.50 0.005 260);
-      --color-series-unified: oklch(0.65 0.01 260);
-      --chart-fill-opacity: 0.10;
-      --color-input-bg: #ffffff;
-      --color-overlay-shadow: rgb(0 0 0 / 0.18);
+      --color-series-unified: oklch(0.62 0.010 260);
+      --chart-fill-opacity: 0.1;
+      --color-input-bg: #f8f8f9;
+      --color-overlay-shadow: rgb(23 25 28 / 0.16);
     }
   }
   html, body, #root { height: 100%; min-height: 100%; }
@@ -310,7 +344,9 @@
     background-color: var(--color-bg);
     color: var(--color-text);
     font-family: var(--font-sans);
-    font-variant-numeric: tabular-nums;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums lining-nums;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     transition: background-color 0.15s ease, color 0.15s ease;
@@ -352,14 +388,15 @@
   }
 }
 
-/* Card surface: panel fill + hairline border. Radius comes from the caller
-   (`Card` uses `rounded-md`). No backdrop-filter: cards sit on an opaque page. */
+/* Card surface: flat panel one step above the ground, 1px line. Radius
+   comes from the caller (`Card` uses `rounded-md`). No blur, no glow; the
+   name is historical. */
 @utility glass {
   background-color: var(--color-panel);
   border: 1px solid var(--color-border);
 }
-/* Overlay surface (popover, menu, select popup): opaque `bg-sub`, strong
-   hairline and the single overlay shadow. No blur. */
+/* Overlay surface (popover, menu, select popup): opaque raised surface,
+   strong 1px line and the single overlay shadow. No blur. */
 @utility glass-strong {
   background-color: var(--color-bg-sub);
   border: 1px solid var(--color-border-strong);
@@ -367,25 +404,25 @@
 }
 /* Well: a sub-group inside a card. Fill only, never a border. */
 @utility well {
-  background-color: var(--color-overlay-2);
+  background-color: var(--color-overlay-3);
   border-radius: var(--radius-sm);
 }
-/* Sticky table header (`thead`): opaque so rows scrolling underneath never
-   show through, `text-label` in `text-faint`, sentence case. */
+/* Sticky table header (`thead`): opaque panel so rows scrolling underneath
+   never show through; 12px/500 `text-faint`, sentence case, 1px line. */
 @utility table-header {
-  background-color: var(--color-bg-sub);
-  border-bottom: 1px solid var(--color-border-strong);
+  background-color: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
   color: var(--color-text-faint);
   font-family: var(--font-sans);
   font-size: 0.75rem;
   line-height: 1rem;
   font-weight: 500;
-  letter-spacing: 0.005em;
+  letter-spacing: 0em;
   text-transform: none;
 }
-/* Header cell geometry: 32px tall, 12px inset, left-aligned. */
+/* Header cell geometry: 36px tall, 12px inset, left-aligned. */
 @utility table-th {
-  height: 2rem;
+  height: 2.25rem;
   padding-inline: 0.75rem;
   text-align: left;
   vertical-align: middle;
@@ -398,25 +435,42 @@
 }
 /* Uppercase is reserved for sidebar and command-palette group headings. */
 @utility text-overline {
-  font-size: var(--text-2xs);
+  font-size: 0.75rem;
   line-height: 1rem;
   font-weight: 500;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+/* Viewport-fit height under the shell chrome (top bar + mobile tab bar). */
+@utility h-shell {
+  height: calc(100dvh - var(--shell-chrome));
+}
 
-/* ── Status dots ── 6px, 8px with `.lg` in lists. Flat: only `live` pulses. */
+/* ── Status dots ── 6px, 8px with `.lg` in lists. Flat and static: no pulse,
+   no glow; state is also carried by text. */
 .status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
 .status-dot.lg { width: 8px; height: 8px; }
 .status-dot.ok { background: var(--color-ok); }
 .status-dot.warn { background: var(--color-warn); }
 .status-dot.danger { background: var(--color-danger); }
 .status-dot.neutral { background: var(--color-neutral); }
-.status-dot.live { background: var(--color-accent); animation: status-live 2s ease-out infinite; }
-@keyframes status-live {
-  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-accent) 55%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 5px transparent; }
-}
+.status-dot.live { background: var(--color-accent); }
+
+/* ── Gauges (components/ui/Gauge.tsx) ── crisp 1px chrome, no glow. */
+.gauge { display: block; overflow: visible; }
+.gauge path, .gauge line { vector-effect: non-scaling-stroke; fill: none; }
+.gauge .gauge-track { stroke: var(--color-progress-track); }
+.gauge .gauge-sweep { stroke: var(--color-accent); stroke-linecap: butt; }
+.gauge .gauge-sweep[data-severity="warn"] { stroke: var(--color-warn); }
+.gauge .gauge-sweep[data-severity="danger"] { stroke: var(--color-danger); }
+.gauge .gauge-tick { stroke: var(--color-border-strong); stroke-width: 1px; shape-rendering: crispEdges; }
+.gauge .gauge-tick[data-major] { stroke: var(--color-text-faint); }
+.gauge .gauge-zone { stroke-width: 2px; }
+.gauge .gauge-zone[data-zone="warn"] { stroke: var(--color-warn); }
+.gauge .gauge-zone[data-zone="danger"] { stroke: var(--color-danger); }
+.gauge .gauge-marker { stroke: var(--color-text); stroke-width: 1.5px; }
+.gauge .gauge-marker[data-severity="warn"] { stroke: var(--color-warn); }
+.gauge .gauge-marker[data-severity="danger"] { stroke: var(--color-danger); }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -436,29 +490,44 @@
 [cmdk-input] { outline: none; background: transparent; width: 100%; }
 [cmdk-list] { overflow-y: auto; padding: 4px; }
 [cmdk-group-heading] {
-  font-size: var(--text-2xs);
+  font-size: 0.75rem;
+  line-height: 1rem;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.08em;
   color: var(--color-text-faint);
-  padding: 6px 10px 3px;
+  padding: 8px 10px 4px;
 }
 [cmdk-item] {
+  position: relative;
+  min-height: 36px;
   padding: 6px 10px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 20px;
   display: flex;
   align-items: center;
   gap: 10px;
 }
+/* Selected: surface fill + the accent rule, like the active nav item. */
 [cmdk-item][data-selected='true'] {
   background: var(--color-overlay-5);
   color: var(--color-text);
+  box-shadow: inset 2px 0 0 var(--color-accent);
 }
-[cmdk-empty] { padding: 16px; color: var(--color-text-faint); font-size: 13px; }
+[cmdk-empty] { padding: 16px; color: var(--color-text-muted); font-size: 14px; }
 
-/* ── Sonner overrides ── */
+/* ── Sonner overrides ──
+   Sonner injects its own theme palette (#000 / #fff) at runtime; the extra
+   `html` raises specificity so the toast sits on the raised surface. */
+html [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: var(--color-toast-bg);
+  --normal-bg-hover: var(--color-panel-strong);
+  --normal-border: var(--color-border-strong);
+  --normal-border-hover: var(--color-border-strong);
+  --normal-text: var(--color-text);
+}
 [data-sonner-toaster] [data-sonner-toast] {
   background: var(--color-toast-bg);
   border: 1px solid var(--color-border-strong);
@@ -466,12 +535,13 @@
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-overlay);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 14px;
 }
 
-/* ── Recharts overrides (DESIGN.md §6 Charts) ──
+/* ── Recharts overrides ──
    Tooltip and ticks are sans with tabular numerals; numbers are never mono.
-   Axis and tick lines are off everywhere: horizontal gridlines carry scale. */
+   Axis and tick lines are off everywhere: 1px crisp horizontal gridlines in
+   the line color carry scale, whatever stroke a caller passes. */
 .recharts-tooltip-wrapper { outline: none !important; }
 .recharts-default-tooltip {
   background: var(--color-bg-sub) !important;
@@ -487,13 +557,25 @@
 .recharts-cartesian-axis-tick text,
 .recharts-cartesian-axis-tick-value {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   fill: var(--color-text-faint);
 }
 .recharts-cartesian-axis-line,
 .recharts-cartesian-axis-tick-line {
   display: none;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--color-border);
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+}
+.recharts-reference-line line {
+  shape-rendering: crispEdges;
+}
+.recharts-curve.recharts-line-curve,
+.recharts-area-curve {
+  stroke-linejoin: round;
 }
 .recharts-tooltip-label {
   color: var(--color-text-muted) !important;
@@ -542,8 +624,7 @@
   .skeleton { animation: none; }
   .flash-in,
   .flash-text-active { animation: none; }
-  .animate-pulse,
-  .status-dot.live { animation: none; }
+  .animate-pulse { animation: none; }
 }
 
 /* ── react-day-picker (Custom time-range calendar helper) ──

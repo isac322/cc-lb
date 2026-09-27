@@ -20,6 +20,22 @@ import {
 
 const SECTION_TITLE_CLASS = 'text-title-card text-text';
 
+// A value that is nothing but an opaque id or hash (no resolved name).
+const RAW_ID =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})$/i;
+
+/**
+ * Recorded values render in sans once they read as names or prose; mono is
+ * kept only for what is still a raw id, hash or JSON.
+ */
+function RecordedValue({ text, raw }: { text: string; raw: boolean }) {
+  return raw || RAW_ID.test(text) ? (
+    <span className="font-mono text-data break-all">{text}</span>
+  ) : (
+    <span>{text}</span>
+  );
+}
+
 function DetailRow({
   label,
   children,
@@ -69,7 +85,7 @@ export function AuditEntryDrawer({
       }
     >
       {entry && parsed ? (
-        <div className="flex flex-col gap-6 p-4 text-body-sm">
+        <div className="flex flex-col gap-6 p-4 text-body">
           <section aria-labelledby="audit-summary-heading">
             <h3 id="audit-summary-heading" className={SECTION_TITLE_CLASS}>
               Summary
@@ -142,20 +158,26 @@ export function AuditEntryDrawer({
               <dl className="mt-2 divide-y divide-row">
                 {parsed.params.map(([key, value]) => (
                   <DetailRow key={`param-${key}`} label={key}>
-                    <span className="font-mono text-data">
-                      {key === 'fields' || key === 'slots'
-                        ? value.split(',').join(', ')
-                        : readableValue(value, maps)}
-                    </span>
+                    <RecordedValue
+                      raw={false}
+                      text={
+                        key === 'fields' || key === 'slots'
+                          ? value.split(',').join(', ')
+                          : readableValue(value, maps)
+                      }
+                    />
                   </DetailRow>
                 ))}
                 {payloadEntries.map(([key, value]) => (
                   <DetailRow key={`payload-${key}`} label={key}>
-                    <span className="font-mono text-data">
-                      {typeof value === 'string'
-                        ? readableValue(value, maps)
-                        : JSON.stringify(value)}
-                    </span>
+                    <RecordedValue
+                      raw={typeof value !== 'string'}
+                      text={
+                        typeof value === 'string'
+                          ? readableValue(value, maps)
+                          : JSON.stringify(value)
+                      }
+                    />
                   </DetailRow>
                 ))}
               </dl>
@@ -169,7 +191,7 @@ export function AuditEntryDrawer({
           ) : null}
 
           <details className="group">
-            <summary className="inline-flex w-fit list-none items-center gap-1.5 rounded-sm text-body-sm text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+            <summary className="inline-flex w-fit list-none items-center gap-1.5 rounded-sm text-body text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
               <ChevronRight
                 className="size-3 shrink-0 transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none"
                 strokeWidth={1.75}

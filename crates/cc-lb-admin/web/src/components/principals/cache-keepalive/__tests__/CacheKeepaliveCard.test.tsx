@@ -84,7 +84,7 @@ describe('CacheKeepaliveCard', () => {
     expect(valueLines).toHaveLength(4);
     expect(card.querySelectorAll('.skeleton')).toHaveLength(4);
     valueLines.forEach((line) => {
-      expect(line.className).toContain('h-7');
+      expect(line.className).toContain('h-9');
       expect(line.querySelectorAll('.skeleton')).toHaveLength(1);
     });
     expect(screen.queryAllByText('0')).toHaveLength(0);

@@ -202,7 +202,7 @@ describe('plugin loading geometry', () => {
     expect(countSkeleton?.className).toContain('w-48');
     expect(
       countSlot
-        .closest('[data-slot="card-subtitle"]')
+        .closest('[data-slot="section-subtitle"]')
         ?.querySelector('div.skeleton'),
     ).toBeNull();
     expect(countSlot.textContent).not.toContain('0 available');

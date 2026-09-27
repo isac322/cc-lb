@@ -8,14 +8,7 @@ import {
   type Upstream,
   useUpdateUpstream,
 } from '../../lib/queries';
-import {
-  Button,
-  Card,
-  CardBody,
-  CardHeader,
-  Field,
-  INPUT_CLASS,
-} from '../ui/primitives';
+import { Button, Field, INPUT_CLASS, Section } from '../ui/primitives';
 
 type Props = {
   upstream: Upstream;
@@ -99,18 +92,17 @@ export function SettingsCard({ upstream }: Props) {
   };
 
   return (
-    <Card>
-      <CardHeader
-        title="Settings"
-        action={
-          !editing && (
-            <Button size="sm" onClick={handleEdit}>
-              Edit
-            </Button>
-          )
-        }
-      />
-      <CardBody>
+    <Section
+      title="Settings"
+      action={
+        !editing && (
+          <Button size="sm" onClick={handleEdit}>
+            Edit
+          </Button>
+        )
+      }
+    >
+      <div className="max-w-2xl">
         {editing ? (
           <div
             aria-busy={update.isPending}
@@ -192,8 +184,8 @@ export function SettingsCard({ upstream }: Props) {
             </div>
           </div>
         ) : (
-          <dl className="grid grid-cols-[120px_1fr] items-baseline gap-y-3 gap-x-4 text-body-sm">
-            <dt className="text-label text-text-faint">Base URL</dt>
+          <dl className="grid grid-cols-[120px_1fr] items-baseline gap-y-3 gap-x-4 text-body">
+            <dt className="text-label text-text-muted">Base URL</dt>
             <dd className="min-w-0 break-all text-text">
               {upstream.base_url ? (
                 <span className="font-mono text-data">{upstream.base_url}</span>
@@ -204,7 +196,7 @@ export function SettingsCard({ upstream }: Props) {
 
             {upstream.kind === 'anthropic_api_key' && (
               <>
-                <dt className="text-label text-text-faint">API key</dt>
+                <dt className="text-label text-text-muted">API key</dt>
                 <dd className="min-w-0 break-all text-text">
                   {upstream.api_key_env ? (
                     <span className="font-mono text-data">
@@ -220,7 +212,7 @@ export function SettingsCard({ upstream }: Props) {
             )}
           </dl>
         )}
-      </CardBody>
-    </Card>
+      </div>
+    </Section>
   );
 }

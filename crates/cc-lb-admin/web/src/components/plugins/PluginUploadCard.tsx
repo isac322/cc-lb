@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
 import type { UploadWasmResponse } from '../../lib/queries';
-import { Card, CardHeader, ConfirmDialog, cx } from '../ui/primitives';
+import { ConfirmDialog, cx, Section } from '../ui/primitives';
 
 interface ReplacementConfirmationBody {
   error: 'replacement_confirmation_required';
@@ -124,8 +124,8 @@ export function PluginUploadCard({
       className={cx(
         'flex flex-col items-center justify-center rounded-sm border border-dashed border-subtle-strong px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
         uploading
-          ? 'cursor-wait opacity-70 border-accent/40'
-          : 'cursor-pointer hover:border-accent/40 hover:bg-overlay-2',
+          ? 'cursor-wait opacity-70'
+          : 'cursor-pointer hover:border-text-faint hover:bg-hover-bg',
       )}
       onClick={() => {
         if (!uploading) fileRef.current?.click();
@@ -149,13 +149,15 @@ export function PluginUploadCard({
         aria-hidden="true"
         className={cx(
           'mb-2 size-6',
-          uploading ? 'text-accent animate-pulse' : 'text-text-faint',
+          uploading
+            ? 'text-text-muted motion-safe:animate-pulse'
+            : 'text-text-faint',
         )}
       />
-      <div className="text-body-sm font-medium text-text">
+      <div className="text-body font-medium text-text">
         {uploading ? 'Uploading…' : 'Choose .wasm file'}
       </div>
-      <div className="mt-1 text-caption text-text-faint">
+      <div className="mt-1 text-body-sm text-text-muted">
         Drag and drop or click to browse. Max 32 MiB.
       </div>
       <input
@@ -178,13 +180,12 @@ export function PluginUploadCard({
       {bare ? (
         dropZone
       ) : (
-        <Card>
-          <CardHeader
-            title="Upload plugin"
-            subtitle="Choose the .wasm file you received. After upload, review what it can do and where it can be used."
-          />
-          <div className="p-4">{dropZone}</div>
-        </Card>
+        <Section
+          title="Upload plugin"
+          subtitle="Choose the .wasm file you received. After upload, review what it can do and where it can be used."
+        >
+          {dropZone}
+        </Section>
       )}
 
       <ConfirmDialog
@@ -203,7 +204,7 @@ export function PluginUploadCard({
                 </span>{' '}
                 already exists.
               </span>
-              <span className="well block space-y-1 p-3 text-body-sm">
+              <span className="well block space-y-1 p-3 text-body">
                 <span className="block">
                   <span className="font-medium text-text">Current:</span>{' '}
                   {pendingReplacement.currentVersion || 'none'} (

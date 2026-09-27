@@ -440,7 +440,7 @@ function subscriptionMetadataResponse(
 // The dialog pre-fetches the authorize URL so "Sign in with Claude" is a plain
 // link, then waits for the pasted code on the next step.
 async function openCreateToSignIn() {
-  fireEvent.click(screen.getByRole('button', { name: 'New' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
   const dialog = screen.getByRole('dialog', { name: 'New upstream' });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   // The 'Link valid for' timer only renders once the draft session is ready.
@@ -634,7 +634,6 @@ describe('/upstreams cold-load geometry', () => {
     renderRoute();
 
     const shell = screen.getByTestId('upstream-detail-loading-shell');
-    expect(shell.className).toContain('contents');
     expect(
       within(shell).getByTestId('upstream-detail-loading-metadata').className,
     ).toContain('min-h-9');
@@ -643,7 +642,7 @@ describe('/upstreams cold-load geometry', () => {
     ).toContain('min-h-5');
     expect(
       within(shell).getByTestId('quota-snapshot-grid').className,
-    ).toContain('min-h-[203px]');
+    ).toContain('min-h-[22rem]');
     const rangeControl = within(shell).getByTestId(
       'quota-history-range-control',
     );
@@ -677,7 +676,7 @@ describe('/upstreams cold-load geometry', () => {
     expect(legend.querySelectorAll('.skeleton')).toHaveLength(2);
 
     const snapshotGrid = screen.getByTestId('quota-snapshot-grid');
-    expect(snapshotGrid.className).toContain('min-h-[203px]');
+    expect(snapshotGrid.className).toContain('min-h-[22rem]');
     expect(
       within(snapshotGrid).getAllByTestId('quota-snapshot-skeleton-card'),
     ).toHaveLength(3);
@@ -777,7 +776,7 @@ describe('/upstreams cold-load geometry', () => {
       'min-h-5',
     );
     expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
-      'min-h-[203px]',
+      'min-h-[22rem]',
     );
     const rangeControl = screen.getByTestId('quota-history-range-control');
     const rangeItems = within(rangeControl).getAllByRole('radio');
@@ -1155,7 +1154,7 @@ describe('/upstreams mutation pending UX', () => {
     } as never);
 
     const view = renderRoute();
-    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
     fireEvent.click(

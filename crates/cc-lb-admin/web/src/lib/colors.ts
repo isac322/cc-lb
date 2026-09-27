@@ -46,19 +46,34 @@ function fnv1aHash(input: string): number {
   return hash >>> 0;
 }
 
+/**
+ * Hue bands a session colour may use. They are the hues where a chip drawn at
+ * the series lightness and chroma (night oklch 0.76/0.11, day 0.52/0.13) stays
+ * more than OKLab ΔE 0.09 from the accent, warn and danger tokens in both
+ * themes, so a session chip never reads as brand or severity.
+ */
+const SESSION_HUE_BANDS: ReadonlyArray<readonly [number, number]> = [
+  [117, 258],
+  [321, 354],
+];
+
+const SESSION_HUES: readonly number[] = SESSION_HUE_BANDS.flatMap(
+  ([from, to]) => Array.from({ length: to - from + 1 }, (_, i) => from + i),
+);
+
 export interface SessionColor {
-  fg: string;
+  /** Series-strength colour for the chip's dot. */
+  mark: string;
+  /** Tinted chip background. */
   bg: string;
-  border: string;
   hue: number;
 }
 
 export function getSessionColor(sessionId: string): SessionColor {
-  const hue = fnv1aHash(sessionId) % 360;
+  const hue = SESSION_HUES[fnv1aHash(sessionId) % SESSION_HUES.length]!;
   return {
     hue,
-    fg: `hsl(${hue} 55% 62%)`,
-    bg: `hsl(${hue} 55% 50% / 0.12)`,
-    border: `hsl(${hue} 45% 50% / 0.35)`,
+    mark: `light-dark(oklch(0.52 0.13 ${hue}), oklch(0.76 0.11 ${hue}))`,
+    bg: `light-dark(oklch(0.52 0.13 ${hue} / 0.12), oklch(0.76 0.11 ${hue} / 0.14))`,
   };
 }

@@ -96,7 +96,7 @@ export function SignInLink({
       onClick={onOpened}
       className={cx(
         base,
-        'bg-text text-bg hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
+        'border border-accent bg-accent text-accent-ink hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
       )}
     >
       <ExternalLink strokeWidth={1.75} />
@@ -401,7 +401,7 @@ export function AccountCard({
       ) : null}
       {account && (account.email || account.displayName) ? (
         <div className="flex items-center gap-3 min-w-0">
-          <div className="h-8 w-8 shrink-0 rounded-full bg-accent-dim text-accent-text flex items-center justify-center text-body-sm font-medium">
+          <div className="h-8 w-8 shrink-0 rounded-full bg-overlay-4 text-text flex items-center justify-center text-body-sm font-medium">
             {(account.displayName ?? account.email ?? '?')
               .slice(0, 1)
               .toUpperCase()}

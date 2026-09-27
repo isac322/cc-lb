@@ -63,7 +63,7 @@ function SessionDetailHeader({ onClose }: Pick<Props, 'onClose'>) {
         type="button"
         onClick={onClose}
         aria-label="Back to sessions"
-        className="-my-1 min-h-8 px-2 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 text-xs inline-flex items-center gap-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="-my-1 min-h-8 px-2 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 text-caption inline-flex items-center gap-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
         <span className="inline-flex items-center gap-1 max-[960px]:hidden">
           Close
@@ -87,7 +87,7 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
       contentTestId="session-detail-loading-content"
     >
       <div
-        className="well p-3 flex flex-col gap-3"
+        className="flex flex-col gap-3"
         data-testid="session-detail-overview-skeleton"
       >
         <div className="flex justify-between items-start">
@@ -106,7 +106,7 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
         <div className="h-px bg-row w-full my-1"></div>
 
         <dl
-          className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-caption"
+          className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm"
           data-testid="session-detail-metadata-skeleton"
         >
           {METADATA_SKELETON_ROWS.map(([label, valueClassName]) => (
@@ -127,23 +127,15 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
       </div>
 
       <div className="mt-2" data-testid="session-detail-turns-skeleton">
-        <h4 className="text-title-card text-text mb-3">Message-by-message</h4>
-        <div className="flex flex-col gap-2">
+        <h4 className="text-title-card text-text mb-2">Message-by-message</h4>
+        <div className="flex flex-col divide-y divide-row">
           {Array.from({ length: 3 }).map((_, index) => (
             <div
               key={index}
-              className={cx(
-                'well px-3',
-                index === 0 ? 'py-2.5 relative' : 'py-2 opacity-70',
-              )}
+              className="py-2.5"
               data-testid="session-detail-turn-skeleton"
               aria-hidden="true"
             >
-              {index === 0 && (
-                <div className="absolute -top-2.5 right-2 w-20">
-                  <Skeleton className="h-4" />
-                </div>
-              )}
               <div className="flex items-center justify-between mb-1.5">
                 <div className="w-32">
                   <Skeleton className="h-3" />
@@ -230,16 +222,8 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const isActiveSession =
     session.state === 'renewed' || session.state === 'scheduled';
   const latestTagLabel = isActiveSession ? 'Current turn · Live' : 'Final turn';
-  const latestCardCls = isActiveSession
-    ? 'border-accent/40 bg-accent/5'
-    : session.state === 'expired'
-      ? 'border-warn/40 bg-warn/5'
-      : 'border-text-faint/30 bg-overlay-2';
-  const latestTagCls = isActiveSession
-    ? 'border-accent/40 text-accent'
-    : session.state === 'expired'
-      ? 'border-warn/40 text-warn-text'
-      : 'border-text-faint/40 text-text-muted';
+  const latestTagTone: 'neutral' | 'warn' =
+    session.state === 'expired' ? 'warn' : 'neutral';
 
   const STATE_TONE: Record<
     string,
@@ -265,15 +249,15 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
       {isError && (
         <div className="rounded-sm bg-danger/8 text-danger-text px-3 py-2 flex items-start gap-2 mb-3">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span className="text-body-sm leading-snug">
+          <span className="text-body leading-snug">
             {session.error} ·{' '}
             <RelativeTime ts={session.last_message_at_ms} compact />
           </span>
         </div>
       )}
 
-      {/* Overview Section */}
-      <div className="well p-3 flex flex-col gap-3">
+      {/* Overview: readout, state and metadata on the pane ground. */}
+      <div className="flex flex-col gap-3">
         <div className="flex justify-between items-start">
           <div className="flex flex-col gap-1">
             <span className="text-label text-text-muted">Net P&L</span>
@@ -289,7 +273,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
 
         <div className="h-px bg-row w-full my-1"></div>
 
-        <dl className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-caption">
+        <dl className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm">
           <dt className="text-text-muted">Session ID</dt>
           <dd className="text-text font-mono text-data break-all">
             {session.id}
@@ -331,14 +315,14 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
         </dl>
       </div>
 
-      {/* Turns Section */}
+      {/* Turns: flat rows on the ground, one 1px line between. */}
       <div className="mt-2">
-        <h4 className="text-title-card text-text mb-3">Message-by-message</h4>
-        <div className="flex flex-col gap-2">
+        <h4 className="text-title-card text-text mb-2">Message-by-message</h4>
+        <div className="flex flex-col divide-y divide-row">
           {session.turns.length === 0 ? (
-            <div className="well px-3 py-2 opacity-70">
+            <div className="py-2.5">
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-caption font-medium text-text flex items-center gap-1.5">
+                <span className="text-body-sm font-medium text-text flex items-center gap-1.5">
                   <Lock className="w-3 h-3 text-text-faint" />
                   <span className="text-text-muted font-normal">
                     · no renewals
@@ -354,7 +338,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                     Status: <span className="text-text">-</span>
                   </span>
                 </div>
-                <div className="text-caption font-medium tabular-nums">
+                <div className="text-body-sm font-medium tabular-nums">
                   <span className="text-text-muted">-</span>
                 </div>
               </div>
@@ -396,64 +380,24 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                 followUpText = 'no follow-up (loss)';
               }
 
-              if (isNewest) {
-                return (
-                  <div
-                    key={turnNum}
-                    className={cx(
-                      'rounded-sm border px-3 py-2.5 relative',
-                      latestCardCls,
-                    )}
-                  >
-                    <div
-                      className={cx(
-                        'absolute -top-2.5 right-2 bg-bg-sub border text-caption font-medium px-1.5 rounded-sm',
-                        latestTagCls,
+              return (
+                <div key={turnNum} className="py-2.5">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="text-body-sm font-medium text-text flex items-center gap-1.5 min-w-0">
+                      {isNewest ? null : (
+                        <Lock className="w-3 h-3 shrink-0 text-text-faint" />
                       )}
-                    >
-                      {latestTagLabel}
-                    </div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-caption font-medium text-text">
+                      <span className="truncate">
                         Turn {turnNum}{' '}
                         <span className="text-text-muted font-normal">
                           · {turn.label}
                         </span>
                       </span>
-                      <span className="text-caption tabular-nums text-text-muted">
-                        <RelativeTime ts={turn.time_ms} compact />
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-end mt-2">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-caption text-text-muted">
-                          Renewals:{' '}
-                          <span className="text-text">{turn.renewals}</span>
-                        </span>
-                        <span className="text-caption text-text-muted">
-                          Status:{' '}
-                          <span className="text-text">{followUpText}</span>
-                        </span>
-                      </div>
-                      <div className="text-body-sm font-medium tabular-nums">
-                        {turnPnlHtml}
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              return (
-                <div key={turnNum} className="well px-3 py-2 opacity-70">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-caption font-medium text-text flex items-center gap-1.5">
-                      <Lock className="w-3 h-3 text-text-faint" />
-                      Turn {turnNum}{' '}
-                      <span className="text-text-muted font-normal">
-                        · {turn.label}
-                      </span>
+                      {isNewest ? (
+                        <Badge tone={latestTagTone}>{latestTagLabel}</Badge>
+                      ) : null}
                     </span>
-                    <span className="text-caption tabular-nums text-text-muted">
+                    <span className="shrink-0 text-caption tabular-nums text-text-muted">
                       <RelativeTime ts={turn.time_ms} compact />
                     </span>
                   </div>
@@ -468,7 +412,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                         <span className="text-text">{followUpText}</span>
                       </span>
                     </div>
-                    <div className="text-caption font-medium tabular-nums">
+                    <div className="text-body-sm font-medium tabular-nums">
                       {turnPnlHtml}
                     </div>
                   </div>
@@ -494,8 +438,8 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           Config in effect at schedule time
         </button>
         {showConfig && session.config_snapshot && (
-          <div className="well mt-1.5 p-3">
-            <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-caption">
+          <div className="mt-2 pl-4">
+            <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm">
               <dt className="text-text-muted">Lead time · 5m</dt>
               <dd className="text-text tabular-nums">
                 {session.config_snapshot.lead_5m}s
@@ -520,7 +464,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           </div>
         )}
         {showConfig && !session.config_snapshot && (
-          <div className="well mt-1.5 p-3 text-caption text-text-muted">
+          <div className="mt-2 pl-4 text-body-sm text-text-muted">
             No config snapshot available for this session.
           </div>
         )}

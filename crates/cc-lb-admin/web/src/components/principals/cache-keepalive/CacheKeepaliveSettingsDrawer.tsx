@@ -225,7 +225,7 @@ export function CacheKeepaliveSettingsDrawer({
     >
       <fieldset
         aria-busy={saving}
-        className="min-w-0 p-4 space-y-6"
+        className="min-w-0 p-4 space-y-10"
         data-testid="cache-keepalive-settings-form"
         disabled={busy}
       >
@@ -239,8 +239,8 @@ export function CacheKeepaliveSettingsDrawer({
           disabled={busy}
         />
 
-        <div className="space-y-5 border-t border-row pt-6">
-          <h3 className="text-title-card text-text">Renewal</h3>
+        <div className="space-y-5">
+          <h3 className="text-title-section text-text">Renewal</h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
             <Field
               label="Renewal lead time · 5m TTL"
@@ -311,8 +311,8 @@ export function CacheKeepaliveSettingsDrawer({
           </div>
         </div>
 
-        <div className="space-y-5 border-t border-row pt-6">
-          <h3 className="text-title-card text-text">Classifier</h3>
+        <div className="space-y-5">
+          <h3 className="text-title-section text-text">Classifier</h3>
           <div className="flex flex-col gap-1.5">
             <label htmlFor={toolInputId} className="text-label text-text-muted">
               Extra wait-for-user tools
@@ -348,7 +348,7 @@ export function CacheKeepaliveSettingsDrawer({
                 disabled={busy}
                 aria-describedby={toolHintId}
                 className={cx(
-                  'flex-1 min-w-[100px] px-1 bg-transparent outline-none text-body-sm text-text placeholder:text-text-faint',
+                  'flex-1 min-w-[100px] px-1 bg-transparent outline-none text-body text-text placeholder:text-text-faint',
                   PENDING_INPUT_CLASS,
                 )}
                 placeholder="Add tool..."

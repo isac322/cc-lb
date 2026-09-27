@@ -371,101 +371,102 @@ function AuditPage() {
         }
       />
 
-      {/* The card is as tall as its rows; past the viewport the list scrolls. */}
-      <Card className="flex min-h-0 flex-col">
-        <div className="flex shrink-0 flex-col gap-3 border-b border-subtle px-4 py-3">
-          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
-            <div className="flex flex-col gap-1.5">
-              <span className={GROUP_LABEL_CLASS} aria-hidden="true">
-                Action type
-              </span>
-              <SegmentedControl
-                ariaLabel="Action type"
-                value={typeFilter}
-                onChange={setType}
-                options={TYPE_OPTIONS}
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <span className={GROUP_LABEL_CLASS} aria-hidden="true">
-                Time range
-              </span>
-              <SegmentedControl
-                ariaLabel="Time range"
-                value={rangeValue}
-                onChange={(value) => {
-                  if (value !== 'custom') setRange(value);
-                }}
-                options={RANGE_OPTIONS}
-              />
-            </div>
-            <Button
-              className="md:hidden"
-              aria-expanded={mobileFiltersOpen}
-              aria-controls="audit-more-filters"
-              iconLeft={<SlidersHorizontal aria-hidden="true" />}
-              onClick={() => setMobileFiltersOpen((open) => !open)}
-            >
-              {serverFilterCount
-                ? `More filters (${serverFilterCount})`
-                : 'More filters'}
-            </Button>
-            <div
-              id="audit-more-filters"
-              className={cx(
-                'w-full flex-wrap items-end gap-3 md:flex md:w-auto',
-                mobileFiltersOpen ? 'flex' : 'hidden',
-              )}
-            >
-              <div className="w-full min-w-0 sm:w-48">
-                <Field label="Principal">
-                  <Select
-                    size="sm"
-                    value={filters.principal_id ?? ''}
-                    options={principalOptions}
-                    onChange={(value) =>
-                      navigate({
-                        search: (prev) => ({
-                          ...prev,
-                          principal_id: value || undefined,
-                        }),
-                      })
-                    }
-                    allLabel="All principals"
-                    className="w-full"
-                  />
-                </Field>
-              </div>
-              <TimeRangeBounds
-                since={filters.since}
-                until={filters.until}
-                onCommit={({ since, until }) => {
-                  navigate({
-                    search: (prev) => ({
-                      ...prev,
-                      since,
-                      until,
-                      range: undefined,
-                    }),
-                  });
-                }}
-              />
-            </div>
+      {/* Filters sit on the ground; only the entries keep a flat surface. */}
+      <div className="flex shrink-0 flex-col gap-3">
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+          <div className="flex flex-col gap-1.5">
+            <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+              Action type
+            </span>
+            <SegmentedControl
+              ariaLabel="Action type"
+              value={typeFilter}
+              onChange={setType}
+              options={TYPE_OPTIONS}
+            />
           </div>
-          <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
-            <p
-              className="text-body-sm text-text-muted"
-              aria-live="polite"
-              data-testid="audit-summary"
-            >
-              {summary ?? (
-                <span className="skeleton inline-block h-3 w-48 align-middle" />
-              )}
-            </p>
-            {clearButton}
+          <div className="flex flex-col gap-1.5">
+            <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+              Time range
+            </span>
+            <SegmentedControl
+              ariaLabel="Time range"
+              value={rangeValue}
+              onChange={(value) => {
+                if (value !== 'custom') setRange(value);
+              }}
+              options={RANGE_OPTIONS}
+            />
+          </div>
+          <Button
+            className="md:hidden"
+            aria-expanded={mobileFiltersOpen}
+            aria-controls="audit-more-filters"
+            iconLeft={<SlidersHorizontal aria-hidden="true" />}
+            onClick={() => setMobileFiltersOpen((open) => !open)}
+          >
+            {serverFilterCount
+              ? `More filters (${serverFilterCount})`
+              : 'More filters'}
+          </Button>
+          <div
+            id="audit-more-filters"
+            className={cx(
+              'w-full flex-wrap items-end gap-3 md:flex md:w-auto',
+              mobileFiltersOpen ? 'flex' : 'hidden',
+            )}
+          >
+            <div className="w-full min-w-0 sm:w-48">
+              <Field label="Principal">
+                <Select
+                  size="sm"
+                  value={filters.principal_id ?? ''}
+                  options={principalOptions}
+                  onChange={(value) =>
+                    navigate({
+                      search: (prev) => ({
+                        ...prev,
+                        principal_id: value || undefined,
+                      }),
+                    })
+                  }
+                  allLabel="All principals"
+                  className="w-full"
+                />
+              </Field>
+            </div>
+            <TimeRangeBounds
+              since={filters.since}
+              until={filters.until}
+              onCommit={({ since, until }) => {
+                navigate({
+                  search: (prev) => ({
+                    ...prev,
+                    since,
+                    until,
+                    range: undefined,
+                  }),
+                });
+              }}
+            />
           </div>
         </div>
+        <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
+          <p
+            className="text-body text-text-muted"
+            aria-live="polite"
+            data-testid="audit-summary"
+          >
+            {summary ?? (
+              <span className="skeleton inline-block h-3 w-48 align-middle" />
+            )}
+          </p>
+          {clearButton}
+        </div>
+      </div>
 
+      {/* The card is as tall as its rows; past the viewport the list scrolls. */}
+      <Card className="flex min-h-0 flex-col">
         {/* Desktop table */}
         <div className="hidden min-h-0 overflow-auto md:block">
           <Table className="table-fixed min-w-[960px]">
@@ -640,7 +641,7 @@ function AuditPage() {
                   <li key={key}>
                     <button
                       type="button"
-                      className="flex w-full flex-col gap-0.5 px-4 py-3 text-left text-body-sm hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                      className="flex w-full flex-col gap-0.5 px-4 py-3 text-left text-body hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
                       onClick={() => setSelected(entry)}
                     >
                       <span className="flex w-full items-baseline justify-between gap-3">

@@ -43,12 +43,10 @@ import {
   CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
   CacheKeepaliveCard,
 } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
+import { PrincipalSection } from '../components/principals/PrincipalSection';
 import {
   Badge,
   Button,
-  Card,
-  CardBody,
-  CardHeader,
   ConfirmDialog,
   cx,
   Drawer,
@@ -120,20 +118,27 @@ const principalSearchSchema = z.object({
 const PRINCIPAL_LIST_ROW_CLASS =
   'w-full min-h-[72px] text-left p-3 rounded-sm border';
 const PRINCIPAL_DETAIL_HEADER_CLASS =
-  'px-4 md:px-6 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0';
+  'px-4 md:px-8 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0';
 const PRINCIPAL_DETAIL_BODY_CLASS =
-  'flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6';
-const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS = 'overflow-x-auto min-h-48';
-// Minimums measured against the production admin fixture at 1440×1000 so the
-// loading shell and the loaded detail keep the same geometry.
+  'flex-1 overflow-y-auto px-4 pt-6 pb-10 md:px-8 md:pt-8 md:pb-16 space-y-12';
+// The table keeps the one flat surface in an otherwise unboxed section.
+const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS =
+  'glass rounded-md overflow-x-auto min-h-48';
+const PRINCIPAL_KIND_LABEL: Record<Principal['kind'], string> = {
+  machine: 'Machine',
+  human: 'Human',
+  admin: 'Admin',
+};
+// Minimums measured on the unboxed sections against an admin fixture at
+// 1440×1000 so the loading shell and the loaded detail keep the same geometry.
 const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
   cacheKeepalive: CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
-  access: 'min-h-[170px]',
-  recentRequests: 'min-h-[308px]',
-  router: 'min-h-[340px]',
-  observability: 'min-h-[149px]',
-  shape: 'min-h-[236px]',
-  apiKeys: 'min-h-[202px]',
+  access: 'min-h-[143px]',
+  recentRequests: 'min-h-[301px]',
+  router: 'min-h-[324px]',
+  observability: 'min-h-[84px]',
+  shape: 'min-h-[211px]',
+  apiKeys: 'min-h-[190px]',
 } as const;
 const EMPTY_PRINCIPAL_DETAIL_NAME_MAP = new Map<string, string>();
 
@@ -189,50 +194,42 @@ function PrincipalDetailLoadingShell() {
       </header>
 
       <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
-        <Card
-          className={cx(
-            PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive,
-            'w-full flex flex-col',
-          )}
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive}
           data-testid="cache-keepalive-card"
-        >
-          <CardHeader
-            align="center"
-            title={<Skeleton as="span" className="block h-5 w-32" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-            action={
-              <div className="flex items-center gap-2">
-                <Skeleton className="h-7 w-24" />
-                <Skeleton className="h-7 w-24" />
-                <Skeleton className="h-5 w-9" />
-              </div>
-            }
-          />
-          <CardBody className="flex-1">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div key={index} className="flex flex-col gap-1">
-                  <Skeleton className="h-3 w-24" />
-                  <div className="flex h-7 items-center">
-                    <Skeleton className="h-5 w-16" />
-                  </div>
-                  <Skeleton className="h-3 w-32" />
-                </div>
-              ))}
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+          action={
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-7 w-24" />
+              <Skeleton className="h-7 w-24" />
+              <Skeleton className="h-5 w-9" />
             </div>
-          </CardBody>
-        </Card>
+          }
+        >
+          <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div key={index} className="flex flex-col gap-1 pr-5">
+                <Skeleton className="h-3 w-24" />
+                <div className="flex h-9 items-center">
+                  <Skeleton className="h-7 w-20" />
+                </div>
+                <Skeleton className="h-3 w-32" />
+              </div>
+            ))}
+          </div>
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-20" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-          />
-          <div className="divide-y divide-row">
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
+          title={<Skeleton as="span" className="block h-5 w-20" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+        >
+          <div className="space-y-5">
             {Array.from({ length: 2 }).map((_, index) => (
               <div
                 key={index}
-                className="flex items-center justify-between gap-4 px-4 py-3"
+                className="flex items-center justify-between gap-4"
               >
                 <div className="flex items-center gap-4 min-w-0 flex-1">
                   <Skeleton className="h-4 w-28" />
@@ -242,13 +239,13 @@ function PrincipalDetailLoadingShell() {
               </div>
             ))}
           </div>
-        </Card>
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-32" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-48" />}
-          />
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-48" />}
+        >
           <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
             <RequestEventsTable
               events={[]}
@@ -263,54 +260,52 @@ function PrincipalDetailLoadingShell() {
               minWidthClass="min-w-[920px]"
             />
           </div>
-        </Card>
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-24" />}
-            subtitle={<Skeleton as="span" className="block h-8 w-full" />}
-            action={<Skeleton className="h-7 w-24" />}
-          />
-          <CardBody className="space-y-3">
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          subtitle={<Skeleton as="span" className="block h-8 w-full" />}
+          action={<Skeleton className="h-7 w-24" />}
+        >
+          <div className="space-y-3">
             <Skeleton className="h-10" />
             <Skeleton className="h-10" />
             <Skeleton className="h-28" />
-          </CardBody>
-        </Card>
+          </div>
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-32" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-            action={<Skeleton className="h-7 w-24" />}
-          />
-          <CardBody>
-            <Skeleton className="h-10" />
-          </CardBody>
-        </Card>
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}
+          title={<Skeleton as="span" className="block h-5 w-32" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
+          action={<Skeleton className="h-7 w-24" />}
+        >
+          <Skeleton className="h-10" />
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-24" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-96" />}
-          />
-          <CardBody className="space-y-3">
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-96" />}
+        >
+          <div className="space-y-3">
             <Skeleton className="h-14" />
             <Skeleton className="h-14" />
-          </CardBody>
-        </Card>
+          </div>
+        </PrincipalSection>
 
-        <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
-          <CardHeader
-            title={<Skeleton as="span" className="block h-5 w-24" />}
-            subtitle={<Skeleton as="span" className="block h-4 w-44" />}
-            action={<Skeleton className="h-7 w-24" />}
-          />
-          <CardBody className="space-y-3">
+        <PrincipalSection
+          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
+          title={<Skeleton as="span" className="block h-5 w-24" />}
+          subtitle={<Skeleton as="span" className="block h-4 w-44" />}
+          action={<Skeleton className="h-7 w-24" />}
+        >
+          <div className="space-y-3">
             <Skeleton className="h-9" />
             <Skeleton className="h-9" />
-          </CardBody>
-        </Card>
+          </div>
+        </PrincipalSection>
       </div>
     </div>
   );
@@ -353,7 +348,7 @@ function PrincipalsPage() {
   }, [principals.isLoading, selected, principals.data?.principals, navigate]);
 
   return (
-    <div className="h-[calc(100dvh-3rem)] min-h-0 flex w-full max-w-[120rem] mx-auto">
+    <div className="h-shell min-h-0 flex w-full max-w-[120rem] mx-auto">
       <aside
         className={cx(
           'border-r border-subtle flex flex-col min-h-0 w-full md:w-[360px] shrink-0',
@@ -416,20 +411,22 @@ function PrincipalsPage() {
                 className={cx(
                   PRINCIPAL_LIST_ROW_CLASS,
                   'border-transparent transition-colors',
-                  p.id === selectedId ? 'bg-overlay-5' : 'hover:bg-overlay-2',
+                  p.id === selectedId
+                    ? 'bg-accent-dim shadow-[inset_3px_0_0_var(--color-accent)]'
+                    : 'hover:bg-overlay-2',
                 )}
                 aria-current={p.id === selectedId ? 'true' : undefined}
               >
                 <div className="flex items-center justify-between gap-2 mb-1">
                   <span
                     className={cx(
-                      'text-body-sm font-medium truncate',
+                      'text-body font-medium truncate',
                       p.enabled ? 'text-text' : 'text-text-muted',
                     )}
                   >
                     {p.name}
                   </span>
-                  <Badge className="capitalize">{p.kind}</Badge>
+                  <Badge>{PRINCIPAL_KIND_LABEL[p.kind]}</Badge>
                 </div>
                 <div className="flex items-center justify-between gap-2 text-caption text-text-faint mt-2">
                   <span className="truncate">
@@ -542,7 +539,7 @@ function PrincipalDetail({
             <h2 className="text-title-page text-text truncate">
               {principal.name}
             </h2>
-            <Badge className="capitalize">{principal.kind}</Badge>
+            <Badge>{PRINCIPAL_KIND_LABEL[principal.kind]}</Badge>
             <ToggleSwitch
               variant="compact"
               role="switch"
@@ -565,7 +562,7 @@ function PrincipalDetail({
                 aria-live="polite"
                 className="inline-flex items-center gap-1.5 text-caption text-text-muted"
               >
-                <Spinner className="w-3 h-3 text-accent" />
+                <Spinner className="w-3 h-3 text-text-muted" />
                 {nextEnabled ? 'Enabling...' : 'Disabling...'}
               </span>
             ) : null}
@@ -699,25 +696,25 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   }, [recent.data]);
   const loading = recent.data === undefined && recent.isPending;
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}>
-      <CardHeader
-        title="Recent requests"
-        subtitle={
-          <span className="inline-flex h-4 items-center">
-            {loading ? (
-              <span
-                className="skeleton inline-block h-3 w-48"
-                data-testid="recent-requests-subtitle-skeleton"
-                aria-hidden="true"
-              />
-            ) : events.length === 0 ? (
-              `No recent requests from ${principal.name}`
-            ) : (
-              `Last ${events.length} from ${principal.name}`
-            )}
-          </span>
-        }
-      />
+    <PrincipalSection
+      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
+      title="Recent requests"
+      subtitle={
+        <span className="inline-flex h-5 items-center">
+          {loading ? (
+            <span
+              className="skeleton inline-block h-3 w-48"
+              data-testid="recent-requests-subtitle-skeleton"
+              aria-hidden="true"
+            />
+          ) : events.length === 0 ? (
+            `No recent requests from ${principal.name}`
+          ) : (
+            `Last ${events.length} from ${principal.name}`
+          )}
+        </span>
+      }
+    >
       <div
         className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
         data-testid="recent-requests-table-slot"
@@ -736,28 +733,28 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
           emptyTitle="No recent requests for this principal"
         />
       </div>
-    </Card>
+    </PrincipalSection>
   );
 }
 
 function AccessCard({ principal }: { principal: Principal }) {
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}>
-      <CardHeader
-        title="Access"
-        subtitle="Which models this principal may call, and the rate caps applied to every API key"
-      />
-      <div className="divide-y divide-row">
+    <PrincipalSection
+      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
+      title="Access"
+      subtitle="Which models this principal may call, and the rate caps applied to every API key"
+    >
+      <div className="space-y-6">
         <AllowedModelsRow principal={principal} />
         <DefaultLimitsRow principal={principal} />
       </div>
-    </Card>
+    </PrincipalSection>
   );
 }
 
 /**
- * One labelled row of the Access card. Each row is its own region with its
- * own edit cycle, so the heading names the region its controls belong to.
+ * One labelled row of the Access section. Each row is its own region with
+ * its own edit cycle, so the heading names the region its controls belong to.
  */
 function AccessRow({
   id,
@@ -772,19 +769,15 @@ function AccessRow({
 }) {
   const headingId = React.useId();
   return (
-    <section
-      id={id}
-      aria-labelledby={headingId}
-      className="scroll-mt-4 px-4 py-3"
-    >
+    <section id={id} aria-labelledby={headingId} className="scroll-mt-4">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-2 sm:grid-cols-[8rem_minmax(0,1fr)_auto]">
-        <h3
+        <h4
           id={headingId}
           className="col-start-1 row-start-1 self-center text-label text-text-muted sm:self-start sm:pt-1.5"
         >
           {title}
-        </h3>
-        <div className="col-span-2 row-start-2 min-w-0 text-body-sm text-text sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:pt-1">
+        </h4>
+        <div className="col-span-2 row-start-2 min-w-0 text-body text-text sm:col-span-1 sm:col-start-2 sm:row-start-1 sm:pt-1">
           {children}
         </div>
         <div className="col-start-2 row-start-1 flex items-center justify-end gap-2 sm:col-start-3">
@@ -961,7 +954,7 @@ function LimitsEditor({
   };
 
   return (
-    <div className="@container space-y-2">
+    <div className="@container space-y-3">
       {value.length === 0 ? (
         <p className="text-caption text-text-faint">
           No limits. Add one below.
@@ -973,7 +966,7 @@ function LimitsEditor({
         return (
           <div
             key={idx}
-            className="well grid grid-cols-2 items-end gap-3 p-3 @xl:grid-cols-[minmax(0,1fr)_7rem_minmax(0,1fr)_auto]"
+            className="grid grid-cols-2 items-end gap-3 pb-3 border-b border-row @xl:grid-cols-[minmax(0,1fr)_7rem_minmax(0,1fr)_auto]"
           >
             <div className="min-w-0">
               <Field label="Kind">
@@ -1172,14 +1165,14 @@ function DefaultLimitsRow({ principal }: { principal: Principal }) {
 const PLUGIN_DRAWER_HEADING_CLASS =
   'mb-1.5 flex items-center gap-1.5 text-label text-text-muted';
 
-// Matches the shared underline tabs (DESIGN.md §5 Tabs): 13/500, 36px tall.
+// Matches the shared underline tabs: 14/500, 36px tall, 2px accent rule.
 const ROUTER_TAB_CLASS =
-  'h-9 px-3 text-[0.8125rem] font-medium border-b-2 -mb-px transition-colors border-transparent text-text-muted hover:text-text data-[active]:border-accent data-[active]:text-text';
+  'h-9 px-3 text-body font-medium border-b-2 -mb-px transition-colors border-transparent text-text-muted hover:text-text data-[active]:border-accent data-[active]:text-text';
 
 /** Radio ring shared by the slot and terminal-strategy option cards. */
 function RadioMark({ isMutating }: { isMutating: boolean }) {
   return isMutating ? (
-    <Spinner className="w-3 h-3 text-accent" />
+    <Spinner className="w-3 h-3 text-text-muted" />
   ) : (
     <span className="flex size-4 items-center justify-center rounded-full border border-subtle-strong">
       <BaseRadio.Indicator className="size-2 rounded-full bg-accent" />
@@ -1221,10 +1214,8 @@ function SlotRadioCard({
           <RadioMark isMutating={isMutating} />
         </BaseRadio.Root>
         <div className="flex-1 min-w-0">
-          <div className="text-body-sm font-medium text-text truncate">
-            {name}
-          </div>
-          <div className="text-caption text-text-faint mt-0.5">{desc}</div>
+          <div className="text-body font-medium text-text truncate">{name}</div>
+          <div className="text-body text-text-muted mt-0.5">{desc}</div>
         </div>
       </label>
     </li>
@@ -1262,7 +1253,7 @@ function PluginDetailDrawer({
         </span>
       }
     >
-      <div className="p-4 pb-8 space-y-6 text-body-sm text-text">
+      <div className="p-4 pb-8 space-y-6 text-body text-text">
         {plugin.metadata ? (
           <>
             <section data-testid="plugin-purpose">
@@ -1312,7 +1303,7 @@ function PluginDetailDrawer({
           </p>
         )}
 
-        <section className="pt-6 border-t border-row">
+        <section className="pt-4">
           <h3 className={PLUGIN_DRAWER_HEADING_CLASS}>Technical details</h3>
           <dl className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1.5">
             {plugin.wire_version !== undefined && (
@@ -1471,10 +1462,10 @@ function TerminalStrategyRadioGroup({
                   <RadioMark isMutating={isMutating} />
                 </BaseRadio.Root>
                 <div className="flex-1 min-w-0">
-                  <div className="text-body-sm font-medium text-text truncate">
+                  <div className="text-body font-medium text-text truncate">
                     {opt.name}
                   </div>
-                  <div className="text-caption text-text-faint mt-0.5">
+                  <div className="text-body text-text-muted mt-0.5">
                     {opt.desc}
                   </div>
                 </div>
@@ -1735,16 +1726,13 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <Card
+    <PrincipalSection
       id={PRINCIPAL_ROUTER_ANCHOR}
       className={cx(PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router, 'scroll-mt-4')}
+      title="Router"
+      subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
     >
-      <CardHeader
-        title="Router"
-        subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
-        className="border-b-0 pb-0"
-      />
-      <div className="flex flex-col px-4 border-b border-subtle relative">
+      <div className="flex flex-col border-b border-subtle relative">
         <BaseTabs.Root
           value={activeTab}
           onValueChange={(value) => {
@@ -1753,7 +1741,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             }
           }}
         >
-          <BaseTabs.List className="flex items-center w-fit mt-2">
+          <BaseTabs.List className="flex items-center w-fit">
             <Hint
               label={
                 isComplex
@@ -1766,6 +1754,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 aria-disabled={isComplex}
                 className={cx(
                   ROUTER_TAB_CLASS,
+                  'pl-0',
                   isComplex && 'opacity-50 cursor-not-allowed',
                 )}
                 value="basic"
@@ -1781,7 +1770,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
         {showMobileNotice && (
           <div
             role="status"
-            className="absolute left-4 top-full mt-2 z-10 text-warn-text bg-bg-sub border border-subtle-strong rounded-md pl-3 py-1 pr-1 text-caption shadow-overlay flex items-start gap-2 max-w-xs"
+            className="absolute left-0 top-full mt-2 z-10 text-warn-text bg-bg-sub border border-subtle-strong rounded-md pl-3 py-1 pr-1 text-caption shadow-overlay flex items-start gap-2 max-w-xs"
           >
             <span className="py-1">
               Basic requires a router chain containing only
@@ -1797,15 +1786,15 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
           </div>
         )}
       </div>
-      <CardBody>
+      <div>
         {activeTab === 'basic' && (
-          <div role="tabpanel" className="space-y-5">
-            <div className="well flex items-center justify-between gap-4 p-3">
+          <div role="tabpanel" className="space-y-6">
+            <div className="flex items-center justify-between gap-4">
               <div>
-                <div className="text-body-sm font-medium text-text">
+                <div className="text-body font-medium text-text">
                   Keep prompt cache warm by reusing upstreams
                 </div>
-                <div className="mt-0.5 text-caption text-text-faint">
+                <div className="mt-0.5 text-body text-text-muted">
                   Requests with similar prompts get routed to the upstream that
                   already served them, so the prompt cache hits stay high.
                 </div>
@@ -1817,7 +1806,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                     aria-live="polite"
                     className="inline-flex items-center gap-1.5 text-caption text-text-muted"
                   >
-                    <Spinner className="w-3 h-3 text-accent" />
+                    <Spinner className="w-3 h-3 text-text-muted" />
                     {hasSubscriptionPreference
                       ? 'Turning off...'
                       : 'Turning on...'}
@@ -1836,7 +1825,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             </div>
 
             <div>
-              <div className="text-body-sm font-medium text-text mb-2">
+              <div className="text-body font-medium text-text mb-2">
                 When multiple upstreams qualify, pick
               </div>
               <TerminalStrategyRadioGroup
@@ -1854,9 +1843,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
         {activeTab === 'advanced' && (
           <div role="tabpanel" className="space-y-4">
             {entries.length === 0 && (
-              <div className="well px-4 py-6 text-center">
-                <p className="text-body-sm text-text mb-1">No filters yet.</p>
-                <p className="text-caption text-text-faint">
+              <div>
+                <p className="text-body text-text mb-1">No filters yet.</p>
+                <p className="text-body text-text-muted">
                   Incoming requests will go straight to the terminal step. Add a
                   filter to narrow candidates by some property (cache prefix,
                   cost, region, ...).
@@ -1885,90 +1874,74 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 setPickerOpen(open);
               }}
             >
-              <ul ref={listRef} className="space-y-0">
+              {/* Chain steps are flat rows on the ground, one 1px line between. */}
+              <ul
+                ref={listRef}
+                className={cx(entries.length > 0 && 'border-t border-row')}
+              >
                 {entries.map((e, idx) => {
                   const reg = registry.data?.entries.find(
                     (r) => r.id === e.wasm_registry_id,
                   );
                   return (
-                    <React.Fragment key={e.id}>
-                      {idx > 0 && (
-                        <li
-                          className="flex flex-col items-center"
-                          data-key={`connector-${idx}`}
+                    <li
+                      key={e.id}
+                      className="flex items-center gap-3 py-3 border-b border-row"
+                      data-key={e.id}
+                    >
+                      <div className="text-caption tabular-nums text-text-faint w-12 shrink-0">
+                        Step {idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="text-body font-medium text-text truncate hover:underline"
+                            onClick={() => setDetailPlugin(reg ?? null)}
+                          >
+                            {reg?.name ?? e.wasm_registry_id}
+                          </button>
+                        </div>
+                        <div className="text-body text-text-muted truncate mt-0.5">
+                          {reg?.metadata?.purpose ??
+                            'User-uploaded filter (no description supplied).'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          aria-label="Move filter up"
+                          onClick={() => moveUp(idx)}
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                          disabled={idx === 0 || routerWriteBlocked}
                         >
-                          <div className="w-px h-4 bg-subtle"></div>
-                          <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
-                        </li>
-                      )}
-                      <li
-                        className="well flex items-center gap-3 p-3"
-                        data-key={e.id}
-                      >
-                        <div className="text-caption tabular-nums text-text-faint w-12 shrink-0">
-                          Step {idx + 1}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              className="text-body-sm font-medium text-text truncate hover:underline"
-                              onClick={() => setDetailPlugin(reg ?? null)}
-                            >
-                              {reg?.name ?? e.wasm_registry_id}
-                            </button>
-                          </div>
-                          <div className="text-caption text-text-faint truncate mt-0.5">
-                            {reg?.metadata?.purpose ??
-                              'User-uploaded filter (no description supplied).'}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-1 shrink-0">
-                          <button
-                            aria-label="Move filter up"
-                            onClick={() => moveUp(idx)}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={idx === 0 || routerWriteBlocked}
-                          >
-                            <ArrowUp className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            aria-label="Move filter down"
-                            onClick={() => moveDown(idx)}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                            disabled={
-                              idx === entries.length - 1 || routerWriteBlocked
-                            }
-                          >
-                            <ArrowDown className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            aria-label="Remove filter"
-                            onClick={() => removeFilter(e.id, e.revision)}
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-danger-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
-                            disabled={routerWriteBlocked}
-                          >
-                            {deletingEntryId === e.id ? (
-                              <Spinner className="w-3.5 h-3.5 text-danger-text" />
-                            ) : (
-                              <Trash2 className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </li>
-                    </React.Fragment>
+                          <ArrowUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          aria-label="Move filter down"
+                          onClick={() => moveDown(idx)}
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                          disabled={
+                            idx === entries.length - 1 || routerWriteBlocked
+                          }
+                        >
+                          <ArrowDown className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          aria-label="Remove filter"
+                          onClick={() => removeFilter(e.id, e.revision)}
+                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-danger-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
+                          disabled={routerWriteBlocked}
+                        >
+                          {deletingEntryId === e.id ? (
+                            <Spinner className="w-3.5 h-3.5 text-danger-text" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </li>
                   );
                 })}
-
-                {entries.length > 0 && (
-                  <li
-                    className="flex flex-col items-center"
-                    data-key="connector-end"
-                  >
-                    <div className="w-px h-4 bg-subtle"></div>
-                    <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
-                  </li>
-                )}
 
                 <BasePopover.Trigger
                   disabled={routerWriteBlocked}
@@ -1976,7 +1949,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   render={
                     <li
                       className={cx(
-                        'flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm transition-colors',
+                        'mt-3 flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm transition-colors',
                         isChainBusy
                           ? 'opacity-50 cursor-progress'
                           : principalWritePending
@@ -1991,32 +1964,28 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   {insert.isPending ? (
                     <div className="flex items-center gap-2 text-text-muted">
                       <Spinner className="w-4 h-4" />
-                      <span className="text-body-sm font-medium">
-                        Adding...
-                      </span>
+                      <span className="text-body font-medium">Adding...</span>
                     </div>
                   ) : (
                     <div className="flex items-center gap-2 text-text-muted hover:text-text">
                       <Plus className="w-4 h-4" />
-                      <span className="text-body-sm font-medium">
-                        Add filter
-                      </span>
+                      <span className="text-body font-medium">Add filter</span>
                     </div>
                   )}
                 </BasePopover.Trigger>
               </ul>
 
-              <div className="well flex flex-col gap-3 p-3 mt-4">
+              <div className="flex flex-col gap-3 mt-8">
                 <div className="flex items-center gap-3">
                   <div className="text-caption text-text-faint w-12 shrink-0 flex items-center gap-1">
                     <ChevronDown className="w-3 h-3" aria-hidden="true" />
                     Final
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-body-sm font-medium text-text truncate">
+                    <div className="text-body font-medium text-text truncate">
                       Terminal step
                     </div>
-                    <div className="text-caption text-text-faint truncate mt-0.5">
+                    <div className="text-body text-text-muted truncate mt-0.5">
                       Picks the upstream that will serve the request.
                     </div>
                   </div>
@@ -2055,7 +2024,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                           <button
                             key={p.id}
                             className={cx(
-                              'w-full text-left px-2 py-1.5 rounded-sm text-body-sm flex flex-col gap-0.5',
+                              'w-full text-left px-2 py-1.5 rounded-sm text-body flex flex-col gap-0.5',
                               isInserting
                                 ? 'cursor-progress'
                                 : disabled
@@ -2089,7 +2058,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
             </BasePopover.Root>
           </div>
         )}
-      </CardBody>
+      </div>
 
       <PluginDetailDrawer
         plugin={detailPlugin}
@@ -2098,7 +2067,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
           if (!open) setDetailPlugin(null);
         }}
       />
-    </Card>
+    </PrincipalSection>
   );
 }
 
@@ -2189,21 +2158,21 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const candidates = registry.data?.entries ?? [];
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}>
-      <CardHeader
-        title={
-          <span className="flex items-center gap-2">
-            Shape
-            {hasMultiple && (
-              <Hint label="Database invariant violated: multiple shape entries detected. Selecting a new option will clear them.">
-                <Badge tone="warn">Multiple entries detected</Badge>
-              </Hint>
-            )}
-          </span>
-        }
-        subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
-      />
-      <CardBody>
+    <PrincipalSection
+      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}
+      title={
+        <span className="flex items-center gap-2">
+          Shape
+          {hasMultiple && (
+            <Hint label="Database invariant violated: multiple shape entries detected. Selecting a new option will clear them.">
+              <Badge tone="warn">Multiple entries detected</Badge>
+            </Hint>
+          )}
+        </span>
+      }
+      subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
+    >
+      <div>
         <BaseRadioGroup
           className="space-y-2"
           aria-busy={shapeWritePending || undefined}
@@ -2236,8 +2205,8 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
               />
             ))}
         </BaseRadioGroup>
-      </CardBody>
-    </Card>
+      </div>
+    </PrincipalSection>
   );
 }
 
@@ -2300,34 +2269,34 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
   };
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}>
-      <CardHeader
-        title="Observability"
-        subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
-        action={
-          <>
-            {reorder.isPending ? (
-              <span
-                role="status"
-                aria-live="polite"
-                className="inline-flex items-center gap-1.5 text-caption text-text-muted"
-              >
-                <Spinner className="w-3 h-3 text-accent" />
-                Saving order...
-              </span>
-            ) : null}
-            <Button
-              size="sm"
-              iconLeft={<Plus className="w-3 h-3" />}
-              disabled={chainBusy}
-              onClick={() => setAddOpen(true)}
+    <PrincipalSection
+      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}
+      title="Observability"
+      subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
+      action={
+        <>
+          {reorder.isPending ? (
+            <span
+              role="status"
+              aria-live="polite"
+              className="inline-flex items-center gap-1.5 text-caption text-text-muted"
             >
-              Add
-            </Button>
-          </>
-        }
-      />
-      <CardBody>
+              <Spinner className="w-3 h-3 text-text-muted" />
+              Saving order...
+            </span>
+          ) : null}
+          <Button
+            size="sm"
+            iconLeft={<Plus className="w-3 h-3" />}
+            disabled={chainBusy}
+            onClick={() => setAddOpen(true)}
+          >
+            Add
+          </Button>
+        </>
+      }
+    >
+      <div>
         {entries.length ? (
           <DndContext
             sensors={sensors}
@@ -2338,7 +2307,10 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
               items={entries.map((e) => e.id)}
               strategy={verticalListSortingStrategy}
             >
-              <ul className="space-y-1.5" aria-busy={chainBusy || undefined}>
+              <ul
+                className="border-t border-row"
+                aria-busy={chainBusy || undefined}
+              >
                 {entries.map((e) => {
                   const reg = registry.data?.entries.find(
                     (r) => r.id === e.wasm_registry_id,
@@ -2364,7 +2336,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
             </SortableContext>
           </DndContext>
         ) : (
-          <p className="py-4 text-center text-body-sm text-text-muted">
+          <p className="text-body text-text-muted">
             No {label.toLowerCase()} plugins. Add one to run it on every
             request.
           </p>
@@ -2456,8 +2428,8 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
             );
           }}
         />
-      </CardBody>
-    </Card>
+      </div>
+    </PrincipalSection>
   );
 }
 
@@ -2491,7 +2463,7 @@ function SortableChainItem({
     <li
       ref={setNodeRef}
       style={style}
-      className="well flex items-center gap-2 p-2"
+      className="flex items-center gap-2 py-2 bg-bg border-b border-row"
     >
       <button
         type="button"
@@ -2506,7 +2478,7 @@ function SortableChainItem({
       <span className="w-8 text-caption tabular-nums text-text-faint">
         #{Math.floor(order)}
       </span>
-      <span className="flex-1 text-body-sm font-medium text-text truncate">
+      <span className="flex-1 text-body font-medium text-text truncate">
         {name}
       </span>
       <IconButton
@@ -2688,37 +2660,37 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
   const bulkCount = selectedKeys.length;
 
   return (
-    <Card className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}>
-      <CardHeader
-        title="API keys"
-        subtitle="Authenticates as this DB principal; routing selects a DB upstream"
-        action={
-          <div className="flex flex-wrap items-center gap-2">
-            {bulkCount > 0 ? (
-              <Button
-                size="sm"
-                variant="danger"
-                disabled={revokePending}
-                onClick={() => {
-                  setBulkTargets(selectedKeys);
-                  setBulkConfirmOpen(true);
-                }}
-              >
-                Revoke selected ({bulkCount})
-              </Button>
-            ) : null}
+    <PrincipalSection
+      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
+      title="API keys"
+      subtitle="Authenticates as this DB principal; routing selects a DB upstream"
+      action={
+        <div className="flex flex-wrap items-center gap-2">
+          {bulkCount > 0 ? (
             <Button
               size="sm"
-              iconLeft={<KeyRound className="w-3 h-3" />}
-              onClick={() => setIssueOpen(true)}
+              variant="danger"
+              disabled={revokePending}
+              onClick={() => {
+                setBulkTargets(selectedKeys);
+                setBulkConfirmOpen(true);
+              }}
             >
-              Issue key
+              Revoke selected ({bulkCount})
             </Button>
-          </div>
-        }
-      />
+          ) : null}
+          <Button
+            size="sm"
+            iconLeft={<KeyRound className="w-3 h-3" />}
+            onClick={() => setIssueOpen(true)}
+          >
+            Issue key
+          </Button>
+        </div>
+      }
+    >
       <div
-        className="overflow-x-auto min-h-32"
+        className="glass rounded-md overflow-x-auto min-h-32"
         data-testid="api-keys-table-slot"
       >
         <Table className="min-w-[760px] whitespace-nowrap">
@@ -2835,7 +2807,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
             ) : (
               <tr>
                 <td colSpan={8} className="px-4 py-8 text-center">
-                  <p className="text-body-sm text-text-muted">
+                  <p className="text-body text-text-muted">
                     No API keys issued.
                   </p>
                   <p className="mt-1 text-caption text-text-faint whitespace-normal">
@@ -2898,7 +2870,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
       >
         {issued ? (
           <div className="space-y-3">
-            <p className="text-body-sm text-text-muted">
+            <p className="text-body text-text-muted">
               Copy the key now. It will not be shown again, so this dialog stays
               open until you choose Done.
             </p>
@@ -2980,7 +2952,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
           void submitBulkRevoke();
         }}
       />
-    </Card>
+    </PrincipalSection>
   );
 }
 

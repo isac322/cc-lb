@@ -119,6 +119,7 @@ export function OAuthReconnectSummary() {
       action={
         <Button
           size="sm"
+          variant={tone === 'danger' ? 'danger' : 'secondary'}
           onClick={() =>
             navigate(
               only
@@ -130,7 +131,7 @@ export function OAuthReconnectSummary() {
             )
           }
         >
-          {only ? only.nudge.actionLabel : 'Review'}
+          {only ? only.nudge.actionLabel : 'Review upstreams'}
         </Button>
       }
     >

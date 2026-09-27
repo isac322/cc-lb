@@ -1429,7 +1429,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
         ) : (
           <CategoryTabsSkeleton />
         )}
-        <CardBody>
+        <CardBody className="md:p-6">
           {loading ? (
             <ConfigEditorSkeleton />
           ) : editorData && state && model && activeCategory ? (
@@ -1452,7 +1452,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
                     <h3 id={CONFIG_CATEGORY_HEADING_ID} className="sr-only">
                       {activeCategory.label}
                     </h3>
-                    <p className="text-body-sm text-text-muted">
+                    <p className="text-body text-text-muted">
                       {activeCategory.description}
                     </p>
                     <CategoryStatusSummary counts={activeCategory.counts} />
@@ -1582,12 +1582,12 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
             ) : null}
             {requiresSelfLockoutConfirmation ? (
               <span className="block space-y-2">
-                <span className="block text-body-sm font-medium text-warn-text">
+                <span className="block text-body font-medium text-warn-text">
                   Admin authentication providers changed. A wrong provider kind,
                   ID, token environment variable, domain, or audience can lock
                   you out after restart.
                 </span>
-                <label className="flex items-start gap-2 text-body-sm text-text">
+                <label className="flex items-start gap-2 text-body text-text">
                   <input
                     type="checkbox"
                     data-testid="self-lockout-ack"
@@ -1844,7 +1844,7 @@ function ValidationSummary({
           errors.length ? 'bg-danger/8' : 'bg-overlay-3',
         )}
       >
-        <summary className="flex min-h-10 cursor-pointer list-none flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-body-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-10 cursor-pointer list-none flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-body focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 [&::-webkit-details-marker]:hidden">
           <span className="inline-flex items-center gap-2 font-medium text-text">
             <ChevronRight
               aria-hidden="true"
@@ -1861,7 +1861,7 @@ function ValidationSummary({
             Validation summary
           </span>
           {statusParts.length ? (
-            <span className="text-caption">
+            <span className="text-body-sm">
               {statusParts.map((part, index) => (
                 <span
                   key={part.key}
@@ -1891,7 +1891,7 @@ function ValidationSummary({
                   {issue.severity === 'error' ? 'Error' : 'Warning'}
                 </Badge>
                 <span className="min-w-0">
-                  <span className="block text-body-sm text-text">
+                  <span className="block text-body text-text">
                     {issue.message}
                   </span>
                   <span className="block break-all font-mono text-data text-text-faint">
@@ -1902,7 +1902,7 @@ function ValidationSummary({
             ))}
           </div>
         ) : (
-          <p className="border-t border-row px-3 py-2 text-body-sm text-text-muted">
+          <p className="border-t border-row px-3 py-2 text-body text-text-muted">
             No validation issues.
           </p>
         )}
@@ -1938,7 +1938,7 @@ function CategoryStatusSummary({ counts }: { counts: ConfigEditorCounts }) {
     );
   }
   return (
-    <p className="text-caption text-text-faint">
+    <p className="text-body-sm text-text-muted">
       {parts.map((part, index) => (
         <span key={typeof part === 'string' ? part : 'errors'}>
           {index ? ' · ' : null}
@@ -1959,7 +1959,7 @@ function CategoryStatusDots({ counts }: { counts: ConfigEditorCounts }) {
   return (
     <span aria-hidden="true" className="inline-flex items-center gap-1">
       {counts.modified ? (
-        <span className="size-1.5 rounded-full bg-accent" />
+        <span className="size-1.5 rounded-full bg-text" />
       ) : null}
       {counts.overrides ? (
         <span className="size-1.5 rounded-full bg-text-faint" />
@@ -2269,22 +2269,19 @@ function ConfigEditorSkeleton() {
   return (
     <div
       data-testid="config-editor-skeleton"
-      className="space-y-5"
+      className="space-y-10"
       aria-hidden="true"
     >
       <Skeleton className="h-4 w-72 max-w-full" />
       {[0, 1, 2].map((index) => (
-        <div
-          key={index}
-          className={index === 0 ? undefined : 'border-t border-subtle pt-5'}
-        >
+        <section key={index}>
           <Skeleton className={cx('h-4', index % 2 ? 'w-36' : 'w-44')} />
           <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2 2xl:grid-cols-3">
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-24 w-full" />
             <Skeleton className="hidden h-24 w-full 2xl:block" />
           </div>
-        </div>
+        </section>
       ))}
     </div>
   );
@@ -2338,7 +2335,7 @@ function CategoryPanel({
   const hasSchemaKnown = unassignedLeaves.some((leaf) => !leaf.unknown);
   return (
     <section
-      className="space-y-5"
+      className="space-y-10"
       data-config-category-panel={category.id}
       aria-labelledby={CONFIG_CATEGORY_HEADING_ID}
     >
@@ -2362,7 +2359,6 @@ function CategoryPanel({
         <section
           data-testid="config-section-card"
           data-config-section={CONFIG_EDITOR_UNASSIGNED_SECTION_ID}
-          className="border-t border-subtle pt-5 first:border-t-0 first:pt-0"
         >
           <div className="flex flex-wrap items-center gap-2">
             <h4 className="text-title-card text-text">
@@ -2373,13 +2369,13 @@ function CategoryPanel({
             </Badge>
           </div>
           {hasUnknownKeys ? (
-            <p className="mt-0.5 text-caption text-text-faint">
+            <p className="mt-0.5 text-body-sm text-text-muted">
               These file keys are not recognized by the schema. They are
               preserved for review — remove or correct them before validation.
             </p>
           ) : null}
           {hasSchemaKnown ? (
-            <p className="mt-0.5 text-caption text-text-faint">
+            <p className="mt-0.5 text-body-sm text-text-muted">
               These settings are recognized by the schema but not covered by a
               settings section.
             </p>
@@ -2469,16 +2465,12 @@ function SectionCard({
     />
   );
   return (
-    <section
-      data-testid="config-section-card"
-      data-config-section={section.id}
-      className="border-t border-subtle pt-5 first:border-t-0 first:pt-0"
-    >
+    <section data-testid="config-section-card" data-config-section={section.id}>
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
         <div className="min-w-0">
           <h4 className="text-title-card text-text">{section.label}</h4>
           {section.description ? (
-            <p className="mt-0.5 text-caption text-text-faint">
+            <p className="mt-0.5 text-body-sm text-text-muted">
               {section.description}
             </p>
           ) : null}
@@ -2515,9 +2507,9 @@ function SectionCard({
           data-testid="config-advanced"
           open={open}
           onToggle={(event) => onToggleAdvanced(event.currentTarget.open)}
-          className="group/advanced mt-5 border-t border-subtle"
+          className="group/advanced mt-6"
         >
-          <summary className="flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1.5 py-2 text-body-sm font-medium text-text-muted transition-colors hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+          <summary className="flex min-h-[44px] w-fit cursor-pointer list-none items-center gap-1.5 py-2 text-body font-medium text-text-muted transition-colors hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
             <ChevronRight
               aria-hidden="true"
               className="size-3.5 transition-transform group-open/advanced:rotate-90 motion-reduce:transition-none"
@@ -2530,7 +2522,7 @@ function SectionCard({
         </details>
       ) : null}
       {!primaryRoots.length && !advancedRoots.length ? (
-        <p className="mt-3 text-caption text-text-faint">
+        <p className="mt-3 text-body-sm text-text-muted">
           These settings only apply to a different configuration variant.
         </p>
       ) : null}
@@ -2640,10 +2632,7 @@ function ConfigNode({
     const showNullableToggle = nullable && !suppressNullableToggle;
     return (
       <div
-        className={cx(
-          'col-span-full space-y-3',
-          depth === 0 ? '' : 'border-t border-subtle pt-4',
-        )}
+        className={cx('col-span-full space-y-3', depth === 0 ? '' : 'pt-3')}
         data-config-path={path}
         tabIndex={-1}
       >
@@ -2658,7 +2647,7 @@ function ConfigNode({
               <div className="min-w-0 flex-1">
                 <ConfigGroupHeading depth={depth} path={path} />
                 {typeof schema.description === 'string' ? (
-                  <p className="mt-0.5 text-caption text-text-faint">
+                  <p className="mt-0.5 text-body-sm text-text-muted">
                     {schema.description}
                   </p>
                 ) : null}
@@ -2746,9 +2735,9 @@ function ConfigKey({ path }: { path: string }) {
 function ConfigGroupHeading({ depth, path }: { depth: number; path: string }) {
   const label = configKeyLabel(path.split('.').at(-1) ?? path);
   return depth === 0 ? (
-    <h5 className="text-body-sm font-semibold text-text">{label}</h5>
+    <h5 className="text-body font-semibold text-text">{label}</h5>
   ) : (
-    <h6 className="text-body-sm font-medium text-text-muted">{label}</h6>
+    <h6 className="text-body font-medium text-text-muted">{label}</h6>
   );
 }
 
@@ -2782,7 +2771,7 @@ function DetailRows({
       {rows.map((row, index) => (
         <div key={`${row.label}-${index}`} className="contents">
           <dt className="text-label text-text-muted">{row.label}</dt>
-          <dd className="min-w-0 break-words text-caption text-text-faint">
+          <dd className="min-w-0 break-words text-body-sm text-text-muted">
             {row.value}
           </dd>
         </div>
@@ -2819,7 +2808,7 @@ function FieldDetails({
         {hints.length ? (
           <div className="space-y-1">
             {hints.map((hint) => (
-              <p key={hint} className="text-caption text-text-muted">
+              <p key={hint} className="text-body-sm text-text-muted">
                 {hint}
               </p>
             ))}
@@ -2828,11 +2817,7 @@ function FieldDetails({
         {tradeoffs.length ? <DetailRows rows={tradeoffs} /> : null}
         <DetailRows
           rows={facts}
-          className={
-            hints.length || tradeoffs.length
-              ? 'border-t border-row pt-3'
-              : undefined
-          }
+          className={hints.length || tradeoffs.length ? 'pt-2' : undefined}
         />
       </div>
     </details>
@@ -3472,10 +3457,7 @@ function TaggedUnionEditor({
   };
   return (
     <div
-      className={cx(
-        'col-span-full space-y-3',
-        depth > 0 && 'border-t border-subtle pt-4',
-      )}
+      className={cx('col-span-full space-y-3', depth > 0 && 'pt-3')}
       data-config-path={path}
       tabIndex={-1}
     >
@@ -3492,7 +3474,7 @@ function TaggedUnionEditor({
             <div className="min-w-0">
               <ConfigGroupHeading depth={depth} path={path} />
               {typeof schema.description === 'string' ? (
-                <p className="mt-0.5 text-caption text-text-faint">
+                <p className="mt-0.5 text-body-sm text-text-muted">
                   {schema.description}
                 </p>
               ) : null}
@@ -3516,7 +3498,7 @@ function TaggedUnionEditor({
                     <BaseRadio.Root
                       key={variant.kind}
                       value={variant.kind}
-                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-body-sm font-medium text-text-muted transition-colors hover:bg-overlay-3 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-overlay-6 data-[checked]:text-text"
+                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-label text-text-muted transition-colors hover:bg-overlay-3 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-overlay-6 data-[checked]:text-text"
                     >
                       {STORAGE_KIND_LABELS[variant.kind] ??
                         configKeyLabel(variant.kind)}
@@ -3623,11 +3605,11 @@ function AdminProvidersEditor({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {!hideHeading ? (
-            <h5 className="text-body-sm font-semibold text-text">
+            <h5 className="text-body font-semibold text-text">
               Admin providers
             </h5>
           ) : null}
-          <p className="mt-0.5 text-caption text-text-faint">
+          <p className="mt-0.5 text-body-sm text-text-muted">
             Provider order is stable. Environment-backed tokens are referenced
             by name and never displayed.
           </p>
@@ -3867,7 +3849,7 @@ function RecurringJobsEditor({
           />
         ))
       ) : (
-        <p className="py-3 text-body-sm text-text-muted">
+        <p className="py-3 text-body text-text-muted">
           No recurring jobs are configured.
         </p>
       )}
@@ -3948,7 +3930,7 @@ function RecurringJobRow({
     <div className="py-4 first:pt-0" data-config-path={jobPath} tabIndex={-1}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-body-sm font-medium text-text">
+          <span className="text-body font-medium text-text">
             {meta?.label ?? configKeyLabel(jobKey)}
           </span>
           <span className="break-all font-mono text-data text-text-faint">

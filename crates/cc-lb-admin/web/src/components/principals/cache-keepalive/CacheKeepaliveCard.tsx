@@ -9,16 +9,8 @@ import {
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
 import { undoToast } from '../../../lib/undoToast';
-import {
-  Button,
-  Card,
-  CardBody,
-  CardHeader,
-  cx,
-  Hint,
-  Skeleton,
-  ToggleSwitch,
-} from '../../ui/primitives';
+import { Button, cx, Hint, Skeleton, ToggleSwitch } from '../../ui/primitives';
+import { PrincipalSection } from '../PrincipalSection';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveSessionsDrawer } from './CacheKeepaliveSessionsDrawer';
 import { CacheKeepaliveSettingsDrawer } from './CacheKeepaliveSettingsDrawer';
@@ -74,13 +66,11 @@ function MetricTile({
   value,
   isLoading,
   subtext,
-  valueClassName = 'text-text',
 }: {
   label: string;
   value?: string | number;
   isLoading: boolean;
   subtext: string;
-  valueClassName?: string;
 }) {
   const [flash, setFlash] = useState(false);
   const prevValueRef = useRef(value);
@@ -99,13 +89,12 @@ function MetricTile({
 
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-label text-text-faint">{label}</span>
+      <span className="text-label text-text-muted">{label}</span>
       <div
         data-testid="cache-keepalive-metric-value"
         aria-busy={isLoading}
         className={cx(
-          'flex h-7 items-center text-xl font-medium tabular-nums',
-          valueClassName,
+          'flex h-9 items-center text-display text-text tabular-nums',
           flash && 'flash-text-active',
         )}
         style={
@@ -116,14 +105,15 @@ function MetricTile({
             : undefined
         }
       >
-        {isLoading ? <Skeleton className="h-5 w-16" /> : value}
+        {isLoading ? <Skeleton className="h-7 w-20" /> : value}
       </div>
       <span className="text-caption text-text-faint">{subtext}</span>
     </div>
   );
 }
 
-export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[171px]';
+// Header (46) + gap (16) + readout row (78): the enabled layout's height.
+export const CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS = 'min-h-[140px]';
 
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
@@ -252,80 +242,69 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
 
   return (
     <>
-      <Card
+      <PrincipalSection
         data-testid="cache-keepalive-card"
-        className={cx(
-          CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
-          'w-full flex flex-col',
-        )}
+        className={CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS}
+        title={headerTitle}
+        subtitle="Renews the prompt-cache TTL during idle gaps."
+        action={headerActions}
       >
-        <CardHeader
-          title={headerTitle}
-          subtitle="Renews the prompt-cache TTL during idle gaps."
-          action={headerActions}
-          align="center"
-        />
-        <CardBody className="flex-1">
-          {!enabled ? (
-            <p
-              className="text-body-sm text-text-muted"
-              data-testid="cache-keepalive-off"
-            >
-              Off. Turn on to renew the prompt-cache TTL for idle sessions.
-            </p>
-          ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <MetricTile
-                label="Renewing now"
-                isLoading={summaryQ.isLoading}
-                value={
-                  summaryQ.isLoading
-                    ? undefined
-                    : (summary?.renewing_now ?? 0).toLocaleString('en-US')
-                }
-                subtext="scheduled or mid-renewal"
-              />
-              <MetricTile
-                label="Sessions (last 5m)"
-                isLoading={summaryQ.isLoading}
-                value={
-                  summaryQ.isLoading
-                    ? undefined
-                    : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
-                }
-                subtext="seen in last 5 min"
-              />
-              <MetricTile
-                label="Renewals fired"
-                isLoading={summaryQ.isLoading}
-                value={
-                  summaryQ.isLoading
-                    ? undefined
-                    : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
-                }
-                subtext="all-time"
-              />
-              <MetricTile
-                label="Cost saved"
-                isLoading={summaryQ.isLoading}
-                value={
-                  summaryQ.isLoading
-                    ? undefined
-                    : summary
-                      ? formatMoney(summary.cost_saved)
-                      : '$0.00'
-                }
-                subtext="net, after renewal spend"
-                valueClassName={
-                  (summary?.cost_saved ?? 0) > 0
-                    ? 'text-success-text'
-                    : 'text-text'
-                }
-              />
-            </div>
-          )}
-        </CardBody>
-      </Card>
+        {!enabled ? (
+          <p
+            className="text-body text-text-muted"
+            data-testid="cache-keepalive-off"
+          >
+            Off. Turn on to renew the prompt-cache TTL for idle sessions.
+          </p>
+        ) : (
+          // Readout row: 1px rules between readouts, none before the first
+          // readout of each visual row (2-up on phones, 4-up from md).
+          <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4 *:border-l *:border-subtle *:px-5 *:odd:border-l-0 *:odd:pl-0 md:*:nth-3:border-l md:*:nth-3:pl-5">
+            <MetricTile
+              label="Renewing now"
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.renewing_now ?? 0).toLocaleString('en-US')
+              }
+              subtext="scheduled or mid-renewal"
+            />
+            <MetricTile
+              label="Sessions (last 5m)"
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.sessions_last_5m ?? 0).toLocaleString('en-US')
+              }
+              subtext="seen in last 5 min"
+            />
+            <MetricTile
+              label="Renewals fired"
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : (summary?.renewals_fired ?? 0).toLocaleString('en-US')
+              }
+              subtext="all-time"
+            />
+            <MetricTile
+              label="Cost saved"
+              isLoading={summaryQ.isLoading}
+              value={
+                summaryQ.isLoading
+                  ? undefined
+                  : summary
+                    ? formatMoney(summary.cost_saved)
+                    : '$0.00'
+              }
+              subtext="net, after renewal spend"
+            />
+          </div>
+        )}
+      </PrincipalSection>
 
       <CacheKeepaliveSettingsDrawer
         open={settingsOpen}

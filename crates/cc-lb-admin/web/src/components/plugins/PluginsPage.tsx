@@ -4,8 +4,6 @@ import { usePluginRegistry, useUploadWasm } from '../../lib/queries';
 import { Route } from '../../routes/plugins';
 import {
   Badge,
-  Card,
-  CardBody,
   Modal,
   PageContainer,
   PageHeader,
@@ -22,87 +20,77 @@ function PluginDetailSkeleton() {
     <div
       aria-busy="true"
       aria-label="Loading plugin details"
-      className="space-y-8"
+      className="space-y-12"
       role="status"
     >
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-x-6 gap-y-8">
-        <div className="lg:col-span-2 space-y-8">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-x-10 gap-y-12">
+        <div className="lg:col-span-2 space-y-12">
           <Section title="What this plugin does">
-            <Card>
-              <CardBody className="space-y-4 min-h-64">
-                <div className="space-y-2">
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-16" />
-                </div>
-                <div className="space-y-2">
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-16" />
-                </div>
-                <div className="space-y-2">
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-7 w-40" />
-                </div>
-              </CardBody>
-            </Card>
+            <div className="space-y-5 min-h-64">
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-16" />
+              </div>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-16" />
+              </div>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-7 w-40" />
+              </div>
+            </div>
           </Section>
 
           <Section title="Used by">
-            <Card>
-              <CardBody className="min-h-28">
-                <Skeleton className="h-20" />
-              </CardBody>
-            </Card>
+            <div className="min-h-28">
+              <Skeleton className="h-20" />
+            </div>
           </Section>
 
           <Section title="Use this plugin">
-            <Card>
-              <CardBody className="space-y-4 min-h-32">
-                <Skeleton className="h-10" />
-                <div className="flex flex-wrap gap-3">
-                  <Skeleton className="h-9 w-48" />
-                  <Skeleton className="h-9 w-44" />
-                </div>
-              </CardBody>
-            </Card>
+            <div className="space-y-4 min-h-32">
+              <Skeleton className="h-10" />
+              <div className="flex flex-wrap gap-3">
+                <Skeleton className="h-9 w-48" />
+                <Skeleton className="h-9 w-44" />
+              </div>
+            </div>
           </Section>
         </div>
 
-        <div className="space-y-8">
+        <div className="space-y-12">
           <Section title="File details">
-            <Card>
-              <CardBody className="space-y-3 text-sm min-h-64">
-                <div className="flex justify-between">
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-4 w-16" />
-                </div>
-                <div className="flex justify-between">
-                  <Skeleton className="h-4 w-12" />
-                  <Skeleton className="h-4 w-20" />
-                </div>
-                <div className="flex justify-between">
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-4 w-32" />
-                </div>
-                <div className="flex justify-between">
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-4 w-24" />
-                </div>
-                <div className="flex justify-between">
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-4 w-32" />
-                </div>
-              </CardBody>
-            </Card>
+            <div className="space-y-3 min-h-64">
+              <div className="flex justify-between">
+                <Skeleton className="h-4 w-20" />
+                <Skeleton className="h-4 w-16" />
+              </div>
+              <div className="flex justify-between">
+                <Skeleton className="h-4 w-12" />
+                <Skeleton className="h-4 w-20" />
+              </div>
+              <div className="flex justify-between">
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-4 w-32" />
+              </div>
+              <div className="flex justify-between">
+                <Skeleton className="h-4 w-20" />
+                <Skeleton className="h-4 w-24" />
+              </div>
+              <div className="flex justify-between">
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-4 w-32" />
+              </div>
+            </div>
           </Section>
 
           <Section title="Manage this plugin">
-            <Card>
-              <CardBody className="space-y-4 min-h-72">
-                <Skeleton className="h-16" />
-                <Skeleton className="h-20" />
-                <Skeleton className="h-16" />
-              </CardBody>
-            </Card>
+            <div className="space-y-6 min-h-72">
+              <Skeleton className="h-16" />
+              <Skeleton className="h-20" />
+              <Skeleton className="h-16" />
+            </div>
           </Section>
         </div>
       </div>
@@ -190,7 +178,7 @@ export function PluginsPage() {
       ) : selectedPlugin ? (
         <PluginDetail plugin={selectedPlugin} onBack={backToCatalog} />
       ) : (
-        <div className="space-y-8">
+        <div className="space-y-12 lg:space-y-16">
           <div hidden={uploadOpen}>
             <PluginUploadCard
               upload={upload}

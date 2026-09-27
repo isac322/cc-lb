@@ -20,9 +20,6 @@ import {
 } from '../../../lib/queries';
 import {
   Button,
-  Card,
-  CardBody,
-  CardHeader,
   ConfirmDialog,
   cx,
   Hint,
@@ -425,7 +422,7 @@ function WarmupCardMinimalInner({
   }
 
   const headerTitle = (
-    <div className="flex items-center gap-2">
+    <span className="flex items-center gap-2">
       <span>Warm-up</span>
       <WarmupHelpHover />
       <span
@@ -438,7 +435,7 @@ function WarmupCardMinimalInner({
           <StatusBadge tone={statusTone} label={statusLabel} />
         )}
       </span>
-    </div>
+    </span>
   );
 
   const headerActions = (
@@ -479,19 +476,22 @@ function WarmupCardMinimalInner({
 
   return (
     <>
-      <Card
+      <section
         data-testid="warmup-card"
         data-variant="minimal"
         tabIndex={-1}
-        className="w-full h-full"
+        className="flex w-full flex-col gap-4 outline-none"
       >
-        <CardHeader
-          title={headerTitle}
-          subtitle="Starts the next 5h window during idle gaps."
-          action={headerActions}
-          align="center"
-        />
-        <CardBody className="space-y-4">
+        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            <h2 className="text-title-section text-text">{headerTitle}</h2>
+            <p className="mt-0.5 text-body-sm text-text-muted">
+              Starts the next 5h window during idle gaps.
+            </p>
+          </div>
+          {headerActions}
+        </header>
+        <div className="space-y-4">
           {staleRevisionVisible && (
             <div
               role="status"
@@ -520,7 +520,7 @@ function WarmupCardMinimalInner({
           )}
 
           <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-1 gap-4 border-b border-subtle pb-4 sm:grid-cols-2">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="flex flex-col gap-1">
                 <span className="text-label text-text-faint">Next run</span>
                 <div
@@ -594,7 +594,7 @@ function WarmupCardMinimalInner({
                   <span>{COPY.noShapePluginsAvailable}</span>{' '}
                   <a
                     href="/plugins"
-                    className="text-accent-text underline-offset-2 hover:underline"
+                    className="text-text underline decoration-border-strong underline-offset-2 hover:decoration-accent"
                   >
                     Plugins
                   </a>
@@ -703,7 +703,7 @@ function WarmupCardMinimalInner({
               </div>
             )}
           </div>
-        </CardBody>
+        </div>
 
         <ConfirmDialog
           open={confirmFireOpen}
@@ -729,7 +729,7 @@ function WarmupCardMinimalInner({
           confirmDisabled={clearPlugin.isPending}
           destructive={true}
         />
-      </Card>
+      </section>
 
       {pluginSnapshot && (
         <WarmupConfigModal

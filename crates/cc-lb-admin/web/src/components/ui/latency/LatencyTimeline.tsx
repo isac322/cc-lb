@@ -36,16 +36,18 @@ type StageGroup =
 
 const GROUP_META: Record<
   StageGroup,
-  { label: string; hue: number; sat: number }
+  { label: string; hue: number; chroma: number }
 > = {
-  // Hues follow the series tokens (sky, teal, violet, green); amber, orange
-  // and red stay reserved for severity.
-  renewal: { label: 'Renewal', hue: 205, sat: 60 },
-  internal_pre: { label: 'Internal pre', hue: 205, sat: 60 },
-  wait: { label: 'Wait', hue: 180, sat: 40 },
-  upstream: { label: 'Upstream', hue: 262, sat: 50 },
-  body: { label: 'Body', hue: 150, sat: 40 },
-  internal_post: { label: 'Internal post', hue: 220, sat: 10 },
+  // OKLCH hues from the series family (sky, teal, green, magenta, neutral).
+  // Across the whole lightness ramp every shade stays more than OKLab ΔE 0.1
+  // from the accent, warn and danger tokens: brand and severity keep their
+  // meaning inside the timeline.
+  renewal: { label: 'Renewal', hue: 235, chroma: 0.1 },
+  internal_pre: { label: 'Internal pre', hue: 235, chroma: 0.1 },
+  wait: { label: 'Wait', hue: 190, chroma: 0.09 },
+  upstream: { label: 'Upstream', hue: 150, chroma: 0.11 },
+  body: { label: 'Body', hue: 335, chroma: 0.11 },
+  internal_post: { label: 'Internal post', hue: 260, chroma: 0.012 },
 };
 
 function getGroupLabel(group: StageGroup, hasFinalizeTiming: boolean): string {
@@ -150,15 +152,13 @@ interface StageDetail extends Stage {
   fill: string;
 }
 
-function stageShadeHsl(
-  group: StageGroup,
-  index: number,
-  count: number,
-): string {
-  const { hue, sat } = GROUP_META[group];
-  const lightness =
-    count <= 1 ? 55 : Math.round(38 + (index / (count - 1)) * 38);
-  return `hsl(${hue}deg ${sat}% ${lightness}%)`;
+/** Night ramps 0.58→0.86 lightness, day 0.40→0.72: each shade holds its contrast on the ground. */
+function stageShade(group: StageGroup, index: number, count: number): string {
+  const { hue, chroma } = GROUP_META[group];
+  const t = count <= 1 ? 0.5 : index / (count - 1);
+  const night = (0.58 + t * 0.28).toFixed(3);
+  const day = (0.4 + t * 0.32).toFixed(3);
+  return `light-dark(oklch(${day} ${chroma} ${hue}), oklch(${night} ${chroma} ${hue}))`;
 }
 
 function formatStageMs(stage: Stage): string {
@@ -335,7 +335,7 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
       ...s,
       index,
       groupCount,
-      fill: stageShadeHsl(s.group, index, groupCount),
+      fill: stageShade(s.group, index, groupCount),
     };
   });
 }
@@ -385,7 +385,7 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
       key: 'first_delta',
       label: 'First content delta (TTFT)',
       ms: e._phase === 'final' ? e.stream_first_content_delta_ms : undefined,
-      color: 'text-accent-text',
+      color: 'text-text',
       starred: true,
     },
     {
@@ -550,7 +550,10 @@ function ResponsibilityOverview({
   const barTotal = Math.max(barSum, attribution.totalMs);
 
   return (
-    <section aria-label="Latency by responsibility" className="space-y-1.5">
+    <section
+      aria-label="Latency by responsibility"
+      className="@container space-y-1.5"
+    >
       <div className="flex items-center justify-between">
         <span className="text-label text-text-muted">Responsibility</span>
         <span className="text-caption text-text-faint">Share of total</span>
@@ -573,7 +576,7 @@ function ResponsibilityOverview({
           />
         ))}
       </div>
-      <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-1 @lg:grid-cols-2">
         {visibleGroups.map((group) => (
           <InfoPopover
             content={
@@ -862,7 +865,7 @@ function SegmentButton({
           isActive
             ? 'ring-2 ring-inset ring-text/70 z-10 brightness-110'
             : 'hover:brightness-110',
-          isSticky ? 'shadow-[0_0_0_1px_var(--color-border-strong)]' : '',
+          isSticky ? 'outline outline-1 outline-border-strong' : '',
         )}
         style={style}
       />
@@ -960,13 +963,7 @@ function MarkerDot({
           )}
           style={{ left: `${leftPct}%`, top: `${dotTop}px` }}
         >
-          <span
-            aria-hidden
-            className={cx(
-              marker.color,
-              'inline-flex drop-shadow-[0_1px_1px_var(--color-bg)]',
-            )}
-          >
+          <span aria-hidden className={cx(marker.color, 'inline-flex')}>
             <MarkerIcon starred={marker.starred} />
           </span>
         </button>
@@ -1558,7 +1555,7 @@ export function LatencyTimeline({
   if (total <= 0 && !hasMeasuredRenewalCycle) {
     return (
       <div
-        className="min-h-80 text-text-faint text-xs"
+        className="min-h-80 text-body text-text-muted"
         data-testid="latency-timeline-region"
       >
         No latency data recorded.
@@ -1637,7 +1634,7 @@ export function LatencyTimeline({
                           aria-hidden
                           className="h-2 w-2 shrink-0 rounded-sm"
                           style={{
-                            backgroundColor: stageShadeHsl(g, 0, 1),
+                            backgroundColor: stageShade(g, 0, 1),
                           }}
                         />
                         {groupLabel}

@@ -1,20 +1,7 @@
 import { Meter as BaseMeter } from '@base-ui/react/meter';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { createFileRoute, Link } from '@tanstack/react-router';
-import {
-  Activity,
-  AlertTriangle,
-  ArrowUpRight,
-  ChevronRight,
-  Database,
-  Gauge,
-  Hourglass,
-  Info,
-  ShieldCheck,
-  Timer,
-  TrendingUp,
-  Users,
-} from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
@@ -31,10 +18,17 @@ import {
   useFirstRunIncomplete,
 } from '../components/onboarding/FirstRunChecklist';
 import { BreakdownPopover } from '../components/ui/BreakdownPopover';
-import { Sparkline } from '../components/ui/charts';
 import {
+  CHART_AXIS,
+  CHART_CURSOR,
+  CHART_GRID,
+  CHART_THRESHOLD,
+  Sparkline,
+} from '../components/ui/charts';
+import { ArcGauge, HeadroomMeter } from '../components/ui/Gauge';
+import {
+  Badge,
   Card,
-  CardHeader,
   cx,
   Hint,
   PageContainer,
@@ -52,8 +46,11 @@ import {
   sumCostMicros,
 } from '../components/ui/usage/costCategories';
 import { OAuthReconnectSummary } from '../components/upstreams/OAuthReconnectNotice';
+import {
+  UpstreamHeadroomGrid,
+  useUpstreamHeadroomData,
+} from '../components/upstreams/UpstreamHeadroomGrid';
 import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
-import { getWindowColor, SERIES_FILL_OPACITY } from '../lib/colors';
 import {
   cacheHitRatio,
   cacheMissRatio,
@@ -79,8 +76,12 @@ import {
   useUsage,
 } from '../lib/queries';
 import {
+  formatHeadroom,
+  formatHeadroomValue,
   formatQuotaPercent,
+  QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
+  QUOTA_WARN_PCT,
   type QuotaSeverity,
   quotaSeverity,
 } from '../lib/quotaSeverity';
@@ -93,15 +94,18 @@ import {
 import { formatInTimezone } from '../lib/timezone';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 import {
+  bindingPoolWindow,
   buildPoolQuotaChartData,
   type ClosestToLimitEntry,
   closestToLimit,
+  formatAgo,
+  formatDuration,
   formatResetIn,
+  oldestProviderObservation,
   POOL_QUOTA_WINDOWS,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
   type PoolQuotaWindow,
-  poolQuotaChartMax,
   poolQuotaResponseLatest,
 } from './-overviewPoolQuota';
 export const Route = createFileRoute('/')({
@@ -201,31 +205,31 @@ function kpiSecondaryY(value: number): number {
 }
 
 // KPI series are data, not status: they draw in neutral ink. Only the error
-// rate turns danger, and only when there are errors to report.
+// rate turns danger, and only when there are errors to report. The brand hue
+// is reserved for headroom, so the cache-miss overlay is full-strength ink.
 const KPI_SERIES_COLOR = 'var(--color-text-muted)';
 
 const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
   testId: 'overview-kpi-secondary-tokens',
   label: 'Cache miss',
-  color: 'var(--color-accent)',
+  color: 'var(--color-text)',
   format: fmtPercent,
 };
 
 /**
- * Hairline dividers between the five KPI cells of the traffic card at each
- * grid width (2 columns, then 3, with the last cell spanning the rest of its
- * row; then 5), so no row edge ever doubles up against the card border.
+ * 1px left rules between the five traffic readouts at each grid width
+ * (2 columns, then 3, then 5): a rule sits before every item that is not
+ * first in its row.
  */
 const KPI_CELL_CLASS = [
-  'border-row',
-  'border-row border-l',
-  'border-row border-t md:border-t-0 md:border-l',
-  'border-row border-t border-l md:border-l-0 xl:border-t-0 xl:border-l',
-  'border-row col-span-2 border-t md:border-l xl:col-span-1 xl:border-t-0',
+  '',
+  'border-l border-row pl-4',
+  'sm:border-l sm:border-row sm:pl-4',
+  'border-l border-row pl-4 sm:border-l-0 sm:pl-0 xl:border-l xl:pl-4',
+  'sm:border-l sm:border-row sm:pl-4',
 ] as const;
 
 export function ValueTile({
-  icon,
   label,
   value,
   sub,
@@ -240,7 +244,6 @@ export function ValueTile({
   loading = false,
   className,
 }: {
-  icon: React.ReactNode;
   label: string;
   value: React.ReactNode;
   sub?: React.ReactNode;
@@ -327,32 +330,26 @@ export function ValueTile({
 
   return (
     <div
-      className={cx(
-        'relative flex min-w-0 flex-col gap-1.5 p-3 md:p-4',
-        className,
-      )}
+      className={cx('relative flex min-w-0 flex-col gap-1.5', className)}
       data-testid={`overview-kpi-${chartId}`}
       data-slot="kpi-tile"
     >
-      <div className="flex items-center gap-1.5 text-text-faint">
-        <span className="size-3.5 [&_svg]:size-3.5">{icon}</span>
-        <span className="text-label truncate">{label}</span>
-      </div>
+      <span className="truncate text-label text-text-muted">{label}</span>
       <div
-        className="flex h-7 min-w-0 items-center justify-between gap-2"
+        className="flex h-9 min-w-0 items-center justify-between gap-2"
         data-slot="value"
       >
         {loading ? (
-          <Skeleton className="h-6 w-20" />
+          <Skeleton className="h-8 w-20" />
         ) : (
-          <span className="truncate text-2xl font-medium leading-none tabular-nums text-text">
+          <span className="truncate text-display tabular-nums text-text">
             {value}
           </span>
         )}
       </div>
       {sub !== undefined ? (
         <div
-          className="flex h-4 items-center truncate text-caption text-text-faint"
+          className="flex h-4 items-center truncate text-caption text-text-muted"
           data-slot="sub"
         >
           {loading ? <Skeleton className="h-3 w-20" /> : sub}
@@ -461,7 +458,7 @@ export type TopPrincipal = {
 };
 
 const TOP_PRINCIPAL_ROW_CLASS =
-  'flex min-h-[66px] items-center gap-3 border-b border-row px-4 py-2 last:border-b-0';
+  'flex min-h-[66px] items-center gap-3 border-t border-row py-2 first:border-t-0';
 
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
@@ -600,7 +597,7 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   );
 }
 
-export function TopPrincipalsCard({
+export function TopPrincipalsSection({
   range,
   principals,
   loading,
@@ -612,184 +609,138 @@ export function TopPrincipalsCard({
   className?: string;
 }) {
   return (
-    <Card className={cx('min-w-0 flex flex-col', className)}>
-      <CardHeader
-        title={
-          <span className="inline-flex items-center gap-2">
-            <Users className="w-3.5 h-3.5 text-text-faint" />
-            Top principals
-          </span>
-        }
-        subtitle={`By virtual cost · ${range}`}
-      />
-      <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
-        <div className="flex flex-col" data-slot="principal-list">
-          {loading ? (
-            Array.from({ length: 5 }).map((_, index) => (
-              <div
-                key={index}
-                aria-hidden="true"
-                className={TOP_PRINCIPAL_ROW_CLASS}
-                data-testid="top-principal-skeleton-row"
-              >
-                <div className="min-w-0 flex-1">
-                  <Skeleton className="h-5 w-2/5" />
-                  <Skeleton className="mt-0.5 h-3 w-3/5" />
-                  <Skeleton className="mt-1.5 h-1.5 rounded-xs" />
-                </div>
-                <div className="flex shrink-0 flex-col items-end gap-1 text-right">
-                  <Skeleton className="h-5 w-16" />
-                  <Skeleton className="h-3 w-10" />
-                </div>
+    <Section
+      title="Top principals"
+      subtitle={`By virtual cost · ${range}`}
+      className={cx('min-w-0', className)}
+    >
+      <div className="flex flex-col" data-slot="principal-list">
+        {loading ? (
+          Array.from({ length: 5 }).map((_, index) => (
+            <div
+              key={index}
+              aria-hidden="true"
+              className={TOP_PRINCIPAL_ROW_CLASS}
+              data-testid="top-principal-skeleton-row"
+            >
+              <div className="min-w-0 flex-1">
+                <Skeleton className="h-5 w-2/5" />
+                <Skeleton className="mt-0.5 h-3 w-3/5" />
+                <Skeleton className="mt-1.5 h-1.5 rounded-xs" />
               </div>
-            ))
-          ) : principals.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center px-4 py-8 text-center text-body-sm text-text-muted">
-              {`No usage in the last ${range}`}
+              <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+                <Skeleton className="h-5 w-16" />
+                <Skeleton className="h-3 w-10" />
+              </div>
             </div>
-          ) : (
-            principals.map((principal) => (
-              <div
-                key={principal.id}
-                className={cx(
-                  TOP_PRINCIPAL_ROW_CLASS,
-                  'hover:bg-overlay-2 transition-colors',
-                )}
-                data-testid="top-principal-row"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-body-sm text-text">
-                    {principal.name}
-                  </div>
-                  <div
-                    className="truncate text-caption text-text-faint"
-                    data-slot="principal-meta"
-                  >
-                    {formatCount(principal.requests)} req ·{' '}
-                    {formatCount(principal.tokens)} tok ·{' '}
-                    <span>
-                      {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
-                    </span>
-                  </div>
-                  <PrincipalCostMeter principal={principal} />
+          ))
+        ) : principals.length === 0 ? (
+          <p className="text-body text-text-muted">
+            {`No usage in the last ${range}`}
+          </p>
+        ) : (
+          principals.map((principal) => (
+            <div
+              key={principal.id}
+              className={TOP_PRINCIPAL_ROW_CLASS}
+              data-testid="top-principal-row"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-body text-text">
+                  {principal.name}
                 </div>
-                <div className="text-right shrink-0">
-                  <div className="text-body-sm font-medium tabular-nums text-text">
-                    {formatUsdAmount(principal.cost_micros / 1_000_000)}
-                  </div>
-                  <div className="text-caption tabular-nums text-text-faint">
-                    {principal.share_pct.toFixed(1)}%
-                  </div>
+                <div
+                  className="truncate text-caption text-text-muted"
+                  data-slot="principal-meta"
+                >
+                  {formatCount(principal.requests)} req ·{' '}
+                  {formatCount(principal.tokens)} tok ·{' '}
+                  <span>
+                    {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
+                  </span>
+                </div>
+                <PrincipalCostMeter principal={principal} />
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-body font-medium tabular-nums text-text">
+                  {formatUsdAmount(principal.cost_micros / 1_000_000)}
+                </div>
+                <div className="text-caption tabular-nums text-text-muted">
+                  {principal.share_pct.toFixed(1)}%
                 </div>
               </div>
-            ))
-          )}
-        </div>
+            </div>
+          ))
+        )}
       </div>
-    </Card>
+    </Section>
   );
 }
 
 type AggregateWindow = AggregateResponse['windows'][number];
 
-/**
- * Fill for a pool bar at each quota severity. The bar says how close the pool
- * is to its limit; window identity stays in the trend legend and series.
- */
-const POOL_SEVERITY_FILL_VAR: Record<QuotaSeverity, string> = {
-  none: 'var(--color-overlay-4)',
-  ok: 'var(--color-text-muted)',
-  warn: 'var(--color-warn)',
-  danger: 'var(--color-danger)',
+/** Text link on the ground: ink with an underline rule that turns brand on hover. */
+const OVERVIEW_LINK_CLASS =
+  'rounded-sm text-body text-text underline decoration-border-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
+
+/** "10-01 09:00" in the viewer's timezone. */
+function formatMonthDayTime(unixSecs: number, timeZone: string): string {
+  return formatInTimezone(unixSecs * 1000, timeZone)
+    .slice(5)
+    .replace('T', ' ');
+}
+
+/** Numeral ink for a quota figure: default ink until warn / danger by used. */
+const HEADROOM_TONE_CLASS: Record<QuotaSeverity, string> = {
+  ...QUOTA_SEVERITY_TEXT_CLASS,
+  none: 'text-text',
+  ok: 'text-text',
 };
-/** Shade steps that tell adjacent upstream segments (and their swatches) apart. */
-const POOL_SEGMENT_SHADES = [100, 72, 52, 38] as const;
-function isPoolQuotaWindow(key: string): key is PoolQuotaWindow {
-  return (POOL_QUOTA_WINDOWS as readonly string[]).includes(key);
-}
 
-const POOL_QUOTA_SNAPSHOT_SLOT_CLASS =
-  'relative flex min-h-10 w-full flex-col justify-center';
-// A fixed 256px chart, except at xl where the card shares a row with the
-// side column and the chart takes up whatever height that row gives it.
-const POOL_QUOTA_CHART_SLOT_CLASS =
-  'relative h-64 min-w-0 w-full xl:h-auto xl:min-h-64 xl:flex-1';
-const POOL_QUOTA_LEGEND_ITEM_CLASS = 'inline-flex min-h-4 items-center gap-1.5';
-
-function poolSegmentColor(severity: QuotaSeverity, index: number): string {
-  const shade = POOL_SEGMENT_SHADES[index % POOL_SEGMENT_SHADES.length];
-  return `color-mix(in oklab, ${POOL_SEVERITY_FILL_VAR[severity]} ${shade}%, var(--color-bg))`;
-}
-
-function PoolQuotaPopoverContent({
-  w,
-  severity,
-  activeIdx,
-}: {
-  w: AggregateWindow;
-  severity: QuotaSeverity;
-  activeIdx: number | null;
-}) {
+/** Each upstream's share of one pool window: headroom, plan weight, impact. */
+function PoolBreakdownTable({ w }: { w: AggregateWindow }) {
   const totalRatio = w.provider_lots.reduce(
     (sum, lot) => sum + lot.capacity_ratio,
     0,
   );
   return (
-    <div className="flex flex-col gap-0.5 text-body-sm text-text">
-      <div className="flex items-center gap-3 px-2 pb-1.5 mb-0.5 border-b border-row text-label text-text-faint">
-        <span className="flex-1 min-w-32">Upstream</span>
-        <span className="w-14 text-right">Util</span>
+    <div className="flex flex-col gap-0.5 text-body text-text">
+      <div className="mb-0.5 flex items-center gap-3 border-b border-row px-2 pb-1.5 text-label text-text-muted">
+        <span className="min-w-32 flex-1">Upstream</span>
+        <span className="w-20 text-right">Left</span>
         <span className="w-14 text-right">Weight</span>
         <span className="w-14 text-right">Impact</span>
       </div>
-      {w.provider_lots.map((lot, i) => {
-        const util = lot.utilization ?? 0;
+      {w.provider_lots.map((lot) => {
+        const utilPct = lot.utilization != null ? lot.utilization * 100 : null;
         const weightedContribution =
-          totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
-        const utilPct = lot.utilization != null ? util * 100 : null;
-        const isHovered = activeIdx === i;
+          totalRatio > 0
+            ? (((lot.utilization ?? 0) * lot.capacity_ratio) / totalRatio) * 100
+            : 0;
         return (
           <div
             key={lot.upstream_id}
-            className={cx(
-              'flex items-center gap-3 px-2 py-1.5 rounded-sm transition-colors',
-              isHovered && 'bg-overlay-5',
-            )}
+            className="flex items-center gap-3 px-2 py-1.5"
             data-testid="pool-quota-breakdown-row"
           >
-            <div className="flex items-center gap-2 flex-1 min-w-32">
-              <span
-                aria-hidden="true"
-                className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
-                style={{ backgroundColor: poolSegmentColor(severity, i) }}
-              />
-              <span
-                className={cx(
-                  'truncate',
-                  isHovered ? 'font-medium text-text' : 'text-text-muted',
-                )}
-                title={lot.upstream_name}
-              >
-                {lot.upstream_name}
-              </span>
-            </div>
+            <span
+              className="min-w-32 flex-1 truncate text-text"
+              title={lot.upstream_name}
+            >
+              {lot.upstream_name}
+            </span>
             <span
               className={cx(
-                'tabular-nums w-14 text-right font-medium',
+                'w-20 text-right font-medium tabular-nums',
                 QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(utilPct)],
               )}
             >
-              {formatQuotaPercent(utilPct)}
+              {formatHeadroom(utilPct)}
             </span>
-            <span className="tabular-nums w-14 text-right text-text-muted">
+            <span className="w-14 text-right tabular-nums text-text-muted">
               {lot.capacity_ratio.toFixed(1)}x
             </span>
-            <span
-              className={cx(
-                'tabular-nums w-14 text-right',
-                isHovered ? 'font-medium text-text' : 'text-text-muted',
-              )}
-            >
+            <span className="w-14 text-right tabular-nums text-text-muted">
               {`${weightedContribution.toFixed(1)}%`}
             </span>
           </div>
@@ -799,125 +750,34 @@ function PoolQuotaPopoverContent({
   );
 }
 
-export function PoolQuotaStackedBar({
+/** Disclosure under a window gauge: the per-upstream breakdown of that window. */
+function PoolBreakdownPopover({
   window,
   w,
-  loading = false,
 }: {
   window: PoolQuotaWindow;
-  w: AggregateWindow | undefined;
-  loading?: boolean;
+  w: AggregateWindow;
 }) {
-  const [activeIdx, setActiveIdx] = useState<number | null>(null);
   const label = WINDOW_LABELS[window];
-
-  if (loading || !w) {
-    return (
-      <div className={cx(POOL_QUOTA_SNAPSHOT_SLOT_CLASS, 'gap-1.5')}>
-        <div className="flex items-center justify-between">
-          <span className="text-label text-text-muted">{label} pool</span>
-          {loading ? (
-            <Skeleton as="span" className="inline-block h-4 w-12" />
-          ) : (
-            <span className="text-caption text-text-faint">no data</span>
-          )}
-        </div>
-        {loading ? (
-          <Skeleton className="h-2 rounded-xs" />
-        ) : (
-          <div className="h-2 w-full rounded-xs bg-progress-track" />
-        )}
-      </div>
-    );
-  }
-
-  const totalRatio = w.provider_lots.reduce(
-    (sum, lot) => sum + lot.capacity_ratio,
-    0,
-  );
-  const severity = quotaSeverity(w.utilization_percent);
-  const weightedSegments = w.provider_lots
-    .map((lot, index) => {
-      const util = lot.utilization ?? 0;
-      const weightedContribution =
-        totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
-      return { index, lot, weightedContribution };
-    })
-    .filter((segment) => segment.weightedContribution > 0);
-  const totalWeightedContribution = weightedSegments.reduce(
-    (sum, segment) => sum + segment.weightedContribution,
-    0,
-  );
-  const pctText = formatQuotaPercent(w.utilization_percent);
-
   return (
-    <BasePopover.Root
-      onOpenChange={(nextOpen) => {
-        if (!nextOpen) setActiveIdx(null);
-      }}
-    >
+    <BasePopover.Root>
       <BasePopover.Trigger
-        aria-label={`${label} pool ${pctText}, show upstream breakdown`}
-        className={cx(
-          POOL_QUOTA_SNAPSHOT_SLOT_CLASS,
-          'gap-1.5 text-left rounded-sm cursor-pointer focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-4',
-        )}
+        aria-label={`By upstream: ${label} headroom`}
+        className="self-start rounded-sm text-body text-text-muted underline decoration-border-strong underline-offset-4 transition-colors hover:text-text hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         closeDelay={100}
         delay={100}
         openOnHover
       >
-        <span className="flex items-center justify-between">
-          <span className="text-label text-text-muted">{label} pool</span>
-          <span
-            className={cx(
-              'tabular-nums font-medium text-body-sm leading-none',
-              QUOTA_SEVERITY_TEXT_CLASS[severity],
-            )}
-            data-slot="pool-pct"
-          >
-            {pctText}
-          </span>
-        </span>
-        <BaseMeter.Root
-          className="h-2 w-full"
-          max={100}
-          value={Math.min(100, totalWeightedContribution)}
-        >
-          <BaseMeter.Track className="flex h-2 w-full overflow-hidden rounded-xs bg-progress-track">
-            <BaseMeter.Indicator className="flex h-full gap-px">
-              {weightedSegments.map(({ index, lot, weightedContribution }) => (
-                <span
-                  key={lot.upstream_id}
-                  className={cx(
-                    'h-full min-w-[2px] basis-0 transition-opacity',
-                    activeIdx !== null && activeIdx !== index && 'opacity-50',
-                  )}
-                  data-testid="pool-quota-segment"
-                  style={{
-                    backgroundColor: poolSegmentColor(severity, index),
-                    flexGrow: weightedContribution,
-                  }}
-                  onMouseEnter={() => setActiveIdx(index)}
-                  onMouseLeave={() => setActiveIdx(null)}
-                />
-              ))}
-            </BaseMeter.Indicator>
-          </BaseMeter.Track>
-        </BaseMeter.Root>
+        By upstream
       </BasePopover.Trigger>
-
       <BasePopover.Portal>
         <BasePopover.Positioner align="start" side="bottom" sideOffset={8}>
           <BasePopover.Popup
             aria-label={`${label} pool by upstream`}
-            className="glass-strong z-50 w-max min-w-[max(var(--anchor-width),22rem)] max-w-[calc(100vw-1rem)] rounded-md p-2"
+            className="glass-strong z-50 w-max min-w-[22rem] max-w-[calc(100vw-1rem)] rounded-md p-2"
             initialFocus={false}
           >
-            <PoolQuotaPopoverContent
-              w={w}
-              severity={severity}
-              activeIdx={activeIdx}
-            />
+            <PoolBreakdownTable w={w} />
           </BasePopover.Popup>
         </BasePopover.Positioner>
       </BasePopover.Portal>
@@ -925,15 +785,326 @@ export function PoolQuotaStackedBar({
   );
 }
 
-const CLOSEST_TO_LIMIT_ROWS = 5;
-// Name, bar (capped so it never runs across the row), % right after the bar,
-// reset text, chevron. The card is a size container, so a narrow column
-// (the xl sidebar slot, or a phone) keeps name + % on one line with the bar
-// and reset below; a wide card lays the row out in five columns.
-const CLOSEST_ROW_CLASS =
-  'grid grid-cols-[minmax(0,1fr)_auto] @2xl:grid-cols-[minmax(8rem,14rem)_minmax(6rem,22rem)_3rem_minmax(7rem,1fr)_1rem] items-center gap-x-3 gap-y-1.5 px-4 py-2.5';
+/**
+ * One pool window: a sub arc gauge (a headroom meter on phones), the used
+ * share and contributing upstreams, when it refills, and the per-upstream
+ * breakdown. The window that runs out first carries the "binds pool" tag.
+ */
+function PoolWindowGauge({
+  window,
+  w,
+  binds,
+  loading,
+  upstreamCount,
+  nowUnixSecs,
+  timeZone,
+  className,
+}: {
+  window: PoolQuotaWindow;
+  w: AggregateWindow | undefined;
+  binds: boolean;
+  loading: boolean;
+  upstreamCount: number;
+  nowUnixSecs: number | null;
+  timeZone: string;
+  className?: string;
+}) {
+  const label = WINDOW_LABELS[window];
+  const used = w?.utilization_percent ?? null;
+  const hasReading = used != null && Number.isFinite(used);
+  const resetSecs = hasReading && w ? w.cc_window_reset_unix_secs : null;
+  const resetLine =
+    resetSecs != null && resetSecs > 0
+      ? [
+          `Resets ${formatMonthDayTime(resetSecs, timeZone)}`,
+          nowUnixSecs == null
+            ? null
+            : resetSecs > nowUnixSecs
+              ? `in ${formatDuration(resetSecs - nowUnixSecs)}`
+              : 'reset time passed',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : null;
 
-export function ClosestToLimitCard({
+  return (
+    <div
+      className={cx('flex min-w-0 flex-col gap-3', className)}
+      data-testid="pool-quota-snapshot-slot"
+      data-window={window}
+    >
+      {loading ? (
+        <>
+          <Skeleton className="hidden size-32 rounded-full md:block" />
+          <Skeleton className="h-5 w-12" />
+          <Skeleton className="h-1.5 w-full md:hidden" />
+          <Skeleton className="h-4 w-40" />
+        </>
+      ) : (
+        <>
+          <div className="hidden md:block">
+            <ArcGauge label={label} usedPct={used} />
+          </div>
+          <div className="flex flex-col gap-1.5 md:hidden">
+            <span className="text-title-section text-text">{label}</span>
+            <HeadroomMeter label={label} size="md" usedPct={used} />
+          </div>
+          <div className="flex flex-col items-start gap-1 text-body text-text-muted">
+            {binds ? <Badge tone="accent">binds pool</Badge> : null}
+            <span>
+              {hasReading ? (
+                <>
+                  <span className="hidden md:inline">{`${formatQuotaPercent(used)} used · `}</span>
+                  {`${formatCount(w?.contributing_upstreams ?? 0)} of ${formatCount(upstreamCount)} upstreams`}
+                </>
+              ) : (
+                'No reading'
+              )}
+            </span>
+            {resetLine ? (
+              <span className="tabular-nums">{resetLine}</span>
+            ) : null}
+          </div>
+          {w && w.provider_lots.length > 0 ? (
+            <PoolBreakdownPopover window={window} w={w} />
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The cluster band: one large pool-headroom dial for the window that runs
+ * out first, when it refills and how old the data is beside it, then the
+ * three window sub-gauges. Phones get linear meters instead of dials.
+ */
+export function PoolHeadroomBand({
+  aggregate,
+  loading,
+}: {
+  aggregate: AggregateResponse | undefined;
+  loading: boolean;
+}) {
+  const { effective: timeZone } = useTimezone();
+  const binding = bindingPoolWindow(aggregate);
+  const bindingWindow = binding
+    ? aggregate?.windows.find((entry) => entry.window === binding)
+    : undefined;
+  const bindingUsed = bindingWindow?.utilization_percent ?? null;
+  const serverNow = aggregate?.now_unix_secs ?? null;
+  const clientNow = Date.now() / 1000;
+  const provider = oldestProviderObservation(aggregate);
+  const refillSecs =
+    bindingWindow && bindingWindow.cc_window_reset_unix_secs > 0
+      ? bindingWindow.cc_window_reset_unix_secs
+      : null;
+  const heroCaption = binding
+    ? `${WINDOW_LABELS[binding]} window binds · ${formatQuotaPercent(bindingUsed)} used`
+    : 'No quota readings yet';
+  const details: { term: string; value: string; stale?: boolean }[] = [
+    {
+      term: 'Refills',
+      value:
+        refillSecs == null ? '—' : formatMonthDayTime(refillSecs, timeZone),
+    },
+    {
+      term: 'Time left',
+      value:
+        refillSecs == null || serverNow == null
+          ? '—'
+          : refillSecs > serverNow
+            ? formatDuration(refillSecs - serverNow)
+            : 'Refill time passed',
+    },
+    {
+      term: 'Pool snapshot',
+      value:
+        serverNow == null
+          ? '—'
+          : `${formatInTimezone(serverNow * 1000, timeZone).slice(11)} · ${formatAgo(serverNow, clientNow)}`,
+    },
+    {
+      term: 'Provider data',
+      value:
+        provider.observedAtUnixSecs == null || serverNow == null
+          ? '—'
+          : `${formatMonthDayTime(provider.observedAtUnixSecs, timeZone)} · ${formatAgo(provider.observedAtUnixSecs, serverNow)}`,
+      stale: provider.stale,
+    },
+  ];
+
+  return (
+    <section
+      aria-busy={loading}
+      aria-labelledby="pool-headroom-title"
+      className="grid grid-cols-1 gap-8 md:gap-10 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-center lg:gap-12"
+      data-testid="pool-headroom-band"
+    >
+      <h2 className="sr-only" id="pool-headroom-title">
+        Pool headroom
+      </h2>
+      <div
+        className="flex flex-col gap-6 md:flex-row md:items-center lg:flex-col lg:items-start"
+        data-testid="pool-headroom-hero"
+      >
+        {loading ? (
+          <>
+            <Skeleton className="hidden size-[264px] rounded-full md:block" />
+            <div className="flex flex-col gap-2 md:hidden">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-14 w-32" />
+              <Skeleton className="h-1 w-full" />
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="hidden md:block">
+              <ArcGauge
+                caption={heroCaption}
+                label="Pool headroom"
+                size="hero"
+                usedPct={bindingUsed}
+              />
+            </div>
+            <div className="flex flex-col gap-2 md:hidden">
+              <span className="text-label text-text-muted">Pool headroom</span>
+              <span
+                className={cx(
+                  'inline-flex items-baseline tabular-nums',
+                  HEADROOM_TONE_CLASS[quotaSeverity(bindingUsed)],
+                )}
+              >
+                <span className="text-display-hero">
+                  {formatHeadroomValue(bindingUsed)}
+                </span>
+                {bindingUsed == null ? null : (
+                  <span className="ml-0.5 text-title-section font-normal text-text-muted">
+                    % left
+                  </span>
+                )}
+              </span>
+              <HeadroomMeter label="Pool headroom" usedPct={bindingUsed} />
+              <span className="text-body text-text-muted">{heroCaption}</span>
+            </div>
+          </>
+        )}
+        <div className="flex flex-col gap-4">
+          <dl className="grid max-w-md grid-cols-2 gap-x-8 gap-y-3">
+            {details.map((detail) => (
+              <div key={detail.term} className="flex min-w-0 flex-col gap-0.5">
+                <dt className="text-label text-text-muted">{detail.term}</dt>
+                <dd className="flex flex-wrap items-center gap-1.5 text-body tabular-nums text-text">
+                  {loading ? (
+                    <Skeleton as="span" className="inline-block h-4 w-24" />
+                  ) : (
+                    <>
+                      {detail.value}
+                      {detail.stale ? <Badge tone="warn">Stale</Badge> : null}
+                    </>
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <Hint
+            label={
+              <span className="block max-w-72 whitespace-normal leading-5">
+                Each upstream's usage counts in proportion to its plan size
+                relative to Claude Pro (Pro 1×, Max 5× counts 5×). Unknown plans
+                count as Pro. Routing is not affected.
+              </span>
+            }
+          >
+            <span
+              tabIndex={0}
+              className="self-start cursor-help rounded-sm text-body text-text-muted underline decoration-dotted decoration-border-strong underline-offset-4 hover:text-text"
+            >
+              Plan-weighted across upstreams
+            </span>
+          </Hint>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-3 md:gap-0">
+        {POOL_QUOTA_WINDOWS.map((window, index) => (
+          <PoolWindowGauge
+            key={window}
+            binds={window === binding}
+            className={
+              index > 0 ? 'md:border-l md:border-row md:pl-6' : 'md:pr-6'
+            }
+            loading={loading}
+            nowUnixSecs={serverNow}
+            timeZone={timeZone}
+            upstreamCount={aggregate?.upstream_count ?? 0}
+            w={aggregate?.windows.find((entry) => entry.window === window)}
+            window={window}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Every upstream's headroom per window on the shared end-label grid. Rows
+ * link into the upstream's detail.
+ */
+function UpstreamStrip() {
+  const headroom = useUpstreamHeadroomData();
+  const count = headroom.rows.length;
+  const subtitle = headroom.isLoading
+    ? undefined
+    : [
+        `${formatCount(count)} configured`,
+        headroom.reconnectCount > 0
+          ? `${formatCount(headroom.reconnectCount)} need reconnect`
+          : null,
+        'headroom per window, as last observed',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+  return (
+    <Section
+      title="Upstreams"
+      subtitle={subtitle}
+      action={
+        <Link to="/upstreams" className={OVERVIEW_LINK_CLASS}>
+          Open upstreams
+        </Link>
+      }
+    >
+      <UpstreamHeadroomGrid
+        ariaLabel="Upstream headroom per window"
+        data={headroom}
+        empty={
+          <p className="text-body text-text-muted">No upstreams configured.</p>
+        }
+        variant="strip"
+      />
+    </Section>
+  );
+}
+
+const CLOSEST_TO_LIMIT_ROWS = 5;
+/** Closest to limit is sized by rank: the first two rows lead, the rest read as a list. */
+const CLOSEST_RANK_TYPE = [
+  {
+    numeral: 'text-display-hero',
+    unit: 'text-body md:text-title-section',
+    name: 'text-title-section md:text-title-page',
+  },
+  { numeral: 'text-display', unit: 'text-body', name: 'text-title-section' },
+] as const;
+const CLOSEST_REST_TYPE = {
+  numeral: 'text-body font-semibold',
+  unit: 'text-body',
+  name: 'text-body font-medium',
+} as const;
+const CLOSEST_ROW_CLASS =
+  'grid grid-cols-[minmax(4.5rem,auto)_minmax(0,1fr)] items-center gap-x-5 py-4';
+
+export function ClosestToLimit({
   aggregate,
   loading,
   className,
@@ -947,129 +1118,142 @@ export function ClosestToLimitCard({
   const shown = entries.slice(0, CLOSEST_TO_LIMIT_ROWS);
   const hidden = entries.length - shown.length;
   return (
-    <Card
+    <div
       aria-busy={loading}
-      className={cx('@container min-w-0', className)}
+      className={cx('min-w-0', className)}
       data-testid="closest-to-limit"
     >
-      <CardHeader
-        align="center"
-        title={
-          <span className="inline-flex items-center gap-2">
-            <Hourglass className="w-3.5 h-3.5 text-text-faint" />
-            Closest to limit
-          </span>
-        }
-        subtitle="Each upstream's most-used quota window"
+      <Section
+        title="Closest to limit"
+        subtitle="Least headroom first, by each upstream's tightest window"
         action={
           hidden > 0 ? (
-            <Link
-              to="/upstreams"
-              className="text-label text-accent-text hover:underline inline-flex items-center gap-1 rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-            >
-              {`${hidden} more`} <ArrowUpRight className="w-3 h-3" />
+            <Link to="/upstreams" className={OVERVIEW_LINK_CLASS}>
+              {`${hidden} more`}
             </Link>
           ) : undefined
         }
-      />
-      {loading ? (
-        <ul aria-hidden="true" className="divide-y divide-row">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <li key={index} className={CLOSEST_ROW_CLASS}>
-              <Skeleton className="h-4 w-32" />
-              <Skeleton className="h-4 w-10 @2xl:order-3" />
-              <Skeleton className="col-span-2 h-1.5 rounded-xs @2xl:col-span-1 @2xl:order-2" />
-            </li>
-          ))}
-        </ul>
-      ) : shown.length === 0 ? (
-        <p className="px-4 py-8 text-center text-body-sm text-text-muted">
-          No quota readings from any upstream yet.
-        </p>
-      ) : (
-        <ul className="divide-y divide-row">
-          {shown.map((entry) => (
-            <ClosestToLimitRow
-              key={entry.upstreamId}
-              entry={entry}
-              nowUnixSecs={aggregate?.now_unix_secs ?? Date.now() / 1000}
-              timeZone={timeZone}
-            />
-          ))}
-        </ul>
-      )}
-    </Card>
+      >
+        {loading ? (
+          <ul aria-hidden="true" className="flex flex-col">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <li
+                key={index}
+                className={cx(
+                  CLOSEST_ROW_CLASS,
+                  'border-t border-row first:border-t-0 first:pt-0',
+                )}
+              >
+                <Skeleton className="h-9 w-20" />
+                <Skeleton className="h-5 w-40" />
+              </li>
+            ))}
+          </ul>
+        ) : shown.length === 0 ? (
+          <p className="text-body text-text-muted">
+            No quota readings from any upstream yet.
+          </p>
+        ) : (
+          <ol className="flex flex-col">
+            {shown.map((entry, rank) => (
+              <ClosestToLimitRow
+                key={entry.upstreamId}
+                entry={entry}
+                rank={rank}
+                nowUnixSecs={aggregate?.now_unix_secs ?? Date.now() / 1000}
+                timeZone={timeZone}
+              />
+            ))}
+          </ol>
+        )}
+      </Section>
+    </div>
   );
 }
 
 function ClosestToLimitRow({
   entry,
+  rank,
   nowUnixSecs,
   timeZone,
 }: {
   entry: ClosestToLimitEntry;
+  rank: number;
   nowUnixSecs: number;
   timeZone: string;
 }) {
+  const type = CLOSEST_RANK_TYPE[rank] ?? CLOSEST_REST_TYPE;
   const severity = quotaSeverity(entry.utilizationPercent);
-  const reset = formatResetIn(entry.resetUnixSecs, nowUnixSecs);
+  const windowLabel = WINDOW_LABELS[entry.window];
   const resetAt =
     entry.resetUnixSecs != null
-      ? `Resets ${formatInTimezone(entry.resetUnixSecs * 1000, timeZone).replace('T', ' ')}`
+      ? `Resets ${formatMonthDayTime(entry.resetUnixSecs, timeZone)}`
       : undefined;
-  const meta = [reset, entry.state === 'stale' ? 'stale reading' : null]
+  const meta = [
+    `${windowLabel} window`,
+    `${formatQuotaPercent(entry.utilizationPercent)} used`,
+    formatResetIn(entry.resetUnixSecs, nowUnixSecs),
+  ]
     .filter(Boolean)
     .join(' · ');
   return (
-    <li>
+    <li className="border-t border-row first:border-t-0">
       <Link
         to="/upstreams"
         search={{ selectedId: entry.upstreamId }}
         className={cx(
           CLOSEST_ROW_CLASS,
-          'group hover:bg-overlay-2 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+          'group rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+          rank === 0 && 'pt-0',
         )}
+        data-rank={rank + 1}
         data-testid="closest-to-limit-row"
       >
-        <span className="min-w-0 flex items-baseline gap-2">
-          <span className="truncate text-body-sm text-text">
-            {entry.upstreamName}
-          </span>
-          <span className="shrink-0 text-caption text-text-faint">
-            {WINDOW_LABELS[entry.window]}
-          </span>
-        </span>
         <span
           className={cx(
-            'text-right tabular-nums text-body-sm font-medium @2xl:order-3 @2xl:text-left',
-            QUOTA_SEVERITY_TEXT_CLASS[severity],
+            'inline-flex items-baseline whitespace-nowrap tabular-nums',
+            HEADROOM_TONE_CLASS[severity],
           )}
-          data-slot="closest-pct"
+          data-slot="closest-headroom"
         >
-          {formatQuotaPercent(entry.utilizationPercent)}
-        </span>
-        <span
-          aria-hidden="true"
-          className="col-span-2 @2xl:col-span-1 @2xl:order-2 h-1.5 rounded-xs bg-progress-track overflow-hidden"
-        >
+          <span className={type.numeral}>
+            {formatHeadroomValue(entry.utilizationPercent)}
+          </span>
           <span
-            className="block h-full"
-            style={{
-              width: `${Math.min(100, entry.utilizationPercent)}%`,
-              backgroundColor: POOL_SEVERITY_FILL_VAR[severity],
-            }}
+            className={cx(
+              'ml-0.5 font-normal',
+              type.unit,
+              HEADROOM_TONE_CLASS[severity] === 'text-text' &&
+                'text-text-muted',
+            )}
+          >
+            % left
+          </span>
+        </span>
+        <span className="flex min-w-0 flex-col gap-1">
+          <span
+            className={cx(
+              'truncate text-text group-hover:underline',
+              type.name,
+            )}
+          >
+            {entry.upstreamName}
+          </span>
+          <span
+            className="text-body tabular-nums text-text-muted"
+            title={resetAt}
+          >
+            {meta}
+          </span>
+          {entry.state === 'stale' ? (
+            <span className="text-body text-warn-text">Stale reading</span>
+          ) : null}
+          <HeadroomMeter
+            className="mt-1 max-w-72"
+            label={`${entry.upstreamName} ${windowLabel} headroom`}
+            usedPct={entry.utilizationPercent}
           />
         </span>
-        <span
-          className="col-span-2 @2xl:col-span-1 @2xl:order-4 text-caption text-text-faint tabular-nums truncate"
-          title={resetAt}
-        >
-          {meta || '—'}
-        </span>
-        <ChevronRight
-          aria-hidden="true"
-          className="hidden @2xl:block @2xl:order-5 w-3.5 h-3.5 text-text-faint group-hover:text-text"
-        />
       </Link>
     </li>
   );
@@ -1077,7 +1261,6 @@ function ClosestToLimitRow({
 
 type PoolQuotaChartProps = {
   data: PoolQuotaChartRow[];
-  maxValue: number;
   rangeStartUnix: number;
   rangeEndUnix: number;
   range: string;
@@ -1085,141 +1268,125 @@ type PoolQuotaChartProps = {
   showFable: boolean;
 };
 
-const PoolQuotaCard = memo(function PoolQuotaCard({
-  aggregate,
+/**
+ * Headroom history series: 7d is the brand line, 7d (Fable) the same hue
+ * dashed, 5h a thin neutral line. No fills, so crossings stay readable.
+ */
+const POOL_SERIES: Record<
+  PoolQuotaWindow,
+  { stroke: string; strokeWidth: number; strokeDasharray?: string }
+> = {
+  '5h': { stroke: 'var(--color-text-muted)', strokeWidth: 1 },
+  '7d': { stroke: 'var(--color-accent)', strokeWidth: 1.5 },
+  '7d_fable': {
+    stroke: 'var(--color-accent)',
+    strokeWidth: 1.5,
+    strokeDasharray: '4 3',
+  },
+};
+
+/** Headroom levels where the warn / danger zones begin (100 − used threshold). */
+const WARN_LEFT_PCT = 100 - QUOTA_WARN_PCT;
+const DANGER_LEFT_PCT = 100 - QUOTA_DANGER_PCT;
+
+function LegendSwatch({
+  stroke,
+  strokeWidth = 1.5,
+  strokeDasharray,
+}: {
+  stroke: string;
+  strokeWidth?: number;
+  strokeDasharray?: string;
+}) {
+  return (
+    <svg aria-hidden="true" className="shrink-0" height="4" width="16">
+      <line
+        stroke={stroke}
+        strokeDasharray={strokeDasharray}
+        strokeWidth={strokeWidth}
+        x1="0"
+        x2="16"
+        y1="2"
+        y2="2"
+      />
+    </svg>
+  );
+}
+
+const PoolQuotaHistory = memo(function PoolQuotaHistory({
   chart,
   loading,
   className,
 }: {
-  aggregate: AggregateResponse | undefined;
   chart: PoolQuotaChartProps;
   loading: boolean;
   className?: string;
 }) {
-  const w5h = aggregate?.windows.find((x) => x.window === '5h');
-  const w7d = aggregate?.windows.find((x) => x.window === '7d');
-  const wFable = aggregate?.windows.find((x) => x.window === '7d_fable');
-  const upstreamCount = aggregate?.upstream_count ?? 0;
-  const contributingCount = Math.max(
-    w5h?.contributing_upstreams ?? 0,
-    w7d?.contributing_upstreams ?? 0,
-    wFable?.contributing_upstreams ?? 0,
-  );
+  const { effective: timeZone } = useTimezone();
+  const first = chart.data[0];
+  const last = chart.data.at(-1);
+  const proof =
+    first && last
+      ? `${formatCount(chart.data.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
+      : null;
   return (
-    <Card
+    <div
       aria-busy={loading}
-      className={cx('min-w-0 flex flex-col', className)}
+      className={cx('min-w-0', className)}
       data-testid="pool-quota-card"
     >
-      <CardHeader
-        title={
-          <span className="inline-flex items-center gap-2">
-            <Gauge className="w-3.5 h-3.5 text-text-faint" />
-            Pool quota
-          </span>
-        }
-        subtitle={
-          <span className="inline-flex flex-wrap items-center gap-x-1">
-            <Hint
-              label={
-                <span className="block max-w-72 whitespace-normal leading-5">
-                  Each upstream's usage counts in proportion to its plan size
-                  relative to Claude Pro (Pro 1×, Max 5× counts 5×). Unknown
-                  plans count as Pro. Routing is not affected.
-                </span>
-              }
-            >
-              <span
-                tabIndex={0}
-                className="inline-flex cursor-help items-center gap-1 rounded-sm hover:text-text-muted"
-              >
-                Plan-weighted
-                <Info
-                  aria-hidden="true"
-                  strokeWidth={1.75}
-                  className="size-3 opacity-60"
-                />
-              </span>
-            </Hint>
-            {upstreamCount > 0
-              ? `· ${formatCount(contributingCount)} of ${formatCount(upstreamCount)} upstreams`
-              : null}
-          </span>
-        }
-      />
-      {/* At xl the card shares a row with the stacked side column; the
-      chart absorbs any extra height so the card never ends in blank space. */}
-      <div className="flex flex-1 flex-col gap-4 p-4 pt-1">
-        <div className="grid grid-cols-1 gap-x-10 gap-y-3 md:grid-cols-3">
-          {POOL_QUOTA_WINDOWS.map((window) => (
-            <div
-              key={window}
-              data-testid="pool-quota-snapshot-slot"
-              className={POOL_QUOTA_SNAPSHOT_SLOT_CLASS}
-            >
-              <PoolQuotaStackedBar
-                window={window}
-                w={aggregate?.windows.find((entry) => entry.window === window)}
-                loading={loading}
-              />
-            </div>
-          ))}
-        </div>
-        <div className="border-t border-row" />
-        <div className="flex flex-1 flex-col gap-3">
-          <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-label text-text-muted">
-              {`Last ${chart.range}`}
-            </div>
-            <PoolQuotaLegend
-              latest={chart.latest}
+      <Section
+        title="Pool quota history"
+        subtitle={`Headroom, higher is better · last ${chart.range}`}
+      >
+        <PoolQuotaLegend
+          latest={chart.latest}
+          showFable={chart.showFable}
+          loading={loading}
+        />
+        <div
+          className="relative h-64 w-full min-w-0"
+          data-testid="pool-quota-chart-slot"
+        >
+          {loading ? (
+            <Skeleton className="absolute inset-0 h-full w-full" />
+          ) : (
+            <PoolQuotaThemedChart
+              seriesData={chart.data}
+              rangeStartUnix={chart.rangeStartUnix}
+              rangeEndUnix={chart.rangeEndUnix}
               showFable={chart.showFable}
-              loading={loading}
             />
-          </div>
-          <div
-            className={POOL_QUOTA_CHART_SLOT_CLASS}
-            data-testid="pool-quota-chart-slot"
-          >
-            {loading ? (
-              <Skeleton className="absolute inset-0 h-full w-full" />
-            ) : (
-              <PoolQuotaThemedChart
-                seriesData={chart.data}
-                rangeStartUnix={chart.rangeStartUnix}
-                rangeEndUnix={chart.rangeEndUnix}
-                maxValue={chart.maxValue}
-                showFable={chart.showFable}
-              />
-            )}
-          </div>
+          )}
         </div>
-      </div>
-    </Card>
+        {proof && !loading ? (
+          <p className="text-body tabular-nums text-text-muted">{proof}</p>
+        ) : null}
+      </Section>
+    </div>
   );
 });
 
+function isPoolQuotaWindow(key: string): key is PoolQuotaWindow {
+  return (POOL_QUOTA_WINDOWS as readonly string[]).includes(key);
+}
+
 export function PoolQuotaThemedChart({
   seriesData,
-  maxValue,
   rangeStartUnix,
   rangeEndUnix,
   showFable,
 }: {
+  /** Headroom rows (0-100, higher is better). */
   seriesData: PoolQuotaChartRow[];
-  maxValue: number;
   rangeStartUnix: number;
   rangeEndUnix: number;
   showFable: boolean;
 }) {
-  const c5h = getWindowColor('5h');
-  const c7d = getWindowColor('7d');
-  const cFable = getWindowColor('7d_fable');
-
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length ? (
-        <div className="absolute inset-0 z-10 flex items-center justify-center text-body-sm text-text-muted pointer-events-none">
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-body text-text-muted">
           No timeline data yet for this range
         </div>
       ) : null}
@@ -1227,94 +1394,77 @@ export function PoolQuotaThemedChart({
         responsive
         className="size-full"
         data={seriesData}
-        margin={{ top: 8, right: 0, bottom: 0, left: 0 }}
+        margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
       >
-        <CartesianGrid vertical={false} stroke="var(--color-border-row)" />
+        <CartesianGrid {...CHART_GRID} />
         <XAxis
+          {...CHART_AXIS}
           dataKey="unix"
           type="number"
           domain={[rangeStartUnix, rangeEndUnix]}
           allowDataOverflow
-          tick={{ fontSize: 11 }}
           tickFormatter={fmtChartTick}
-          axisLine={false}
-          tickLine={false}
           minTickGap={48}
           tickMargin={8}
         />
         <YAxis
-          tick={{ fontSize: 11 }}
+          {...CHART_AXIS}
           tickFormatter={(v) => `${v}%`}
-          axisLine={false}
-          tickLine={false}
           width={44}
           tickMargin={8}
-          domain={[0, maxValue]}
-          ticks={maxValue <= 100 ? [0, 50, 100] : [0, 50, 100, maxValue]}
+          domain={[0, 100]}
+          ticks={[0, 25, 50, 75, 100]}
           allowDataOverflow={false}
         />
         <ReferenceLine
-          y={80}
-          stroke="var(--color-warn)"
-          strokeOpacity={0.5}
-          strokeDasharray="3 3"
+          y={WARN_LEFT_PCT}
+          {...CHART_THRESHOLD.warn}
           label={{
             position: 'insideTopRight',
-            value: '80%',
+            value: `${WARN_LEFT_PCT}% left`,
             fill: 'var(--color-warn-text)',
-            fontSize: 11,
+            fontSize: 12,
           }}
         />
         <ReferenceLine
-          y={95}
-          stroke="var(--color-danger)"
-          strokeOpacity={0.5}
-          strokeDasharray="3 3"
+          y={DANGER_LEFT_PCT}
+          {...CHART_THRESHOLD.danger}
           label={{
             position: 'insideTopRight',
-            value: '95%',
+            value: `${DANGER_LEFT_PCT}% left`,
             fill: 'var(--color-danger-text)',
-            fontSize: 11,
+            fontSize: 12,
           }}
         />
         <RTooltip
-          cursor={{
-            stroke: 'var(--color-border-strong)',
-            strokeWidth: 1,
-          }}
+          cursor={CHART_CURSOR}
           content={({ active, payload, label }) => {
             if (!active || !payload?.length) return null;
             return (
-              <div className="glass-strong min-w-36 rounded-md px-3 py-2 text-caption text-text">
+              <div className="glass-strong min-w-40 rounded-md px-3 py-2 text-caption text-text">
                 <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(Number(label))}
                 </div>
                 {payload.map((p) => {
-                  const w = String(p.dataKey);
-                  const wLabel = isPoolQuotaWindow(w)
-                    ? `${WINDOW_LABELS[w]} window`
-                    : w;
+                  const key = String(p.dataKey);
                   return (
                     <div
-                      key={w}
+                      key={key}
                       className="flex items-center justify-between gap-3 py-0.5"
                     >
                       <span className="inline-flex items-center gap-1.5 text-text-muted">
-                        <span
-                          aria-hidden="true"
-                          className="h-0.5 w-2.5 rounded-xs"
-                          style={{
-                            background:
-                              typeof p.color === 'string'
-                                ? p.color
-                                : 'var(--color-text)',
-                          }}
-                        />
-                        {wLabel}
+                        {isPoolQuotaWindow(key) ? (
+                          <>
+                            <LegendSwatch {...POOL_SERIES[key]} />
+                            {`${WINDOW_LABELS[key]} window`}
+                          </>
+                        ) : (
+                          key
+                        )}
                       </span>
                       <span className="font-medium tabular-nums">
                         {typeof p.value === 'number'
-                          ? formatQuotaPercent(p.value)
+                          ? formatHeadroom(100 - p.value)
                           : '—'}
                       </span>
                     </div>
@@ -1324,38 +1474,19 @@ export function PoolQuotaThemedChart({
             );
           }}
         />
-        {/* Series overlap, so only the 5h window carries a flat fill; the
-        longer windows draw as lines. */}
-        {showFable ? (
+        {POOL_QUOTA_WINDOWS.filter(
+          (window) => showFable || window !== '7d_fable',
+        ).map((window) => (
           <Area
+            key={window}
             type="monotone"
-            dataKey="7d_fable"
-            stroke={cFable.stroke}
-            strokeWidth={1.5}
+            dataKey={window}
+            {...POOL_SERIES[window]}
             fill="none"
             isAnimationActive={false}
             connectNulls={false}
           />
-        ) : null}
-        <Area
-          type="monotone"
-          dataKey="7d"
-          stroke={c7d.stroke}
-          strokeWidth={1.5}
-          fill="none"
-          isAnimationActive={false}
-          connectNulls={false}
-        />
-        <Area
-          type="monotone"
-          dataKey="5h"
-          stroke={c5h.stroke}
-          strokeWidth={1.5}
-          fill={c5h.fill}
-          fillOpacity={SERIES_FILL_OPACITY}
-          isAnimationActive={false}
-          connectNulls={false}
-        />
+        ))}
       </AreaChart>
     </div>
   );
@@ -1371,38 +1502,40 @@ export function PoolQuotaLegend({
   loading?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-caption text-text-muted">
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-body text-text-muted">
       {POOL_QUOTA_WINDOWS.filter(
         (window) => showFable || window !== '7d_fable',
       ).map((window) => {
-        const color = getWindowColor(window);
         const value = latest?.[window];
-        const label = WINDOW_LABELS[window];
         return (
           <span
             key={window}
-            className={POOL_QUOTA_LEGEND_ITEM_CLASS}
+            className="inline-flex min-h-5 items-center gap-1.5"
             data-testid="pool-quota-legend-slot"
           >
-            <span
-              aria-hidden="true"
-              className="h-0.5 w-2.5 rounded-xs"
-              style={{ background: color.stroke }}
-            />
-            {label}
+            <LegendSwatch {...POOL_SERIES[window]} />
+            {WINDOW_LABELS[window]}
             {loading ? (
-              <Skeleton as="span" className="inline-block h-3 w-8" />
+              <Skeleton as="span" className="inline-block h-3 w-12" />
             ) : value != null ? (
               <>
                 {' · '}
                 <span className="tabular-nums text-text">
-                  {formatQuotaPercent(value)}
+                  {formatHeadroom(value)}
                 </span>
               </>
             ) : null}
           </span>
         );
       })}
+      <span className="inline-flex min-h-5 items-center gap-1.5">
+        <LegendSwatch {...CHART_THRESHOLD.warn} />
+        {`Warn below ${WARN_LEFT_PCT}% left`}
+      </span>
+      <span className="inline-flex min-h-5 items-center gap-1.5">
+        <LegendSwatch {...CHART_THRESHOLD.danger} />
+        {`Danger below ${DANGER_LEFT_PCT}% left`}
+      </span>
     </div>
   );
 }
@@ -1567,11 +1700,6 @@ function OverviewPage() {
     [chartData, poolHistoryNowUnixSecs, displayedPoolHistoryRangeSecs],
   );
 
-  const chartMaxValue = useMemo(
-    () => poolQuotaChartMax(visibleChartData, showFable),
-    [visibleChartData, showFable],
-  );
-
   const chartLatest = useMemo(
     () =>
       poolQuotaResponseLatest(
@@ -1584,7 +1712,6 @@ function OverviewPage() {
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
       data: visibleChartData,
-      maxValue: chartMaxValue,
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       range: displayedPoolHistoryRange,
@@ -1593,7 +1720,6 @@ function OverviewPage() {
     }),
     [
       chartLatest,
-      chartMaxValue,
       displayedPoolHistoryRange,
       displayedPoolHistoryRangeSecs,
       poolHistoryNowUnixSecs,
@@ -1692,125 +1818,118 @@ function OverviewPage() {
 
       {firstRunIncomplete ? null : (
         <>
-          {/* Quota comes first in the DOM (and on mobile); desktop shows the
-          traffic strip above it. At xl the pool card takes the wide column
-          and "Closest to limit" stacks over "Top principals" beside it, so
-          neither column ends in blank space. */}
-          <div className="flex flex-col gap-4 min-w-0">
-            <div className="grid grid-cols-1 gap-4 min-w-0 xl:grid-cols-[2fr_1fr] xl:grid-rows-[auto_1fr]">
-              <ClosestToLimitCard
-                className="xl:col-start-2 xl:row-start-1 xl:self-start"
-                aggregate={quotaAggregate.data}
-                loading={quotaLoading}
-              />
+          {/* Instrument cluster: pool headroom first, then every upstream,
+          then what runs out first beside the pool's history, then traffic. */}
+          <PoolHeadroomBand
+            aggregate={quotaAggregate.data}
+            loading={quotaLoading}
+          />
 
-              <PoolQuotaCard
-                className="xl:col-start-1 xl:row-span-2 xl:row-start-1"
-                aggregate={quotaAggregate.data}
-                loading={quotaLoading}
-                chart={poolQuotaChart}
-              />
+          <UpstreamStrip />
 
-              <TopPrincipalsCard
-                className="xl:col-start-2 xl:row-start-2 xl:self-start"
-                range={range}
-                principals={topPrincipals}
-                loading={
-                  principalUsage.data === undefined && principalUsage.isPending
-                }
-              />
-            </div>
-
-            <section
-              aria-label="Traffic"
-              className="glass rounded-md min-w-0 md:order-first"
-              data-testid="overview-kpi-strip"
-            >
-              {/* A window without requests has nothing to chart: one line
-              instead of five tiles of zeros and dashes. */}
-              {!summary.isPending && noTraffic ? (
-                <p className="px-4 py-3 text-caption text-text-muted">
-                  {`No requests in the last ${range}`}
-                </p>
-              ) : (
-                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5">
-                  <ValueTile
-                    className={KPI_CELL_CLASS[0]}
-                    chartId="request-rate"
-                    icon={<Activity />}
-                    label="Requests/s"
-                    loading={summary.isPending}
-                    value={formatRate(reqPerSec)}
-                    sub={`${formatCount(totals?.request_count)} in ${range}`}
-                    spark={kpiPoints.rate}
-                    sparkColor={KPI_SERIES_COLOR}
-                    chartLabel="Req/s"
-                    formatChartValue={formatRate}
-                    activeIndex={activeKpiIndex}
-                    onActiveIndexChange={setActiveKpiIndex}
-                  />
-                  <ValueTile
-                    className={KPI_CELL_CLASS[1]}
-                    chartId="tokens"
-                    icon={<Database />}
-                    label="Tokens"
-                    loading={summary.isPending}
-                    value={formatCount(totalTokens)}
-                    sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
-                    spark={kpiPoints.tokens}
-                    sparkColor={KPI_SERIES_COLOR}
-                    formatChartValue={formatCount}
-                    secondary={TOKENS_CACHE_MISS_SERIES}
-                    activeIndex={activeKpiIndex}
-                    onActiveIndexChange={setActiveKpiIndex}
-                  />
-                  <ValueTile
-                    className={KPI_CELL_CLASS[2]}
-                    chartId="cost"
-                    icon={<TrendingUp />}
-                    label="Cost at list price"
-                    loading={summary.isPending}
-                    value={formatUsdAmount(virtualUsd)}
-                    spark={kpiPoints.cost}
-                    sparkColor={KPI_SERIES_COLOR}
-                    chartLabel="Cost"
-                    formatChartValue={formatUsdAmount}
-                    activeIndex={activeKpiIndex}
-                    onActiveIndexChange={setActiveKpiIndex}
-                  />
-                  <ValueTile
-                    className={KPI_CELL_CLASS[3]}
-                    chartId="latency"
-                    icon={<Timer />}
-                    label={latencyLabel}
-                    loading={summary.isPending}
-                    value={fmtMs(latency)}
-                    spark={kpiPoints.latency}
-                    sparkColor={KPI_SERIES_COLOR}
-                    formatChartValue={fmtMs}
-                    activeIndex={activeKpiIndex}
-                    onActiveIndexChange={setActiveKpiIndex}
-                  />
-                  <ValueTile
-                    className={KPI_CELL_CLASS[4]}
-                    chartId="error-rate"
-                    icon={<ShieldCheck />}
-                    label="Error rate"
-                    loading={summary.isPending}
-                    value={fmtErrorPercent(errRate)}
-                    spark={kpiPoints.error}
-                    sparkColor={
-                      errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
-                    }
-                    formatChartValue={fmtErrorPercent}
-                    activeIndex={activeKpiIndex}
-                    onActiveIndexChange={setActiveKpiIndex}
-                  />
-                </div>
-              )}
-            </section>
+          <div className="grid min-w-0 grid-cols-1 gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-10">
+            <ClosestToLimit
+              aggregate={quotaAggregate.data}
+              loading={quotaLoading}
+            />
+            <PoolQuotaHistory chart={poolQuotaChart} loading={quotaLoading} />
           </div>
 
+          <div className="grid min-w-0 grid-cols-1 gap-12 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-10">
+            <Section
+              title="Traffic"
+              subtitle={`Last ${range}`}
+              className="min-w-0"
+            >
+              <div className="min-w-0" data-testid="overview-kpi-strip">
+                {/* A window without requests has nothing to chart: one line
+                instead of five readouts of zeros and dashes. */}
+                {!summary.isPending && noTraffic ? (
+                  <p className="text-body text-text-muted">
+                    {`No requests in the last ${range}`}
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-y-6 sm:grid-cols-3 xl:grid-cols-5">
+                    <ValueTile
+                      className={KPI_CELL_CLASS[0]}
+                      chartId="request-rate"
+                      label="Requests/s"
+                      loading={summary.isPending}
+                      value={formatRate(reqPerSec)}
+                      sub={`${formatCount(totals?.request_count)} in ${range}`}
+                      spark={kpiPoints.rate}
+                      sparkColor={KPI_SERIES_COLOR}
+                      chartLabel="Req/s"
+                      formatChartValue={formatRate}
+                      activeIndex={activeKpiIndex}
+                      onActiveIndexChange={setActiveKpiIndex}
+                    />
+                    <ValueTile
+                      className={KPI_CELL_CLASS[1]}
+                      chartId="tokens"
+                      label="Tokens"
+                      loading={summary.isPending}
+                      value={formatCount(totalTokens)}
+                      sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
+                      spark={kpiPoints.tokens}
+                      sparkColor={KPI_SERIES_COLOR}
+                      formatChartValue={formatCount}
+                      secondary={TOKENS_CACHE_MISS_SERIES}
+                      activeIndex={activeKpiIndex}
+                      onActiveIndexChange={setActiveKpiIndex}
+                    />
+                    <ValueTile
+                      className={KPI_CELL_CLASS[2]}
+                      chartId="cost"
+                      label="Cost at list price"
+                      loading={summary.isPending}
+                      value={formatUsdAmount(virtualUsd)}
+                      spark={kpiPoints.cost}
+                      sparkColor={KPI_SERIES_COLOR}
+                      chartLabel="Cost"
+                      formatChartValue={formatUsdAmount}
+                      activeIndex={activeKpiIndex}
+                      onActiveIndexChange={setActiveKpiIndex}
+                    />
+                    <ValueTile
+                      className={KPI_CELL_CLASS[3]}
+                      chartId="latency"
+                      label={latencyLabel}
+                      loading={summary.isPending}
+                      value={fmtMs(latency)}
+                      spark={kpiPoints.latency}
+                      sparkColor={KPI_SERIES_COLOR}
+                      formatChartValue={fmtMs}
+                      activeIndex={activeKpiIndex}
+                      onActiveIndexChange={setActiveKpiIndex}
+                    />
+                    <ValueTile
+                      className={KPI_CELL_CLASS[4]}
+                      chartId="error-rate"
+                      label="Error rate"
+                      loading={summary.isPending}
+                      value={fmtErrorPercent(errRate)}
+                      spark={kpiPoints.error}
+                      sparkColor={
+                        errRate > 0 ? 'var(--color-danger)' : KPI_SERIES_COLOR
+                      }
+                      formatChartValue={fmtErrorPercent}
+                      activeIndex={activeKpiIndex}
+                      onActiveIndexChange={setActiveKpiIndex}
+                    />
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            <TopPrincipalsSection
+              range={range}
+              principals={topPrincipals}
+              loading={
+                principalUsage.data === undefined && principalUsage.isPending
+              }
+            />
+          </div>
           {/* Latest requests: the feed is not range-scoped (newest events of any
           age), so its label must not suggest it follows the range picker. */}
           <Section
@@ -1848,11 +1967,8 @@ function OverviewPage() {
               </span>
             }
             action={
-              <Link
-                to="/logs"
-                className="text-label text-accent-text hover:underline inline-flex items-center gap-1 rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-              >
-                See all <ArrowUpRight className="w-3 h-3" />
+              <Link to="/logs" className={OVERVIEW_LINK_CLASS}>
+                Open logs
               </Link>
             }
           >

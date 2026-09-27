@@ -12,7 +12,7 @@ export type SelectOption = {
 };
 
 const ITEM_CLASS =
-  'flex items-center gap-2 px-2 py-1.5 text-body-sm text-text rounded-sm cursor-pointer outline-none select-none data-[highlighted]:bg-overlay-5 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-40';
+  'flex items-center gap-2 px-2 min-h-8 py-1.5 text-body text-text rounded-sm cursor-pointer outline-none select-none data-[highlighted]:bg-overlay-5 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-40';
 
 /** Reserves the check column so labels never shift when selection changes. */
 function ItemIndicator() {

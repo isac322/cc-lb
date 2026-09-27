@@ -5,6 +5,33 @@ import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
 
+// ─── Shared chart chrome ─────────────────────────────────────────────────────
+// Spread into Recharts parts so every chart shares the instrument-cluster
+// chrome: 1px crisp horizontal gridlines in the line color (index.css
+// enforces the stroke too), 12px sans tick labels in `text-faint`, a 1px
+// strong-line hover cursor, and 1px dashed warn / danger threshold rules.
+export const CHART_GRID = {
+  vertical: false,
+  stroke: 'var(--color-border)',
+} as const;
+export const CHART_AXIS = {
+  axisLine: false,
+  tickLine: false,
+  tick: { fill: 'var(--color-text-faint)', fontSize: 12 },
+} as const;
+export const CHART_CURSOR = {
+  stroke: 'var(--color-border-strong)',
+  strokeWidth: 1,
+} as const;
+export const CHART_THRESHOLD = {
+  warn: { stroke: 'var(--color-warn)', strokeWidth: 1, strokeDasharray: '3 3' },
+  danger: {
+    stroke: 'var(--color-danger)',
+    strokeWidth: 1,
+    strokeDasharray: '3 3',
+  },
+} as const;
+
 /**
  * Accessible wrapper shared by the mini charts. Recharts' own keyboard layer
  * is disabled, so the chart is one static image: named by `ariaLabel`, or
@@ -33,13 +60,14 @@ function ChartFrame({
 
 // ─── Sparkline ───────────────────────────────────────────────────────────────
 /**
- * 1.5px line over a flat series-opacity fill. Renders nothing when every
- * value is zero (or there is no data): a flat line on the tile's bottom edge
- * reads as a second border, not as "no traffic".
+ * 1.25px line over a flat series-opacity fill, neutral by default (the
+ * accent is reserved for headroom). Renders nothing when every value is
+ * zero (or there is no data): a flat line on the tile's bottom edge reads
+ * as a second border, not as "no traffic".
  */
 export function Sparkline({
   data,
-  color = 'var(--color-accent)',
+  color = 'var(--color-text-muted)',
   ariaLabel,
 }: {
   data: number[];
@@ -66,7 +94,7 @@ export function Sparkline({
             type="monotone"
             dataKey="value"
             stroke={color}
-            strokeWidth={1.5}
+            strokeWidth={1.25}
             fill={color}
             fillOpacity={SERIES_FILL_OPACITY}
             isAnimationActive={false}

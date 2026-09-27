@@ -7,10 +7,10 @@ import type {
 import { cx } from './primitives';
 
 /**
- * Table primitives (DESIGN.md §5 Tables). One header style everywhere:
- * `text-label` sans, sentence case, `text-faint`, 32px, opaque sticky
- * `bg-sub` with a `border-strong` rule. Body is 13px sans; mono only for
- * ID / model / path / hash columns. Numbers right-align with tabular figures.
+ * Table primitives. One header style everywhere: 12px/500 sans, sentence
+ * case, `text-faint`, 36px, opaque sticky panel with a 1px line. Body is
+ * 14px sans; mono only for ID / model / path / hash columns. Numbers
+ * right-align with tabular figures.
  *
  * Tables inside a card drop the card's body padding; the first and last
  * cells keep a 16px inset so the header aligns with the card title.
@@ -22,7 +22,7 @@ export function Table({
   return (
     <table
       className={cx(
-        'relative w-full border-collapse text-body-sm text-text [&_th:first-child]:pl-4 [&_th:last-child]:pr-4 [&_td:first-child]:pl-4 [&_td:last-child]:pr-4',
+        'relative w-full border-collapse text-body text-text [&_th:first-child]:pl-4 [&_th:last-child]:pr-4 [&_td:first-child]:pl-4 [&_td:last-child]:pr-4',
         className,
       )}
       {...rest}
@@ -63,8 +63,8 @@ export function TableHeadCell({
 }
 
 /**
- * 40px row (32px with `dense`), `border-row` divider, `overlay-2` hover,
- * `accent-dim` when selected.
+ * 40px row (32px with `dense`), 1px `border-row` divider, hover fill, and
+ * when selected the accent-dim fill with a 2px accent rule on the left.
  */
 export function TableRow({
   className,
@@ -83,8 +83,8 @@ export function TableRow({
       className={cx(
         'border-b border-row last:border-b-0 transition-colors',
         dense ? 'h-8' : 'h-10',
-        interactive && 'cursor-pointer hover:bg-overlay-2',
-        selected && 'bg-accent-dim',
+        interactive && 'cursor-pointer hover:bg-hover-bg',
+        selected && 'bg-accent-dim shadow-[inset_2px_0_0_var(--color-accent)]',
         className,
       )}
       {...rest}

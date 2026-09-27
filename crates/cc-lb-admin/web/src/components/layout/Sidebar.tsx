@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { BookOpen } from 'lucide-react';
+import { BookOpen, MoreHorizontal } from 'lucide-react';
 import { useId, useMemo } from 'react';
 import {
   type OAuthReconnectNudge,
@@ -7,7 +7,12 @@ import {
 } from '../../lib/oauthReconnect';
 import { useUpstreams } from '../../lib/queries';
 import { cx } from '../ui/primitives';
-import { NAV_GROUPS, type NavGroup } from './navItems';
+import {
+  NAV_GROUPS,
+  NAV_ITEMS,
+  type NavGroup,
+  navItemForPath,
+} from './navItems';
 
 const DOCS_URL = 'https://github.com/isac322/cc-lb#readme';
 
@@ -65,7 +70,7 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
   return (
     <span
       className={cx(
-        'ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-2xs font-medium tabular-nums',
+        'ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-caption font-medium tabular-nums',
         danger ? 'bg-danger/15 text-danger-text' : 'bg-warn/15 text-warn-text',
       )}
     >
@@ -75,22 +80,48 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+/**
+ * The mark: a 240° headroom dial with a violet sweep. `size` in px.
+ */
+export function BrandMark({ size = 24 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="shrink-0"
+      height={size}
+      viewBox="0 0 24 24"
+      width={size}
+    >
+      <path
+        d="M4.21 16.5A9 9 0 1 1 19.79 16.5"
+        fill="none"
+        stroke="var(--color-border-strong)"
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      <path
+        d="M4.21 16.5A9 9 0 0 1 16.34 4.11"
+        fill="none"
+        stroke="var(--color-accent)"
+        strokeWidth={3}
+      />
+    </svg>
+  );
+}
+
 export function SidebarBrand({ collapsed }: { collapsed: boolean }) {
   return (
     <div
       className={cx(
-        'flex items-center gap-2.5 px-3 h-12 border-b border-subtle shrink-0',
-        collapsed ? 'justify-center' : '',
+        'flex items-center gap-2.5 h-12 shrink-0',
+        collapsed ? 'justify-center px-2' : 'px-5',
       )}
     >
-      <div
-        aria-hidden="true"
-        className="w-6 h-6 shrink-0 bg-overlay-6 border border-subtle text-text flex items-center justify-center font-semibold text-2xs rounded-sm"
-      >
-        CC
-      </div>
+      <BrandMark />
       {!collapsed ? (
-        <span className="font-medium text-sm">cc-lb</span>
+        <span className="text-[0.9375rem] font-semibold leading-none">
+          cc-lb
+        </span>
       ) : (
         <span className="sr-only">cc-lb</span>
       )}
@@ -104,6 +135,17 @@ export function SidebarBrand({ collapsed }: { collapsed: boolean }) {
  */
 const LABEL_FADE =
   'transition-opacity duration-150 ease-out starting:opacity-0 motion-reduce:transition-none';
+
+/**
+ * Nav item chrome. TanStack `Link` marks the current route with
+ * `data-status="active"`: surface fill, full ink and a 2px accent rule on
+ * the sidebar's left edge.
+ */
+const NAV_ITEM =
+  'relative flex items-center gap-2.5 h-9 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-panel hover:text-text ' +
+  "before:absolute before:-left-3 before:top-1.5 before:bottom-1.5 before:w-0.5 before:content-[''] " +
+  'data-[status=active]:bg-panel-strong data-[status=active]:text-text data-[status=active]:before:bg-accent ' +
+  'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
 
 function SidebarNavGroup({
   group,
@@ -122,7 +164,7 @@ function SidebarNavGroup({
         className={cx(
           collapsed
             ? 'sr-only'
-            : cx('px-2.5 pb-1 text-overline text-text-faint', LABEL_FADE),
+            : cx('px-2 pb-2 text-overline text-text-faint', LABEL_FADE),
         )}
       >
         {group.label}
@@ -135,14 +177,13 @@ function SidebarNavGroup({
               onClick={onNavigate}
               activeOptions={{ exact: path === '/' }}
               title={collapsed ? label : undefined}
-              className={cx(
-                'relative flex items-center gap-2.5 px-2.5 h-9 rounded-sm text-sm transition-colors hover:bg-overlay-5 text-text-muted hover:text-text',
-                'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
-                collapsed ? 'justify-center' : '',
-              )}
-              activeProps={{ className: 'bg-overlay-6 text-text' }}
+              className={cx(NAV_ITEM, collapsed ? 'justify-center' : 'px-2')}
             >
-              <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <Icon
+                className="w-4 h-4 shrink-0"
+                strokeWidth={1.75}
+                aria-hidden="true"
+              />
               {!collapsed ? (
                 <span className={cx('truncate', LABEL_FADE)}>{label}</span>
               ) : (
@@ -170,8 +211,8 @@ export function SidebarNav({
     <nav
       aria-label="Main"
       className={cx(
-        'flex-1 pt-3 pb-8 px-2 overflow-y-auto',
-        collapsed ? 'space-y-3' : 'space-y-5',
+        'flex-1 pt-4 pb-8 px-3 overflow-y-auto',
+        collapsed ? 'space-y-3' : 'space-y-6',
       )}
     >
       {NAV_GROUPS.map((group, index) => (
@@ -204,8 +245,8 @@ export function SidebarFooter({
   return (
     <div
       className={cx(
-        'border-t border-subtle px-3 py-3 flex flex-col gap-2',
-        collapsed ? 'items-center text-center' : '',
+        'px-5 py-4 flex flex-col gap-2',
+        collapsed ? 'items-center px-2 text-center' : '',
       )}
     >
       <a
@@ -235,5 +276,80 @@ export function SidebarFooter({
         {collapsed ? 'cc' : label}
       </div>
     </div>
+  );
+}
+
+/** Pages that get their own tab on phones; the rest live under "More". */
+const TAB_BAR_PATHS = ['/', '/upstreams', '/principals', '/logs'] as const;
+
+const TAB_ITEM =
+  'relative flex flex-col items-center justify-center gap-1 min-w-0 text-caption font-medium text-text-muted transition-colors hover:text-text ' +
+  "before:absolute before:top-0 before:inset-x-1/4 before:h-0.5 before:content-[''] " +
+  'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
+
+/**
+ * Bottom tab bar below `lg`: four primary pages plus "More", which opens
+ * the full navigation sheet. The active tab gets full ink and a 2px accent
+ * rule on its top edge. Page titles stay in the top bar only.
+ */
+export function SidebarTabBar({
+  pathname,
+  onMore,
+  moreOpen,
+}: {
+  pathname: string;
+  onMore: () => void;
+  moreOpen: boolean;
+}) {
+  const current = navItemForPath(pathname)?.path ?? null;
+  const moreActive =
+    current !== null && !(TAB_BAR_PATHS as readonly string[]).includes(current);
+  return (
+    <nav
+      aria-label="Main"
+      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-subtle bg-bg pb-[env(safe-area-inset-bottom)] lg:hidden"
+    >
+      {TAB_BAR_PATHS.map((path) => {
+        const item = NAV_ITEMS.find((candidate) => candidate.path === path);
+        if (!item) return null;
+        const { label, Icon } = item;
+        return (
+          <Link
+            key={path}
+            to={path}
+            activeOptions={{ exact: path === '/' }}
+            className={cx(
+              TAB_ITEM,
+              'h-14 data-[status=active]:text-text data-[status=active]:before:bg-accent',
+            )}
+          >
+            <Icon className="size-4" strokeWidth={1.75} aria-hidden="true" />
+            <span className="max-w-full truncate">{label}</span>
+            {path === '/upstreams' ? (
+              <UpstreamOAuthAttentionBadge collapsed />
+            ) : null}
+          </Link>
+        );
+      })}
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={moreOpen}
+        aria-current={moreActive ? 'page' : undefined}
+        onClick={onMore}
+        className={cx(
+          TAB_ITEM,
+          'h-14',
+          moreActive && 'text-text before:bg-accent',
+        )}
+      >
+        <MoreHorizontal
+          className="size-4"
+          strokeWidth={1.75}
+          aria-hidden="true"
+        />
+        <span>More</span>
+      </button>
+    </nav>
   );
 }

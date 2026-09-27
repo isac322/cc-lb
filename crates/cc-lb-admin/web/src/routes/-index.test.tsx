@@ -24,12 +24,12 @@ import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
-  ClosestToLimitCard,
+  ClosestToLimit,
+  PoolHeadroomBand,
   PoolQuotaLegend,
-  PoolQuotaStackedBar,
   Route,
   type TopPrincipal,
-  TopPrincipalsCard,
+  TopPrincipalsSection,
   ValueTile,
 } from './index';
 
@@ -50,6 +50,21 @@ vi.mock('../lib/queries', async () => {
 
 vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: vi.fn(),
+}));
+
+// The upstream strip's grid and its data hook belong to the Upstreams page;
+// the Overview only decides where the strip goes and what an empty pool says.
+vi.mock('../components/upstreams/UpstreamHeadroomGrid', () => ({
+  useUpstreamHeadroomData: () => ({
+    rows: [],
+    isLoading: false,
+    quotaPending: false,
+    statusPending: false,
+    usagePending: false,
+    quotaError: false,
+    reconnectCount: 0,
+  }),
+  UpstreamHeadroomGrid: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
 }));
 
 // The Overview links to other routes; render router links as plain anchors so
@@ -542,12 +557,13 @@ describe('Overview quota headroom', () => {
     };
   }
 
-  it('opens the pool breakdown with upstream names from a named button', async () => {
-    const aggregate = twoUpstreamAggregate();
-    render(<PoolQuotaStackedBar window="7d" w={aggregate.windows[1]} />);
+  it('opens a window breakdown with each upstream headroom from a named button', async () => {
+    render(
+      <PoolHeadroomBand aggregate={twoUpstreamAggregate()} loading={false} />,
+    );
 
     const trigger = screen.getByRole('button', {
-      name: '7d pool 60%, show upstream breakdown',
+      name: 'By upstream: 7d headroom',
     });
     expect(screen.queryByText('Upstream Two')).toBeNull();
 
@@ -560,12 +576,48 @@ describe('Overview quota headroom', () => {
       expect.stringContaining('Upstream One'),
       expect.stringContaining('Upstream Two'),
     ]);
-    expect(rows[1]?.textContent).toContain('97%');
+    expect(rows[1]?.textContent).toContain('3% left');
   });
 
-  it('ranks upstreams by their most-used window and links each to its detail', () => {
+  it('leads with the binding window as pool headroom and tags it', () => {
+    const base = aggregateResponse(1_000_000, 60);
+    const used: Record<string, number> = { '5h': 12, '7d': 60, '7d_fable': 41 };
     render(
-      <ClosestToLimitCard aggregate={twoUpstreamAggregate()} loading={false} />,
+      <PoolHeadroomBand
+        aggregate={{
+          ...base,
+          windows: base.windows.map((entry) => ({
+            ...entry,
+            utilization_percent: used[entry.window] ?? null,
+          })),
+        }}
+        loading={false}
+      />,
+    );
+
+    expect(
+      screen.getByRole('img', {
+        name: 'Pool headroom: 40% left, 7d window binds · 60% used',
+      }),
+    ).toBeDefined();
+    const slots = screen.getAllByTestId('pool-quota-snapshot-slot');
+    expect(
+      slots.map((slot) => slot.textContent?.includes('binds pool')),
+    ).toEqual([false, true, false]);
+    expect(slots[0]?.textContent).toContain('88% left');
+    expect(slots[0]?.textContent).toContain('12% used');
+
+    const band = screen.getByTestId('pool-headroom-band');
+    const detail = (term: string) =>
+      within(band).getByText(term).nextElementSibling?.textContent;
+    expect(detail('Time left')).toBe('1h');
+    expect(detail('Provider data')).toContain('just now');
+    expect(detail('Provider data')).not.toContain('Stale');
+  });
+
+  it('ranks upstreams by least headroom left, sized by rank, linking to detail', () => {
+    render(
+      <ClosestToLimit aggregate={twoUpstreamAggregate()} loading={false} />,
     );
 
     const rows = screen.getAllByTestId('closest-to-limit-row');
@@ -573,10 +625,22 @@ describe('Overview quota headroom', () => {
       '/upstreams?selectedId=upstream-2',
       '/upstreams?selectedId=upstream-1',
     ]);
+    expect(rows.map((row) => row.getAttribute('data-rank'))).toEqual([
+      '1',
+      '2',
+    ]);
     expect(rows[0]?.textContent).toContain('Upstream Two');
-    expect(rows[0]?.textContent).toContain('7d');
-    expect(rows[0]?.textContent).toContain('97%');
+    expect(rows[0]?.textContent).toContain('3% left');
+    expect(rows[0]?.textContent).toContain('7d window · 97% used');
     expect(rows[0]?.textContent).toContain('resets in 2d 3h');
+    expect(
+      rows[0]?.querySelector('[data-slot="closest-headroom"] > span')
+        ?.className,
+    ).toContain('text-display-hero');
+    expect(
+      rows[1]?.querySelector('[data-slot="closest-headroom"] > span')
+        ?.className,
+    ).not.toContain('text-display-hero');
   });
 });
 
@@ -596,7 +660,7 @@ describe('PoolQuotaLegend', () => {
         showFable
       />,
     );
-    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 28%');
+    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 72% left');
   });
 });
 
@@ -606,7 +670,6 @@ describe('Overview loading geometry', () => {
       <ValueTile
         chartId="request-rate"
         chartLabel="Req/s"
-        icon={<span />}
         label="requests"
         loading
         spark={[]}
@@ -634,7 +697,7 @@ describe('Overview loading geometry', () => {
     expect(
       container.querySelector('[data-slot="sparkline"] .skeleton'),
     ).not.toBeNull();
-    expect(valueClassName).toContain('h-7');
+    expect(valueClassName).toContain('h-9');
     expect(subClassName).toContain('h-4');
     expect(sparklineClassName).toContain('h-8');
     expect(screen.queryByText('12')).toBeNull();
@@ -644,7 +707,6 @@ describe('Overview loading geometry', () => {
       <ValueTile
         chartId="request-rate"
         chartLabel="Req/s"
-        icon={<span />}
         label="requests"
         loading={false}
         spark={[]}
@@ -675,7 +737,6 @@ describe('Overview loading geometry', () => {
       <ValueTile
         chartId="isolated-secondary"
         chartLabel="Primary"
-        icon={<span />}
         label="isolated secondary"
         secondary={{
           color: '#8b5cf6',
@@ -710,14 +771,14 @@ describe('Overview loading geometry', () => {
     expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
   });
 
-  it('keeps the principal card shell stable across loading and loaded states', () => {
+  it('keeps the principal section shell stable across loading and loaded states', () => {
     const { container, rerender } = render(
-      <TopPrincipalsCard loading principals={[]} range="24h" />,
+      <TopPrincipalsSection loading principals={[]} range="24h" />,
     );
 
-    const cardClassName = screen
+    const sectionClassName = screen
       .getByText('Top principals')
-      .closest('.glass')?.className;
+      .closest('section')?.className;
     const listClassName = container.querySelector(
       '[data-slot="principal-list"]',
     )?.className;
@@ -727,7 +788,7 @@ describe('Overview loading geometry', () => {
     for (const row of skeletonRows) {
       const skeletons = row.querySelectorAll('.skeleton');
       expect(row.className).toContain('min-h-[66px]');
-      expect(row.className).toContain('px-4');
+      expect(row.className).toContain('border-row');
       expect(row.className).toContain('py-2');
       expect(skeletons).toHaveLength(5);
       expect(skeletons[0]?.className).toContain('h-5');
@@ -738,18 +799,20 @@ describe('Overview loading geometry', () => {
     }
     expect(screen.queryByText('Loading top principals…')).toBeNull();
 
-    rerender(<TopPrincipalsCard loading={false} principals={[]} range="24h" />);
+    rerender(
+      <TopPrincipalsSection loading={false} principals={[]} range="24h" />,
+    );
 
     expect(
-      screen.getByText('Top principals').closest('.glass')?.className,
-    ).toBe(cardClassName);
+      screen.getByText('Top principals').closest('section')?.className,
+    ).toBe(sectionClassName);
     expect(
       container.querySelector('[data-slot="principal-list"]')?.className,
     ).toBe(listClassName);
     expect(screen.getByText('No usage in the last 24h')).toBeDefined();
 
     rerender(
-      <TopPrincipalsCard
+      <TopPrincipalsSection
         loading={false}
         principals={[
           {
@@ -769,8 +832,8 @@ describe('Overview loading geometry', () => {
     );
 
     expect(
-      screen.getByText('Top principals').closest('.glass')?.className,
-    ).toBe(cardClassName);
+      screen.getByText('Top principals').closest('section')?.className,
+    ).toBe(sectionClassName);
     expect(
       container.querySelector('[data-slot="principal-list"]')?.className,
     ).toBe(listClassName);
@@ -812,7 +875,7 @@ describe('Overview loading geometry', () => {
     ['aggregate', true, false],
     ['history', false, true],
   ])(
-    'keeps Pool quota structured while the %s query is pending',
+    'keeps the pool band and history structured while the %s query is pending',
     (_queryName, aggregatePending, historyPending) => {
       mockPendingOverviewQueries();
       vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
@@ -828,27 +891,29 @@ describe('Overview loading geometry', () => {
 
       render(<OverviewPage />);
 
-      const card = screen.getByTestId('pool-quota-card');
-      expect(card.getAttribute('aria-busy')).toBe('true');
-      expect(card.textContent).not.toContain('no data');
-      expect(card.textContent).not.toContain('No timeline data yet');
+      const band = screen.getByTestId('pool-headroom-band');
+      expect(band.getAttribute('aria-busy')).toBe('true');
+      // Pending is not "no reading": nothing claims the pool is empty.
+      expect(band.textContent).not.toContain('No reading');
+      expect(band.textContent).not.toContain('No quota readings yet');
+      expect(band.querySelectorAll('[role="img"]')).toHaveLength(0);
 
-      const snapshotSlots = card.querySelectorAll(
+      const snapshotSlots = band.querySelectorAll(
         '[data-testid="pool-quota-snapshot-slot"]',
       );
-      expect(snapshotSlots).toHaveLength(3);
       expect(
-        Array.from(snapshotSlots, (slot) => slot.textContent?.trim()),
-      ).toEqual(['5h pool', '7d pool', '7d (Fable) pool']);
+        Array.from(snapshotSlots, (slot) => slot.getAttribute('data-window')),
+      ).toEqual(['5h', '7d', '7d_fable']);
       for (const slot of snapshotSlots) {
-        expect(slot.className).toContain('min-h-10');
-        expect(slot.querySelectorAll('.skeleton')).toHaveLength(2);
+        expect(slot.querySelector('.skeleton')).not.toBeNull();
       }
 
+      const card = screen.getByTestId('pool-quota-card');
+      expect(card.getAttribute('aria-busy')).toBe('true');
+      expect(card.textContent).not.toContain('No timeline data yet');
       const legendSlots = card.querySelectorAll(
         '[data-testid="pool-quota-legend-slot"]',
       );
-      expect(legendSlots).toHaveLength(3);
       expect(
         Array.from(legendSlots, (slot) => slot.textContent?.trim()),
       ).toEqual(['5h', '7d', '7d (Fable)']);
@@ -859,41 +924,45 @@ describe('Overview loading geometry', () => {
       const chartSlot = screen.getByTestId('pool-quota-chart-slot');
       expect(chartSlot.className).toContain('h-64');
       expect(chartSlot.querySelector('.skeleton')).not.toBeNull();
-      const chartHeader = chartSlot.previousElementSibling;
-      expect(chartHeader?.className).toContain('flex-col');
-      expect(chartHeader?.className).toContain('sm:flex-row');
     },
   );
 
-  it('keeps all three Pool quota slots mounted when pending resolves to legitimate no-data', () => {
+  it('keeps the pool band and history mounted when pending resolves to legitimate no-data', () => {
     mockPendingOverviewQueries();
 
     const { rerender } = render(<OverviewPage />);
-    const pendingCard = screen.getByTestId('pool-quota-card');
+    const pendingBand = screen.getByTestId('pool-headroom-band');
     const pendingSnapshotSlots = Array.from(
-      pendingCard.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
+      pendingBand.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
     );
+    const pendingCard = screen.getByTestId('pool-quota-card');
     const pendingChartSlot = screen.getByTestId('pool-quota-chart-slot');
 
     mockResolvedEmptyQuotaQueries();
     rerender(<OverviewPage />);
 
-    const resolvedCard = screen.getByTestId('pool-quota-card');
+    const resolvedBand = screen.getByTestId('pool-headroom-band');
     const resolvedSnapshotSlots = Array.from(
-      resolvedCard.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
+      resolvedBand.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
     );
-    expect(resolvedCard).toBe(pendingCard);
-    expect(resolvedCard.getAttribute('aria-busy')).toBe('false');
+    expect(resolvedBand).toBe(pendingBand);
+    expect(resolvedBand.getAttribute('aria-busy')).toBe('false');
+    expect(resolvedSnapshotSlots).toHaveLength(3);
     for (let index = 0; index < resolvedSnapshotSlots.length; index += 1) {
       expect(resolvedSnapshotSlots[index]).toBe(pendingSnapshotSlots[index]);
     }
-    expect(resolvedSnapshotSlots).toHaveLength(3);
+    expect(resolvedBand.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(resolvedBand.textContent?.match(/No reading/g)).toHaveLength(3);
+    expect(resolvedBand.textContent).toContain('No quota readings yet');
+
+    const resolvedCard = screen.getByTestId('pool-quota-card');
+    expect(resolvedCard).toBe(pendingCard);
+    expect(resolvedCard.getAttribute('aria-busy')).toBe('false');
     expect(
       resolvedCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]'),
     ).toHaveLength(3);
     expect(screen.getByTestId('pool-quota-chart-slot')).toBe(pendingChartSlot);
     expect(resolvedCard.querySelectorAll('.skeleton')).toHaveLength(0);
-    expect(resolvedCard.textContent?.match(/no data/g)).toHaveLength(3);
     expect(resolvedCard.textContent).toContain(
       'No timeline data yet for this range',
     );
@@ -932,12 +1001,10 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 20%');
+      ).toBe('5h · 80% left');
       expect(
-        quotaCard.querySelectorAll(
-          '[data-testid="pool-quota-snapshot-slot"]',
-        )[0]?.textContent,
-      ).toContain('20%');
+        screen.getAllByTestId('pool-quota-snapshot-slot')[0]?.textContent,
+      ).toContain('80% left');
       expect(principalRow.textContent).toContain('Principal Alpha');
       expect(principalRow.textContent).toContain('$3.00');
 
@@ -971,7 +1038,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 20%');
+      ).toBe('5h · 80% left');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(screen.queryByTestId('top-principal-skeleton-row')).toBeNull();
       expect(principalRow.textContent).toContain('$3.00');
@@ -1008,12 +1075,10 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 55%');
+      ).toBe('5h · 45% left');
       expect(
-        quotaCard.querySelectorAll(
-          '[data-testid="pool-quota-snapshot-slot"]',
-        )[0]?.textContent,
-      ).toContain('55%');
+        screen.getAllByTestId('pool-quota-snapshot-slot')[0]?.textContent,
+      ).toContain('45% left');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(principalRow.textContent).toContain('$9.00');
     } finally {
@@ -1063,8 +1128,10 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    fireEvent.click(screen.getByText('1h'));
-    expect(screen.getByText('Last 24h')).toBeDefined();
+    fireEvent.click(screen.getByRole('radio', { name: '1h' }));
+    expect(
+      screen.getByText('Headroom, higher is better · last 24h'),
+    ).toBeDefined();
 
     const oneHourHistory = poolHistoryResponse(
       POOL_HISTORY_NOW + 60,
@@ -1089,7 +1156,9 @@ describe('Overview loading geometry', () => {
     } as never);
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Last 1h')).toBeDefined();
+    expect(
+      screen.getByText('Headroom, higher is better · last 1h'),
+    ).toBeDefined();
     const oneHourDomain = screen
       .getByTestId('pool-quota-x-axis')
       .getAttribute('data-domain');
@@ -1123,7 +1192,9 @@ describe('Overview loading geometry', () => {
     fireEvent.click(sevenDayOption);
 
     expect(sevenDayOption.getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByText('Last 1h')).toBeDefined();
+    expect(
+      screen.getByText('Headroom, higher is better · last 1h'),
+    ).toBeDefined();
     expect(screen.getByText('By virtual cost · 7d')).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
@@ -1159,7 +1230,9 @@ describe('Overview loading geometry', () => {
 
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Last 7d')).toBeDefined();
+    expect(
+      screen.getByText('Headroom, higher is better · last 7d'),
+    ).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1175,7 +1248,7 @@ describe('Overview loading geometry', () => {
     expect(
       quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
         ?.textContent,
-    ).toBe('5h · 55%');
+    ).toBe('5h · 45% left');
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
@@ -1214,7 +1287,7 @@ describe('Overview loading geometry', () => {
     // A preview has no infinite-scroll footer; the full history is on Logs.
     expect(screen.queryByText('No more entries')).toBeNull();
     expect(
-      screen.getByRole('link', { name: 'See all' }).getAttribute('href'),
+      screen.getByRole('link', { name: 'Open logs' }).getAttribute('href'),
     ).toBe('/logs');
   });
 
@@ -1713,7 +1786,11 @@ function costDetailValues(): string[] {
 
 function renderPrincipals(principals: readonly TopPrincipal[]) {
   return render(
-    <TopPrincipalsCard loading={false} principals={principals} range="24h" />,
+    <TopPrincipalsSection
+      loading={false}
+      principals={principals}
+      range="24h"
+    />,
   );
 }
 

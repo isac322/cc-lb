@@ -11,11 +11,10 @@ import {
 import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
 import { fmtUsd, sumTokens } from '../../lib/format';
+import { CHART_AXIS, CHART_CURSOR, CHART_GRID } from '../ui/charts';
 import {
-  Card,
-  CardBody,
-  CardHeader,
   EmptyState,
+  Section,
   SegmentedControl,
   Skeleton,
 } from '../ui/primitives';
@@ -137,13 +136,12 @@ export function ApiUsageCard({
   );
 
   return (
-    <Card data-testid="api-usage-card">
-      <CardHeader
+    <div data-testid="api-usage-card">
+      <Section
         title="API usage"
         subtitle="Token and cost breakdown by model"
         action={action}
-      />
-      <CardBody>
+      >
         <div className="flex flex-col gap-3">
           <div
             data-testid="api-usage-legend-slot"
@@ -183,21 +181,16 @@ export function ApiUsageCard({
                     data={chartData}
                     margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
                   >
-                    <CartesianGrid
-                      vertical={false}
-                      stroke="var(--color-border-row)"
-                    />
+                    <CartesianGrid {...CHART_GRID} />
                     <XAxis
+                      {...CHART_AXIS}
                       dataKey="ts"
                       tickFormatter={formatXAxis}
-                      tickLine={false}
-                      axisLine={false}
                       minTickGap={60}
                     />
                     <YAxis
+                      {...CHART_AXIS}
                       tickFormatter={formatYAxis}
-                      tickLine={false}
-                      axisLine={false}
                       tickCount={3}
                       width={60}
                     />
@@ -207,10 +200,7 @@ export function ApiUsageCard({
                         formatTooltip(Number(value ?? 0)),
                         String(name),
                       ]}
-                      cursor={{
-                        stroke: 'var(--color-border-strong)',
-                        strokeWidth: 1,
-                      }}
+                      cursor={CHART_CURSOR}
                     />
                     {models.map((model, index) => {
                       const color = modelSeriesColor(model, index);
@@ -234,7 +224,7 @@ export function ApiUsageCard({
             </div>
           )}
         </div>
-      </CardBody>
-    </Card>
+      </Section>
+    </div>
   );
 }

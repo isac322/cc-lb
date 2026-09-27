@@ -1,4 +1,4 @@
-import '@fontsource-variable/geist';
+import '@fontsource-variable/hanken-grotesk';
 import '@fontsource-variable/geist-mono';
 import './index.css';
 
@@ -42,6 +42,9 @@ function App() {
         closeButton
         richColors={false}
         duration={4000}
+        // Clear the phone/tablet tab bar (`--shell-bottom` is 0 from `lg`).
+        offset={{ bottom: 'calc(var(--shell-bottom) + 24px)', right: 24 }}
+        mobileOffset={{ bottom: 'calc(var(--shell-bottom) + 16px)' }}
       />
     </QueryClientProvider>
   );

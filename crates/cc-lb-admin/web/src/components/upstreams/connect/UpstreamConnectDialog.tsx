@@ -734,7 +734,7 @@ function StepRail({
             ) : null}
             <span
               className={cx(
-                'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-2xs font-medium tabular-nums',
+                'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-caption font-medium tabular-nums',
                 done
                   ? 'border-ok/50 bg-ok/15 text-success-text'
                   : active
@@ -808,27 +808,27 @@ function WhatYouWillSee() {
             <span className="h-1.5 w-1.5 rounded-full bg-overlay-4" />
             <span className="h-1.5 w-1.5 rounded-full bg-overlay-4" />
           </span>
-          <span className="flex-1 truncate rounded-sm bg-overlay-2 px-2 py-0.5 font-mono text-2xs text-text-faint">
+          <span className="flex-1 truncate rounded-sm bg-overlay-2 px-2 py-0.5 text-caption text-text-faint">
             claude.ai — authentication
           </span>
         </div>
         {/* Miniature callback page */}
         <div className="flex flex-col gap-1.5 p-3">
           <div className="text-label text-text">Authentication code</div>
-          <div className="text-2xs text-text-faint">
+          <div className="text-caption text-text-faint">
             Paste this into Claude Code
           </div>
-          <div className="rounded-sm border border-subtle bg-bg px-2 py-1.5 font-mono text-2xs text-text-muted">
+          <div className="rounded-sm border border-subtle bg-bg px-2 py-1.5 font-mono text-data text-text-muted">
             aB3x…#eyJ1…
           </div>
           <div className="mt-0.5">
-            <span className="inline-flex items-center rounded-sm bg-text px-2 py-1 text-2xs font-medium text-bg ring-1 ring-accent ring-offset-1 ring-offset-bg">
+            <span className="inline-flex items-center rounded-sm bg-text px-2 py-1 text-caption font-medium text-bg">
               Copy Code
             </span>
           </div>
         </div>
       </div>
-      <p className="mt-1.5 flex items-center gap-1 text-caption text-accent-text">
+      <p className="mt-1.5 flex items-center gap-1 text-caption text-text-muted">
         <CornerUpLeft className="w-3 h-3" strokeWidth={1.75} />
         Click Copy Code, then come back here
       </p>

@@ -19,9 +19,9 @@ export interface TabItem<T extends string> {
 }
 
 /**
- * Underline tabs (DESIGN.md §5 Tabs): 13/500 labels, 36px row, a 2px accent
- * bar under the active item, one horizontally scrolling line with an edge
- * fade — never a grid of bordered cells and never wrapping.
+ * Underline tabs: 14/500 labels, 36px row, a square 2px accent rule under
+ * the active item, one horizontally scrolling line with an edge fade —
+ * never a grid of bordered cells and never wrapping.
  *
  * - `mode="tabs"` (default): an ARIA tablist with roving focus (arrows,
  *   Home/End). With `idPrefix`, tab `i` is `${idPrefix}-tab-${value}` and
@@ -165,10 +165,10 @@ export function Tabs<T extends string>({
             }}
             onKeyDown={handleKeyDown}
             className={cx(
-              'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[0.8125rem] font-medium transition-colors',
+              'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
               'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
               'disabled:cursor-not-allowed disabled:opacity-40',
-              "after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:rounded-full after:content-['']",
+              "after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:content-['']",
               active
                 ? 'text-text after:bg-accent'
                 : 'text-text-muted hover:text-text after:bg-transparent',

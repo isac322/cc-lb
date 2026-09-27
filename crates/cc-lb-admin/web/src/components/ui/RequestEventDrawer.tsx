@@ -131,7 +131,7 @@ function RequestDetail({
           )}
         </div>
       </div>
-      <div className="overflow-x-hidden p-4 pb-8 space-y-6 text-body-sm min-w-0">
+      <div className="overflow-x-hidden p-4 pb-8 space-y-6 text-body min-w-0">
         <RequestEventIdentity
           event={merged}
           principalLabel={principalLabel}
