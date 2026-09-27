@@ -641,8 +641,10 @@ describe('/upstreams cold-load geometry', () => {
       within(shell).getByTestId('quota-history-legend-slot').className,
     ).toContain('min-h-5');
     expect(
-      within(shell).getByTestId('quota-snapshot-grid').className,
-    ).toContain('min-h-70');
+      within(within(shell).getByTestId('quota-snapshot-grid')).getAllByTestId(
+        'quota-snapshot-skeleton-card',
+      ),
+    ).toHaveLength(3);
     const rangeControl = within(shell).getByTestId(
       'quota-history-range-control',
     );
@@ -676,7 +678,6 @@ describe('/upstreams cold-load geometry', () => {
     expect(legend.querySelectorAll('.skeleton')).toHaveLength(2);
 
     const snapshotGrid = screen.getByTestId('quota-snapshot-grid');
-    expect(snapshotGrid.className).toContain('min-h-70');
     expect(
       within(snapshotGrid).getAllByTestId('quota-snapshot-skeleton-card'),
     ).toHaveLength(3);
@@ -775,9 +776,6 @@ describe('/upstreams cold-load geometry', () => {
     );
     expect(screen.getByTestId('quota-history-legend-slot').className).toContain(
       'min-h-5',
-    );
-    expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
-      'min-h-70',
     );
     const rangeControl = screen.getByTestId('quota-history-range-control');
     const rangeItems = within(rangeControl).getAllByRole('radio');

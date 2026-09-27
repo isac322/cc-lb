@@ -133,16 +133,18 @@ const RANGE_OPTIONS = TIME_PRESET_OPTIONS_WITH_ALL;
 // sidebar counts), not the viewport. Below 56rem (1024px screens) Action is the
 // one flexible column and the change summary rides under it. From 56rem
 // (1280–1536px screens) Action is capped and the room goes to a Details column
-// plus the route beside the status. From 80rem (1920px screens) the fixed
-// columns widen and the actor kind shows. Order: Time, Action, Target,
-// Details, Actor, Request (status + route), Open.
+// plus the route beside the status; Target is wide enough for a typical
+// `upstream <name>` without truncating. From 80rem (1920px screens) the fixed
+// columns widen, favouring Target and the route over the line-clamped Details,
+// and the actor kind shows. Order: Time, Action, Target, Details, Actor,
+// Request (status + route), Open.
 const AUDIT_COLUMN_CLASS_NAMES = [
   'w-[6rem]',
-  '@4xl:w-[15rem] @7xl:w-[18rem]',
-  'w-[10.5rem] @4xl:w-[11rem] @7xl:w-[13rem]',
+  '@4xl:w-[13rem] @7xl:w-[16rem]',
+  'w-[10.5rem] @4xl:w-[13rem] @7xl:w-[17rem]',
   'hidden @4xl:table-cell',
   'w-[8.5rem] @4xl:w-[9.5rem] @7xl:w-[12rem]',
-  'w-[4.5rem] @4xl:w-[12rem] @7xl:w-[16rem]',
+  'w-[4.5rem] @4xl:w-[12rem] @7xl:w-[20rem]',
   'w-[3.5rem]',
 ] as const;
 

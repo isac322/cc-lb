@@ -304,7 +304,6 @@ function PrincipalDetailLoadingShell() {
               cost: true,
               tokens: true,
             }}
-            minWidthClass="min-w-[920px]"
           />
         </div>
       </DetailSection>
@@ -781,7 +780,6 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
             cost: true,
             tokens: true,
           }}
-          minWidthClass="min-w-[920px]"
           emptyTitle="No recent requests for this principal"
         />
       </div>
@@ -1948,7 +1946,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            className="text-body font-medium text-text truncate hover:underline"
+                            className="truncate rounded-sm text-body font-medium text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
                             onClick={() => setDetailPlugin(reg ?? null)}
                           >
                             {reg?.name ?? e.wasm_registry_id}

@@ -1472,7 +1472,7 @@ function OverviewPage() {
                           output={outputTokens}
                         />
                       }
-                      sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
+                      sub={`Cache miss ${fmtRatioPercent(cacheMissAvg)}`}
                       spark={kpiPoints.tokens}
                       sparkColor={TOKENS_INPUT_COLOR}
                       chartLabel="In"

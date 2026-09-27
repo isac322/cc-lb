@@ -79,9 +79,14 @@ export function formatCount(v: number | null | undefined): string {
   return EN_US_NUMBER.format(v === 0 ? 0 : v);
 }
 
+/**
+ * Requests per second: three significant digits, and `<0.01` below one per
+ * hundred seconds so a quiet window never reads as a long run of zeros.
+ */
 export function formatRate(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v) || v < 0) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  if (v > 0 && v < 0.01) return '<0.01';
   return EN_US_RATE.format(v === 0 ? 0 : v);
 }
 

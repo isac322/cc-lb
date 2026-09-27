@@ -477,7 +477,8 @@ export function LatencyCell({
           {triggerStages.join(', ')}
         </span>
       ) : null}
-      <span className="flex items-baseline justify-end max-md:justify-start">
+      {/* Left-aligned in RequestEventsTable's card layout. */}
+      <span className="flex items-baseline justify-end @max-xl/events:justify-start">
         <span className="text-text">{value}</span>
         <span className="ml-1 w-[2ch] shrink-0 text-left text-text-muted">
           {unit}

@@ -113,10 +113,10 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 const BTN_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    'bg-accent border border-accent text-accent-ink hover:brightness-110',
+    'bg-accent border border-accent text-accent-ink hover:bg-accent-hover hover:border-accent-hover disabled:hover:bg-accent disabled:hover:border-accent',
   secondary:
     'border border-subtle-strong text-text hover:bg-panel-strong disabled:hover:bg-transparent',
-  ghost: 'text-text-muted hover:bg-hover-bg hover:text-text',
+  ghost: 'text-text-muted hover:bg-overlay-5 hover:text-text',
   danger:
     'border border-danger text-danger-text hover:bg-danger/10 disabled:hover:bg-transparent',
   'danger-solid':
@@ -673,7 +673,8 @@ export function Hint({
       </BasePopover.Trigger>
       <BasePopover.Portal>
         <BasePopover.Positioner className="z-50" side={side} sideOffset={4}>
-          <BasePopover.Popup className="max-w-xs px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay">
+          {/* Tall breakdowns scroll inside the popup instead of running past the viewport edge. */}
+          <BasePopover.Popup className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay">
             {label}
           </BasePopover.Popup>
         </BasePopover.Positioner>

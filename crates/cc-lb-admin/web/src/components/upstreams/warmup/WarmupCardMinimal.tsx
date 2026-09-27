@@ -117,7 +117,7 @@ function HelpIcon({
     >
       <span
         aria-label={label}
-        className="inline-flex h-4 w-4 cursor-help items-center justify-center text-text-faint transition-colors hover:text-text"
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:bg-overlay-5 hover:text-text"
       >
         <HelpCircle className="h-3.5 w-3.5" />
       </span>

@@ -30,12 +30,13 @@ Night is the default (`:root`, `[data-theme="dark"]`). Day applies with `[data-t
 | Row line | `--color-border-row` (`border-row`) | `#272b30` | `#d7d9de` | Table and list row dividers, dividers between peers |
 | Meter track | `--color-progress-track` | `#2c3036` | `#cfd2d8` | Usage meter and stacked-bar tracks, switch off |
 | Overlay steps | `--color-overlay-{1..6}` | 2–8% white | 2–8% ink (`#17191c`) | Wells (`overlay-3`), neutral badges (`overlay-5`), list-row and nav hover (`overlay-2`) |
-| Hover | `--color-hover-bg` | 4% white | 4% ink | Interactive table row and ghost-button hover |
+| Hover | `--color-hover-bg` | 4% white | 4% ink | Interactive table row hover |
 | Selected | `--color-selected` (`bg-selected`) | 8% white | `#0f141e` at 7% | Selected list and table rows, active nav item and tab bar item, command-palette selection |
 | Text | `--color-text` | `#eceef0` | `#17191c` | Primary text, healthy quota figures |
 | Text muted | `--color-text-muted` | `#b3b9c1` | `#464b52` | Secondary text, labels, used %, notice bodies |
 | Text faint | `--color-text-faint` | `#959ca5` | `#565a61` | Captions, table headers, chart ticks, placeholders |
 | Accent (Ion violet) | `--color-accent` | `#a493ff` | `#5a3fd6` | See "Brand violet" below |
+| Accent hover | `--color-accent-hover` | `#b3a6ff` | `#4c31c4` | Fill and line of a hovered `primary` button |
 | Accent dim | `--color-accent-dim` | `#a493ff` at 14% | `#5a3fd6` at 10% | Text selection, live-row flash, calendar day selection, time-strip wash |
 | Accent text | `--color-accent-text` | `#b3a6ff` | `#4c31c4` | Links, accent badge text, select check marks |
 | Accent ink | `--color-accent-ink` | `#15171a` | `#ffffff` | Text and the switch knob on a solid accent fill |
@@ -168,13 +169,13 @@ Usage meter tracks and fills are square (no radius).
 
 ## 5. Components
 
-Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, Notice, Field, …), `UsageMeter.tsx`, `EntityList.tsx`, `charts.tsx`, `StackedBar.tsx`, `Select.tsx`, `Table.tsx`, `Tabs.tsx`. The shell lives in `src/components/layout/`.
+Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, Notice, Field, …), `UsageMeter.tsx`, `StackedBar.tsx` + `MetricCell.tsx`, `EntityList.tsx`, `DetailPane.tsx`, `charts.tsx`, `Select.tsx`, `Table.tsx`, `Tabs.tsx`. The shell lives in `src/components/layout/`.
 
 ### Shell
 
-- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B (the width snaps, labels fade). Brand mark (a small 240° dial with a violet sweep) and "cc-lb" at the top, nav groups with `text-overline` headings, then the footer (Docs link and the 11px version line).
+- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B or the footer toggle (the width snaps, labels fade). Brand mark (a small 240° dial with a violet sweep) and "cc-lb" at the top, nav groups with `text-overline` headings, then the footer: Docs link, the 11px version line and, on the desktop rail only, the collapse/expand `IconButton` ("Collapse sidebar" / "Expand sidebar", `aria-expanded`, ⌘B in the tooltip). The phone "More" sheet omits the toggle.
 - **Nav item**: 36px, 14/500 `text-muted`; hover `overlay-2` fill and full ink. Active (`data-status="active"`, `aria-current="page"`) is the `selected` fill with full ink, and stays filled on hover; no edge rule. The Upstreams item carries the reconnect count pill (`warn` / `danger` at 15% with `*-text` numerals; a 6px dot when collapsed).
-- **Top bar**: 48px, sticky, on the ground with a 1px bottom line. Left: the rail toggle (`lg`+) or the brand mark (below `lg`), then the page name in `text-title-section`. Right: Search (⌘K) field, identity (name and kind from `xl`, a popover below), API connection status (dot + word; the healthy "Live" word hides on phones, other states always show their word), and the Night / Day theme pill.
+- **Top bar**: 48px, sticky, on the ground with a 1px bottom line. Left: the page name in `text-title-section`, joined by the brand mark below `lg`. Right: Search (⌘K) field, identity (name and kind from `xl`, a popover below), API connection status (dot + word; the healthy "Live" word hides on phones, other states always show their word), and the Night / Day theme pill. The rail toggle lives in the rail footer, not here.
 - **Bottom tab bar** (below `lg`): fixed, 56px plus the safe-area inset, on the ground with a 1px top line. Overview, Upstreams, Principals, Logs and More; 16px icons over 12px labels. The active tab (and More while one of its pages is open) takes the `selected` fill and full ink; no edge rule. More opens the full navigation as a left sheet. Page titles stay in the top bar only; `main` pads by `--shell-bottom` and toasts sit above the bar.
 - `h-shell` is the viewport minus the top bar and, below `lg`, the tab bar; use it for viewport-fit consoles.
 
@@ -182,11 +183,11 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 `UsageMeter` (`UsageMeter.tsx`) is the one quota instrument. There are no arc gauges or dials. It is static CSS; nothing animates.
 
-- The fill is what is **used** of the window, clamped to 0–100, on the meter track: `text-muted` ink below 80%, `warn` from 80%, `danger` from 95%. A non-zero reading draws at least 1% wide; no reading or 0% draws an empty track. A 1px `text-faint` mark sits at 80% where the warn zone starts.
+- The fill is what is **used** of the window, clamped to 0–100, on the meter track: `text-muted` ink below 80%, `warn` from 80%, `danger` from 95%. A non-zero reading draws at least 1% wide; no reading or 0% draws an empty track. The track carries no marks: the fill color is the cue.
 - `size="sm"`: a 4px bar for dense rows (the Overview usage table). `size="md"`: a 6px bar with `N% used` (`text-title-card`, severity ink) above it (upstream detail window blocks), or `—` without a reading.
 - `role="meter"` named by `label` (the window), valued 0–100 as used, with `aria-valuetext` "N% used" or "No reading".
 - Quota bars are only ever this component. Window identity colors never fill it.
-- **`StackedBar`**: breakdowns (latency attribution, token usage), not quota. 6px (`sm`) or 8px (`md`), `rounded-xs` track, square segments in a `gap-px` row with `min-width: 2px`, so the track shows between them. Renders nothing when every segment is zero. Breakdowns live in drawers and popovers, never in table cells.
+- **`StackedBar`**: breakdowns (latency attribution, token usage), not quota. 4px (`xs`), 6px (`sm`) or 8px (`md`), `rounded-xs` track, square segments in a `gap-px` row with `min-width: 2px`, so the track shows between them. Segments always scale within their own bar, never across rows. Renders nothing when every segment is zero. The `xs` bar is the in-cell composition strip under a `MetricCell` number; larger sizes live in drawers and popovers.
 
 ### Card and Section
 
@@ -198,9 +199,9 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 | Variant | Look | Use |
 |---------|------|-----|
-| `primary` | Solid accent with `accent-ink` text; brighter on hover | One per view: the commit action (Save, Create, Continue). Not "New" in list headers |
+| `primary` | Solid accent with `accent-ink` text; `accent-hover` fill and line on hover (no brightness filter) | One per view: the commit action (Save, Create, Continue). Not "New" in list headers |
 | `secondary` (default) | Transparent with a 1px `border-strong` line; `panel-strong` on hover | Toolbars, paired actions, most actions |
-| `ghost` | No fill or line; `text-muted` → `text` with a hover fill | Tertiary actions, in-row links |
+| `ghost` | No fill or line; `text-muted` → `text` with the icon-button `overlay-5` hover fill | Tertiary actions, in-row links |
 | `danger` | Outline: 1px `danger` line, `danger-text`, hover `danger/10` | Page-level Delete / Revoke |
 | `danger-solid` | `danger-solid` fill, white text, darker fill on hover | Only the confirm button of a destructive `ConfirmDialog` |
 
@@ -212,7 +213,7 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 ### IconButton
 
-Every icon-only control. `label` is required and becomes the accessible name. 44×44 below `md`, 32×32 from `md`; the glyph is 16px.
+Every icon-only control. `label` is required and becomes the accessible name. 44×44 below `md`, 32×32 from `md`; the glyph is 16px. Hover is the one icon/ghost fill, `bg-overlay-5`, with `text-muted` → `text` — shared by `IconButton`, the `ghost` Button, the shell's `TOPBAR_ICON_BUTTON` and the 16px `?` help glyphs; disabled drops both the fill and the text change.
 
 ### Badge and StatusBadge
 
@@ -238,7 +239,8 @@ Use `Table`, `TableHead`, `TableHeadCell`, `TableRow`, `TableCell`, `TableEmptyR
 - Header: 12/500 sans sentence case in `text-faint`, 36px, opaque sticky `panel` with a 1px line. No uppercase, no tracking, no blur.
 - Body: `text-body` 14px sans. Mono (`TableCell mono`) only for ID, model, path and hash columns. Numbers right-aligned and tabular (`numeric`), units muted at the same size.
 - Rows: 40px (32px `dense`), `border-row` divider, `hover-bg` on interactive rows. Selected (`TableRow selected`) is the neutral `selected` fill, kept on hover; no edge rule, no inset shadow.
-- No per-cell bars except a `UsageMeter sm` in a quota window cell. Breakdowns go in the drawer.
+- No per-cell bars except a `UsageMeter sm` in a quota window cell and the `MetricCell` composition bar. In request tables (Overview preview, Logs, per-upstream and per-principal recent requests) latency, tokens and cost are each one cell via `MetricCell`: the tabular number on top, an `xs` `StackedBar` of the metric's composition under it, and a breakdown `Hint` popover on hover — the cell is a button, so Enter/Space opens the same breakdown (tokens shows cache hit in its footer; there is no separate cache-hit column). A metric the request never recorded is `EmptyMetricCell`: `—` over the empty bar slot.
+- `RequestEventsTable` has two width modes. Full-page tables (Logs, Overview latest requests) pass `minWidthClass` and keep every column with horizontal scroll as a last resort. Detail-pane tables omit it and fit their container (`@container/events`): Session drops below 64rem, Request kind below 52rem, Principal / Upstream below 44rem, Model truncates with a `title`, and below 36rem the rows become cards. Timestamp, Status, Latency, Tokens and Cost never drop.
 - Hide a column when every visible row is null; show a null cell as `—` in `text-faint` (`EmptyValue`, with a screen-reader label).
 - A table inside a card drops the card body padding; the first and last cells keep a 16px inset so the header aligns with the card title.
 
@@ -267,13 +269,25 @@ Principal rows:
 - Line 2: `Disabled · ` (muted) when disabled, then kind · `Any model` / `N models` · `No limits` / `N limits`. The revision lives in the detail, not the row.
 - Filter: All principals / Enabled / Disabled / Human / Machine / Admin. Sort: Name (default) / Most active (24h). There is no "recently updated": principals carry no update timestamp.
 
+### Detail pane
+
+`DetailPane.tsx` is the one selected-item detail behind Upstreams and Principals; both pages compose the same exported pieces, identically.
+
+- **`DetailPane`**: the pane's own `@container` scroll area (`min-w-0 flex-1 overflow-y-auto`). `header` stays pinned at the top; the body stacks an optional `notices` block (incident notices, page-level actions) then `DetailSection`s at 32px (`md`: 40px) intervals, all sharing a 16 / 32px horizontal inset.
+- **`DetailHeader`**: sticky, identical shape for every entity. Below `md` a 44px `All upstreams` / `All principals` back button. Line 1: the entity name as the pane's one `h2` (`text-title-page`), its kind/plan `Badge` and at most one exception `StatusBadge`; on the right the `Enabled` compact `ToggleSwitch` (with an `Enabling...` / `Disabling...` pending status) and a `danger` `sm` Delete button, in that order on both pages. Line 2: one muted `·`-joined meta line ending in the mono ID with a copy `IconButton`. It sits over `bg-bg` and gains a 1px `border-subtle` bottom line once the body scrolls under it. `DetailHeaderSkeleton` is the loading placeholder with the same geometry.
+- **`DetailSection`**: one titled region per pane section — a full-width 1px `border-subtle` rule, then a `text-title-section` h3 with a one-line muted `description` and an optional `action`, then the content. `collapsible` makes a `details` disclosure closed unless `defaultOpen`, with a Show/Hide + chevron summary.
+- **`DetailRows` / `DetailRow`**: settings as label / value / action rows between `border-row` dividers (bordered top and bottom). From the pane's `@lg` width a row is a three-column grid: 12rem `text-label` muted label (with a faint caption `description`), then the value, then the action.
+- **`DetailFacts` / `DetailFact`**: a `dl` of small related facts in 2 columns, 3 from `@2xl`, 4 from `@4xl` — muted label over value with an optional faint `hint`.
+
+The upstream detail reads: notices (reconnect / apply failure / billing), then for OAuth upstreams **Quota**, **Quota history** (with its own range control) — API-key upstreams get **API usage** instead — then **Recent requests**, and OAuth continues **Credential**, **Warm-up**, collapsible **Account metadata**; API-key ends with **Settings**. The principal detail reads: **Cache keepalive**, **Access**, **Recent requests**, **Router**, collapsible **Observability** and **Shape** plugin sections, **API keys**.
+
 ### Overview
 
-The Overview leads with how usage moved, then who is using it. Top to bottom (`routes/index.tsx`): the incident banners (`LiveTailFailureBanner`, `OAuthReconnectSummary`), `PageHeader` with the range `SegmentedControl`, then either the first-run checklist alone or:
+The Overview leads with how usage moved, then who is using it. Top to bottom (`routes/index.tsx`): the incident banners (`LiveTailFailureBanner`, `OAuthReconnectSummary`), `PageHeader`, then either the first-run checklist alone or the sections below. There is no page-level range control: two `SegmentedControl`s sit on section title rows — one for the pool chart, one for Traffic — and Traffic's range also drives Top principals (its subtitle says `Same range as Traffic (…)`).
 
-1. **Pool quota usage** (`Section`, full width): a line chart of pool used % per window (5h, 7d, 7d (Fable)) over the selected range, with the 80 / 95 threshold lines. 200px tall on phones, 240px from `md`, 320px from `lg`. Current values ride along the chart in the legend row above the plot: each window's swatch and name, its current `N% used` (`font-medium`, severity ink) and `resets in 3h 12m` (absolute time in `title`), then the two threshold entries. Captions under the plot keep the honesty notes: plan weighting, upstreams with unknown capacity, and the provider reading's age with a `Stale reading` badge.
+1. **Pool quota usage** (`Section`, full width, `SegmentedControl` range on the title row): a line chart of pool used % per window (5h, 7d, 7d (Fable)) over the selected range, with the 80 / 95 threshold lines. 200px tall on phones, 240px from `md`, 320px from `lg`. Current values ride along the chart in the legend row above the plot: each window's swatch and name, its current `N% used` (`font-medium`, severity ink) and `resets in 3h 12m` (absolute time in `title`), then the two threshold entries. Captions under the plot keep the honesty notes: plan weighting, upstreams with unknown capacity, and the provider reading's age with a `Stale reading` badge.
 2. **Upstreams** (`Section`, full width, `Manage upstreams` link): `UpstreamUsageTable`, one row per upstream with columns Upstream, 5h, 7d and 7d (Fable). The name cell adds a dot and status phrase only when something is wrong. Each window cell is `N%` with a muted `used`, a `UsageMeter sm` and a reset caption (the limit status in `danger-text` when the window is limited). Order: needs attention, subscription, API key, disabled; most used first inside each group. Up to 8 rows show; past 8 the rest sit behind an inline `Show all N` / `Show fewer` toggle (`aria-expanded`). Rows link to `/upstreams?selectedId=`. Below the container's `@4xl` width a row stacks: the name line, then the three window cells side by side, each repeating its label.
-3. **Traffic** KPIs with sparklines beside **Top principals** (7 : 5 from `lg`), then **Latest requests (any time)**.
+3. **Traffic** (`Section`, `SegmentedControl` on the title row): five KPI readouts with sparklines (Requests/s, Tokens, Cost at list price, avg latency, Error rate) as cells of one grid separated by 1px left rules, sharing one hover index and a hover tooltip. Requests/s reads `<0.01` for a nonzero rate below 0.01 (`formatRate`), never a run of zeros. Tokens is the one two-series sparkline: In is a filled area in `--color-series-input`, Out a dashed line (no fill, own scale) in `--color-series-output`, named by an inline `In … Out …` legend with the range totals under the value, then a `Cache miss N%` caption; other tiles draw in `text-muted` (the error rate turns `danger` only with errors). Beside it, **Top principals** (7 : 5 from `lg`) lists at most 8 principals (`TOP_PRINCIPAL_ROWS`) by virtual cost — name, `N req · N tok · N% cache hit` caption, a share meter and cost figures — then one `N others` row folding the remainder's totals and share, with a `View all principals` link (`/principals?sort=active`) on the title row. Then **Latest requests (any time)**: a preview of the newest requests (not range-scoped) in a card, stream status in the subtitle, `Open logs` link on the title row.
 
 ### Charts (Recharts)
 
@@ -288,9 +302,14 @@ The Overview leads with how usage moved, then who is using it. Top to bottom (`r
 - The Overview pool usage chart draws 7d as a 1.5px accent line, 7d (Fable) as the same line dashed `4 3`, and 5h as a 1px `text-muted` line, with no fills so crossings stay readable.
 - Series colors come from `--color-series-*` via `getWindowColor`; 1.5px strokes. Quota windows draw as lines without fill (7d (Fable) dashed `5 3` where it shares a plot with 7d); areas elsewhere use a flat fill at `SERIES_FILL_OPACITY`, never a gradient. When series overlap, fill only the primary or hovered series.
 - Legend: in the chart header row or directly under the plot: a short line swatch (dashed for thresholds), a `text-muted` label and a tabular value. A legend entry may isolate its window.
-- `Sparkline`: a 1.25px `text-muted` line over a flat fill; renders nothing when every value is zero. `QuotaMiniChart`: 1.5px step lines for 5h and 7d, no fill. Chart animation is off.
+- `Sparkline`: a 1.25px `text-muted` line over a flat fill; an optional `secondary` series draws as a 1.5px dashed line without fill on its own scale (`SPARKLINE_SECONDARY_DASH` 3 2), always named by a caller legend. Renders nothing when every value is zero. `QuotaMiniChart`: 1.5px step lines for 5h and 7d, no fill. Chart animation is off.
+
 - Histograms: neutral bars with errors stacked in `danger`. No donuts: use a `StackedBar` plus a value table.
 - A chart is one static image to assistive tech: pass an `ariaLabel` summary, or hide it when the surrounding element already names it.
+
+### Audit table
+
+The audit trail (`routes/audit.tsx`, a `FullPage` console) lists admin API actions newest first in a card table. Time is `RelativeTime compact` (`5m ago`) with the absolute timestamp in a hover tooltip (`Hint`) and `title`. Columns size to the table's own width by container query, so a collapsed rail counts: below `@4xl` Action is the one flexible column and the change summary rides under it; from `@4xl` Action caps, a Details column appears and the route joins the status in the Request column; from `@7xl` the fixed columns widen and the actor kind shows. A row click opens an `AuditEntryDrawer`; below `md` the table becomes a stacked card list.
 
 ### Forms
 
@@ -343,7 +362,7 @@ Tones are `info` and `success` (both neutral: overlay fill, muted icon), `warnin
 
 - Animate only color, opacity or transform. Width never animates: the rail width snaps and only its labels fade.
 - Instruments are still. Meters and charts do not animate, and the live dot does not pulse; nothing loops except the skeleton shimmer while loading.
-- Every interactive element stays keyboard-focusable with the 2px accent focus outline.
+- Every interactive element shows focus only on keyboard focus: `focus-visible:outline-2 outline-accent` (offset per element), never `focus:` rings or `ring-*`. Disabled is `disabled:opacity-40 disabled:cursor-not-allowed` exactly — not 30 or 50 — and a disabled `primary` Button renders as a disabled `secondary`. Anchors that must keep link semantics take `buttonClassName(variant, size)` for Button chrome.
 - No emoji or Unicode glyphs as icons; use lucide at `strokeWidth={1.75}` or text-only labels.
 - Honor `prefers-reduced-motion`: shimmer and live-row flashes become static, drawers fade instead of sliding, switches and the "More" sheet stop transitioning. Never use a global 0.01ms kill.
 - Mobile (below `md`): request tables stack into three-line cards, filter panels sit behind a "Filters (n)" disclosure, entity pages show the list or the detail, and quota comes before traffic KPIs.

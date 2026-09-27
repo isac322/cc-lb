@@ -159,11 +159,13 @@ describe('formatCount', () => {
 });
 
 describe('formatRate', () => {
-  it('uses adaptive significant precision for nonzero rates', () => {
+  it('uses three significant digits and floors tiny nonzero rates at <0.01', () => {
     expect(formatRate(1 / 60)).toBe('0.0167');
-    expect(formatRate(1 / 3_600)).toBe('0.000278');
+    expect(formatRate(0.01)).toBe('0.01');
+    expect(formatRate(1 / 3_600)).toBe('<0.01');
+    expect(formatRate(30 / 604_800)).toBe('<0.01');
     expect(formatRate(1_234.5)).toBe('1,230');
-    expect(formatRate(Number.MIN_VALUE)).not.toBe('0');
+    expect(formatRate(Number.MIN_VALUE)).toBe('<0.01');
   });
 
   it('handles zero, missing, invalid, negative, and overflowing rates', () => {

@@ -1466,7 +1466,7 @@ describe('Overview KPI details', () => {
     mockResolvedKpiQueries();
     render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByText('Cache miss 44.4%')).toBeDefined();
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '83.3% cache hit',
     );
@@ -1546,7 +1546,7 @@ describe('Overview KPI details', () => {
     mockResolvedKpiQueries();
     const { rerender } = render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByText('Cache miss 44.4%')).toBeDefined();
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '83.3% cache hit',
     );
@@ -1607,8 +1607,8 @@ describe('Overview KPI details', () => {
 
     rerender(<OverviewPage />);
 
-    expect(screen.queryByText('Avg cache miss 44.4%')).toBeNull();
-    expect(screen.getByText('Avg cache miss 30.0%')).toBeDefined();
+    expect(screen.queryByText('Cache miss 44.4%')).toBeNull();
+    expect(screen.getByText('Cache miss 30.0%')).toBeDefined();
     expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
       '83.3% cache hit',
     );
@@ -1622,7 +1622,7 @@ describe('Overview KPI details', () => {
     mockResolvedKpiQueries({ zeroPromptDenominator: true });
     render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss —')).toBeDefined();
+    expect(screen.getByText('Cache miss —')).toBeDefined();
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '— cache hit',
     );
@@ -1680,7 +1680,7 @@ describe('Overview OAuth reconnect summary', () => {
     // jsdom cannot reach the status endpoint, so the real nudge query errors
     // and the summary must surface that rather than rendering nothing.
     expect(await screen.findByText('OAuth status check failed')).toBeDefined();
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(screen.getByText('Cache miss 44.4%')).toBeDefined();
   });
 });
 

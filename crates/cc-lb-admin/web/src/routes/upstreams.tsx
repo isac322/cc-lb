@@ -590,11 +590,10 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
   'inline-flex items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5';
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
-// Window blocks reserve one meter row (label, N% used, meter, reset,
-// ETA and burn facts) so the loaded blocks never push
-// the chart down.
+// Sized to its window blocks; the loading skeleton mirrors a block line for
+// line, so the loaded grid lands at the skeleton's height.
 const QUOTA_WINDOW_GRID_CLASS =
-  'grid min-h-70 grid-cols-2 items-start gap-x-6 gap-y-8 @lg:gap-x-10 @lg:gap-y-10 @lg:[grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))]';
+  'grid grid-cols-2 items-start gap-x-6 gap-y-8 @lg:gap-x-10 @lg:gap-y-10 @lg:[grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))]';
 const QUOTA_CHART_HEIGHT = 280;
 /** The one series drawn dashed, so 7d and 7d (Fable) stay apart without a new hue. */
 const DASHED_WINDOW = '7d_fable';
@@ -620,19 +619,67 @@ function IdentitySkeleton() {
   );
 }
 
+/** A skeleton bar in one line box of `typeClass`, so it is one text line tall. */
+function SkeletonLine({
+  typeClass,
+  widthClass,
+}: {
+  typeClass: string;
+  widthClass: string;
+}) {
+  return (
+    <span className={cx('block', typeClass)}>
+      <Skeleton
+        as="span"
+        className={cx('inline-block h-[0.75em] align-middle', widthClass)}
+      />
+    </span>
+  );
+}
+
+/** A `WindowFact` placeholder: label, value and an optional caption line. */
+function WindowFactSkeleton({
+  valueWidth,
+  caption,
+}: {
+  valueWidth: string;
+  caption?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <SkeletonLine typeClass="text-label" widthClass="w-16" />
+      <span className="block">
+        <SkeletonLine typeClass="text-body-sm" widthClass={valueWidth} />
+        {caption ? (
+          <SkeletonLine typeClass="text-caption" widthClass={caption} />
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * One started window block: title, `N% used` meter, then the reset, ETA and
+ * burn facts, with the same spacing as the loaded block.
+ */
 function QuotaWindowCardSkeleton() {
   return (
     <div
       data-testid="quota-snapshot-skeleton-card"
-      className="flex flex-col gap-3"
+      className="flex min-w-0 flex-col gap-4"
     >
-      <Skeleton className="h-5 w-12" />
-      <Skeleton className="h-4 w-20" />
-      <Skeleton className="h-1.5 w-full" />
-      <Skeleton className="mt-2 h-3 w-10" />
-      <Skeleton className="h-4 w-36" />
-      <Skeleton className="h-3 w-16" />
-      <Skeleton className="h-4 w-24" />
+      <div className="flex flex-col gap-2">
+        <SkeletonLine typeClass="text-title-section" widthClass="w-12" />
+        <div className="flex flex-col gap-1.5">
+          <SkeletonLine typeClass="text-title-card" widthClass="w-24" />
+          <Skeleton className="h-1.5 w-full" />
+        </div>
+      </div>
+      <div className="flex flex-col gap-2">
+        <WindowFactSkeleton valueWidth="w-32" caption="w-16" />
+        <WindowFactSkeleton valueWidth="w-20" />
+        <WindowFactSkeleton valueWidth="w-24" caption="w-28" />
+      </div>
     </div>
   );
 }
@@ -832,7 +879,7 @@ function PaymentWarning({
           href={orgMeta.payment_auth_hosted_invoice_url}
           target="_blank"
           rel="noreferrer"
-          className="inline-flex items-center gap-1 text-text underline-offset-2 hover:underline"
+          className="inline-flex items-center gap-1 rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
         >
           Open invoice <ExternalLink className="w-3 h-3" />
         </a>
@@ -1848,7 +1895,6 @@ function DetailView({
                 cost: true,
                 tokens: true,
               }}
-              minWidthClass="min-w-[920px]"
               emptyTitle="No recent requests for this upstream"
             />
           </div>

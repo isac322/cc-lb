@@ -95,6 +95,7 @@
   --color-text-faint: var(--color-text-faint);
   --color-accent: var(--color-accent);
   --color-accent-dim: var(--color-accent-dim);
+  --color-accent-hover: var(--color-accent-hover);
   --color-accent-text: var(--color-accent-text);
   --color-accent-ink: var(--color-accent-ink);
   --color-ok: var(--color-ok);
@@ -180,6 +181,7 @@
        7d chart lines and the one primary action. `accent-ink` is text on a
        solid accent fill. Selection is neutral (`--color-selected`). */
     --color-accent: #a493ff;
+    --color-accent-hover: #b3a6ff;
     --color-accent-dim: rgb(164 147 255 / 0.14);
     --color-accent-text: #b3a6ff;
     --color-accent-ink: #15171a;
@@ -241,6 +243,7 @@
     --color-text-muted: #464b52;
     --color-text-faint: #565a61;
     --color-accent: #5a3fd6;
+    --color-accent-hover: #4c31c4;
     --color-accent-dim: rgb(90 63 214 / 0.1);
     --color-accent-text: #4c31c4;
     --color-accent-ink: #ffffff;
@@ -300,6 +303,7 @@
       --color-text-muted: #464b52;
       --color-text-faint: #565a61;
       --color-accent: #5a3fd6;
+      --color-accent-hover: #4c31c4;
       --color-accent-dim: rgb(90 63 214 / 0.1);
       --color-accent-text: #4c31c4;
       --color-accent-ink: #ffffff;

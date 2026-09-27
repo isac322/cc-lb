@@ -246,7 +246,7 @@ function Topbar({
                 <button
                   type="button"
                   aria-label="What is break glass?"
-                  className="inline-flex h-4 w-4 shrink-0 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                  className="inline-flex h-4 w-4 shrink-0 cursor-help items-center justify-center rounded-sm text-text-faint transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                 >
                   <HelpCircle size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>

@@ -150,7 +150,7 @@ const principalUsage: DashboardUsageResponse = {
  * spread, and only the cache composition is rewritten: prompt tokens still add
  * up to 1,800 across the window and to 800 in the hovered middle bucket, so the
  * tokens tile keeps its value and its `Tokens 900` row while the ratios move —
- * `Avg cache miss` 44.4% → 70.0% (1,260/1,800) and the hovered bucket 50.0% →
+ * `Cache miss` 44.4% → 70.0% (1,260/1,800) and the hovered bucket 50.0% →
  * 80.0% (640/800). The last bucket was idle and reported no ratio at all; now it
  * reports one too, so the cache-miss line stops breaking mid-chart.
  */
@@ -261,8 +261,8 @@ type KpiChartId = (typeof KPI_CHART_IDS)[number];
 const TOKENS_VALUE_ROW = 'Tokens 900';
 const CACHE_MISS_ROW = 'Cache miss 50.0%';
 const REFRESHED_CACHE_MISS_ROW = 'Cache miss 80.0%';
-const CACHE_MISS_AVG = 'Avg cache miss 44.4%';
-const REFRESHED_CACHE_MISS_AVG = 'Avg cache miss 70.0%';
+const CACHE_MISS_AVG = 'Cache miss 44.4%';
+const REFRESHED_CACHE_MISS_AVG = 'Cache miss 70.0%';
 const PRINCIPAL_CACHE_HIT = '83.3% cache hit';
 const REFRESHED_PRINCIPAL_CACHE_HIT = '40.0% cache hit';
 
