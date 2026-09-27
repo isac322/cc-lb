@@ -605,7 +605,7 @@ function ResponsibilityOverview({
                   ? `${pct(group.valueMs, attribution.totalMs)}% of total`
                   : 'no timing recorded'
               }`}
-              className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-left text-caption transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent"
+              className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-left text-caption transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
               data-ms={group.observed ? group.valueMs : undefined}
               data-responsibility={group.key}
               type="button"
@@ -673,9 +673,9 @@ function StageInfo({
                 <div
                   key={s.key}
                   className={cx(
-                    'h-full transition-all',
+                    'h-full transition-opacity',
                     isActive
-                      ? 'ring-2 ring-inset ring-text/70 z-10'
+                      ? 'z-10 outline-2 -outline-offset-2 outline-text/70'
                       : 'opacity-60',
                   )}
                   style={{
@@ -861,11 +861,12 @@ function SegmentButton({
         data-testid={`latency-segment-${stage.key}`}
         aria-label={`${stage.label} ${formatStageMs(stage)}${stage.detail ? `, ${stage.detail}` : ''}`}
         className={cx(
-          'absolute top-0 h-full rounded-sm outline-none transition-all cursor-pointer',
-          isActive
-            ? 'ring-2 ring-inset ring-text/70 z-10 brightness-110'
-            : 'hover:brightness-110',
-          isSticky ? 'outline outline-1 outline-border-strong' : '',
+          'absolute top-0 h-full rounded-sm transition-colors cursor-pointer -outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent',
+          isSticky
+            ? 'z-10 outline-2 outline-text'
+            : isActive
+              ? 'z-10 outline-2 outline-text/70'
+              : 'hover:outline-2 hover:outline-text/40',
         )}
         style={style}
       />
@@ -904,10 +905,10 @@ function UnaccountedRow({
             {...active.bind('unaccounted')}
             className={cx(
               UNACCOUNTED_BG,
-              'absolute top-0 h-full rounded-sm outline-none transition cursor-pointer',
+              'absolute top-0 h-full rounded-sm transition-colors cursor-pointer -outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent',
               isActive
-                ? 'ring-2 ring-inset ring-text/70 z-10'
-                : 'hover:brightness-110',
+                ? 'z-10 outline-2 outline-text/70'
+                : 'hover:outline-2 hover:outline-text/40',
             )}
             style={{
               left: `${(startMs / total) * 100}%`,
@@ -1328,15 +1329,12 @@ function SseDetailsList({
               type="button"
               {...active.bind(m.key)}
               className={cx(
-                'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition text-left cursor-pointer',
-                isActive
-                  ? 'bg-overlay-6 text-text'
-                  : 'text-text-muted hover:bg-overlay-5',
+                'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
                 isSticky
-                  ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+                  ? 'bg-selected text-text'
                   : isActive
-                    ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
-                    : '',
+                    ? 'bg-overlay-2 text-text'
+                    : 'text-text-muted hover:bg-overlay-2 hover:text-text',
               )}
             >
               <span
@@ -1402,15 +1400,12 @@ function DetailRow({
       type="button"
       {...active.bind(stateKey)}
       className={cx(
-        'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition text-left cursor-pointer',
-        isActive
-          ? 'bg-overlay-6 text-text'
-          : 'text-text-muted hover:bg-overlay-5',
+        'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         isSticky
-          ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+          ? 'bg-selected text-text'
           : isActive
-            ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
-            : '',
+            ? 'bg-overlay-2 text-text'
+            : 'text-text-muted hover:bg-overlay-2 hover:text-text',
       )}
     >
       {leading}

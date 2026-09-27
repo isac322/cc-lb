@@ -122,8 +122,8 @@ export function useCouponNudge(
 
 const ACTION_BASE =
   'inline-flex h-8 items-center rounded-sm border text-xs font-medium transition-colors select-none ' +
-  'disabled:cursor-not-allowed disabled:opacity-50 ' +
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2';
+  'disabled:cursor-not-allowed disabled:opacity-40 ' +
+  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
 
 /** Ticket-outline path for the header button: rounded corners plus a
  *  semicircular notch cut into the top and bottom edges at the count
@@ -313,7 +313,7 @@ export function CouponActionButton({
           <span
             className={cx(
               'inline-flex cursor-not-allowed rounded-sm',
-              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
             )}
           />
         }

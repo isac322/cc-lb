@@ -1835,7 +1835,7 @@ function ValidationSummary({
       ref={ref}
       tabIndex={-1}
       data-testid="config-validation-summary"
-      className="rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+      className="rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
     >
       <details
         open={errors.length > 0}
@@ -1884,7 +1884,7 @@ function ValidationSummary({
               <button
                 key={`${issue.path}-${issue.code}-${index}`}
                 type="button"
-                className="flex w-full min-w-0 items-start gap-2.5 rounded-sm px-2 py-1.5 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                className="flex w-full min-w-0 items-start gap-2.5 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                 onClick={() => issue.path && onIssueClick(issue.path)}
               >
                 <Badge tone={validationTone(issue)}>
@@ -2181,7 +2181,7 @@ function ConfigSearch({
         <button
           type="button"
           aria-label="Clear search"
-          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-faint hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
           onClick={() => {
             onSearchTextChange('');
             onOpenChange(false);
@@ -2220,8 +2220,9 @@ function ConfigSearch({
                 aria-selected={index === activeOptionIndex}
                 tabIndex={-1}
                 className={cx(
-                  'flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-left hover:bg-overlay-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
-                  index === activeOptionIndex && 'bg-overlay-5',
+                  'flex min-h-[44px] w-full min-w-0 items-center justify-between gap-3 rounded-sm px-2.5 py-1.5 text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
+                  index === activeOptionIndex &&
+                    'bg-selected hover:bg-selected',
                 )}
                 // Keep focus on the input: preventing the default mousedown
                 // focus shift means the option is still mounted when the
@@ -3043,7 +3044,7 @@ function ScalarField({
       data-field-embedded={embedded ? '' : undefined}
       tabIndex={-1}
       className={cx(
-        'min-w-0 rounded-sm outline-none focus:outline-2 focus:outline-offset-4 focus:outline-accent/60',
+        'min-w-0 rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent',
         isStringArray ? 'col-span-full' : undefined,
       )}
     >
@@ -3498,7 +3499,7 @@ function TaggedUnionEditor({
                     <BaseRadio.Root
                       key={variant.kind}
                       value={variant.kind}
-                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-label text-text-muted transition-colors hover:bg-overlay-3 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-overlay-6 data-[checked]:text-text"
+                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-label text-text-muted transition-colors hover:bg-hover-bg hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-panel-strong data-[checked]:text-text data-[checked]:shadow-[inset_0_0_0_1px_var(--color-border)] data-[checked]:hover:bg-panel-strong"
                     >
                       {STORAGE_KIND_LABELS[variant.kind] ??
                         configKeyLabel(variant.kind)}

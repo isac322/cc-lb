@@ -105,10 +105,9 @@ describe('CacheKeepaliveCard', () => {
 
     expect(screen.getByText('Cache keepalive')).toBeDefined();
 
-    const caption = screen.getByText(
-      'Renews the prompt-cache TTL during idle gaps.',
-    );
-    expect(caption.closest('header')).toBeNull();
+    expect(
+      screen.getByText('Renews the prompt-cache TTL during idle gaps.'),
+    ).toBeDefined();
 
     expect(screen.getByText('Renewing now')).toBeDefined();
     expect(screen.getByText('scheduled or mid-renewal')).toBeDefined();

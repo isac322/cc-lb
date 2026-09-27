@@ -9,8 +9,6 @@ import {
 } from '@testing-library/react';
 import type { ComponentType, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { UNATTRIBUTED_CATEGORY } from '../components/ui/usage/costCategories';
-import { SLICE_COLORS } from '../components/ui/usage/sliceColors';
 import type {
   AggregateResponse,
   DashboardSummaryResponse,
@@ -117,14 +115,29 @@ vi.mock('recharts', () => ({
       </svg>
     );
   },
-  Area: ({ dataKey }: { dataKey: string }) => {
+  Area: ({
+    dataKey,
+    stroke,
+    strokeDasharray,
+  }: {
+    dataKey: string;
+    stroke?: string;
+    strokeDasharray?: string;
+  }) => {
     const path = rechartsMock.data
       .map(
         (row) =>
           `${String(row.unix)}:${String(row[dataKey] === null ? '' : row[dataKey])}`,
       )
       .join('|');
-    return <path d={path} data-testid={`pool-quota-area-${dataKey}`} />;
+    return (
+      <path
+        d={path}
+        data-testid={`pool-quota-area-${dataKey}`}
+        stroke={stroke}
+        strokeDasharray={strokeDasharray}
+      />
+    );
   },
   XAxis: ({ domain }: { domain: readonly number[] }) => (
     <g data-domain={JSON.stringify(domain)} data-testid="pool-quota-x-axis" />
@@ -165,6 +178,13 @@ function tooltipRows(testId: string): string[] {
   return Array.from(
     screen.getByTestId(testId).querySelectorAll('span'),
     (row) => row.textContent ?? '',
+  );
+}
+
+function rangeOption(group: string, name: string): HTMLElement {
+  return within(screen.getByRole('radiogroup', { name: group })).getByRole(
+    'radio',
+    { name },
   );
 }
 
@@ -701,43 +721,82 @@ describe('Overview loading geometry', () => {
     expect(screen.getByText('12 / 24h')).toBeDefined();
   });
 
-  it('renders an isolated secondary value as a visible point', () => {
+  it('draws a second series as a dashed line and names both in the readout', () => {
     render(
       <ValueTile
-        chartId="isolated-secondary"
-        chartLabel="Primary"
-        label="isolated secondary"
+        activeIndex={1}
+        chartId="two-series"
+        chartLabel="In"
+        label="two series"
         secondary={{
-          color: '#8b5cf6',
+          color: 'var(--color-series-output)',
           format: String,
-          label: 'Secondary',
-          testId: 'overview-kpi-secondary-isolated',
+          label: 'Out',
         }}
         spark={[
-          {
-            secondaryValue: null,
-            timestamp: KPI_TIMESTAMPS[0],
-            value: 1,
-          },
-          {
-            secondaryValue: 50,
-            timestamp: KPI_TIMESTAMPS[1],
-            value: 2,
-          },
-          {
-            secondaryValue: null,
-            timestamp: KPI_TIMESTAMPS[2],
-            value: 3,
-          },
+          { secondaryValue: 5, timestamp: KPI_TIMESTAMPS[0], value: 100 },
+          { secondaryValue: 7, timestamp: KPI_TIMESTAMPS[1], value: 200 },
         ]}
-        value="2"
+        sparkColor="var(--color-series-input)"
+        value="312"
       />,
     );
 
-    const secondary = screen.getByTestId('overview-kpi-secondary-isolated');
-    const marker = secondary.querySelector('path[data-slot="secondary-point"]');
-    expect(secondary.querySelectorAll('path')).toHaveLength(1);
-    expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
+    const primary = screen.getByTestId('pool-quota-area-value');
+    const secondary = screen.getByTestId('pool-quota-area-secondary');
+    expect(primary.getAttribute('stroke')).toBe('var(--color-series-input)');
+    expect(primary.getAttribute('stroke-dasharray')).toBeNull();
+    expect(secondary.getAttribute('stroke')).toBe('var(--color-series-output)');
+    expect(secondary.getAttribute('stroke-dasharray')).not.toBeNull();
+    expect(secondary.getAttribute('d')).toBe('undefined:5|undefined:7');
+    expect(tooltipRows('overview-kpi-tooltip-two-series').slice(1)).toEqual([
+      'In 200',
+      'Out 7',
+    ]);
+  });
+
+  it('lists the top eight principals and folds the rest into one others row', () => {
+    mockResolvedKpiQueries();
+    const series = Array.from({ length: 11 }, (_, index) => ({
+      key: `principal-${index + 1}`,
+      buckets: [
+        usageBucket(KPI_TIMESTAMPS[0], {
+          request_count: 1,
+          input_tokens: 10,
+          virtual_cost_micros: (11 - index) * 100_000,
+        }),
+      ],
+    }));
+    vi.mocked(queries.useUsage).mockReturnValue({
+      data: { ...PRINCIPAL_USAGE_FIXTURE, series },
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const rows = screen.getAllByTestId('top-principal-row');
+    expect(rows).toHaveLength(8);
+    expect(rows[0]?.textContent).toContain('principal-1');
+    expect(rows[7]?.textContent).toContain('principal-8');
+    // $6.60 total; the three smallest ($0.30 + $0.20 + $0.10) fold together.
+    const rest = screen.getByTestId('top-principal-rest-row');
+    expect(rest.textContent).toContain('3 others');
+    expect(rest.textContent).toContain('$0.60');
+    expect(rest.textContent).toContain('9.1%');
+    expect(
+      screen
+        .getByRole('link', { name: 'View all principals' })
+        .getAttribute('href'),
+    ).toBe('/principals?sort=active');
+  });
+
+  it('lists every principal without an others row when eight or fewer have usage', () => {
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
+
+    expect(screen.getAllByTestId('top-principal-row')).toHaveLength(1);
+    expect(screen.queryByTestId('top-principal-rest-row')).toBeNull();
   });
 
   it('keeps the principal section shell stable across loading and loaded states', () => {
@@ -789,7 +848,7 @@ describe('Overview loading geometry', () => {
             cost_components_micros: null,
             cost_micros: 1_250_000,
             id: 'principal-1',
-            max_cost_micros: 1_250_000,
+            total_cost_micros: 1_250_000,
             name: 'Primary principal',
             requests: 12,
             share_pct: 100,
@@ -1062,7 +1121,9 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    fireEvent.click(screen.getByRole('radio', { name: '1h' }));
+    fireEvent.click(rangeOption('Pool quota usage range', '1h'));
+    // The pool control drives the pool chart only.
+    expect(screen.getByText('Last 24h')).toBeDefined();
     expect(
       screen.getByText('Used per window across the pool · last 24h'),
     ).toBeDefined();
@@ -1122,14 +1183,17 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    const sevenDayOption = screen.getByRole('radio', { name: '7d' });
+    const sevenDayOption = rangeOption('Pool quota usage range', '7d');
     fireEvent.click(sevenDayOption);
+    fireEvent.click(rangeOption('Traffic range', '7d'));
 
     expect(sevenDayOption.getAttribute('aria-checked')).toBe('true');
     expect(
       screen.getByText('Used per window across the pool · last 1h'),
     ).toBeDefined();
-    expect(screen.getByText('By virtual cost · 7d')).toBeDefined();
+    expect(
+      screen.getByText('By virtual cost · Same range as Traffic (7d)'),
+    ).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1406,15 +1470,10 @@ describe('Overview KPI details', () => {
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '83.3% cache hit',
     );
-    const secondary = screen.getByTestId('overview-kpi-secondary-tokens');
-    const secondaryPaths = Array.from(secondary.querySelectorAll('path'));
-    expect(secondaryPaths).toHaveLength(1);
-    expect(secondaryPaths[0]?.getAttribute('data-slot')).toBe(
-      'secondary-segment',
-    );
-    expect(secondaryPaths[0]?.getAttribute('d')).toBe(
-      'M 0.00,59.20 L 50.00,50.00',
-    );
+    // In is every prompt-side token; In + Out is the Tokens value.
+    const legend = screen.getByTestId('overview-kpi-tokens-legend');
+    expect(legend.textContent).toContain('In 1.8k');
+    expect(legend.textContent).toContain('Out 180');
     expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(0);
 
     const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
@@ -1463,8 +1522,8 @@ describe('Overview KPI details', () => {
     ]);
     expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
       tooltipTimestamp,
-      'Tokens 900',
-      'Cache miss 50.0%',
+      'In 800',
+      'Out 100',
     ]);
     expect(tooltipRows('overview-kpi-tooltip-cost')).toEqual([
       tooltipTimestamp,
@@ -1505,9 +1564,7 @@ describe('Overview KPI details', () => {
       toJSON: () => ({}),
     });
     fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
-    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
-      'Cache miss 50.0%',
-    );
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain('Out 100');
 
     const updatedSummary: DashboardSummaryResponse = {
       ...SUMMARY_FIXTURE,
@@ -1558,9 +1615,7 @@ describe('Overview KPI details', () => {
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '70.0% cache hit',
     );
-    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
-      'Cache miss 20.0%',
-    );
+    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain('In 1.0k');
   });
 
   it('renders dashes when cache ratios have a zero prompt denominator', () => {
@@ -1588,8 +1643,8 @@ describe('Overview KPI details', () => {
 
     expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
       kpiTooltipTimestamp(KPI_TIMESTAMPS[1]),
-      'Tokens 100',
-      'Cache miss —',
+      'In 0',
+      'Out 100',
     ]);
   });
 });
@@ -1629,12 +1684,6 @@ describe('Overview OAuth reconnect summary', () => {
   });
 });
 
-/** Request-log slice colors, read back from the meter's inline style. */
-const CATEGORY_COLOR = {
-  ...SLICE_COLORS,
-  unattributed: UNATTRIBUTED_CATEGORY.color,
-} as const;
-
 const COST_NOTE = 'Per-category cost not recorded for this window';
 
 const COMPLETE_PRINCIPAL: TopPrincipal = {
@@ -1648,7 +1697,7 @@ const COMPLETE_PRINCIPAL: TopPrincipal = {
   },
   cost_micros: 1_000_000,
   id: 'principal-complete',
-  max_cost_micros: 1_000_000,
+  total_cost_micros: 1_600_000,
   name: 'Complete principal',
   requests: 12,
   share_pct: 62.5,
@@ -1695,21 +1744,6 @@ function meterFill(meter: HTMLElement): HTMLElement {
   return fill;
 }
 
-function costSegments(
-  meter: HTMLElement,
-): { category: string; color: string; width: string }[] {
-  return Array.from(
-    meter.querySelectorAll<HTMLElement>(
-      '[data-testid="top-principal-cost-segment"]',
-    ),
-    (segment) => ({
-      category: segment.dataset.category ?? '',
-      color: segment.style.backgroundColor,
-      width: segment.style.width,
-    }),
-  );
-}
-
 /** Every figure the open breakdown shows, in order. */
 function costDetailValues(): string[] {
   return Array.from(
@@ -1746,32 +1780,14 @@ describe('Top principal cost meter', () => {
     );
   });
 
-  it('subdivides the filled meter in request-log order, colors and widths', () => {
+  it("fills one neutral bar by the principal's share of every principal's cost", () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
     const meter = costMeters()[0];
 
     expect(meter.dataset.costComponents).toBe('complete');
-    expect(meterFill(meter).style.width).toBe('100%');
-    expect(meterFill(meter).className).not.toContain('var(--color-accent)');
-    expect(costSegments(meter)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '40%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '30%' },
-      {
-        category: 'cache_create_5m',
-        color: CATEGORY_COLOR.cache_create_5m,
-        width: '10%',
-      },
-      {
-        category: 'cache_create_1h',
-        color: CATEGORY_COLOR.cache_create_1h,
-        width: '10%',
-      },
-      {
-        category: 'cache_read',
-        color: CATEGORY_COLOR.cache_read,
-        width: '10%',
-      },
-    ]);
+    expect(meterFill(meter).style.width).toBe('62.5%');
+    expect(meterFill(meter).className).toContain('bg-text-muted');
+    expect(meterFill(meter).children).toHaveLength(0);
   });
 
   it('names the meter and carries the whole breakdown in its value text', () => {
@@ -1781,9 +1797,9 @@ describe('Top principal cost meter', () => {
     expect(meter.getAttribute('role')).toBe('meter');
     expect(meter.getAttribute('aria-label')).toBe('Complete principal cost');
     expect(meter.getAttribute('aria-valuenow')).toBe('1000000');
-    expect(meter.getAttribute('aria-valuemax')).toBe('1000000');
+    expect(meter.getAttribute('aria-valuemax')).toBe('1600000');
     expect(meter.getAttribute('aria-valuetext')).toBe(
-      'Total $1.0000; 100.0% of the largest principal; Input $0.4000, Output $0.3000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.1000',
+      'Total $1.0000; 62.5% of all principals; Input $0.4000, Output $0.3000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.1000',
     );
   });
 
@@ -1820,13 +1836,6 @@ describe('Top principal cost meter', () => {
     expect(costMeters()[0]).toBe(meter);
     expect(meter.getAttribute('role')).toBe('meter');
     expect(meter.getAttribute('aria-valuetext')).toContain('Input $0.4000');
-    expect(costSegments(meter).map((segment) => segment.category)).toEqual([
-      'input',
-      'output',
-      'cache_create_5m',
-      'cache_create_1h',
-      'cache_read',
-    ]);
   });
 
   it('opens the same breakdown after the hover delay', () => {
@@ -1846,26 +1855,12 @@ describe('Top principal cost meter', () => {
     }
   });
 
-  it('appends a neutral unattributed tail when the total outruns the categories', () => {
+  it('lists an unattributed remainder when the total outruns the categories', () => {
     renderPrincipals([PARTIAL_PRINCIPAL]);
     const meter = costMeters()[0];
 
     expect(meter.dataset.costComponents).toBe('partial');
-    expect(meterFill(meter).style.width).toBe('80%');
-    expect(costSegments(meter)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '25%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '25%' },
-      {
-        category: 'cache_read',
-        color: CATEGORY_COLOR.cache_read,
-        width: '25%',
-      },
-      {
-        category: 'unattributed',
-        color: CATEGORY_COLOR.unattributed,
-        width: '25%',
-      },
-    ]);
+    expect(meterFill(meter).style.width).toBe('50%');
 
     fireEvent.focus(costTriggers()[0]);
     expect(costDetailValues()).toEqual([
@@ -1892,15 +1887,14 @@ describe('Top principal cost meter', () => {
     ]);
   });
 
-  it('keeps a solid accent bar and says so when no category cost was recorded', () => {
+  it('says so in the breakdown when no category cost was recorded', () => {
     renderPrincipals([UNRECORDED_PRINCIPAL]);
     const meter = costMeters()[0];
 
     expect(meter.dataset.costComponents).toBe('unavailable');
-    expect(costSegments(meter)).toEqual([]);
     expect(meterFill(meter).className).toContain('bg-text-muted');
     expect(meter.getAttribute('aria-valuetext')).toBe(
-      `Total $0.5000; 50.0% of the largest principal; ${COST_NOTE}`,
+      `Total $0.5000; 62.5% of all principals; ${COST_NOTE}`,
     );
 
     fireEvent.focus(costTriggers()[0]);
@@ -1908,7 +1902,7 @@ describe('Top principal cost meter', () => {
     expect(costDetailValues()).toEqual(['Total', '$0.5000']);
   });
 
-  it('scales every meter against the largest principal below one dollar', () => {
+  it("scales every meter against every principal's cost below one dollar", () => {
     renderPrincipals([
       {
         ...COMPLETE_PRINCIPAL,
@@ -1921,25 +1915,21 @@ describe('Top principal cost meter', () => {
         },
         cost_micros: 500_000,
         id: 'principal-top',
-        max_cost_micros: 500_000,
+        total_cost_micros: 625_000,
         name: 'Top principal',
         share_pct: 80,
       },
       {
         ...UNRECORDED_PRINCIPAL,
         cost_micros: 125_000,
-        max_cost_micros: 500_000,
+        total_cost_micros: 625_000,
         share_pct: 20,
       },
     ]);
     const [top, tail] = costMeters();
 
-    expect(meterFill(top).style.width).toBe('100%');
-    expect(meterFill(tail).style.width).toBe('25%');
-    expect(costSegments(top)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '50%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '50%' },
-    ]);
+    expect(meterFill(top).style.width).toBe('80%');
+    expect(meterFill(tail).style.width).toBe('20%');
     expect(screen.getAllByTestId('top-principal-row')[0].textContent).toContain(
       '$0.50',
     );
@@ -2029,29 +2019,6 @@ describe('Top principal cost meter', () => {
       '67%',
       'Total',
       '$3.0000',
-    ]);
-    expect(costSegments(costMeters()[0])).toEqual([
-      {
-        category: 'input',
-        color: CATEGORY_COLOR.input,
-        width: '16.666666666666664%',
-      },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '10%' },
-      {
-        category: 'cache_create_5m',
-        color: CATEGORY_COLOR.cache_create_5m,
-        width: '3.3333333333333335%',
-      },
-      {
-        category: 'cache_create_1h',
-        color: CATEGORY_COLOR.cache_create_1h,
-        width: '3.3333333333333335%',
-      },
-      {
-        category: 'unattributed',
-        color: CATEGORY_COLOR.unattributed,
-        width: '66.66666666666666%',
-      },
     ]);
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '83.3% cache hit',

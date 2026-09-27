@@ -1,7 +1,7 @@
 // Recharts-backed mini charts. Kept out of `primitives.tsx` so importing a
 // Button or Card never drags Recharts (and d3) into a route's chunk.
 import type { ReactNode } from 'react';
-import { Area, AreaChart, ResponsiveContainer } from 'recharts';
+import { Area, AreaChart, ResponsiveContainer, YAxis } from 'recharts';
 
 import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
 
@@ -59,24 +59,37 @@ function ChartFrame({
 }
 
 // ─── Sparkline ───────────────────────────────────────────────────────────────
+/** Dash of a sparkline's second series, so it reads apart from the first. */
+export const SPARKLINE_SECONDARY_DASH = '3 2';
+
 /**
  * 1.25px line over a flat series-opacity fill, neutral by default (the
  * accent is reserved for pool quota). Renders nothing when every value is
  * zero (or there is no data): a flat line on the tile's bottom edge reads
  * as a second border, not as "no traffic".
+ *
+ * An optional `secondary` series draws as a 1.5px dashed line without fill
+ * on its own scale: the pair shows shape, so the caller must name both
+ * series and carry their figures in a legend.
  */
 export function Sparkline({
   data,
   color = 'var(--color-text-muted)',
+  secondary,
   ariaLabel,
 }: {
   data: number[];
   color?: string;
+  secondary?: { data: number[]; color: string };
   /** Summary read by screen readers; omit when an ancestor already names the chart. */
   ariaLabel?: string;
 }) {
   if (!data.some((value) => value !== 0)) return null;
-  const chartData = data.map((value, i) => ({ i, value }));
+  const chartData = data.map((value, i) => ({
+    i,
+    value,
+    secondary: secondary?.data[i] ?? 0,
+  }));
   return (
     <ChartFrame ariaLabel={ariaLabel}>
       <ResponsiveContainer
@@ -90,7 +103,9 @@ export function Sparkline({
           margin={{ top: 1, right: 0, bottom: 1, left: 0 }}
           accessibilityLayer={false}
         >
+          <YAxis yAxisId="primary" hide />
           <Area
+            yAxisId="primary"
             type="monotone"
             dataKey="value"
             stroke={color}
@@ -98,7 +113,24 @@ export function Sparkline({
             fill={color}
             fillOpacity={SERIES_FILL_OPACITY}
             isAnimationActive={false}
+            activeDot={false}
           />
+          {secondary ? (
+            <>
+              <YAxis yAxisId="secondary" hide />
+              <Area
+                yAxisId="secondary"
+                type="monotone"
+                dataKey="secondary"
+                stroke={secondary.color}
+                strokeWidth={1.5}
+                strokeDasharray={SPARKLINE_SECONDARY_DASH}
+                fill="none"
+                isAnimationActive={false}
+                activeDot={false}
+              />
+            </>
+          ) : null}
         </AreaChart>
       </ResponsiveContainer>
     </ChartFrame>

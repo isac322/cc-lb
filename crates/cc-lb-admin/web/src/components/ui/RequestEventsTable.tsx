@@ -13,7 +13,7 @@ import { RequestEventDrawer } from './RequestEventDrawer';
 import { RequestOutcomeTableCell } from './RequestEventIdentity';
 import { SessionChip } from './SessionChip';
 import { Table, TableHead, TableHeadCell, TableRow } from './Table';
-import { cacheHitPercent, TokenCell } from './TokenCell';
+import { TokenCell } from './TokenCell';
 
 export { SessionChip };
 
@@ -35,8 +35,8 @@ const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
 /*
  * Below `md` each row becomes a three-line card instead of a 1000px-wide
  * table row: time, kind and status; principal, upstream and model; latency,
- * tokens and cost. Session and cache hit are left to the drawer. Cells keep
- * their DOM order and are only placed on the grid.
+ * tokens and cost, each with its composition bar. Session is left to the
+ * drawer. Cells keep their DOM order and are only placed on the grid.
  */
 const MOBILE_ROW =
   'max-md:grid max-md:h-auto! max-md:grid-cols-[auto_minmax(0,1fr)_auto] max-md:items-center max-md:gap-x-3 max-md:gap-y-1 max-md:px-4 max-md:py-2.5';
@@ -53,8 +53,9 @@ const MOBILE_AT = {
     'max-md:row-start-2 max-md:col-start-2 max-md:before:content-["→_"] max-md:before:text-text-faint',
   model:
     'max-md:row-start-2 max-md:col-start-3 max-md:max-w-[40vw] max-md:text-right',
-  latency: 'max-md:row-start-3 max-md:col-start-1',
-  tokens: 'max-md:row-start-3 max-md:col-start-2 max-md:justify-self-start',
+  latency: 'max-md:row-start-3 max-md:col-start-1 max-md:text-left',
+  tokens:
+    'max-md:row-start-3 max-md:col-start-2 max-md:justify-self-start max-md:text-left',
   cost: 'max-md:row-start-3 max-md:col-start-3',
 } as const;
 
@@ -104,7 +105,6 @@ interface RequestEventRowProps {
   showSession: boolean;
   showKind: boolean;
   showTokens: boolean;
-  showCacheHit: boolean;
   showCost: boolean;
   selected: boolean;
   flash: boolean;
@@ -122,7 +122,6 @@ const RequestEventRow = memo(function RequestEventRow({
   showSession,
   showKind,
   showTokens,
-  showCacheHit,
   showCost,
   selected,
   flash,
@@ -139,7 +138,6 @@ const RequestEventRow = memo(function RequestEventRow({
   const tone = requestOutcomeTone(outcome);
   const tierBadge = serviceTierBadgeText(event.service_tier);
   const requestKindBadge = requestKindBadgeText(event.request_kind);
-  const hit = showCacheHit ? cacheHitPercent(event) : null;
   const at = eventTime(event);
 
   return (
@@ -147,7 +145,7 @@ const RequestEventRow = memo(function RequestEventRow({
       interactive
       selected={selected}
       className={cx(
-        'focus:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+        'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         flash ? 'flash-in' : '',
         MOBILE_ROW,
       )}
@@ -191,7 +189,7 @@ const RequestEventRow = memo(function RequestEventRow({
               <button
                 key={label}
                 type="button"
-                className="rounded-sm bg-overlay-3 px-1 text-caption text-text-muted hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                className="rounded-sm px-1 text-caption text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                 aria-label={`Show ${label} around this request`}
                 title={`Show ${label} around this request`}
                 onClick={(clickEvent) => {
@@ -290,15 +288,6 @@ const RequestEventRow = memo(function RequestEventRow({
           className={cx(MOBILE_CELL, MOBILE_AT.tokens)}
         />
       )}
-      {showCacheHit && (
-        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap max-md:hidden">
-          {hit != null ? (
-            <span className="text-text-muted">{hit}%</span>
-          ) : (
-            <span className="text-text-faint">{DASH}</span>
-          )}
-        </td>
-      )}
       {showCost && (
         <CostCell
           event={event}
@@ -348,8 +337,6 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   const showSession =
     (columns?.session ?? true) && events.some((e) => e.thread_id);
   const showKind = events.some((e) => requestKindBadgeText(e.request_kind));
-  const showCacheHit =
-    showTokens && events.some((e) => cacheHitPercent(e) != null);
 
   const columnSpecs: ColumnSpec[] = [
     { label: 'Timestamp', skeleton: 'max-w-24' },
@@ -362,9 +349,6 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     { label: 'Latency', numeric: true, skeleton: 'max-w-16 ml-auto' },
     ...(showTokens
       ? [{ label: 'Tokens', numeric: true, skeleton: 'max-w-20 ml-auto' }]
-      : []),
-    ...(showCacheHit
-      ? [{ label: 'Cache hit', numeric: true, skeleton: 'max-w-10 ml-auto' }]
       : []),
     ...(showCost
       ? [{ label: 'Cost', numeric: true, skeleton: 'max-w-16 ml-auto' }]
@@ -443,7 +427,6 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                   showSession={showSession}
                   showKind={showKind}
                   showTokens={showTokens}
-                  showCacheHit={showCacheHit}
                   showCost={showCost}
                   selected={selectedId === eventKey}
                   flash={liveFlashIds?.has(eventKey) ?? false}

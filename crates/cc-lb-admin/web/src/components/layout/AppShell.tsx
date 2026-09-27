@@ -1,7 +1,7 @@
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { useRouterState } from '@tanstack/react-router';
-import { HelpCircle, PanelLeft, Search, UserRound, X } from 'lucide-react';
+import { HelpCircle, Search, UserRound, X } from 'lucide-react';
 import { type ReactNode, useEffect, useState } from 'react';
 import { useAuthSessionContext } from '../../lib/authSession';
 import { useHealth } from '../../lib/queries';
@@ -106,7 +106,11 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
       >
         <SidebarBrand collapsed={collapsed} />
         <SidebarNav collapsed={collapsed} onNavigate={() => {}} />
-        <SidebarFooter collapsed={collapsed} version={version} />
+        <SidebarFooter
+          collapsed={collapsed}
+          version={version}
+          onToggleCollapsed={() => setCollapsed((c) => !c)}
+        />
       </aside>
 
       {/* "More" sheet below `lg`: the full navigation, opened from the tab bar. */}
@@ -141,8 +145,6 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
       <div className="flex-1 flex flex-col min-w-0 bg-bg min-h-screen">
         <Topbar
           pageLabel={pageLabel}
-          onToggleSidebar={() => setCollapsed((c) => !c)}
-          sidebarCollapsed={collapsed}
           onCommandPalette={onCommandPalette}
           connection={connection}
         />
@@ -173,14 +175,10 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
  */
 function Topbar({
   pageLabel,
-  onToggleSidebar,
-  sidebarCollapsed,
   onCommandPalette,
   connection,
 }: {
   pageLabel: string | null;
-  onToggleSidebar: () => void;
-  sidebarCollapsed: boolean;
   onCommandPalette: () => void;
   connection: Connection;
 }) {
@@ -196,25 +194,11 @@ function Topbar({
   const identityKind = rawKind.charAt(0).toUpperCase() + rawKind.slice(1);
 
   return (
-    <header className="h-12 shrink-0 flex items-center justify-between gap-2 pl-4 pr-2 md:pl-6 md:pr-5 lg:pl-3 lg:pr-6 border-b border-subtle bg-bg sticky top-0 z-30">
+    <header className="h-12 shrink-0 flex items-center justify-between gap-2 pl-4 pr-2 md:pl-6 md:pr-5 lg:pr-6 border-b border-subtle bg-bg sticky top-0 z-30">
       <div className="flex items-center gap-2.5 min-w-0">
         <span className="lg:hidden">
           <BrandMark />
         </span>
-        <button
-          type="button"
-          aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          aria-expanded={!sidebarCollapsed}
-          title="Toggle sidebar (⌘B)"
-          className={cx(TOPBAR_ICON_BUTTON, 'hidden lg:inline-flex h-8 w-8')}
-          onClick={onToggleSidebar}
-        >
-          <PanelLeft
-            className="w-4 h-4"
-            strokeWidth={1.75}
-            aria-hidden="true"
-          />
-        </button>
         <span className="truncate text-title-section text-text">
           {pageLabel ?? 'cc-lb'}
         </span>

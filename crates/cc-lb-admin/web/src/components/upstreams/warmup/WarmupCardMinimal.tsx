@@ -18,6 +18,7 @@ import {
   useUpdateUpstreamWarmupSettings,
   useWarmupSummary,
 } from '../../../lib/queries';
+import { DetailSection } from '../../ui/DetailPane';
 import {
   Button,
   ConfirmDialog,
@@ -476,21 +477,15 @@ function WarmupCardMinimalInner({
 
   return (
     <>
-      <section
+      <DetailSection
         data-testid="warmup-card"
         data-variant="minimal"
         tabIndex={-1}
-        className="flex w-full flex-col gap-4 outline-none"
+        className="outline-none"
+        title={headerTitle}
+        description="Starts the next 5h window during idle gaps."
+        action={headerActions}
       >
-        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <div className="min-w-0">
-            <h2 className="text-title-section text-text">{headerTitle}</h2>
-            <p className="mt-0.5 text-body-sm text-text-muted">
-              Starts the next 5h window during idle gaps.
-            </p>
-          </div>
-          {headerActions}
-        </header>
         <div className="space-y-4">
           {staleRevisionVisible && (
             <div
@@ -594,7 +589,7 @@ function WarmupCardMinimalInner({
                   <span>{COPY.noShapePluginsAvailable}</span>{' '}
                   <a
                     href="/plugins"
-                    className="text-text underline decoration-border-strong underline-offset-2 hover:decoration-accent"
+                    className="rounded-sm text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                   >
                     Plugins
                   </a>
@@ -658,7 +653,7 @@ function WarmupCardMinimalInner({
                       : null}
                   </p>
                   <details className="group mt-1">
-                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted hover:text-text [&::-webkit-details-marker]:hidden">
+                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
                       <ChevronRight
                         aria-hidden="true"
                         strokeWidth={1.75}
@@ -729,7 +724,7 @@ function WarmupCardMinimalInner({
           confirmDisabled={clearPlugin.isPending}
           destructive={true}
         />
-      </section>
+      </DetailSection>
 
       {pluginSnapshot && (
         <WarmupConfigModal

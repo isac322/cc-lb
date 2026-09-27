@@ -12,6 +12,7 @@ import {
   cx,
   Drawer,
   EmptyState,
+  IconButton,
   SegmentedControl,
   Skeleton,
   Spinner,
@@ -224,8 +225,8 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
                 'inline-flex items-center gap-1.5 px-2 h-8 md:h-7 rounded-sm text-xs font-medium transition-colors',
                 'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                 filter === f.key
-                  ? 'bg-overlay-6 text-text'
-                  : 'text-text-muted hover:bg-overlay-3 hover:text-text',
+                  ? 'bg-selected text-text'
+                  : 'text-text-muted hover:bg-hover-bg hover:text-text',
               )}
             >
               {f.key !== 'all' && (
@@ -312,8 +313,8 @@ function AttemptListRow({
         type="button"
         onClick={onSelect}
         className={cx(
-          'w-full text-left rounded-sm px-2.5 py-1.5 transition-colors',
-          isSelected ? 'bg-overlay-5' : 'hover:bg-overlay-2',
+          'w-full text-left rounded-sm px-2.5 py-1.5 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+          isSelected ? 'bg-selected' : 'hover:bg-overlay-2',
         )}
         aria-current={isSelected ? 'true' : undefined}
       >
@@ -387,14 +388,9 @@ function AttemptDetail({
     <div className="flex flex-col gap-4 p-4">
       <div className="flex items-center justify-between gap-2 sticky top-0 bg-bg-sub -m-4 mb-0 px-4 py-2 border-b border-subtle z-10">
         <h3 className="text-title-card text-text">Attempt detail</h3>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close attempt detail"
-          className="inline-flex size-7 items-center justify-center rounded-sm text-text-muted hover:bg-overlay-3 hover:text-text"
-        >
-          <X aria-hidden="true" strokeWidth={1.75} className="size-4" />
-        </button>
+        <IconButton label="Close attempt detail" onClick={onClose}>
+          <X aria-hidden="true" strokeWidth={1.75} />
+        </IconButton>
       </div>
 
       {/* Tier 1: narrative */}
@@ -473,7 +469,7 @@ function AttemptDetail({
             type="button"
             onClick={() => setPluginOpen((v) => !v)}
             aria-expanded={pluginOpen}
-            className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted hover:text-text"
+            className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <ChevronRight
               className={cx(
@@ -497,7 +493,7 @@ function AttemptDetail({
           type="button"
           onClick={() => setRawOpen((v) => !v)}
           aria-expanded={rawOpen}
-          className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted hover:text-text"
+          className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <ChevronRight
             className={cx(

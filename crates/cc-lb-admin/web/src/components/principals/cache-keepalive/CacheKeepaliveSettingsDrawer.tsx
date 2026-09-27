@@ -18,7 +18,7 @@ import {
 
 // INPUT_CLASS carries no disabled affordance of its own; a control locked by an
 // in-flight write must read as unavailable, not merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS = 'disabled:opacity-40 disabled:cursor-not-allowed';
 
 interface Props {
   open: boolean;
@@ -330,7 +330,7 @@ export function CacheKeepaliveSettingsDrawer({
                     aria-label={`Remove ${tool}`}
                     disabled={busy}
                     className={cx(
-                      'inline-flex h-6 w-6 items-center justify-center rounded-xs text-text-muted hover:text-text hover:bg-overlay-5',
+                      'inline-flex h-6 w-6 items-center justify-center rounded-xs text-text-muted transition-colors hover:bg-overlay-5 hover:text-text disabled:hover:bg-transparent disabled:hover:text-text-muted',
                       'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                       PENDING_INPUT_CLASS,
                     )}

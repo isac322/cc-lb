@@ -12,12 +12,8 @@ import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor, SERIES_FILL_OPACITY } from '../../lib/colors';
 import { fmtUsd, sumTokens } from '../../lib/format';
 import { CHART_AXIS, CHART_CURSOR, CHART_GRID } from '../ui/charts';
-import {
-  EmptyState,
-  Section,
-  SegmentedControl,
-  Skeleton,
-} from '../ui/primitives';
+import { DetailSection } from '../ui/DetailPane';
+import { EmptyState, SegmentedControl, Skeleton } from '../ui/primitives';
 
 // Model families reuse the quota series tokens so the same model reads in
 // the same hue everywhere; anything else cycles through the remaining ones.
@@ -136,95 +132,94 @@ export function ApiUsageCard({
   );
 
   return (
-    <div data-testid="api-usage-card">
-      <Section
-        title="API usage"
-        subtitle="Token and cost breakdown by model"
-        action={action}
-      >
-        <div className="flex flex-col gap-3">
-          <div
-            data-testid="api-usage-legend-slot"
-            className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-caption min-h-[28px]"
-          >
-            {!showLoading && chartData.length > 0
-              ? models.map((model, index) => {
-                  const lastBucket = chartData[chartData.length - 1];
-                  const val = lastBucket ? lastBucket[model] || 0 : 0;
-                  return (
-                    <div key={model} className="flex items-center gap-1.5">
-                      <span
-                        aria-hidden="true"
-                        className="h-0.5 w-2.5 shrink-0 rounded-xs"
-                        style={{
-                          backgroundColor: modelSeriesColor(model, index),
-                        }}
-                      />
-                      <span className="text-text-muted">{model}</span>
-                      <span className="tabular-nums text-text">
-                        {formatTooltip(val)}
-                      </span>
-                    </div>
-                  );
-                })
-              : null}
-          </div>
-          {!showLoading && chartData.length === 0 ? (
-            <EmptyState title="No usage in selected range" />
-          ) : (
-            <div className="h-64 w-full">
-              {showLoading ? (
-                <Skeleton className="h-full w-full" />
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart
-                    data={chartData}
-                    margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
-                  >
-                    <CartesianGrid {...CHART_GRID} />
-                    <XAxis
-                      {...CHART_AXIS}
-                      dataKey="ts"
-                      tickFormatter={formatXAxis}
-                      minTickGap={60}
+    <DetailSection
+      data-testid="api-usage-card"
+      title="API usage"
+      description="Token and cost breakdown by model"
+      action={action}
+    >
+      <div className="flex flex-col gap-3">
+        <div
+          data-testid="api-usage-legend-slot"
+          className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-caption min-h-[28px]"
+        >
+          {!showLoading && chartData.length > 0
+            ? models.map((model, index) => {
+                const lastBucket = chartData[chartData.length - 1];
+                const val = lastBucket ? lastBucket[model] || 0 : 0;
+                return (
+                  <div key={model} className="flex items-center gap-1.5">
+                    <span
+                      aria-hidden="true"
+                      className="h-0.5 w-2.5 shrink-0 rounded-xs"
+                      style={{
+                        backgroundColor: modelSeriesColor(model, index),
+                      }}
                     />
-                    <YAxis
-                      {...CHART_AXIS}
-                      tickFormatter={formatYAxis}
-                      tickCount={3}
-                      width={60}
-                    />
-                    <Tooltip
-                      labelFormatter={(label) => formatXAxis(label as number)}
-                      formatter={(value: unknown, name: unknown) => [
-                        formatTooltip(Number(value ?? 0)),
-                        String(name),
-                      ]}
-                      cursor={CHART_CURSOR}
-                    />
-                    {models.map((model, index) => {
-                      const color = modelSeriesColor(model, index);
-                      return (
-                        <Area
-                          key={model}
-                          type="monotone"
-                          dataKey={model}
-                          stackId="1"
-                          stroke={color}
-                          fill={color}
-                          fillOpacity={SERIES_FILL_OPACITY}
-                          strokeWidth={1.5}
-                          isAnimationActive={false}
-                        />
-                      );
-                    })}
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          )}
+                    <span className="text-text-muted">{model}</span>
+                    <span className="tabular-nums text-text">
+                      {formatTooltip(val)}
+                    </span>
+                  </div>
+                );
+              })
+            : null}
         </div>
-      </Section>
-    </div>
+        {!showLoading && chartData.length === 0 ? (
+          <EmptyState title="No usage in selected range" />
+        ) : (
+          <div className="h-64 w-full">
+            {showLoading ? (
+              <Skeleton className="h-full w-full" />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart
+                  data={chartData}
+                  margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                >
+                  <CartesianGrid {...CHART_GRID} />
+                  <XAxis
+                    {...CHART_AXIS}
+                    dataKey="ts"
+                    tickFormatter={formatXAxis}
+                    minTickGap={60}
+                  />
+                  <YAxis
+                    {...CHART_AXIS}
+                    tickFormatter={formatYAxis}
+                    tickCount={3}
+                    width={60}
+                  />
+                  <Tooltip
+                    labelFormatter={(label) => formatXAxis(label as number)}
+                    formatter={(value: unknown, name: unknown) => [
+                      formatTooltip(Number(value ?? 0)),
+                      String(name),
+                    ]}
+                    cursor={CHART_CURSOR}
+                  />
+                  {models.map((model, index) => {
+                    const color = modelSeriesColor(model, index);
+                    return (
+                      <Area
+                        key={model}
+                        type="monotone"
+                        dataKey={model}
+                        stackId="1"
+                        stroke={color}
+                        fill={color}
+                        fillOpacity={SERIES_FILL_OPACITY}
+                        strokeWidth={1.5}
+                        isAnimationActive={false}
+                      />
+                    );
+                  })}
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        )}
+      </div>
+    </DetailSection>
   );
 }

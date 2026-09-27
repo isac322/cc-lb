@@ -225,6 +225,66 @@ export function readableValue(value: string, maps: NameMaps): string {
   });
 }
 
+const CHANGED_NOUN: Record<string, [string, string]> = {
+  fields: ['field', 'fields'],
+  slots: ['slot', 'slots'],
+};
+
+/** One recorded fact for the list's Details column. */
+export interface AuditDetailPart {
+  label: string;
+  value: string;
+}
+
+/**
+ * The entry's recorded details in list form: changed field names first
+ * ("3 fields: name, enabled, weight"), then the other parameters and payload
+ * values. Values that only restate the target (its id or name) are left out;
+ * the target has its own column.
+ */
+export function auditDetailParts(
+  entry: AuditEntryLike,
+  parsed: ParsedAction,
+  maps: NameMaps,
+  target: AuditTarget | null,
+): AuditDetailPart[] {
+  // The target's own id or name adds nothing next to the Target column.
+  const targetValues = new Set<unknown>(target ? [target.id, target.name] : []);
+  const parts: AuditDetailPart[] = [];
+  for (const [key, value] of parsed.params) {
+    const noun = CHANGED_NOUN[key];
+    if (!noun) continue;
+    const names = value.split(',').filter(Boolean);
+    parts.push({
+      label: `${names.length} ${names.length === 1 ? noun[0] : noun[1]}`,
+      value: names.join(', '),
+    });
+  }
+  for (const [key, value] of parsed.params) {
+    if (CHANGED_NOUN[key] || targetValues.has(value)) continue;
+    parts.push({
+      label: key.replaceAll('_', ' '),
+      value: readableValue(value, maps),
+    });
+  }
+  for (const [key, value] of Object.entries(entry.payload ?? {})) {
+    if (value == null || targetValues.has(value)) continue;
+    // An integer past 2^53 lost its digits in JSON parsing (an unbounded
+    // `until` is u64::MAX); showing the rounded number would misstate it.
+    if (typeof value === 'number' && value > Number.MAX_SAFE_INTEGER) continue;
+    parts.push({
+      label: key.replaceAll('_', ' '),
+      value:
+        typeof value === 'string'
+          ? readableValue(value, maps)
+          : typeof value === 'object'
+            ? JSON.stringify(value)
+            : String(value),
+    });
+  }
+  return parts;
+}
+
 export function auditActorLabel(entry: AuditEntryLike): string {
   return entry.actor_email || entry.actor || '—';
 }

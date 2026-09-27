@@ -17,12 +17,13 @@ import {
   FirstRunChecklist,
   useFirstRunIncomplete,
 } from '../components/onboarding/FirstRunChecklist';
-import { BreakdownPopover } from '../components/ui/BreakdownPopover';
+import { BreakdownPopover, fmtTokens } from '../components/ui/BreakdownPopover';
 import {
   CHART_AXIS,
   CHART_CURSOR,
   CHART_GRID,
   CHART_THRESHOLD,
+  SPARKLINE_SECONDARY_DASH,
   Sparkline,
 } from '../components/ui/charts';
 import {
@@ -151,15 +152,17 @@ function fmtChartTooltip(unix: number): string {
 export type KpiChartPoint = {
   timestamp: number;
   value: number;
-  secondaryValue?: number | null;
+  secondaryValue?: number;
 };
 
-/** Optional second line drawn on a fixed 0–100 scale over the primary area. */
+/**
+ * Optional second series drawn over the primary area as a dashed line on its
+ * own scale (the sparkline shows shape; the legend and readout carry figures).
+ */
 type KpiSecondarySeries = {
-  testId: string;
   label: string;
   color: string;
-  format: (value: number | null | undefined) => string;
+  format: (value: number) => string;
 };
 
 const NO_KPI_POINTS: readonly KpiChartPoint[] = [];
@@ -180,36 +183,46 @@ function fmtErrorPercent(value: number): string {
   return `${value.toFixed(2)}%`;
 }
 
-// The secondary series owns its geometry inside a `0 0 100 100` viewBox scaled
-// with preserveAspectRatio="none", inset so a 0% or 100% bucket keeps its full
-// stroke inside the 28px chart band.
-const KPI_SECONDARY_TOP = 4;
-const KPI_SECONDARY_BOTTOM = 96;
+// KPI series are data, not status: they draw in neutral ink. Only the error
+// rate turns danger, and only when there are errors to report. Tokens is the
+// one two-series tile: input and output take the token series colors, input
+// as a solid area and output as a dashed line, named by an inline legend.
+const KPI_SERIES_COLOR = 'var(--color-text-muted)';
+const TOKENS_INPUT_COLOR = 'var(--color-series-input)';
+const TOKENS_OUTPUT_COLOR = 'var(--color-series-output)';
 
-/** Horizontal position (percent) of bucket `index`; matches Sparkline's plot. */
-function kpiPointX(index: number, count: number): number {
-  return count > 1 ? (index / (count - 1)) * 100 : 50;
-}
+const TOKENS_OUTPUT_SERIES: KpiSecondarySeries = {
+  label: 'Out',
+  color: TOKENS_OUTPUT_COLOR,
+  format: fmtTokens,
+};
 
-function kpiSecondaryY(value: number): number {
-  const clamped = value < 0 ? 0 : value > 100 ? 100 : value;
+/**
+ * "── In 45.2k  ┄┄ Out 295" under the Tokens value: names both chart series
+ * with the range totals, compact like the Logs token column. Wraps to two
+ * lines when the tile is narrow rather than truncating a figure.
+ */
+function TokensLegend({ input, output }: { input: number; output: number }) {
   return (
-    KPI_SECONDARY_BOTTOM -
-    (clamped / 100) * (KPI_SECONDARY_BOTTOM - KPI_SECONDARY_TOP)
+    <div
+      className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-caption tabular-nums text-text-muted"
+      data-testid="overview-kpi-tokens-legend"
+    >
+      <span className="inline-flex h-4 items-center gap-1.5 whitespace-nowrap">
+        <LegendSwatch stroke={TOKENS_INPUT_COLOR} strokeWidth={2} />
+        In <span className="text-text">{fmtTokens(input)}</span>
+      </span>
+      <span className="inline-flex h-4 items-center gap-1.5 whitespace-nowrap">
+        <LegendSwatch
+          stroke={TOKENS_OUTPUT_COLOR}
+          strokeWidth={2}
+          strokeDasharray={SPARKLINE_SECONDARY_DASH}
+        />
+        Out <span className="text-text">{fmtTokens(output)}</span>
+      </span>
+    </div>
   );
 }
-
-// KPI series are data, not status: they draw in neutral ink. Only the error
-// rate turns danger, and only when there are errors to report. The brand hue
-// is reserved for pool quota, so the cache-miss overlay is full-strength ink.
-const KPI_SERIES_COLOR = 'var(--color-text-muted)';
-
-const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
-  testId: 'overview-kpi-secondary-tokens',
-  label: 'Cache miss',
-  color: 'var(--color-text)',
-  format: fmtPercent,
-};
 
 /**
  * 1px left rules between the five traffic readouts at each grid width
@@ -227,6 +240,7 @@ const KPI_CELL_CLASS = [
 export function ValueTile({
   label,
   value,
+  legend,
   sub,
   chartId,
   spark,
@@ -241,6 +255,8 @@ export function ValueTile({
 }: {
   label: string;
   value: React.ReactNode;
+  /** Series legend under the value, for a tile that draws two series. */
+  legend?: React.ReactNode;
   sub?: React.ReactNode;
   chartId: string;
   spark?: readonly KpiChartPoint[];
@@ -264,56 +280,33 @@ export function ValueTile({
   const activePoint = activeIdx == null ? null : points[activeIdx];
 
   const values = useMemo(() => points.map((point) => point.value), [points]);
-  // Memoized so a hover on any sibling tile does not re-render Recharts.
-  const primarySeries = useMemo(
-    () => <Sparkline color={color} data={values} />,
-    [color, values],
+  const secondaryValues = useMemo(
+    () =>
+      secondary ? points.map((point) => point.secondaryValue ?? 0) : undefined,
+    [points, secondary],
   );
-  // Buckets that reported a cache-hit ratio, grouped into contiguous runs: an
-  // idle bucket has no ratio, so the line breaks there instead of interpolating
-  // across the gap. A run of one bucket has no segment to draw, so it is painted
-  // as a round dot — a `<circle>` would be squashed into a sub-pixel ellipse by
-  // preserveAspectRatio="none", while a nonzero-length subpath with round caps
-  // and a non-scaling stroke stays circular in device space.
-  const secondaryShapes = useMemo(() => {
-    if (!secondary) return [];
-    const shapes: { key: string; d: string; isPoint: boolean }[] = [];
-    let run: string[] = [];
-    const flush = (afterIndex: number) => {
-      if (run.length === 0) return;
-      const start = afterIndex - run.length;
-      const coords = run.join(' L ');
-      shapes.push(
-        run.length === 1
-          ? { key: `point-${start}`, d: `M ${coords} h 0.01`, isPoint: true }
-          : { key: `segment-${start}`, d: `M ${coords}`, isPoint: false },
-      );
-      run = [];
-    };
-    for (let i = 0; i < points.length; i++) {
-      const secondaryValue = points[i]?.secondaryValue;
-      if (secondaryValue == null || !Number.isFinite(secondaryValue)) {
-        flush(i);
-        continue;
-      }
-      run.push(
-        `${kpiPointX(i, points.length).toFixed(2)},${kpiSecondaryY(secondaryValue).toFixed(2)}`,
-      );
-    }
-    flush(points.length);
-    return shapes;
-  }, [points, secondary]);
-
-  const activeX =
-    activeIdx == null ? null : `${kpiPointX(activeIdx, points.length)}%`;
-  const secondaryMarker =
-    secondary && activeX != null && activePoint?.secondaryValue != null
-      ? {
-          color: secondary.color,
-          left: activeX,
-          top: `${kpiSecondaryY(activePoint.secondaryValue)}%`,
+  const secondaryColor = secondary?.color;
+  // Memoized so a hover on any sibling tile does not re-render Recharts.
+  const chart = useMemo(
+    () => (
+      <Sparkline
+        color={color}
+        data={values}
+        secondary={
+          secondaryValues && secondaryColor
+            ? { data: secondaryValues, color: secondaryColor }
+            : undefined
         }
-      : null;
+      />
+    ),
+    [color, values, secondaryValues, secondaryColor],
+  );
+
+  // Bucket position across the plot, matching Sparkline's x axis.
+  const activeX =
+    activeIdx == null
+      ? null
+      : `${points.length > 1 ? (activeIdx / (points.length - 1)) * 100 : 50}%`;
 
   const handleMove = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!onActiveIndexChange || points.length === 0) return;
@@ -342,6 +335,13 @@ export function ValueTile({
           </span>
         )}
       </div>
+      {legend !== undefined ? (
+        loading ? (
+          <Skeleton className="h-4 w-28" />
+        ) : (
+          legend
+        )
+      ) : null}
       {sub !== undefined ? (
         <div
           className="flex h-4 items-center truncate text-caption text-text-muted"
@@ -362,11 +362,8 @@ export function ValueTile({
             {`${chartLabel ?? label} ${formatChartValue(activePoint.value)}`}
           </span>
           {secondary ? (
-            // Muted body text rather than the series stroke, so the row keeps
-            // body-text contrast in both themes. The stroke color stays on
-            // the chart itself.
-            <span className="truncate text-caption leading-none tabular-nums text-text-muted">
-              {`${secondary.label} ${secondary.format(activePoint.secondaryValue)}`}
+            <span className="truncate text-caption leading-none tabular-nums text-text">
+              {`${secondary.label} ${secondary.format(activePoint.secondaryValue ?? 0)}`}
             </span>
           ) : null}
         </div>
@@ -381,50 +378,12 @@ export function ValueTile({
             onMouseLeave={() => onActiveIndexChange?.(null)}
             onMouseMove={handleMove}
           >
-            {primarySeries}
-            {secondary && secondaryShapes.length > 0 ? (
-              <svg
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 h-full w-full"
-                preserveAspectRatio="none"
-                viewBox="0 0 100 100"
-              >
-                <g data-testid={secondary.testId}>
-                  {secondaryShapes.map((shape) => (
-                    <path
-                      d={shape.d}
-                      data-slot={
-                        shape.isPoint ? 'secondary-point' : 'secondary-segment'
-                      }
-                      fill="none"
-                      key={shape.key}
-                      stroke={secondary.color}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeOpacity={0.9}
-                      strokeWidth={shape.isPoint ? 3 : 1.2}
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  ))}
-                </g>
-              </svg>
-            ) : null}
+            {chart}
             {activeX != null ? (
               <div
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-y-0 w-px -translate-x-1/2 bg-border-strong"
                 style={{ left: activeX }}
-              />
-            ) : null}
-            {secondaryMarker ? (
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                style={{
-                  backgroundColor: secondaryMarker.color,
-                  left: secondaryMarker.left,
-                  top: secondaryMarker.top,
-                }}
               />
             ) : null}
           </div>
@@ -441,28 +400,44 @@ export type TopPrincipal = {
   cost_micros: number;
   /**
    * Per-category cost summed over the window, or null when no bucket recorded
-   * any — legacy windows keep a single-tone bar instead of an invented split.
+   * any — legacy windows say so in the breakdown instead of an invented split.
    */
   cost_components_micros: CostComponentMicros | null;
   tokens: number;
   requests: number;
   cache_hit_ratio: number | null;
+  /** Share of every principal's cost in the window, 0-100. */
   share_pct: number;
-  /** Largest `cost_micros` on the card: the full-length reference for a meter. */
-  max_cost_micros: number;
+  /** Every principal's cost in the window: the full-length reference for a meter. */
+  total_cost_micros: number;
 };
+
+/** The principals past the top rows, folded into one "N others" line. */
+export type TopPrincipalsRest = {
+  count: number;
+  cost_micros: number;
+  requests: number;
+  tokens: number;
+  share_pct: number;
+};
+
+/** Principals listed by name before the rest fold into "N others". */
+const TOP_PRINCIPAL_ROWS = 8;
 
 const TOP_PRINCIPAL_ROW_CLASS =
   'flex min-h-[66px] items-center gap-3 border-t border-row py-2 first:border-t-0';
 
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
+/** Share-of-total track: one neutral fill, square ends. */
+const SHARE_TRACK_CLASS =
+  'relative h-1.5 w-full overflow-hidden rounded-xs bg-progress-track';
+
 /**
- * Cost meter for one principal row. Length is the principal's share of the
- * largest principal; the filled part is subdivided into the request-log cost
- * categories, with a neutral tail for cost the categories do not account for.
- * Exact figures stay out of the row and live in the hover/focus breakdown and
- * in the meter's value text, so the row keeps its geometry and its reading.
+ * Cost meter for one principal row: one neutral fill whose length is the
+ * principal's share of every principal's cost in the window. The per-category
+ * split lives in the hover/focus breakdown and in the meter's value text, so
+ * the row keeps its geometry and its reading.
  */
 function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   const [open, setOpen] = useState(false);
@@ -482,16 +457,9 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   const segments = components
     ? costCategorySegments(components, unattributedMicros)
     : [];
-  // Segments add up to this, so widths fill the bar exactly even if recorded
-  // components run past the rollup total.
-  const segmentBasisMicros = Math.max(totalMicros, attributedMicros);
-  const sharePct =
-    principal.max_cost_micros > 0
-      ? (totalMicros / principal.max_cost_micros) * 100
-      : 0;
   const valueText = [
     `Total ${formatCostMicros(totalMicros)}`,
-    `${fmtPercent(sharePct)} of the largest principal`,
+    `${fmtPercent(principal.share_pct)} of all principals`,
     components
       ? segments
           .map(
@@ -532,32 +500,14 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
           }
           data-testid="top-principal-cost-meter"
           getAriaValueText={() => valueText}
-          max={Math.max(1, principal.max_cost_micros)}
+          max={Math.max(1, principal.total_cost_micros)}
           value={totalMicros}
         >
-          <BaseMeter.Track className="relative h-1.5 w-full overflow-hidden rounded-xs bg-progress-track">
+          <BaseMeter.Track className={SHARE_TRACK_CLASS}>
             <BaseMeter.Indicator
-              className={cx(
-                'flex h-full overflow-hidden transition-all',
-                components ? '' : 'bg-text-muted',
-              )}
+              className="h-full bg-text-muted"
               data-slot="cost-meter-fill"
-            >
-              {segments.map((segment) =>
-                segment.value <= 0 ? null : (
-                  <span
-                    key={segment.key}
-                    className="h-full"
-                    data-category={segment.key}
-                    data-testid="top-principal-cost-segment"
-                    style={{
-                      backgroundColor: segment.color,
-                      width: `${(segment.value / segmentBasisMicros) * 100}%`,
-                    }}
-                  />
-                ),
-              )}
-            </BaseMeter.Indicator>
+            />
           </BaseMeter.Track>
         </BaseMeter.Root>
       </BasePopover.Trigger>
@@ -592,21 +542,54 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
   );
 }
 
+/** Cost and share figures on the right of a principal row. */
+function PrincipalCostFigures({
+  costMicros,
+  sharePct,
+}: {
+  costMicros: number;
+  sharePct: number;
+}) {
+  return (
+    <div className="text-right shrink-0">
+      <div className="text-body font-medium tabular-nums text-text">
+        {formatUsdAmount(costMicros / 1_000_000)}
+      </div>
+      <div className="text-caption tabular-nums text-text-muted">
+        {sharePct.toFixed(1)}%
+      </div>
+    </div>
+  );
+}
+
 export function TopPrincipalsSection({
   range,
   principals,
+  rest = null,
   loading,
   className,
 }: {
   range: Range;
+  /** The top principals by cost, at most `TOP_PRINCIPAL_ROWS`. */
   principals: readonly TopPrincipal[];
+  /** Everyone past the top rows; null when every principal is listed. */
+  rest?: TopPrincipalsRest | null;
   loading: boolean;
   className?: string;
 }) {
   return (
     <Section
       title="Top principals"
-      subtitle={`By virtual cost · ${range}`}
+      subtitle={`By virtual cost · Same range as Traffic (${range})`}
+      action={
+        <Link
+          className={OVERVIEW_LINK_CLASS}
+          search={{ sort: 'active' }}
+          to="/principals"
+        >
+          View all principals
+        </Link>
+      }
       className={cx('min-w-0', className)}
     >
       <div className="flex flex-col" data-slot="principal-list">
@@ -634,38 +617,65 @@ export function TopPrincipalsSection({
             {`No usage in the last ${range}`}
           </p>
         ) : (
-          principals.map((principal) => (
-            <div
-              key={principal.id}
-              className={TOP_PRINCIPAL_ROW_CLASS}
-              data-testid="top-principal-row"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-body text-text">
-                  {principal.name}
+          <>
+            {principals.map((principal) => (
+              <div
+                key={principal.id}
+                className={TOP_PRINCIPAL_ROW_CLASS}
+                data-testid="top-principal-row"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-body text-text">
+                    {principal.name}
+                  </div>
+                  <div
+                    className="truncate text-caption text-text-muted"
+                    data-slot="principal-meta"
+                  >
+                    {formatCount(principal.requests)} req ·{' '}
+                    {formatCount(principal.tokens)} tok ·{' '}
+                    <span>
+                      {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
+                    </span>
+                  </div>
+                  <PrincipalCostMeter principal={principal} />
                 </div>
-                <div
-                  className="truncate text-caption text-text-muted"
-                  data-slot="principal-meta"
-                >
-                  {formatCount(principal.requests)} req ·{' '}
-                  {formatCount(principal.tokens)} tok ·{' '}
-                  <span>
-                    {`${fmtRatioPercent(principal.cache_hit_ratio)} cache hit`}
-                  </span>
-                </div>
-                <PrincipalCostMeter principal={principal} />
+                <PrincipalCostFigures
+                  costMicros={principal.cost_micros}
+                  sharePct={principal.share_pct}
+                />
               </div>
-              <div className="text-right shrink-0">
-                <div className="text-body font-medium tabular-nums text-text">
-                  {formatUsdAmount(principal.cost_micros / 1_000_000)}
+            ))}
+            {rest ? (
+              <div
+                className={TOP_PRINCIPAL_ROW_CLASS}
+                data-testid="top-principal-rest-row"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-body text-text-muted">
+                    {`${formatCount(rest.count)} others`}
+                  </div>
+                  <div className="truncate text-caption text-text-muted">
+                    {formatCount(rest.requests)} req ·{' '}
+                    {formatCount(rest.tokens)} tok
+                  </div>
+                  <div
+                    aria-hidden="true"
+                    className={cx('mt-1.5', SHARE_TRACK_CLASS)}
+                  >
+                    <div
+                      className="h-full bg-text-muted"
+                      style={{ width: `${Math.min(100, rest.share_pct)}%` }}
+                    />
+                  </div>
                 </div>
-                <div className="text-caption tabular-nums text-text-muted">
-                  {principal.share_pct.toFixed(1)}%
-                </div>
+                <PrincipalCostFigures
+                  costMicros={rest.cost_micros}
+                  sharePct={rest.share_pct}
+                />
               </div>
-            </div>
-          ))
+            ) : null}
+          </>
         )}
       </div>
     </Section>
@@ -794,10 +804,15 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
   chart,
   aggregate,
   loading,
+  range,
+  onRangeChange,
 }: {
   chart: PoolQuotaChartProps;
   aggregate: AggregateResponse | undefined;
   loading: boolean;
+  /** The range control's value; the chart keeps its last response's range. */
+  range: Range;
+  onRangeChange: (range: Range) => void;
 }) {
   const { effective: timeZone } = useTimezone();
   const resets = poolWindowResets(aggregate);
@@ -815,6 +830,14 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
       <Section
         title="Pool quota usage"
         subtitle={`Used per window across the pool · last ${chart.range}`}
+        action={
+          <SegmentedControl
+            ariaLabel="Pool quota usage range"
+            options={RANGE_OPTIONS}
+            value={range}
+            onChange={onRangeChange}
+          />
+        }
       >
         <PoolQuotaLegend
           latest={chart.latest}
@@ -1101,6 +1124,9 @@ export function PoolQuotaLegend({
 }
 
 function OverviewPage() {
+  // Each range control sits on the title row of the section that reads it:
+  // one for the pool chart, one shared by Traffic and Top principals.
+  const [poolRange, setPoolRange] = useState<Range>('24h');
   const [range, setRange] = useState<Range>('24h');
   // One hover index shared by every KPI chart so all five read the same bucket.
   const [activeKpiIndex, setActiveKpiIndex] = useState<number | null>(null);
@@ -1128,7 +1154,7 @@ function OverviewPage() {
     source: 'merged',
   });
 
-  const seriesRangeSecs = RANGE_SECONDS[range];
+  const seriesRangeSecs = RANGE_SECONDS[poolRange];
   const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
     windows: POOL_QUOTA_QUERY_WINDOWS,
     rangeSecs: seriesRangeSecs,
@@ -1191,6 +1217,7 @@ function OverviewPage() {
   const firstRunIncomplete = useFirstRunIncomplete(requestSeen);
 
   const cacheMissAvg = totals ? cacheMissRatio(totals) : null;
+  const outputTokens = totals?.output_tokens ?? 0;
 
   const kpiPoints = useMemo(() => {
     const buckets = summary.data?.sparkline.buckets ?? [];
@@ -1204,12 +1231,14 @@ function OverviewPage() {
     };
     for (const b of buckets) {
       const timestamp = b.bucket_start_unix_secs;
-      const miss = cacheMissRatio(b);
+      const out = b.output_tokens ?? 0;
       series.rate.push({ timestamp, value: b.request_count / stepSecs });
+      // Input is every prompt-side token (fresh, cache writes and reads), so
+      // In + Out is the tile's total.
       series.tokens.push({
         timestamp,
-        value: sumTokens(b),
-        secondaryValue: miss == null ? null : miss * 100,
+        value: sumTokens(b) - out,
+        secondaryValue: out,
       });
       series.cost.push({
         timestamp,
@@ -1288,14 +1317,13 @@ function OverviewPage() {
     ],
   );
 
-  // Principals Data
-  const topPrincipals = useMemo(() => {
+  // Principals Data: the top rows by cost, then everyone else as one line.
+  const principalRanking = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
     const byId = new Map<
       string,
-      Omit<TopPrincipal, 'share_pct' | 'max_cost_micros'>
+      Omit<TopPrincipal, 'share_pct' | 'total_cost_micros'>
     >();
-    let maxCostMicros = 0;
     let totalCostMicros = 0;
 
     for (const s of series) {
@@ -1320,7 +1348,6 @@ function OverviewPage() {
       if (costMicros <= 0 && requests <= 0) continue;
 
       totalCostMicros += costMicros;
-      if (costMicros > maxCostMicros) maxCostMicros = costMicros;
 
       byId.set(s.key, {
         id: s.key,
@@ -1337,15 +1364,34 @@ function OverviewPage() {
       });
     }
 
-    return Array.from(byId.values())
-      .sort((a, b) => b.cost_micros - a.cost_micros)
-      .slice(0, 5)
+    const sharePct = (costMicros: number) =>
+      totalCostMicros > 0 ? (costMicros / totalCostMicros) * 100 : 0;
+    const ranked = Array.from(byId.values()).sort(
+      (a, b) => b.cost_micros - a.cost_micros,
+    );
+    const top: TopPrincipal[] = ranked
+      .slice(0, TOP_PRINCIPAL_ROWS)
       .map((p) => ({
         ...p,
-        share_pct:
-          totalCostMicros > 0 ? (p.cost_micros / totalCostMicros) * 100 : 0,
-        max_cost_micros: maxCostMicros,
+        share_pct: sharePct(p.cost_micros),
+        total_cost_micros: totalCostMicros,
       }));
+    const others = ranked.slice(TOP_PRINCIPAL_ROWS);
+    if (others.length === 0) return { top, rest: null };
+    const rest: TopPrincipalsRest = {
+      count: others.length,
+      cost_micros: 0,
+      requests: 0,
+      tokens: 0,
+      share_pct: 0,
+    };
+    for (const p of others) {
+      rest.cost_micros += p.cost_micros;
+      rest.requests += p.requests;
+      rest.tokens += p.tokens;
+    }
+    rest.share_pct = sharePct(rest.cost_micros);
+    return { top, rest };
   }, [principalUsage.data, principalNameMap]);
 
   return (
@@ -1357,20 +1403,7 @@ function OverviewPage() {
         onRetry={live.forceReconnect}
       />
       <OAuthReconnectSummary />
-      <PageHeader
-        title="Overview"
-        actions={
-          // Nothing below reads the range until the first-run state lifts.
-          firstRunIncomplete ? undefined : (
-            <SegmentedControl
-              ariaLabel="Time range"
-              options={RANGE_OPTIONS}
-              value={range}
-              onChange={selectRange}
-            />
-          )
-        }
-      />
+      <PageHeader title="Overview" />
 
       {/* The checklist is the whole first-run state: it says what fills in
       once traffic flows, so nothing else renders until it lifts. */}
@@ -1384,6 +1417,8 @@ function OverviewPage() {
             aggregate={quotaAggregate.data}
             chart={poolQuotaChart}
             loading={quotaLoading}
+            range={poolRange}
+            onRangeChange={setPoolRange}
           />
 
           <UpstreamsUsageSection />
@@ -1392,6 +1427,14 @@ function OverviewPage() {
             <Section
               title="Traffic"
               subtitle={`Last ${range}`}
+              action={
+                <SegmentedControl
+                  ariaLabel="Traffic range"
+                  options={RANGE_OPTIONS}
+                  value={range}
+                  onChange={selectRange}
+                />
+              }
               className="min-w-0"
             >
               <div className="min-w-0" data-testid="overview-kpi-strip">
@@ -1423,11 +1466,18 @@ function OverviewPage() {
                       label="Tokens"
                       loading={summary.isPending}
                       value={formatCount(totalTokens)}
+                      legend={
+                        <TokensLegend
+                          input={totalTokens - outputTokens}
+                          output={outputTokens}
+                        />
+                      }
                       sub={`Avg cache miss ${fmtRatioPercent(cacheMissAvg)}`}
                       spark={kpiPoints.tokens}
-                      sparkColor={KPI_SERIES_COLOR}
-                      formatChartValue={formatCount}
-                      secondary={TOKENS_CACHE_MISS_SERIES}
+                      sparkColor={TOKENS_INPUT_COLOR}
+                      chartLabel="In"
+                      formatChartValue={fmtTokens}
+                      secondary={TOKENS_OUTPUT_SERIES}
                       activeIndex={activeKpiIndex}
                       onActiveIndexChange={setActiveKpiIndex}
                     />
@@ -1477,7 +1527,8 @@ function OverviewPage() {
 
             <TopPrincipalsSection
               range={range}
-              principals={topPrincipals}
+              principals={principalRanking.top}
+              rest={principalRanking.rest}
               loading={
                 principalUsage.data === undefined && principalUsage.isPending
               }

@@ -4,15 +4,7 @@ import {
   stripSearchParams,
   useNavigate,
 } from '@tanstack/react-router';
-import {
-  ChevronLeft,
-  ExternalLink,
-  Info,
-  KeyRound,
-  Plus,
-  RefreshCw,
-  Trash2,
-} from 'lucide-react';
+import { ExternalLink, KeyRound, Plus, RefreshCw } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
@@ -35,24 +27,30 @@ import {
   CHART_THRESHOLD,
 } from '../components/ui/charts';
 import {
+  DetailFact,
+  DetailFacts,
+  DetailHeader,
+  DetailHeaderSkeleton,
+  DetailPane,
+  DetailSection,
+} from '../components/ui/DetailPane';
+import {
   EntityList,
   type EntityListView,
   type EntityListViewConfig,
   useEntityListView,
 } from '../components/ui/EntityList';
 import {
+  Badge,
   Button,
   ConfirmDialog,
   cx,
   EmptyState,
-  Hint,
+  IconButton,
   Notice,
-  Section,
   SegmentedControl,
   Skeleton,
-  Spinner,
   StatusBadge,
-  ToggleSwitch,
 } from '../components/ui/primitives';
 import {
   RelativeOffsetTime,
@@ -85,19 +83,20 @@ import {
   type UpstreamUsageRow,
   useUpstreamUsageData,
 } from '../components/upstreams/UpstreamUsageTable';
-import { upstreamHealth } from '../components/upstreams/upstreamHealth';
+import {
+  QuotaFreshnessCaption,
+  upstreamHealth,
+} from '../components/upstreams/upstreamHealth';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
   type OrganizationMetadataInner,
-  type QuotaSnapshot,
   type SubscriptionMetadataResponse,
   type SubscriptionQuotaWindow,
   type UpstreamOAuthStatusResponse,
   WINDOW_LABELS,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
-import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs, formatCount } from '../lib/format';
 import { useTimezone } from '../lib/locale';
 import { isMessagesRequestEvent } from '../lib/logRows';
@@ -535,42 +534,44 @@ function UpstreamsPage() {
       />
 
       {/* Phones show the list or the selected upstream, never both; from md
-          the detail sits beside the list with its own scroll. Keyed by the
-          selection so each upstream opens at the top of its detail. */}
+          the detail sits beside the list and DetailPane owns its scroll.
+          Keyed by the selection so each upstream opens at the top. */}
       <div
         key={selected?.id ?? 'none'}
         className={cx(
-          'min-h-0 min-w-0 flex-1 overflow-y-auto',
-          selected ? 'block' : 'hidden md:block',
+          'min-h-0 min-w-0 flex-1 flex-col',
+          selected ? 'flex' : 'hidden md:flex',
         )}
         data-testid="upstream-detail-pane"
       >
-        <div className="px-4 pt-5 pb-10 md:px-8 md:pt-8 md:pb-16">
-          {selected ? (
-            <DetailView
-              key={selected.id}
-              upstream={selected}
-              onBack={() => select(undefined)}
-              onConnect={() =>
-                setConnectTarget({ mode: 'reconnect', upstream: selected })
-              }
-            />
-          ) : upstreamUsage.isLoading ? (
-            <UpstreamDetailLoadingShell />
-          ) : total ? (
+        {selected ? (
+          <DetailView
+            key={selected.id}
+            upstream={selected}
+            onBack={() => select(undefined)}
+            onConnect={() =>
+              setConnectTarget({ mode: 'reconnect', upstream: selected })
+            }
+          />
+        ) : upstreamUsage.isLoading ? (
+          <UpstreamDetailLoadingShell />
+        ) : total ? (
+          <div className="flex flex-1 items-center justify-center px-4 md:px-8">
             <EmptyState
               headingLevel={2}
               title="Select an upstream"
               description="Pick an upstream from the list to see its configuration, OAuth state, and recent requests."
             />
-          ) : (
+          </div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center px-4 md:px-8">
             <EmptyState
               headingLevel={2}
               title="Upstream details appear here"
               description="Quota, OAuth state, settings, and recent requests show here once you add an upstream."
             />
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       <UpstreamConnectDialog
@@ -590,18 +591,11 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
 // Window blocks reserve one meter row (label, N% used, meter, reset,
-// ETA and burn facts, observed caption) so the loaded blocks never push
+// ETA and burn facts) so the loaded blocks never push
 // the chart down.
 const QUOTA_WINDOW_GRID_CLASS =
   'grid min-h-70 grid-cols-2 items-start gap-x-6 gap-y-8 @lg:gap-x-10 @lg:gap-y-10 @lg:[grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))]';
 const QUOTA_CHART_HEIGHT = 280;
-// Sized by the detail pane, not the viewport: beside the list the pane is
-// ~800-1000px wide, too narrow for a 20rem identity aside next to three
-// window blocks and the chart. The aside sits beside the main column only
-// when the pane is 56rem+; otherwise it drops under it. Parents carry
-// `@container`.
-const DETAIL_GRID_CLASS =
-  'grid gap-x-12 gap-y-12 @4xl:grid-cols-[minmax(0,1fr)_20rem]';
 /** The one series drawn dashed, so 7d and 7d (Fable) stay apart without a new hue. */
 const DASHED_WINDOW = '7d_fable';
 /** Usage thresholds on the chart: warn at 80% used, danger at 95% used. */
@@ -612,13 +606,14 @@ const USAGE_THRESHOLDS = [
 
 function IdentitySkeleton() {
   return (
-    <div data-testid="upstream-metadata-loading" className="flex flex-col">
-      {['w-28', 'w-24', 'w-32', 'w-40', 'w-36'].map((width) => (
-        <div
-          key={width}
-          className="flex min-h-10 items-center border-t border-border-row py-2"
-        >
-          <Skeleton className={cx('h-3', width)} />
+    <div
+      data-testid="upstream-metadata-loading"
+      className="grid grid-cols-2 gap-x-6 gap-y-4 @2xl:grid-cols-3 @4xl:grid-cols-4"
+    >
+      {['w-24', 'w-20', 'w-28', 'w-16'].map((width) => (
+        <div key={width} className="flex flex-col gap-1.5">
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className={cx('h-4', width)} />
         </div>
       ))}
     </div>
@@ -638,84 +633,75 @@ function QuotaWindowCardSkeleton() {
       <Skeleton className="h-4 w-36" />
       <Skeleton className="h-3 w-16" />
       <Skeleton className="h-4 w-24" />
-      <Skeleton className="mt-2 h-3 w-28" />
     </div>
   );
 }
 
 function UpstreamDetailLoadingShell() {
   return (
-    <div
+    <DetailPane
       data-testid="upstream-detail-loading-shell"
       aria-busy="true"
       aria-label="Loading upstream details"
-      className="@container flex flex-col gap-12"
+      header={<DetailHeaderSkeleton />}
     >
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-4 w-28" />
-        <Skeleton className="h-8 w-56" />
-        <Skeleton as="span" className="h-4 w-48" />
-      </div>
-      <div className={DETAIL_GRID_CLASS}>
-        <div className="flex min-w-0 flex-col gap-12">
-          <Section title="Quota windows">
-            <div
-              data-testid="quota-snapshot-grid"
-              className={QUOTA_WINDOW_GRID_CLASS}
-            >
-              {Array.from({ length: 3 }).map((_, index) => (
-                <QuotaWindowCardSkeleton key={index} />
-              ))}
-            </div>
-          </Section>
-          <Section
-            title="Quota history"
-            action={
-              <div
-                aria-hidden="true"
-                className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
-                data-testid="quota-history-range-control"
-              >
-                {QUOTA_HISTORY_RANGES.map((range) => (
-                  <span
-                    key={range}
-                    className={cx(
-                      'skeleton inline-flex items-center justify-center',
-                      QUOTA_HISTORY_RANGE_ITEM_CLASS,
-                    )}
-                  >
-                    <span className="invisible">{range}</span>
-                  </span>
-                ))}
-              </div>
-            }
-          >
-            <div>
-              <div
-                data-testid="quota-history-legend-slot"
-                className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1"
-              >
-                <Skeleton className="h-3 w-20" />
-                <Skeleton className="h-3 w-20" />
-              </div>
-              <Skeleton
-                className="w-full"
-                style={{ height: QUOTA_CHART_HEIGHT }}
-              />
-            </div>
-          </Section>
+      <DetailSection
+        title="Quota"
+        description={<Skeleton as="span" className="block h-4 w-56" />}
+      >
+        <div
+          data-testid="quota-snapshot-grid"
+          className={QUOTA_WINDOW_GRID_CLASS}
+        >
+          {Array.from({ length: 3 }).map((_, index) => (
+            <QuotaWindowCardSkeleton key={index} />
+          ))}
         </div>
-        <aside aria-label="Identity" className="flex flex-col gap-4">
-          <Skeleton className="h-5 w-20" />
+      </DetailSection>
+      <DetailSection
+        title="Quota history"
+        description="Used per window over time"
+        action={
           <div
-            data-testid="upstream-detail-loading-metadata"
-            className="min-h-9"
+            aria-hidden="true"
+            className={QUOTA_HISTORY_RANGE_GROUP_CLASS}
+            data-testid="quota-history-range-control"
           >
-            <IdentitySkeleton />
+            {QUOTA_HISTORY_RANGES.map((range) => (
+              <span
+                key={range}
+                className={cx(
+                  'skeleton inline-flex items-center justify-center',
+                  QUOTA_HISTORY_RANGE_ITEM_CLASS,
+                )}
+              >
+                <span className="invisible">{range}</span>
+              </span>
+            ))}
           </div>
-        </aside>
-      </div>
-    </div>
+        }
+      >
+        <div>
+          <div
+            data-testid="quota-history-legend-slot"
+            className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1"
+          >
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-3 w-20" />
+          </div>
+          <Skeleton className="w-full" style={{ height: QUOTA_CHART_HEIGHT }} />
+        </div>
+      </DetailSection>
+      <DetailSection
+        collapsible
+        title="Account metadata"
+        description="Subscription details Anthropic reports for this account"
+      >
+        <div data-testid="upstream-detail-loading-metadata" className="min-h-9">
+          <IdentitySkeleton />
+        </div>
+      </DetailSection>
+    </DetailPane>
   );
 }
 
@@ -784,36 +770,6 @@ function isQuotaWindow(name: string): name is SubscriptionQuotaWindow {
 function windowLabel(windowName: string): string {
   if (windowName === 'overage') return 'Extra usage';
   return isQuotaWindow(windowName) ? WINDOW_LABELS[windowName] : windowName;
-}
-
-/** Card-header caption: when the reading was taken, with a warn dot only
- *  when it is stale. The source sits in the hint. */
-function SnapshotStatusComposite({ snap }: { snap: QuotaSnapshot }) {
-  const source =
-    snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
-  const observed = snap.state === 'fresh' || snap.state === 'stale';
-  return (
-    <Hint label={`Source: ${source}`}>
-      <span
-        tabIndex={0}
-        className="relative inline-flex cursor-help items-center gap-1.5 self-start whitespace-nowrap rounded-sm text-caption text-text-faint"
-      >
-        {snap.state === 'stale' ? (
-          <>
-            <span aria-hidden="true" className="status-dot warn" />
-            <span className="sr-only">Stale:</span>
-          </>
-        ) : null}
-        {observed ? (
-          <span>
-            Updated <QuotaObservedAt snapshot={snap} />
-          </span>
-        ) : (
-          'No data'
-        )}
-      </span>
-    </Hint>
-  );
 }
 
 function PromotionalCreditsBadge({
@@ -1113,14 +1069,6 @@ function DetailView({
   const quotaAnalysisPending =
     quotaAnalysis.data === undefined && quotaAnalysis.isPending;
   const analysis = quotaAnalysis.data?.upstreams[0];
-  const a5h = analysis?.windows.find((w) => w.window === '5h');
-  const caveats = Array.from(
-    new Set(analysis?.windows.flatMap((w) => w.caveats) ?? []),
-  ).filter(
-    (c) =>
-      c.toLowerCase().trim() !==
-      'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
-  );
   const oauthStatusPending =
     isOauth && upstreamOAuthQ.data === undefined && upstreamOAuthQ.isPending;
   const recentPending = recent.data === undefined && recent.isPending;
@@ -1157,225 +1105,130 @@ function DetailView({
       : 'Disabling...'
     : null;
 
-  const fields: {
-    label: string;
-    value: React.ReactNode;
-    tooltip: string;
-  }[] = [];
-
-  const commonIdFields: typeof fields = [
-    {
-      label: 'ID',
-      value: (
-        <span className="break-all font-mono text-data">{upstream.id}</span>
-      ),
-      tooltip: 'Internal upstream identifier',
-    },
-  ];
-
-  if (isOauth) {
-    fields.push(...commonIdFields);
-    if (orgMeta?.organization_type)
-      fields.push({
-        label: 'Plan',
-        value: (
-          <span className="font-mono text-data">
-            {orgMeta.organization_type}
-          </span>
-        ),
-        tooltip: 'Anthropic subscription tier',
-      });
-    if (orgMeta?.rate_limit_tier)
-      fields.push({
-        label: 'Rate',
-        value: (
-          <span className="font-mono text-data">{orgMeta.rate_limit_tier}</span>
-        ),
-        tooltip:
-          'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)',
-      });
-    if (orgMeta?.has_extra_usage_enabled != null)
-      fields.push({
-        label: 'Extra usage billing',
-        value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
-        tooltip:
-          'Whether overage spending beyond plan quota is enabled (paid extra)',
-      });
-    if (orgMeta?.account_display_name || orgMeta?.account_email)
-      fields.push({
-        label: 'Account',
-        value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
-        tooltip: 'OAuth token account identity',
-      });
-    if (orgMeta?.organization_name)
-      fields.push({
-        label: 'Org',
-        value: orgMeta.organization_name,
-        tooltip: 'Anthropic organization name',
-      });
-    if (subMeta?.organization_role)
-      fields.push({
-        label: 'Role',
-        value: subMeta.organization_role,
-        tooltip: 'Your role within the organization',
-      });
-    if (subMeta?.workspace_role)
-      fields.push({
-        label: 'Seat',
-        value: subMeta.workspace_role,
-        tooltip: 'Seat tier within team plans',
-      });
-    if (orgMeta?.subscription_created_at_unix_secs)
-      fields.push({
-        label: 'Subscribed',
-        value: (
-          <RelativeTime
-            ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
-          />
-        ),
-        tooltip: 'When this organization first subscribed',
-      });
-    if (orgMeta?.billing_type)
-      fields.push({
-        label: 'Billing',
-        value: (
-          <span className="font-mono text-data">{orgMeta.billing_type}</span>
-        ),
-        tooltip: 'How the subscription is billed',
-      });
-  } else {
-    fields.push(...commonIdFields);
-    fields.push({
-      label: 'Base URL',
-      value: (
-        <span className="font-mono text-data">
-          {upstream.base_url || DEFAULT_ANTHROPIC_BASE_URL}
-        </span>
-      ),
-      tooltip: upstream.base_url
-        ? 'Endpoint base URL for upstream requests'
-        : `Endpoint base URL for upstream requests (default: ${DEFAULT_ANTHROPIC_BASE_URL})`,
-    });
-    if (upstream.api_key_env)
-      fields.push({
-        label: 'API key',
-        value: (
-          <span className="font-mono text-data">
-            env:{upstream.api_key_env}
-          </span>
-        ),
-        tooltip: `Loaded from the ${upstream.api_key_env} environment variable on the server`,
-      });
-    else if (upstream.kind === 'anthropic_api_key')
-      fields.push({
-        label: 'API key',
-        value: 'Literal',
-        tooltip: 'Stored inline (literal API key)',
-      });
-    if (upstreamRuntimeStatus?.last_apply_error)
-      fields.push({
-        label: 'Apply error',
-        value: (
-          <span className="text-danger-text">
-            {upstreamRuntimeStatus.last_apply_error}
-          </span>
-        ),
-        tooltip: 'Most recent failed reconciliation',
-      });
-  }
-
-  const planSummary = isOauth
-    ? [subscriptionPlanLabel(orgMeta), orgMeta?.organization_name]
-        .filter(Boolean)
-        .join(' · ') || 'Claude subscription'
+  const planLabel = isOauth
+    ? (subscriptionPlanLabel(orgMeta) ?? 'Claude subscription')
     : 'API key';
+  // The header carries plan, account and organization; the collapsed
+  // metadata section keeps only what the header does not say. API-key
+  // endpoint and key source live in Settings, where they are edited.
+  const headerMeta: React.ReactNode[] = !isOauth
+    ? []
+    : metadataPending
+      ? [<Skeleton key="meta" as="span" className="inline-block h-4 w-48" />]
+      : [
+          orgMeta?.account_email || orgMeta?.account_display_name,
+          orgMeta?.organization_name,
+        ];
+
+  const metadataFacts: { label: string; value: React.ReactNode }[] = [];
+  if (
+    orgMeta?.account_display_name &&
+    orgMeta.account_email &&
+    orgMeta.account_display_name !== orgMeta.account_email
+  )
+    metadataFacts.push({
+      label: 'Account name',
+      value: orgMeta.account_display_name,
+    });
+  if (subMeta?.organization_role)
+    metadataFacts.push({ label: 'Role', value: subMeta.organization_role });
+  if (subMeta?.workspace_role)
+    metadataFacts.push({ label: 'Seat', value: subMeta.workspace_role });
+  if (orgMeta?.has_extra_usage_enabled != null)
+    metadataFacts.push({
+      label: 'Extra usage billing',
+      value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
+    });
+  if (orgMeta?.billing_type)
+    metadataFacts.push({
+      label: 'Billing',
+      value: (
+        <span className="font-mono text-data">{orgMeta.billing_type}</span>
+      ),
+    });
+  if (orgMeta?.subscription_created_at_unix_secs)
+    metadataFacts.push({
+      label: 'Subscribed',
+      value: (
+        <RelativeTime
+          ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
+        />
+      ),
+    });
 
   const identity = (
-    <aside
-      aria-labelledby="upstream-identity-title"
-      className="flex min-w-0 flex-col gap-4"
-    >
-      <header className="flex min-h-7 items-center justify-between gap-3">
-        <h2
-          id="upstream-identity-title"
-          className="text-title-section text-text"
+    <DetailSection
+      collapsible
+      title="Account metadata"
+      description="Subscription details Anthropic reports for this account"
+      action={
+        <IconButton
+          label="Refresh subscription metadata"
+          disabled={triggerSubscriptionMetadataRefresh.isPending}
+          onClick={() => {
+            triggerSubscriptionMetadataRefresh.mutate(upstream.id, {
+              onSuccess: () => toast.success('Metadata refreshed'),
+              onError: (error) => {
+                const message =
+                  error instanceof ApiError
+                    ? error.message || `Request failed (${error.status})`
+                    : error instanceof Error
+                      ? error.message
+                      : String(error);
+                toast.error(`Metadata refresh failed: ${message}`);
+              },
+            });
+          }}
         >
-          Identity
-        </h2>
-        {isOauth && (
-          <Hint label="Refresh subscription metadata">
-            <button
-              type="button"
-              disabled={triggerSubscriptionMetadataRefresh.isPending}
-              onClick={() => {
-                triggerSubscriptionMetadataRefresh.mutate(upstream.id, {
-                  onSuccess: () => toast.success('Metadata refreshed'),
-                  onError: (error) => {
-                    const message =
-                      error instanceof ApiError
-                        ? error.message || `Request failed (${error.status})`
-                        : error instanceof Error
-                          ? error.message
-                          : String(error);
-                    toast.error(`Metadata refresh failed: ${message}`);
-                  },
-                });
-              }}
-              className="inline-flex size-7 items-center justify-center rounded-sm text-text-muted hover:bg-hover-bg hover:text-text disabled:opacity-40"
-              aria-label="Refresh subscription metadata"
-            >
-              <RefreshCw
-                strokeWidth={1.75}
-                className={cx(
-                  'size-3.5',
-                  triggerSubscriptionMetadataRefresh.isPending &&
-                    'animate-spin',
-                )}
-              />
-            </button>
-          </Hint>
-        )}
-      </header>
+          <RefreshCw
+            strokeWidth={1.75}
+            className={cx(
+              triggerSubscriptionMetadataRefresh.isPending && 'animate-spin',
+            )}
+          />
+        </IconButton>
+      }
+    >
       <div data-testid="upstream-metadata-strip" className="min-h-9">
         {metadataPending ? (
           <IdentitySkeleton />
-        ) : (
-          <dl className="flex flex-col">
-            {fields.map((f) => (
-              <div
-                key={f.label}
-                className="grid grid-cols-[minmax(0,8rem)_minmax(0,1fr)] items-baseline gap-x-4 border-t border-border-row py-2.5"
-              >
-                <dt className="text-label text-text-muted">
-                  <Hint label={f.tooltip}>
-                    <span
-                      tabIndex={0}
-                      className="inline-flex cursor-help items-center gap-1 rounded-sm hover:text-text"
-                    >
-                      {f.label}
-                      <Info
-                        aria-hidden="true"
-                        strokeWidth={1.75}
-                        className="size-3 opacity-60"
-                      />
-                    </span>
-                  </Hint>
-                </dt>
-                <dd className="min-w-0 break-words text-body text-text">
-                  {f.value}
-                </dd>
-              </div>
+        ) : metadataFacts.length ? (
+          <DetailFacts>
+            {metadataFacts.map((f) => (
+              <DetailFact key={f.label} label={f.label}>
+                {f.value}
+              </DetailFact>
             ))}
-          </dl>
+          </DetailFacts>
+        ) : (
+          <p className="text-body-sm text-text-muted">
+            No subscription metadata reported yet.
+          </p>
         )}
       </div>
-    </aside>
+    </DetailSection>
   );
 
   const quotaWindows = (
-    <Section
-      title="Quota windows"
-      subtitle="Used per window with its reset time"
+    <DetailSection
+      title="Quota"
+      description={
+        <span className="flex flex-wrap items-center gap-x-2">
+          Used per window and when it resets
+          {selectedLatest ? (
+            <QuotaFreshnessCaption snapshots={selectedLatest.windows} />
+          ) : null}
+        </span>
+      }
+      action={
+        <LimitResetAction
+          key={upstream.id}
+          upstream={upstream}
+          quotaWindows={
+            quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
+          }
+        />
+      }
     >
       {quotaLatestPending ? (
         <div
@@ -1537,19 +1390,18 @@ function DetailView({
                     is observed.
                   </p>
                 )}
-                <SnapshotStatusComposite snap={snap} />
               </article>
             );
           })}
         </div>
       )}
-    </Section>
+    </DetailSection>
   );
 
   const quotaHistory = (
-    <Section
+    <DetailSection
       title="Quota history"
-      subtitle="Used per window over time"
+      description="Used per window over time"
       action={
         <div data-testid="quota-history-range-control">
           <SegmentedControl
@@ -1590,30 +1442,31 @@ function DetailView({
                       )
                     }
                     aria-pressed={effectiveIsolatedWindow === windowName}
-                    className={cx(
-                      'flex min-h-6 cursor-pointer items-center gap-1.5 rounded-sm text-body-sm transition-opacity',
-                      dimmed ? 'opacity-40 hover:opacity-70' : '',
-                    )}
+                    className="-mx-1.5 flex min-h-6 cursor-pointer items-center gap-1.5 rounded-sm px-1.5 text-body-sm transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                   >
                     <span
                       aria-hidden="true"
-                      className="w-3 border-t-2"
+                      className={cx('w-3 border-t-2', dimmed && 'opacity-40')}
                       style={{
                         borderColor: getWindowColor(windowName).stroke,
                         borderStyle:
                           windowName === DASHED_WINDOW ? 'dashed' : 'solid',
                       }}
                     />
-                    <span className="text-text-muted">
+                    <span
+                      className={dimmed ? 'text-text-faint' : 'text-text-muted'}
+                    >
                       {windowLabel(windowName)}
                     </span>
                     {current != null ? (
                       <span
                         className={cx(
                           'tabular-nums',
-                          QUOTA_SEVERITY_TEXT_CLASS[
-                            quotaSeverity(current * 100)
-                          ],
+                          dimmed
+                            ? 'text-text-faint'
+                            : QUOTA_SEVERITY_TEXT_CLASS[
+                                quotaSeverity(current * 100)
+                              ],
                         )}
                       >
                         {formatQuotaPercent(current * 100)} used
@@ -1871,176 +1724,173 @@ function DetailView({
           <p className="mt-3 text-caption text-text-muted">
             {formatQuotaStamp(seriesSinceUnixSecs, timeZone)} →{' '}
             {formatQuotaStamp(seriesUntilUnixSecs, timeZone)}
-            {selectedLatest?.windows[0] ? (
-              <>
-                {' · provider data observed '}
-                <QuotaObservedAt snapshot={selectedLatest.windows[0]} />
-              </>
-            ) : null}
           </p>
         )}
       </div>
-    </Section>
+    </DetailSection>
   );
+
+  const titleId = 'upstream-detail-title';
+  const hasBillingNotice =
+    isOauth &&
+    (orgMeta?.claude_code_trial_ends_at ||
+      orgMeta?.payment_auth_hosted_invoice_url ||
+      orgMeta?.overage_credit_granted ||
+      orgMeta?.overage_credit_eligible ||
+      (orgMeta?.overage_credit_amount_minor_units != null &&
+        orgMeta.overage_credit_amount_minor_units > 0));
+  const applyError = isOauth ? null : upstreamRuntimeStatus?.last_apply_error;
+  const hasNotices =
+    reconnectNudge != null || !!applyError || !!hasBillingNotice;
 
   return (
     <>
-      <section
-        aria-labelledby="upstream-detail-title"
-        className="@container flex flex-col gap-12"
-      >
-        <div className="flex flex-col gap-3">
-          <button
-            type="button"
-            onClick={onBack}
-            className="-ml-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text md:hidden"
-          >
-            <ChevronLeft className="size-4" strokeWidth={1.75} /> All upstreams
-          </button>
-          <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
-            <div className="min-w-0">
-              <p className="text-label text-text-muted">Selected upstream</p>
-              <h2 id="upstream-detail-title" className="mt-1 break-words">
-                <InlineNameEditor upstream={upstream} />
-              </h2>
-              <p className="mt-1 flex min-h-5 items-center text-body text-text-muted">
-                {metadataPending ? (
-                  <Skeleton as="span" className="h-4 w-48" />
-                ) : (
-                  planSummary
-                )}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <ToggleSwitch
-                variant="compact"
-                role="switch"
-                aria-label="Enabled"
-                label={upstream.enabled ? 'Enabled' : 'Disabled'}
-                checked={upstream.enabled}
-                disabled={toggle.isPending}
-                onChange={(e) =>
-                  setEnabledConfirm({ open: true, enabled: e.target.checked })
-                }
-                className="flex-row-reverse"
-              />
-              {/* One danger surface per problem: when the reconnect notice
-                  below owns the diagnosis, the head stays quiet. */}
-              {headerHealth.tone === 'danger' && !reconnectNudge ? (
+      <DetailPane
+        aria-labelledby={titleId}
+        header={
+          <DetailHeader
+            backLabel="All upstreams"
+            onBack={onBack}
+            title={<InlineNameEditor upstream={upstream} />}
+            titleId={titleId}
+            badge={
+              metadataPending ? (
+                <Skeleton as="span" className="inline-block h-5 w-24" />
+              ) : (
+                <Badge>{planLabel}</Badge>
+              )
+            }
+            // One danger surface per problem: when the reconnect notice
+            // below owns the diagnosis, the header stays quiet.
+            status={
+              headerHealth.tone === 'danger' && !reconnectNudge ? (
                 <StatusBadge tone="danger" label={headerHealth.label} />
-              ) : null}
-              {togglePendingLabel ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  data-testid="upstream-enabled-pending"
-                  className="inline-flex items-center gap-1.5 text-body-sm text-text-muted"
-                >
-                  <Spinner className="w-3 h-3 text-text-muted" />
-                  {togglePendingLabel}
-                </span>
-              ) : null}
-              <LimitResetAction
-                key={upstream.id}
-                upstream={upstream}
-                quotaWindows={
-                  quotaLatest.isError ? [] : (selectedLatest?.windows ?? [])
-                }
-              />
-              <Button
-                size="sm"
-                variant="danger"
-                iconLeft={<Trash2 />}
-                onClick={() => setConfirmDeleteOpen(true)}
-              >
-                Delete
-              </Button>
-            </div>
-          </div>
-        </div>
-
-        {reconnectNudge ? (
-          <OAuthReconnectNotice
-            nudge={reconnectNudge}
-            onReconnect={onConnect}
+              ) : null
+            }
+            meta={headerMeta}
+            id={upstream.id}
+            idLabel="Upstream ID"
+            enabled={upstream.enabled}
+            onEnabledChange={(checked) =>
+              setEnabledConfirm({ open: true, enabled: checked })
+            }
+            enabledDisabled={toggle.isPending}
+            pendingLabel={togglePendingLabel}
+            onDelete={() => setConfirmDeleteOpen(true)}
+            deleting={del.isPending}
           />
-        ) : null}
+        }
+        notices={
+          hasNotices ? (
+            <>
+              {reconnectNudge ? (
+                <OAuthReconnectNotice
+                  nudge={reconnectNudge}
+                  onReconnect={onConnect}
+                />
+              ) : null}
+              {applyError ? (
+                <Notice tone="danger" title="Last apply failed">
+                  <span className="break-words">{applyError}</span>
+                </Notice>
+              ) : null}
+              {hasBillingNotice ? (
+                <>
+                  <TrialBanner orgMeta={orgMeta} />
+                  <PaymentWarning orgMeta={orgMeta} />
+                  <PromotionalCreditsBadge orgMeta={orgMeta} />
+                </>
+              ) : null}
+            </>
+          ) : null
+        }
+      >
+        {isOauth ? (
+          <>
+            {quotaWindows}
+            {quotaHistory}
+          </>
+        ) : (
+          <ApiUsageCard
+            data={apiUsageQ.data}
+            isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
+            range={apiUsageRange}
+            onRangeChange={setApiUsageRange}
+            metric={apiUsageMetric}
+            onMetricChange={setApiUsageMetric}
+          />
+        )}
 
-        {isOauth &&
-        (orgMeta?.claude_code_trial_ends_at ||
-          orgMeta?.payment_auth_hosted_invoice_url ||
-          orgMeta?.overage_credit_granted ||
-          orgMeta?.overage_credit_eligible ||
-          (orgMeta?.overage_credit_amount_minor_units != null &&
-            orgMeta.overage_credit_amount_minor_units > 0)) ? (
-          <div className="space-y-2">
-            <TrialBanner orgMeta={orgMeta} />
-            <PaymentWarning orgMeta={orgMeta} />
-            <PromotionalCreditsBadge orgMeta={orgMeta} />
-          </div>
-        ) : null}
-
-        <div className={DETAIL_GRID_CLASS}>
-          <div className="flex min-w-0 flex-col gap-12">
-            {isOauth ? (
-              <>
-                {quotaWindows}
-                {quotaHistory}
-              </>
+        <DetailSection
+          data-testid="recent-requests-card"
+          title="Recent requests"
+          description={
+            recentPending ? (
+              <Skeleton className="h-3 w-52" />
+            ) : recentForUpstream.length === 0 ? (
+              `No recent requests against ${upstream.name}`
             ) : (
-              <ApiUsageCard
-                data={apiUsageQ.data}
-                isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
-                range={apiUsageRange}
-                onRangeChange={setApiUsageRange}
-                metric={apiUsageMetric}
-                onMetricChange={setApiUsageMetric}
-              />
-            )}
+              `Last ${recentForUpstream.length} against ${upstream.name}`
+            )
+          }
+        >
+          <div
+            data-testid="recent-requests-table-slot"
+            className="glass min-h-48 overflow-x-auto rounded-md"
+          >
+            <RequestEventsTable
+              events={recentForUpstream}
+              principalNameMap={principalNameMap}
+              upstreamNameMap={upstreamNameMap}
+              loading={recentPending}
+              columns={{
+                upstream: false,
+                cost: true,
+                tokens: true,
+              }}
+              minWidthClass="min-w-[920px]"
+              emptyTitle="No recent requests for this upstream"
+            />
           </div>
-          {identity}
-        </div>
+        </DetailSection>
 
         {isOauth ? (
-          <div className="grid gap-12 @4xl:grid-cols-2">
-            <WarmupCardMinimal
-              upstream={upstream}
-              credentialNoticeShown={reconnectNudge != null}
-            />
-            <Section
-              title="OAuth status"
-              subtitle={
+          <>
+            <DetailSection
+              title="Credential"
+              description={
                 oauthStatusPending ? (
                   <Skeleton className="h-3 w-32" />
                 ) : hasBoundToken ? (
-                  'Bound on this upstream'
+                  'OAuth token bound on this upstream'
                 ) : (
                   'Not connected'
                 )
               }
               action={
-                <div className="flex items-center gap-3">
-                  {oauthStatusPending ? (
-                    <>
-                      <Skeleton className="h-5 w-24" />
-                      <Skeleton className="h-7 w-24" />
-                    </>
-                  ) : (
-                    <>
+                oauthStatusPending ? (
+                  <>
+                    <Skeleton className="h-5 w-24" />
+                    <Skeleton className="h-7 w-24" />
+                  </>
+                ) : (
+                  <>
+                    {/* The reconnect notice already names a problem. */}
+                    {reconnectNudge ? null : (
                       <StatusBadge
                         tone={oauthStatusBadge.tone}
                         label={oauthStatusBadge.label}
                       />
-                      <Button
-                        size="sm"
-                        iconLeft={<KeyRound />}
-                        onClick={onConnect}
-                      >
-                        {hasBoundToken ? 'Reconnect' : 'Connect'}
-                      </Button>
-                    </>
-                  )}
-                </div>
+                    )}
+                    <Button
+                      size="sm"
+                      iconLeft={<KeyRound />}
+                      onClick={onConnect}
+                    >
+                      {hasBoundToken ? 'Reconnect' : 'Connect'}
+                    </Button>
+                  </>
+                )
               }
             >
               <div
@@ -2203,102 +2053,17 @@ function DetailView({
                   </p>
                 )}
               </div>
-            </Section>
-          </div>
+            </DetailSection>
+            <WarmupCardMinimal
+              upstream={upstream}
+              credentialNoticeShown={reconnectNudge != null}
+            />
+            {identity}
+          </>
         ) : (
           <SettingsCard upstream={upstream} />
         )}
-
-        <div data-testid="recent-requests-card">
-          <Section
-            title="Recent requests"
-            subtitle={
-              recentPending ? (
-                <Skeleton className="h-3 w-52" />
-              ) : recentForUpstream.length === 0 ? (
-                `No recent requests against ${upstream.name}`
-              ) : (
-                `Last ${recentForUpstream.length} against ${upstream.name}`
-              )
-            }
-          >
-            <div
-              data-testid="recent-requests-table-slot"
-              className="min-h-48 overflow-x-auto"
-            >
-              <RequestEventsTable
-                events={recentForUpstream}
-                principalNameMap={principalNameMap}
-                upstreamNameMap={upstreamNameMap}
-                loading={recentPending}
-                columns={{
-                  upstream: false,
-                  cost: true,
-                  tokens: true,
-                }}
-                minWidthClass="min-w-[920px]"
-                emptyTitle="No recent requests for this upstream"
-              />
-            </div>
-          </Section>
-        </div>
-
-        {selectedLatest && (a5h?.deficit || caveats.length > 0) && (
-          <Section title="Quota analysis">
-            <div className="flex flex-col gap-6">
-              {a5h?.deficit && (
-                <div className="flex flex-col gap-2">
-                  <h3 className="text-title-card text-text">Quota deficit</h3>
-                  <dl className="grid max-w-md grid-cols-[auto_1fr] items-baseline gap-x-6 gap-y-2 text-body">
-                    <dt className="text-label text-text-muted">Shortfall</dt>
-                    <dd className="text-right tabular-nums text-warn-text">
-                      {Math.round(
-                        a5h.deficit.shortfall_tokens,
-                      ).toLocaleString()}{' '}
-                      <span className="text-text-muted">tokens</span>
-                    </dd>
-                    <dt className="text-label text-text-muted">
-                      Recommended multiplier
-                    </dt>
-                    <dd className="text-right tabular-nums text-warn-text">
-                      {a5h.deficit.recommended_multiplier}×
-                    </dd>
-                    <dt className="text-label text-text-muted">Confidence</dt>
-                    <dd className="text-right text-text">
-                      {a5h.deficit.confidence}
-                    </dd>
-                  </dl>
-                </div>
-              )}
-              {caveats.length > 0 && (
-                <Notice tone="warning" title="Analysis caveats">
-                  <ul className="list-disc list-inside ml-1">
-                    {caveats.map((c) => {
-                      // The backend names its config key; operators read
-                      // the actual freshness limit instead.
-                      const limit = quotaAnalysis.data?.max_staleness_secs;
-                      const text = c
-                        .toLowerCase()
-                        .startsWith(
-                          'latest observation is older than max_staleness_secs',
-                        )
-                        ? `Latest reading is older than ${
-                            limit == null
-                              ? 'the freshness limit'
-                              : limit >= 60
-                                ? `${Math.round(limit / 60)} min`
-                                : `${limit} s`
-                          }; analysis may be outdated`
-                        : c.charAt(0).toUpperCase() + c.slice(1);
-                      return <li key={c}>{text}</li>;
-                    })}
-                  </ul>
-                </Notice>
-              )}
-            </div>
-          </Section>
-        )}
-      </section>
+      </DetailPane>
 
       <ConfirmDialog
         open={confirmDeleteOpen}

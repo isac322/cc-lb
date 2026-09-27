@@ -184,7 +184,7 @@ export function PluginCatalog({
                     // through the row's Inspect button.
                     <tr
                       key={p.id}
-                      className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row last:border-b-0 transition-colors cursor-pointer hover:bg-overlay-2`}
+                      className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row last:border-b-0 transition-colors cursor-pointer hover:bg-hover-bg`}
                       onClick={() => onSelectPlugin(p.id)}
                     >
                       <TableCell>
@@ -281,7 +281,7 @@ export function PluginCatalog({
                           <button
                             type="button"
                             aria-label={`Inspect ${p.name}`}
-                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:bg-hover-bg hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                             onClick={(e) => {
                               e.stopPropagation();
                               onSelectPlugin(p.id);

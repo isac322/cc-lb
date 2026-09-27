@@ -280,12 +280,11 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   const detailShell = screen.getByRole('status', {
     name: 'Loading principal details',
   });
-  const detailPane = detailShell.closest('section');
+  const detailPane = screen.getByTestId('principal-detail-pane');
+  expect(detailPane.contains(detailShell)).toBe(true);
   expect(detailPane?.className).toContain('hidden');
   expect(detailPane?.className).toContain('md:flex');
-  expect(detailShell.querySelectorAll('[data-principal-section]')).toHaveLength(
-    7,
-  );
+  expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(7);
   expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
 
   loadingView.unmount();

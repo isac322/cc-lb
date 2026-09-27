@@ -669,7 +669,7 @@ describe('/upstreams cold-load geometry', () => {
     const metadataLoading = within(metadata).getByTestId(
       'upstream-metadata-loading',
     );
-    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(5);
+    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(8);
 
     const legend = screen.getByTestId('quota-history-legend-slot');
     expect(legend.className).toContain('min-h-5');
@@ -1414,7 +1414,7 @@ describe('/upstreams mutation pending UX', () => {
 
     const pendingToggle = screen.getByRole('switch', { name: 'Enabled' });
     expect(pendingToggle.hasAttribute('disabled')).toBe(true);
-    const status = screen.getByTestId('upstream-enabled-pending');
+    const status = screen.getByTestId('detail-enabled-pending');
     expect(status.getAttribute('role')).toBe('status');
     expect(status.textContent).toContain('Disabling...');
     expect(status.querySelector('svg.animate-spin')).not.toBeNull();
@@ -1954,7 +1954,8 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(
       within(notice).getByRole('button', { name: 'Reconnect' }),
     ).toBeDefined();
-    expect(screen.getByText('Login expiring')).toBeDefined();
+    // The notice owns the problem; the credential section does not repeat it.
+    expect(screen.queryByText('Login expiring')).toBeNull();
 
     cleanup();
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(

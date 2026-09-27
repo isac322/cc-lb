@@ -246,11 +246,20 @@ test('audit rows open their entry from the keyboard and name entities', async ()
 
   renderAudit();
   const [row] = tableRows();
+  const time = row?.cells[0]?.querySelector('[title]');
+  expect(time?.textContent).toBe('1y ago');
+  expect(time?.getAttribute('title')).toContain('2025');
   expect(row?.cells[1]?.textContent).toBe(
     'Upstream updatedupstream_update· fields: weight, enabled',
   );
   expect(row?.cells[2]?.textContent).toBe('upstream isac-max');
-  expect(row?.cells[4]?.textContent).toBe('/admin/v1/upstreams/isac-max');
+  expect(
+    within(row?.cells[2] as HTMLElement)
+      .getByRole('link', { name: 'isac-max' })
+      .getAttribute('href'),
+  ).toBe(`/upstreams?selectedId=${upstreamId}`);
+  expect(row?.cells[3]?.textContent).toBe('2 fields: weight, enabled');
+  expect(row?.cells[5]?.textContent).toBe('200/upstreams/isac-max');
 
   const open = within(row as HTMLElement).getByRole('button', {
     name: /^Open Upstream updated entry from /,
@@ -264,6 +273,38 @@ test('audit rows open their entry from the keyboard and name entities', async ()
     'This entry records which fields changed, not their previous or new values.',
   );
   expect(dialog.textContent).toContain(`isac-max (${upstreamId.slice(0, 8)})`);
+});
+
+test('audit details leave out the target and unbounded query limits', () => {
+  const principalId = '7fb023cf-180a-4738-9cc8-79c0d6572182';
+  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
+    new Map([[principalId, 'local-traffic']]),
+  );
+  mockEntries([
+    {
+      request_id: 'r1',
+      ts: 1_750_204_800,
+      status: 200,
+      principal_id: principalId,
+      route: `/admin/v1/principals/${principalId}/keys`,
+      upstream: 'admin',
+      actor: 'static-token/local',
+      admin_action: 'principal_keys_list',
+      payload: {
+        principal_id: principalId,
+        status: 'active',
+        since: 0,
+        // u64::MAX as the JSON parser delivers it.
+        until: 2 ** 64,
+        actor_subject: null,
+      },
+    },
+  ]);
+
+  renderAudit({ type: 'all' });
+  const [row] = tableRows();
+  expect(row?.cells[2]?.textContent).toBe('principal local-traffic');
+  expect(row?.cells[3]?.textContent).toBe('status: active · since: 0');
 });
 
 test('audit preserves duplicate request-id events across filter result transitions', () => {

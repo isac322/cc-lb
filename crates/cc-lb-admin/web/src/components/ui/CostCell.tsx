@@ -1,14 +1,12 @@
 import { formatCostMicros } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover } from './BreakdownPopover';
-import { cx, Hint } from './primitives';
+import { EmptyMetricCell, MetricCell } from './MetricCell';
 import {
   type CostComponentMicros,
   costCategorySegments,
   sumCostMicros,
 } from './usage/costCategories';
-
-const DASH = '—';
 
 type CostBreakdownT = {
   components: CostComponentMicros;
@@ -34,6 +32,10 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
   return { components, total, hasComponents };
 }
 
+/**
+ * Request cost over a bar of what it paid for, in the token bar's five
+ * categories. Cost no category accounts for is left as bare track.
+ */
 export function CostCell({
   event,
   isPartial,
@@ -47,16 +49,7 @@ export function CostCell({
   const segments = costCategorySegments(c.components);
 
   if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
-    return (
-      <td
-        className={cx(
-          'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-          className,
-        )}
-      >
-        <span className="text-text-faint">{DASH}</span>
-      </td>
-    );
+    return <EmptyMetricCell className={className} />;
   }
 
   const popover = (
@@ -73,27 +66,20 @@ export function CostCell({
       footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}
     />
   );
+  const text = isPartial
+    ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
+    : formatCostMicros(c.total);
 
   return (
-    <td
-      className={cx(
-        'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-        className,
-      )}
-      onClick={(e) => e.stopPropagation()}
+    <MetricCell
+      className={className}
+      label={`Cost ${text}, show breakdown`}
+      popover={popover}
+      segments={segments}
+      total={c.total}
+      pulse={isPartial}
     >
-      <Hint label={popover}>
-        <span
-          className={cx(
-            'cursor-help text-text',
-            isPartial ? 'animate-pulse' : '',
-          )}
-        >
-          {isPartial
-            ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
-            : formatCostMicros(c.total)}
-        </span>
-      </Hint>
-    </td>
+      <span className="text-text">{text}</span>
+    </MetricCell>
   );
 }

@@ -490,7 +490,6 @@ describe('RequestEventsTable', () => {
 
     expect(headers()).not.toContain('Session');
     expect(headers()).not.toContain('Request kind');
-    expect(headers()).not.toContain('Cache hit');
 
     rerender(
       <RequestEventsTable
@@ -512,13 +511,20 @@ describe('RequestEventsTable', () => {
     );
 
     expect(headers()).toEqual(
-      expect.arrayContaining(['Session', 'Request kind', 'Cache hit']),
+      expect.arrayContaining(['Session', 'Request kind']),
     );
-    const hitColumn = headers().indexOf('Cache hit');
-    const cells = (row: number) =>
-      container.querySelectorAll('tbody > tr')[row].querySelectorAll('td');
-    expect(cells(0)[hitColumn].textContent).toBe('75%');
-    expect(cells(1)[hitColumn].textContent).toBe('—');
+    // Cache hit lives in the tokens cell, not in a column of its own.
+    expect(headers()).not.toContain('Cache hit');
+    expect(
+      screen.getByRole('button', {
+        name: 'Tokens 40 in, 0 out, cache hit 75%, show breakdown',
+      }),
+    ).toBeDefined();
+    expect(
+      screen.getByRole('button', {
+        name: 'Tokens 20 in, 0 out, show breakdown',
+      }),
+    ).toBeDefined();
   });
 
   describe('Cost Tooltip', () => {

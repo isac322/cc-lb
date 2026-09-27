@@ -1,7 +1,7 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
-import { Badge, cx, Skeleton } from '../../ui/primitives';
+import { Badge, Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 
 interface Props {
@@ -59,21 +59,22 @@ function SessionDetailHeader({ onClose }: Pick<Props, 'onClose'>) {
   return (
     <div className="flex items-start justify-between gap-2 sticky top-0 bg-bg-sub -m-3 mb-0 px-3 py-2 border-b border-subtle z-10">
       <h3 className="text-title-card text-text">Session detail</h3>
-      <button
-        type="button"
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onClose}
         aria-label="Back to sessions"
-        className="-my-1 min-h-8 px-2 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 text-caption inline-flex items-center gap-1 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="-my-0.5"
       >
         <span className="inline-flex items-center gap-1 max-[960px]:hidden">
           Close
-          <ChevronRight size={14} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronRight strokeWidth={1.75} aria-hidden="true" />
         </span>
         <span className="hidden items-center gap-1 max-[960px]:inline-flex">
-          <ChevronLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronLeft strokeWidth={1.75} aria-hidden="true" />
           Back
         </span>
-      </button>
+      </Button>
     </div>
   );
 }

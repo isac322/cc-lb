@@ -1,11 +1,10 @@
 // Linear quota usage: the fill is what has been USED of a window, matching
 // the utilization Claude reports. Neutral ink below 80% used, warn from 80%,
-// danger from 95%, with a 1px mark where the warn zone starts.
+// danger from 95%. The track carries no marks: the fill color is the cue.
 // Static: nothing animates, so reduced motion needs no special case.
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
-  QUOTA_WARN_PCT,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx } from './primitives';
@@ -74,11 +73,6 @@ export function UsageMeter({
             style={{ width: `${Math.max(used, 1)}%` }}
           />
         ) : null}
-        <span
-          aria-hidden="true"
-          className="absolute -inset-y-0.5 w-px bg-text-faint"
-          style={{ left: `${QUOTA_WARN_PCT}%` }}
-        />
       </span>
     </div>
   );

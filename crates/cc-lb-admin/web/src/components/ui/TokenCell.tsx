@@ -1,6 +1,6 @@
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover, fmtTokens } from './BreakdownPopover';
-import { cx, Hint } from './primitives';
+import { MetricCell } from './MetricCell';
 import { SLICE_COLORS } from './usage/sliceColors';
 
 type TokenBreakdown = {
@@ -36,17 +36,19 @@ function totalInputTokens(b: TokenBreakdown): number {
 
 /**
  * Share of the prompt served from cache, as a whole percent, or null when the
- * request read nothing from cache (the table hides the column when every row
- * is null).
+ * request read nothing from cache.
  */
-export function cacheHitPercent(e: RequestEventWithPhase): number | null {
-  const b = tokenBreakdown(e);
+function cacheHitPercent(b: TokenBreakdown): number | null {
   const denom = totalInputTokens(b);
   if (denom <= 0 || b.cr <= 0) return null;
   return Math.round((b.cr / denom) * 100);
 }
 
-/** "2.8k → 8": prompt tokens in, output tokens out, one size, tabular. */
+/**
+ * "2.8k → 8" (prompt tokens in, output tokens out) over a bar of the request's
+ * token composition: input, output, cache create 5m / 1h and cache read, so the
+ * cache-read share is the cache hit at a glance.
+ */
 export function TokenCell({
   event,
   isPartial,
@@ -57,64 +59,52 @@ export function TokenCell({
   className?: string;
 }) {
   const b = tokenBreakdown(event);
+  const input = fmtTokens(totalInputTokens(b));
+  const output = fmtTokens(b.output);
+  const hit = cacheHitPercent(b);
+  const rows = [
+    { label: 'Input', value: b.input, color: SLICE_COLORS.input },
+    { label: 'Output', value: b.output, color: SLICE_COLORS.output },
+    {
+      label: 'Cache create 5m',
+      value: b.cc_5m,
+      color: SLICE_COLORS.cache_create_5m,
+    },
+    {
+      label: 'Cache create 1h',
+      value: b.cc_1h,
+      color: SLICE_COLORS.cache_create_1h,
+    },
+    { label: 'Cache read', value: b.cr, color: SLICE_COLORS.cache_read },
+  ];
 
   const popover = (
     <BreakdownPopover
       title="Tokens"
-      rows={[
-        {
-          label: 'Input',
-          value: b.input,
-          color: SLICE_COLORS.input,
-          fmt: fmtTokens,
-        },
-        {
-          label: 'Output',
-          value: b.output,
-          color: SLICE_COLORS.output,
-          fmt: fmtTokens,
-        },
-        {
-          label: 'Cache create 5m',
-          value: b.cc_5m,
-          color: SLICE_COLORS.cache_create_5m,
-          fmt: fmtTokens,
-        },
-        {
-          label: 'Cache create 1h',
-          value: b.cc_1h,
-          color: SLICE_COLORS.cache_create_1h,
-          fmt: fmtTokens,
-        },
-        {
-          label: 'Cache read',
-          value: b.cr,
-          color: SLICE_COLORS.cache_read,
-          fmt: fmtTokens,
-        },
-      ]}
+      rows={rows.map((row) => ({ ...row, fmt: fmtTokens }))}
+      footer={
+        hit != null
+          ? { label: 'Cache hit of prompt', value: hit, fmt: (v) => `${v}%` }
+          : null
+      }
     />
   );
 
   return (
-    <td
-      className={cx(
-        'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-        className,
-      )}
-      onClick={(e) => e.stopPropagation()}
+    <MetricCell
+      className={className}
+      label={`Tokens ${input} in, ${output} out${
+        hit != null ? `, cache hit ${hit}%` : ''
+      }, show breakdown`}
+      popover={popover}
+      segments={rows}
+      pulse={isPartial}
     >
-      <Hint label={popover}>
-        <span className={cx('cursor-help', isPartial ? 'animate-pulse' : '')}>
-          <span className="text-text">{fmtTokens(totalInputTokens(b))}</span>
-          <span aria-hidden="true" className="px-1 text-text-faint">
-            →
-          </span>
-          <span className="sr-only"> in, </span>
-          <span className="text-text">{fmtTokens(b.output)}</span>
-          <span className="sr-only"> out</span>
-        </span>
-      </Hint>
-    </td>
+      <span className="text-text">{input}</span>
+      <span aria-hidden="true" className="px-1 text-text-faint">
+        →
+      </span>
+      <span className="text-text">{output}</span>
+    </MetricCell>
   );
 }

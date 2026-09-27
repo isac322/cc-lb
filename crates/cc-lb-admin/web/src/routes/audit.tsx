@@ -1,6 +1,17 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  Link,
+  useNavigate,
+  useRouter,
+} from '@tanstack/react-router';
 import { ChevronRight, RefreshCw, SlidersHorizontal, X } from 'lucide-react';
-import { type ReactNode, useMemo, useRef, useState } from 'react';
+import {
+  type MouseEvent,
+  type ReactNode,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import * as z from 'zod';
 import { AuditEntryDrawer } from '../components/audit/AuditEntryDrawer';
 import {
@@ -8,9 +19,11 @@ import {
   AUDIT_TYPE_FILTERS,
   AUDIT_TYPE_NOUN,
   type AuditEntryLike,
+  type AuditTarget,
   type AuditTypeFilter,
   auditActorLabel,
   auditCategory,
+  auditDetailParts,
   auditTarget,
   humanizeAuditAction,
   type NameMaps,
@@ -31,6 +44,7 @@ import {
   SegmentedControl,
   SkeletonRow,
 } from '../components/ui/primitives';
+import { RelativeTime } from '../components/ui/RelativeTime';
 import { Select } from '../components/ui/Select';
 import {
   EmptyValue,
@@ -115,26 +129,83 @@ const TYPE_OPTIONS: ReadonlyArray<{ value: AuditTypeFilter; label: string }> = [
 
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS_WITH_ALL;
 
-// Time, Action, Target, Actor, Route, Status, Open.
+// Columns size to the table's own width (container query, so a collapsed
+// sidebar counts), not the viewport. Below 56rem (1024px screens) Action is the
+// one flexible column and the change summary rides under it. From 56rem
+// (1280–1536px screens) Action is capped and the room goes to a Details column
+// plus the route beside the status. From 80rem (1920px screens) the fixed
+// columns widen and the actor kind shows. Order: Time, Action, Target,
+// Details, Actor, Request (status + route), Open.
 const AUDIT_COLUMN_CLASS_NAMES = [
-  'w-44',
-  '',
-  'w-48',
-  'w-40',
-  'w-56',
-  'w-20',
-  'w-14',
+  'w-[6rem]',
+  '@4xl:w-[15rem] @7xl:w-[18rem]',
+  'w-[10.5rem] @4xl:w-[11rem] @7xl:w-[13rem]',
+  'hidden @4xl:table-cell',
+  'w-[8.5rem] @4xl:w-[9.5rem] @7xl:w-[12rem]',
+  'w-[4.5rem] @4xl:w-[12rem] @7xl:w-[16rem]',
+  'w-[3.5rem]',
+] as const;
+
+const AUDIT_SKELETON_CELL_CLASS_NAMES = [
+  undefined,
+  undefined,
+  undefined,
+  'hidden @4xl:table-cell',
 ] as const;
 
 const AUDIT_SKELETON_CLASS_NAMES = [
-  'w-28',
+  'w-14',
   'w-40',
   'w-28',
+  'w-48',
   'w-28',
-  'w-40',
-  'w-8 ml-auto',
+  'w-8 ml-auto @4xl:ml-0 @4xl:w-40',
   'w-6 ml-auto',
 ] as const;
+
+const ENTITY_LINK_CLASS =
+  'rounded-sm text-text underline decoration-border-strong underline-offset-2 hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
+
+/**
+ * The target's name, linked to its page while the entity still exists. Falls
+ * back to a plain anchor outside a router (component tests mount bare).
+ */
+function TargetName({ target, maps }: { target: AuditTarget; maps: NameMaps }) {
+  const router = useRouter({ warn: false });
+  const list = target.kind === 'upstream' ? maps.upstreams : maps.principals;
+  if (!target.resolved || target.id == null || !list.has(target.id)) {
+    return (
+      <span
+        className={
+          target.resolved ? 'text-text' : 'font-mono text-data text-text-muted'
+        }
+      >
+        {target.name}
+      </span>
+    );
+  }
+  const to = target.kind === 'upstream' ? '/upstreams' : '/principals';
+  // The row opens the entry drawer; following the link must not.
+  const stop = (event: MouseEvent) => event.stopPropagation();
+  return router ? (
+    <Link
+      to={to}
+      search={{ selectedId: target.id }}
+      className={ENTITY_LINK_CLASS}
+      onClick={stop}
+    >
+      {target.name}
+    </Link>
+  ) : (
+    <a
+      href={`${to}?selectedId=${encodeURIComponent(target.id)}`}
+      className={ENTITY_LINK_CLASS}
+      onClick={stop}
+    >
+      {target.name}
+    </a>
+  );
+}
 
 const GROUP_LABEL_CLASS = 'text-label text-text-muted';
 
@@ -468,22 +539,35 @@ function AuditPage() {
       {/* The card is as tall as its rows; past the viewport the list scrolls. */}
       <Card className="flex min-h-0 flex-col">
         {/* Desktop table */}
-        <div className="hidden min-h-0 overflow-auto md:block">
-          <Table className="table-fixed min-w-[960px]">
-            <colgroup>
-              {AUDIT_COLUMN_CLASS_NAMES.map((className, index) => (
-                <col key={index} className={className} />
-              ))}
-            </colgroup>
+        <div className="@container hidden min-h-0 overflow-auto md:block">
+          <Table className="table-fixed min-w-[46rem]">
             <TableHead>
               <tr>
-                <TableHeadCell>Time</TableHeadCell>
-                <TableHeadCell>Action</TableHeadCell>
-                <TableHeadCell>Target</TableHeadCell>
-                <TableHeadCell>Actor</TableHeadCell>
-                <TableHeadCell>Route</TableHeadCell>
-                <TableHeadCell numeric>Status</TableHeadCell>
-                <TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[0]}>
+                  Time
+                </TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[1]}>
+                  Action
+                </TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[2]}>
+                  Target
+                </TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[3]}>
+                  Details
+                </TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[4]}>
+                  Actor
+                </TableHeadCell>
+                <TableHeadCell
+                  className={cx(
+                    AUDIT_COLUMN_CLASS_NAMES[5],
+                    'text-right @4xl:text-left',
+                  )}
+                >
+                  <span className="@4xl:hidden">Status</span>
+                  <span className="hidden @4xl:inline">Request</span>
+                </TableHeadCell>
+                <TableHeadCell className={AUDIT_COLUMN_CLASS_NAMES[6]}>
                   <span className="sr-only">Open</span>
                 </TableHeadCell>
               </tr>
@@ -495,6 +579,7 @@ function AuditPage() {
                     key={i}
                     className="h-10"
                     cols={AUDIT_COLUMN_CLASS_NAMES.length}
+                    cellClassNames={AUDIT_SKELETON_CELL_CLASS_NAMES}
                     skeletonClassNames={AUDIT_SKELETON_CLASS_NAMES}
                   />
                 ))
@@ -508,8 +593,10 @@ function AuditPage() {
                 visibleRows.map(({ entry, key, parsed }) => {
                   const target = auditTarget(entry, parsed, maps);
                   const changed = changedFieldsSummary(parsed);
+                  const details = auditDetailParts(entry, parsed, maps, target);
                   const category = auditCategory(parsed.name);
                   const actor = auditActorLabel(entry);
+                  const actorKind = entry.actor_kind?.replaceAll('_', ' ');
                   const time = formatTime(entry);
                   const action = humanizeAuditAction(parsed.name);
                   return (
@@ -519,8 +606,8 @@ function AuditPage() {
                       className="has-[:focus-visible]:bg-overlay-3"
                       onClick={() => setSelected(entry)}
                     >
-                      <TableCell className="whitespace-nowrap pr-4 text-text-muted">
-                        {time}
+                      <TableCell className="whitespace-nowrap pr-4 text-text-muted tabular-nums">
+                        <RelativeTime compact ts={eventTime(entry)} />
                       </TableCell>
                       <TableCell>
                         <div className="flex min-w-0 items-baseline gap-2">
@@ -533,16 +620,17 @@ function AuditPage() {
                         </div>
                         <div className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
                           <span
-                            className="shrink-0 font-mono text-data"
+                            className="min-w-0 shrink-0 truncate font-mono text-data @4xl:shrink"
                             title={
                               entry.admin_action ?? entry.kind ?? undefined
                             }
                           >
                             {parsed.name}
                           </span>
+                          {/* From 56rem the Details column carries this. */}
                           {changed ? (
                             <span
-                              className="min-w-0 line-clamp-2 break-words"
+                              className="min-w-0 line-clamp-2 break-words @4xl:hidden"
                               title={changed}
                             >
                               · {changed}
@@ -559,49 +647,73 @@ function AuditPage() {
                             <span className="text-text-faint">
                               {target.kind}{' '}
                             </span>
-                            <span
-                              className={
-                                target.resolved
-                                  ? 'text-text'
-                                  : 'font-mono text-data text-text-muted'
-                              }
-                            >
-                              {target.name}
-                            </span>
+                            <TargetName target={target} maps={maps} />
                           </div>
                         ) : (
                           <EmptyValue label="No target" />
                         )}
                       </TableCell>
+                      <TableCell className={AUDIT_COLUMN_CLASS_NAMES[3]}>
+                        {details.length > 0 ? (
+                          <p
+                            className="line-clamp-2 break-words text-caption text-text-muted"
+                            title={details
+                              .map(({ label, value }) => `${label}: ${value}`)
+                              .join(' · ')}
+                          >
+                            {details.map(({ label, value }, index) => (
+                              <span key={`${label}:${value}`}>
+                                {index > 0 ? (
+                                  <span className="text-text-faint"> · </span>
+                                ) : null}
+                                <span className="text-text-faint">
+                                  {label}:
+                                </span>{' '}
+                                {value}
+                              </span>
+                            ))}
+                          </p>
+                        ) : (
+                          <EmptyValue label="No recorded details" />
+                        )}
+                      </TableCell>
                       <TableCell>
                         <div
                           className="truncate text-text-muted"
-                          title={
-                            entry.actor_kind
-                              ? `${actor} (${entry.actor_kind.replaceAll('_', ' ')})`
-                              : actor
-                          }
+                          title={actorKind ? `${actor} (${actorKind})` : actor}
                         >
                           {actor}
                         </div>
+                        {actorKind ? (
+                          <div className="hidden truncate text-caption text-text-faint @7xl:block">
+                            {actorKind}
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell>
-                        {entry.route ? (
-                          <div
-                            className="truncate font-mono text-data text-text-muted"
-                            title={entry.route}
+                        <div className="flex min-w-0 items-baseline justify-end gap-2 @4xl:justify-start">
+                          <span
+                            className={cx(
+                              'shrink-0 tabular-nums',
+                              statusTextClass(entry.status),
+                            )}
                           >
-                            {readableRoute(entry.route, maps)}
-                          </div>
-                        ) : (
-                          <EmptyValue label="No route" />
-                        )}
-                      </TableCell>
-                      <TableCell
-                        numeric
-                        className={statusTextClass(entry.status)}
-                      >
-                        {entry.status}
+                            {entry.status}
+                          </span>
+                          {/* Every admin route shares `/admin/v1`; the title
+                          keeps the full path. */}
+                          {entry.route ? (
+                            <span
+                              className="hidden min-w-0 truncate font-mono text-data text-text-muted @4xl:inline"
+                              title={entry.route}
+                            >
+                              {readableRoute(entry.route, maps).replace(
+                                /^\/admin\/v1(?=\/)/,
+                                '',
+                              )}
+                            </span>
+                          ) : null}
+                        </div>
                       </TableCell>
                       <TableCell className="py-1 text-right">
                         <IconButton

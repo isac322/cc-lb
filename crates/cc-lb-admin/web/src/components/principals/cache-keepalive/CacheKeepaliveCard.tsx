@@ -9,8 +9,8 @@ import {
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
 import { undoToast } from '../../../lib/undoToast';
+import { DetailSection } from '../../ui/DetailPane';
 import { Button, cx, Hint, Skeleton, ToggleSwitch } from '../../ui/primitives';
-import { PrincipalSection } from '../PrincipalSection';
 import { cacheKeepaliveAnimationContract } from './__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveSessionsDrawer } from './CacheKeepaliveSessionsDrawer';
 import { CacheKeepaliveSettingsDrawer } from './CacheKeepaliveSettingsDrawer';
@@ -242,11 +242,11 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
 
   return (
     <>
-      <PrincipalSection
+      <DetailSection
         data-testid="cache-keepalive-card"
         className={CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS}
         title={headerTitle}
-        subtitle="Renews the prompt-cache TTL during idle gaps."
+        description="Renews the prompt-cache TTL during idle gaps."
         action={headerActions}
       >
         {!enabled ? (
@@ -304,7 +304,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
             />
           </div>
         )}
-      </PrincipalSection>
+      </DetailSection>
 
       <CacheKeepaliveSettingsDrawer
         open={settingsOpen}

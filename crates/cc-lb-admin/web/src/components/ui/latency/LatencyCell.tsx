@@ -1,7 +1,8 @@
 import { type ReactNode, useId } from 'react';
 import { fmtBytes, fmtMs, fmtMsCompact, fmtSetupMs } from '../../../lib/format';
 import type { RequestEventWithPhase } from '../../../lib/RequestEventTypes';
-import { cx, Hint } from '../primitives';
+import { MetricCell } from '../MetricCell';
+import { cx } from '../primitives';
 import { StackedBar } from '../StackedBar';
 import {
   CACHE_SETUP_TIMING_STAGES,
@@ -463,30 +464,25 @@ export function LatencyCell({
   );
 
   return (
-    <td
-      className={cx('p-0 text-right whitespace-nowrap', className)}
-      onClick={(ev) => ev.stopPropagation()}
+    <MetricCell
+      className={className}
+      label={triggerLabel}
+      describedBy={triggerStages.length > 0 ? stagesId : undefined}
+      popover={popover}
+      segments={responsibilitySegments}
+      total={duration}
     >
-      <Hint label={popover} openOnFocus={false}>
-        <button
-          type="button"
-          aria-label={triggerLabel}
-          aria-describedby={triggerStages.length > 0 ? stagesId : undefined}
-          className="w-full px-3 py-2 cursor-help block bg-transparent border-0 text-inherit rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
-        >
-          {triggerStages.length > 0 ? (
-            <span className="sr-only" id={stagesId}>
-              {triggerStages.join(', ')}
-            </span>
-          ) : null}
-          <span className="flex items-baseline justify-end tabular-nums max-md:justify-start">
-            <span className="text-text">{value}</span>
-            <span className="ml-1 w-[2ch] shrink-0 text-left text-text-muted">
-              {unit}
-            </span>
-          </span>
-        </button>
-      </Hint>
-    </td>
+      {triggerStages.length > 0 ? (
+        <span className="sr-only" id={stagesId}>
+          {triggerStages.join(', ')}
+        </span>
+      ) : null}
+      <span className="flex items-baseline justify-end max-md:justify-start">
+        <span className="text-text">{value}</span>
+        <span className="ml-1 w-[2ch] shrink-0 text-left text-text-muted">
+          {unit}
+        </span>
+      </span>
+    </MetricCell>
   );
 }

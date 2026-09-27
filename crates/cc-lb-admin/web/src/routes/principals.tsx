@@ -30,7 +30,6 @@ import {
   ArrowUp,
   CheckCircle2,
   ChevronDown,
-  ChevronLeft,
   Copy,
   GripVertical,
   KeyRound,
@@ -47,7 +46,12 @@ import {
   CACHE_KEEPALIVE_CARD_GEOMETRY_CLASS,
   CacheKeepaliveCard,
 } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
-import { PrincipalSection } from '../components/principals/PrincipalSection';
+import {
+  DetailHeader,
+  DetailHeaderSkeleton,
+  DetailPane,
+  DetailSection,
+} from '../components/ui/DetailPane';
 import {
   EntityList,
   type EntityListView,
@@ -179,10 +183,6 @@ const PRINCIPAL_VIEW_DEFAULTS = {
   sort: 'name',
 } as const satisfies EntityListView<PrincipalFilter, PrincipalSort>;
 
-const PRINCIPAL_DETAIL_HEADER_CLASS =
-  'px-4 md:px-8 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0';
-const PRINCIPAL_DETAIL_BODY_CLASS =
-  'flex-1 overflow-y-auto px-4 pt-6 pb-10 md:px-8 md:pt-8 md:pb-16 space-y-12';
 // The table keeps the one flat surface in an otherwise unboxed section.
 const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS =
   'glass rounded-md overflow-x-auto min-h-48';
@@ -198,15 +198,13 @@ const PRINCIPAL_DETAIL_CARD_CLASS_NAMES = {
   access: 'min-h-[143px]',
   recentRequests: 'min-h-[301px]',
   router: 'min-h-[324px]',
-  observability: 'min-h-[84px]',
-  shape: 'min-h-[211px]',
   apiKeys: 'min-h-[190px]',
 } as const;
 const EMPTY_PRINCIPAL_DETAIL_NAME_MAP = new Map<string, string>();
 
 // INPUT_CLASS carries no disabled affordance of its own; blocking mutations
 // need every locked control to read as unavailable, not merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS = 'disabled:opacity-40 disabled:cursor-not-allowed';
 
 function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
   const slots = plugin.supported_slots;
@@ -236,142 +234,122 @@ export const Route = createFileRoute('/principals')({
 
 function PrincipalDetailLoadingShell() {
   return (
-    <div
+    <DetailPane
       aria-busy="true"
       aria-label="Loading principal details"
-      className="contents"
       data-testid="principal-detail-loading-shell"
       role="status"
+      header={<DetailHeaderSkeleton />}
     >
-      <header className={PRINCIPAL_DETAIL_HEADER_CLASS}>
-        <div className="min-w-0">
-          <div className="flex items-center gap-3 flex-wrap">
-            <Skeleton className="h-7 w-48" />
-            <Skeleton className="h-5 w-20" />
-            <Skeleton className="h-5 w-16" />
+      <DetailSection
+        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive}
+        data-testid="cache-keepalive-card"
+        title={<Skeleton as="span" className="block h-5 w-32" />}
+        description={<Skeleton as="span" className="block h-4 w-64" />}
+        action={
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-7 w-24" />
+            <Skeleton className="h-7 w-24" />
+            <Skeleton className="h-5 w-9" />
           </div>
-          <Skeleton className="mt-1 h-4 w-72" />
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Skeleton className="h-8 w-20" />
-        </div>
-      </header>
-
-      <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.cacheKeepalive}
-          data-testid="cache-keepalive-card"
-          title={<Skeleton as="span" className="block h-5 w-32" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-          action={
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-7 w-24" />
-              <Skeleton className="h-7 w-24" />
-              <Skeleton className="h-5 w-9" />
+        }
+      >
+        <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <div key={index} className="flex flex-col gap-1 pr-5">
+              <Skeleton className="h-3 w-24" />
+              <div className="flex h-9 items-center">
+                <Skeleton className="h-7 w-20" />
+              </div>
+              <Skeleton className="h-3 w-32" />
             </div>
-          }
-        >
-          <div className="grid grid-cols-2 gap-y-5 md:grid-cols-4">
-            {Array.from({ length: 4 }).map((_, index) => (
-              <div key={index} className="flex flex-col gap-1 pr-5">
-                <Skeleton className="h-3 w-24" />
-                <div className="flex h-9 items-center">
-                  <Skeleton className="h-7 w-20" />
-                </div>
-                <Skeleton className="h-3 w-32" />
+          ))}
+        </div>
+      </DetailSection>
+
+      <DetailSection
+        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
+        title={<Skeleton as="span" className="block h-5 w-20" />}
+        description={<Skeleton as="span" className="block h-4 w-64" />}
+      >
+        <div className="space-y-5">
+          {Array.from({ length: 2 }).map((_, index) => (
+            <div
+              key={index}
+              className="flex items-center justify-between gap-4"
+            >
+              <div className="flex items-center gap-4 min-w-0 flex-1">
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-2/5" />
               </div>
-            ))}
-          </div>
-        </PrincipalSection>
+              <Skeleton className="h-7 w-14" />
+            </div>
+          ))}
+        </div>
+      </DetailSection>
 
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
-          title={<Skeleton as="span" className="block h-5 w-20" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-        >
-          <div className="space-y-5">
-            {Array.from({ length: 2 }).map((_, index) => (
-              <div
-                key={index}
-                className="flex items-center justify-between gap-4"
-              >
-                <div className="flex items-center gap-4 min-w-0 flex-1">
-                  <Skeleton className="h-4 w-28" />
-                  <Skeleton className="h-4 w-2/5" />
-                </div>
-                <Skeleton className="h-7 w-14" />
-              </div>
-            ))}
-          </div>
-        </PrincipalSection>
+      <DetailSection
+        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
+        title={<Skeleton as="span" className="block h-5 w-32" />}
+        description={<Skeleton as="span" className="block h-4 w-48" />}
+      >
+        <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
+          <RequestEventsTable
+            events={[]}
+            principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+            upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
+            loading
+            columns={{
+              principal: false,
+              cost: true,
+              tokens: true,
+            }}
+            minWidthClass="min-w-[920px]"
+          />
+        </div>
+      </DetailSection>
 
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
-          title={<Skeleton as="span" className="block h-5 w-32" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-48" />}
-        >
-          <div className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}>
-            <RequestEventsTable
-              events={[]}
-              principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
-              upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
-              loading
-              columns={{
-                principal: false,
-                cost: true,
-                tokens: true,
-              }}
-              minWidthClass="min-w-[920px]"
-            />
-          </div>
-        </PrincipalSection>
-
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}
-          title={<Skeleton as="span" className="block h-5 w-24" />}
-          subtitle={<Skeleton as="span" className="block h-8 w-full" />}
-          action={<Skeleton className="h-7 w-24" />}
-        >
-          <div className="space-y-3">
-            <Skeleton className="h-10" />
-            <Skeleton className="h-10" />
-            <Skeleton className="h-28" />
-          </div>
-        </PrincipalSection>
-
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}
-          title={<Skeleton as="span" className="block h-5 w-32" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-64" />}
-          action={<Skeleton className="h-7 w-24" />}
-        >
+      <DetailSection
+        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router}
+        title={<Skeleton as="span" className="block h-5 w-24" />}
+        description={<Skeleton as="span" className="block h-8 w-full" />}
+        action={<Skeleton className="h-7 w-24" />}
+      >
+        <div className="space-y-3">
           <Skeleton className="h-10" />
-        </PrincipalSection>
+          <Skeleton className="h-10" />
+          <Skeleton className="h-28" />
+        </div>
+      </DetailSection>
 
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}
-          title={<Skeleton as="span" className="block h-5 w-24" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-96" />}
-        >
-          <div className="space-y-3">
-            <Skeleton className="h-14" />
-            <Skeleton className="h-14" />
-          </div>
-        </PrincipalSection>
+      <DetailSection
+        collapsible
+        title={<Skeleton as="span" className="block h-5 w-32" />}
+        description={<Skeleton as="span" className="block h-4 w-64" />}
+      >
+        <Skeleton className="h-10" />
+      </DetailSection>
 
-        <PrincipalSection
-          className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
-          title={<Skeleton as="span" className="block h-5 w-24" />}
-          subtitle={<Skeleton as="span" className="block h-4 w-44" />}
-          action={<Skeleton className="h-7 w-24" />}
-        >
-          <div className="space-y-3">
-            <Skeleton className="h-9" />
-            <Skeleton className="h-9" />
-          </div>
-        </PrincipalSection>
-      </div>
-    </div>
+      <DetailSection
+        collapsible
+        title={<Skeleton as="span" className="block h-5 w-24" />}
+        description={<Skeleton as="span" className="block h-4 w-96" />}
+      >
+        <Skeleton className="h-14" />
+      </DetailSection>
+
+      <DetailSection
+        className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
+        title={<Skeleton as="span" className="block h-5 w-24" />}
+        description={<Skeleton as="span" className="block h-4 w-44" />}
+        action={<Skeleton className="h-7 w-24" />}
+      >
+        <div className="space-y-3">
+          <Skeleton className="h-9" />
+          <Skeleton className="h-9" />
+        </div>
+      </DetailSection>
+    </DetailPane>
   );
 }
 
@@ -554,11 +532,14 @@ function PrincipalsPage() {
         skeletonTestId="principal-list-skeleton"
       />
 
-      <section
+      {/* Phones show the list or the selected principal, never both; from md
+          the detail sits beside the list and DetailPane owns its scroll. */}
+      <div
         className={cx(
-          'flex-1 flex flex-col bg-bg min-w-0',
+          'min-h-0 min-w-0 flex-1 flex-col bg-bg',
           selected ? 'flex' : 'hidden md:flex',
         )}
+        data-testid="principal-detail-pane"
       >
         {selected ? (
           <PrincipalDetail
@@ -569,7 +550,7 @@ function PrincipalsPage() {
         ) : principals.isLoading ? (
           <PrincipalDetailLoadingShell />
         ) : (
-          <div className="flex-1 flex items-center justify-center">
+          <div className="flex flex-1 items-center justify-center px-4 md:px-8">
             {principals.data?.principals.length ? (
               <EmptyState
                 headingLevel={2}
@@ -585,7 +566,7 @@ function PrincipalsPage() {
             )}
           </div>
         )}
-      </section>
+      </div>
 
       <CreatePrincipalModal open={createOpen} onOpenChange={setCreateOpen} />
     </div>
@@ -625,70 +606,42 @@ function PrincipalDetail({
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [confirmToggleOpen, setConfirmToggleOpen] = useState(false);
   const nextEnabled = !principal.enabled;
+  const titleId = `principal-detail-title-${principal.id}`;
   return (
-    <>
-      <header className={PRINCIPAL_DETAIL_HEADER_CLASS}>
-        <div className="min-w-0">
-          <button
-            type="button"
-            onClick={onBack}
-            className="-ml-1 mb-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text md:hidden"
-          >
-            <ChevronLeft className="size-4" strokeWidth={1.75} /> All principals
-          </button>
-          <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
-            <h2 className="text-title-page text-text truncate">
-              {principal.name}
-            </h2>
-            <Badge>{PRINCIPAL_KIND_LABEL[principal.kind]}</Badge>
-            <ToggleSwitch
-              variant="compact"
-              role="switch"
-              aria-label="Enabled"
-              label={
-                <span className="text-text-muted">
-                  {principal.enabled ? 'Enabled' : 'Disabled'}
-                </span>
-              }
-              checked={principal.enabled}
-              disabled={
-                toggle.isPending || del.isPending || principalWritePending
-              }
-              onChange={() => setConfirmToggleOpen(true)}
-              className="flex-row-reverse"
-            />
-            {toggle.isPending ? (
-              <span
-                role="status"
-                aria-live="polite"
-                className="inline-flex items-center gap-1.5 text-caption text-text-muted"
-              >
-                <Spinner className="w-3 h-3 text-text-muted" />
-                {nextEnabled ? 'Enabling...' : 'Disabling...'}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-1 text-caption text-text-faint">
-            ID{' '}
-            <span className="font-mono text-data text-text-muted">
-              {principal.id}
-            </span>
-            <span className="tabular-nums"> · rev {principal.revision}</span>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <Button
-            size="sm"
-            variant="danger"
-            iconLeft={<Trash2 className="w-3 h-3" />}
-            loading={del.isPending}
-            disabled={toggle.isPending || principalWritePending}
-            onClick={() => setConfirmDeleteOpen(true)}
-          >
-            Delete
-          </Button>
-        </div>
-      </header>
+    <DetailPane
+      aria-labelledby={titleId}
+      header={
+        <DetailHeader
+          backLabel="All principals"
+          onBack={onBack}
+          title={principal.name}
+          titleId={titleId}
+          badge={<Badge>{PRINCIPAL_KIND_LABEL[principal.kind]}</Badge>}
+          meta={[
+            <span key="rev" className="tabular-nums">
+              Revision {principal.revision}
+            </span>,
+          ]}
+          id={principal.id}
+          idLabel="Principal ID"
+          enabled={principal.enabled}
+          onEnabledChange={() => setConfirmToggleOpen(true)}
+          enabledDisabled={
+            toggle.isPending || del.isPending || principalWritePending
+          }
+          pendingLabel={
+            toggle.isPending
+              ? nextEnabled
+                ? 'Enabling...'
+                : 'Disabling...'
+              : null
+          }
+          onDelete={() => setConfirmDeleteOpen(true)}
+          deleteDisabled={toggle.isPending || principalWritePending}
+          deleting={del.isPending}
+        />
+      }
+    >
       <ConfirmDialog
         open={confirmToggleOpen}
         onOpenChange={setConfirmToggleOpen}
@@ -764,18 +717,16 @@ function PrincipalDetail({
         }
       />
 
-      <div className={PRINCIPAL_DETAIL_BODY_CLASS}>
-        <fieldset className="min-w-0" disabled={principalWritePending}>
-          <CacheKeepaliveCard principal={principal} />
-        </fieldset>
-        <AccessCard principal={principal} />
-        <RecentRequestsCard principal={principal} />
-        <RouterSlotEditor principal={principal} />
-        <ObservabilityHookEditor principalId={principal.id} />
-        <ShapeSlotEditor principalId={principal.id} />
-        <ApiKeysCard principal={principal} />
-      </div>
-    </>
+      <fieldset className="min-w-0" disabled={principalWritePending}>
+        <CacheKeepaliveCard principal={principal} />
+      </fieldset>
+      <AccessCard principal={principal} />
+      <RecentRequestsCard principal={principal} />
+      <RouterSlotEditor principal={principal} />
+      <ObservabilityHookEditor principalId={principal.id} />
+      <ShapeSlotEditor principalId={principal.id} />
+      <ApiKeysCard principal={principal} />
+    </DetailPane>
   );
 }
 
@@ -797,10 +748,10 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
   }, [recent.data]);
   const loading = recent.data === undefined && recent.isPending;
   return (
-    <PrincipalSection
+    <DetailSection
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
       title="Recent requests"
-      subtitle={
+      description={
         <span className="inline-flex h-5 items-center">
           {loading ? (
             <span
@@ -834,22 +785,22 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
           emptyTitle="No recent requests for this principal"
         />
       </div>
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 
 function AccessCard({ principal }: { principal: Principal }) {
   return (
-    <PrincipalSection
+    <DetailSection
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
       title="Access"
-      subtitle="Which models this principal may call, and the rate caps applied to every API key"
+      description="Which models this principal may call, and the rate caps applied to every API key"
     >
       <div className="space-y-6">
         <AllowedModelsRow principal={principal} />
         <DefaultLimitsRow principal={principal} />
       </div>
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 
@@ -1827,11 +1778,11 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
   const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <PrincipalSection
+    <DetailSection
       id={PRINCIPAL_ROUTER_ANCHOR}
       className={cx(PRINCIPAL_DETAIL_CARD_CLASS_NAMES.router, 'scroll-mt-4')}
       title="Router"
-      subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
+      description="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
     >
       <div className="flex flex-col border-b border-subtle relative">
         <BaseTabs.Root
@@ -1856,7 +1807,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 className={cx(
                   ROUTER_TAB_CLASS,
                   'pl-0',
-                  isComplex && 'opacity-50 cursor-not-allowed',
+                  isComplex && 'opacity-40 cursor-not-allowed',
                 )}
                 value="basic"
               >
@@ -2009,36 +1960,34 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          aria-label="Move filter up"
+                        <IconButton
+                          label="Move filter up"
                           onClick={() => moveUp(idx)}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
                           disabled={idx === 0 || routerWriteBlocked}
                         >
-                          <ArrowUp className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          aria-label="Move filter down"
+                          <ArrowUp />
+                        </IconButton>
+                        <IconButton
+                          label="Move filter down"
                           onClick={() => moveDown(idx)}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
                           disabled={
                             idx === entries.length - 1 || routerWriteBlocked
                           }
                         >
-                          <ArrowDown className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          aria-label="Remove filter"
+                          <ArrowDown />
+                        </IconButton>
+                        <IconButton
+                          label="Remove filter"
                           onClick={() => removeFilter(e.id, e.revision)}
-                          className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-danger-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-text-faint"
+                          className="hover:text-danger-text"
                           disabled={routerWriteBlocked}
                         >
                           {deletingEntryId === e.id ? (
-                            <Spinner className="w-3.5 h-3.5 text-danger-text" />
+                            <Spinner className="text-danger-text" />
                           ) : (
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 />
                           )}
-                        </button>
+                        </IconButton>
                       </div>
                     </li>
                   );
@@ -2052,9 +2001,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                       className={cx(
                         'mt-3 flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm transition-colors',
                         isChainBusy
-                          ? 'opacity-50 cursor-progress'
+                          ? 'opacity-40 cursor-progress'
                           : principalWritePending
-                            ? 'opacity-50 cursor-not-allowed'
+                            ? 'opacity-40 cursor-not-allowed'
                             : 'hover:bg-overlay-2 cursor-pointer',
                       )}
                       data-key="add-filter-placeholder"
@@ -2126,11 +2075,8 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             key={p.id}
                             className={cx(
                               'w-full text-left px-2 py-1.5 rounded-sm text-body flex flex-col gap-0.5',
-                              isInserting
-                                ? 'cursor-progress'
-                                : disabled
-                                  ? 'opacity-50 cursor-not-allowed'
-                                  : 'hover:bg-overlay-5',
+                              'hover:bg-overlay-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+                              isInserting && 'cursor-progress',
                             )}
                             disabled={disabled}
                             onClick={() => addFilter(p.id)}
@@ -2168,7 +2114,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
           if (!open) setDetailPlugin(null);
         }}
       />
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 
@@ -2259,8 +2205,9 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const candidates = registry.data?.entries ?? [];
 
   return (
-    <PrincipalSection
-      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.shape}
+    <DetailSection
+      collapsible
+      defaultOpen={activeEntry != null}
       title={
         <span className="flex items-center gap-2">
           Shape
@@ -2271,7 +2218,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
           )}
         </span>
       }
-      subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
+      description="Request / response transform. Inherits the dialect returned by the router when unset."
     >
       <div>
         <BaseRadioGroup
@@ -2307,7 +2254,7 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
             ))}
         </BaseRadioGroup>
       </div>
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 
@@ -2370,10 +2317,11 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
   };
 
   return (
-    <PrincipalSection
-      className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.observability}
+    <DetailSection
+      collapsible
+      defaultOpen={entries.length > 0}
       title="Observability"
-      subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
+      description="SSE / audit hooks. Executed in order. Multiple allowed."
       action={
         <>
           {reorder.isPending ? (
@@ -2530,7 +2478,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
           }}
         />
       </div>
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 
@@ -2572,7 +2520,7 @@ function SortableChainItem({
         {...listeners}
         aria-label="Drag to reorder"
         disabled={disabled}
-        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
+        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-text-faint"
       >
         <GripVertical className="w-3.5 h-3.5" />
       </button>
@@ -2761,10 +2709,10 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
   const bulkCount = selectedKeys.length;
 
   return (
-    <PrincipalSection
+    <DetailSection
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.apiKeys}
       title="API keys"
-      subtitle="Authenticates as this DB principal; routing selects a DB upstream"
+      description="Authenticates as this DB principal; routing selects a DB upstream"
       action={
         <div className="flex flex-wrap items-center gap-2">
           {bulkCount > 0 ? (
@@ -3053,7 +3001,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
           void submitBulkRevoke();
         }}
       />
-    </PrincipalSection>
+    </DetailSection>
   );
 }
 

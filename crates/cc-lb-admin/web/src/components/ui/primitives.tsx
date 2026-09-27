@@ -127,6 +127,22 @@ const BTN_SIZES: Record<ButtonSize, string> = {
   md: 'h-8 px-3 text-[0.8125rem] gap-1.5 [&_svg]:size-3.5',
   lg: 'h-9 px-3.5 text-sm gap-2 [&_svg]:size-4',
 };
+/**
+ * The Button chrome as a class string, for elements that must stay a real
+ * anchor (never popup-blocked, keeps link semantics) yet look like a Button.
+ */
+export function buttonClassName(
+  variant: ButtonVariant = 'secondary',
+  size: ButtonSize = 'md',
+): string {
+  return cx(
+    'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
+    'disabled:cursor-not-allowed disabled:opacity-40',
+    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+    BTN_VARIANTS[variant],
+    BTN_SIZES[size],
+  );
+}
 export function Button({
   variant = 'secondary',
   size = 'md',
@@ -151,11 +167,7 @@ export function Button({
     <BaseButton
       type={type ?? 'button'}
       className={cx(
-        'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
-        'disabled:cursor-not-allowed disabled:opacity-40',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-        BTN_VARIANTS[look],
-        BTN_SIZES[size],
+        buttonClassName(look, size),
         fullWidth ? 'w-full' : '',
         className,
       )}
@@ -749,7 +761,7 @@ export function Section({
     <section className={cx('flex flex-col gap-4', className)}>
       {title || action ? (
         <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             {title ? (
               <h2 className="text-title-section text-text">{title}</h2>
             ) : null}

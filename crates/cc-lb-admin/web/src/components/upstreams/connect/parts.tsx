@@ -23,6 +23,7 @@ import {
 import { toast } from 'sonner';
 import {
   Button,
+  buttonClassName,
   cx,
   INPUT_CLASS,
   INPUT_SM_CLASS,
@@ -57,26 +58,17 @@ export function SignInLink({
   className?: string;
 }) {
   const ready = session.phase === 'ready' && session.authorizeUrl;
-  // Mirrors Button's `primary` look and sizes: this anchor is the step's
-  // commit action, rendered as a real link so it is never popup-blocked.
-  const sizeClass =
-    size === 'lg'
-      ? 'h-9 px-4 text-sm gap-2 [&_svg]:size-4'
-      : size === 'sm'
-        ? 'h-7 px-2.5 text-xs gap-1.5 [&_svg]:size-3.5'
-        : 'h-8 px-3 text-[0.8125rem] gap-1.5 [&_svg]:size-3.5';
-  const base = cx(
-    'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
-    sizeClass,
-    className,
-  );
+  // The Button primitive's `primary` chrome on a real anchor: this is the
+  // step's commit action, rendered as a link so it is never popup-blocked.
+  // Until the URL exists it reads as a disabled Button (secondary look).
   if (!ready) {
     return (
       <span
         aria-disabled="true"
         className={cx(
-          base,
-          'bg-panel-strong border border-subtle text-text opacity-40 cursor-not-allowed',
+          buttonClassName('secondary', size),
+          'cursor-not-allowed opacity-40 hover:bg-transparent',
+          className,
         )}
       >
         {session.phase === 'starting' ? (
@@ -94,10 +86,7 @@ export function SignInLink({
       target="_blank"
       rel="noopener noreferrer"
       onClick={onOpened}
-      className={cx(
-        base,
-        'border border-accent bg-accent text-accent-ink hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-      )}
+      className={cx(buttonClassName('primary', size), className)}
     >
       <ExternalLink strokeWidth={1.75} />
       {label}

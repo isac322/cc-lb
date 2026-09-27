@@ -55,7 +55,7 @@ import {
 type StepId = 'kind' | 'signin' | 'paste' | 'finish' | 'apikey';
 type UpstreamKind = 'anthropic_oauth' | 'anthropic_api_key';
 
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS = 'disabled:opacity-40 disabled:cursor-not-allowed';
 
 /** What the dialog is opened for; `null` keeps it closed. */
 export type UpstreamConnectTarget =
@@ -404,7 +404,7 @@ function ConnectDialogBody({
                 )}
                 <button
                   type="button"
-                  className="-mt-1 w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:opacity-50"
+                  className="-mt-1 w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-faint"
                   disabled={saving}
                   onClick={() => setUseEnvVar((v) => !v)}
                 >

@@ -8,7 +8,8 @@ import {
   type Upstream,
   useUpdateUpstream,
 } from '../../lib/queries';
-import { Button, Field, INPUT_CLASS, Section } from '../ui/primitives';
+import { DetailRow, DetailRows, DetailSection } from '../ui/DetailPane';
+import { Button, Field, INPUT_CLASS } from '../ui/primitives';
 
 type Props = {
   upstream: Upstream;
@@ -92,8 +93,9 @@ export function SettingsCard({ upstream }: Props) {
   };
 
   return (
-    <Section
+    <DetailSection
       title="Settings"
+      description="Where requests go and which key they carry"
       action={
         !editing && (
           <Button size="sm" onClick={handleEdit}>
@@ -102,11 +104,11 @@ export function SettingsCard({ upstream }: Props) {
         )
       }
     >
-      <div className="max-w-2xl">
+      <div>
         {editing ? (
           <div
             aria-busy={update.isPending}
-            className="flex flex-col gap-4"
+            className="flex max-w-2xl flex-col gap-4"
             data-testid="upstream-settings-edit-form"
           >
             <Field label="Base URL">
@@ -184,35 +186,37 @@ export function SettingsCard({ upstream }: Props) {
             </div>
           </div>
         ) : (
-          <dl className="grid grid-cols-[120px_1fr] items-baseline gap-y-3 gap-x-4 text-body">
-            <dt className="text-label text-text-muted">Base URL</dt>
-            <dd className="min-w-0 break-all text-text">
+          <DetailRows>
+            <DetailRow label="Base URL">
               {upstream.base_url ? (
-                <span className="font-mono text-data">{upstream.base_url}</span>
+                <span className="break-all font-mono text-data">
+                  {upstream.base_url}
+                </span>
               ) : (
-                <span className="text-text-faint">—</span>
+                <span className="text-text-muted">
+                  Default{' '}
+                  <span className="break-all font-mono text-data">
+                    {DEFAULT_ANTHROPIC_BASE_URL}
+                  </span>
+                </span>
               )}
-            </dd>
-
+            </DetailRow>
             {upstream.kind === 'anthropic_api_key' && (
-              <>
-                <dt className="text-label text-text-muted">API key</dt>
-                <dd className="min-w-0 break-all text-text">
-                  {upstream.api_key_env ? (
-                    <span className="font-mono text-data">
-                      env:{upstream.api_key_env}
-                    </span>
-                  ) : (
-                    <span className="text-text-muted">
-                      Literal value (stored)
-                    </span>
-                  )}
-                </dd>
-              </>
+              <DetailRow label="API key">
+                {upstream.api_key_env ? (
+                  <span className="break-all font-mono text-data">
+                    env:{upstream.api_key_env}
+                  </span>
+                ) : (
+                  <span className="text-text-muted">
+                    Literal value (stored)
+                  </span>
+                )}
+              </DetailRow>
             )}
-          </dl>
+          </DetailRows>
         )}
       </div>
-    </Section>
+    </DetailSection>
   );
 }

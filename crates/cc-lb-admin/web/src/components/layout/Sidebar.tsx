@@ -1,12 +1,12 @@
 import { Link } from '@tanstack/react-router';
-import { BookOpen, MoreHorizontal } from 'lucide-react';
+import { BookOpen, MoreHorizontal, PanelLeft } from 'lucide-react';
 import { useId, useMemo } from 'react';
 import {
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
 import { useUpstreams } from '../../lib/queries';
-import { cx } from '../ui/primitives';
+import { cx, IconButton } from '../ui/primitives';
 import {
   NAV_GROUPS,
   NAV_ITEMS,
@@ -236,48 +236,75 @@ export function SidebarNav({
   );
 }
 
+/**
+ * Docs link, version and, on the desktop rail, the collapse/expand toggle.
+ * The toggle sits at the foot of the rail in both states so it moves with
+ * the rail; the phone sheet omits it (`onToggleCollapsed` absent).
+ */
 export function SidebarFooter({
   collapsed,
   version,
+  onToggleCollapsed,
 }: {
   collapsed: boolean;
   version: string | null;
+  onToggleCollapsed?: () => void;
 }) {
   const label = version ? `cc-lb v${version}` : 'cc-lb';
+  const toggle = onToggleCollapsed ? (
+    <IconButton
+      label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      aria-expanded={!collapsed}
+      title={collapsed ? 'Expand sidebar (⌘B)' : 'Collapse sidebar (⌘B)'}
+      onClick={onToggleCollapsed}
+    >
+      <PanelLeft strokeWidth={1.75} aria-hidden="true" />
+    </IconButton>
+  ) : null;
 
   return (
     <div
       className={cx(
-        'px-5 py-4 flex flex-col gap-2',
-        collapsed ? 'items-center px-2 text-center' : '',
+        'py-4 flex gap-2',
+        collapsed
+          ? 'flex-col items-center px-2 text-center'
+          : 'items-end justify-between pl-5 pr-3',
       )}
     >
-      <a
-        href={DOCS_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
-        title={collapsed ? 'Docs' : undefined}
-        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-      >
-        <BookOpen
-          size={14}
-          strokeWidth={1.75}
-          className="shrink-0"
-          aria-hidden="true"
-        />
-        {collapsed ? null : (
-          <>
-            Docs<span className="sr-only"> (opens in a new tab)</span>
-          </>
-        )}
-      </a>
       <div
-        className="text-2xs text-text-faint truncate"
-        title={collapsed ? label : undefined}
+        className={cx(
+          'flex min-w-0 flex-col gap-2',
+          collapsed ? 'items-center' : '',
+        )}
       >
-        {collapsed ? 'cc' : label}
+        <a
+          href={DOCS_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
+          title={collapsed ? 'Docs' : undefined}
+          className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        >
+          <BookOpen
+            size={14}
+            strokeWidth={1.75}
+            className="shrink-0"
+            aria-hidden="true"
+          />
+          {collapsed ? null : (
+            <>
+              Docs<span className="sr-only"> (opens in a new tab)</span>
+            </>
+          )}
+        </a>
+        <div
+          className="text-2xs text-text-faint truncate"
+          title={collapsed ? label : undefined}
+        >
+          {collapsed ? 'cc' : label}
+        </div>
       </div>
+      {toggle}
     </div>
   );
 }

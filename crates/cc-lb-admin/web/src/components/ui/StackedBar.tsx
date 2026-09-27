@@ -6,13 +6,14 @@ export interface StackedBarSegment {
   color: string;
 }
 
-const HEIGHTS = { sm: 'h-1.5', md: 'h-2' } as const;
+const HEIGHTS = { xs: 'h-1', sm: 'h-1.5', md: 'h-2' } as const;
 
 /**
- * Meter-style stacked bar (DESIGN.md §5 Meters): 6px (`sm`) or 8px (`md`),
- * a flat track with a 2px radius, square segments separated by a 1px gap so
- * the track shows between them. Breakdowns live in drawers and popovers, never
- * in table cells. Renders nothing when every segment is zero.
+ * Meter-style stacked bar (DESIGN.md §5 Meters): 4px (`xs`, the composition
+ * bar under a request-table metric), 6px (`sm`) or 8px (`md`), a flat track
+ * with a 2px radius, square segments separated by a 1px gap so the track shows
+ * between them. Segments always scale within their own bar, never across rows.
+ * Renders nothing when every segment is zero.
  */
 export function StackedBar({
   segments,
