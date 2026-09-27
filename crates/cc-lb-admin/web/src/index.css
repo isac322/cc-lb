@@ -107,6 +107,7 @@
   --color-warn-text: var(--color-warn-text);
   --color-danger-text: var(--color-danger-text);
   --color-hover-bg: var(--color-hover-bg);
+  --color-selected: var(--color-selected);
   --color-overlay-1: var(--color-overlay-1);
   --color-overlay-2: var(--color-overlay-2);
   --color-overlay-3: var(--color-overlay-3);
@@ -175,8 +176,9 @@
     --color-text: #eceef0;
     --color-text-muted: #b3b9c1;
     --color-text-faint: #959ca5;
-    /* Ion violet: gauge sweeps, meter fills, active nav rule, selected row,
-       the one primary action. `accent-ink` is text on a solid accent fill. */
+    /* Ion violet: the brand mark, focus, the switch "on" track, links, the
+       7d chart lines and the one primary action. `accent-ink` is text on a
+       solid accent fill. Selection is neutral (`--color-selected`). */
     --color-accent: #a493ff;
     --color-accent-dim: rgb(164 147 255 / 0.14);
     --color-accent-text: #b3a6ff;
@@ -194,6 +196,8 @@
     --color-scrollbar: #2f343a;
     --color-scrollbar-hover: #666d76;
     --color-hover-bg: rgb(255 255 255 / 0.04);
+    /* Selected row / nav item: a neutral fill a clear step above hover. */
+    --color-selected: rgb(255 255 255 / 0.08);
     --color-overlay-1: rgb(255 255 255 / 0.02);
     --color-overlay-2: rgb(255 255 255 / 0.03);
     --color-overlay-3: rgb(255 255 255 / 0.04);
@@ -252,6 +256,7 @@
     --color-scrollbar: #c9ccd2;
     --color-scrollbar-hover: #7e838b;
     --color-hover-bg: rgb(23 25 28 / 0.04);
+    --color-selected: rgb(15 20 30 / 0.07);
     --color-overlay-1: rgb(23 25 28 / 0.02);
     --color-overlay-2: rgb(23 25 28 / 0.03);
     --color-overlay-3: rgb(23 25 28 / 0.04);
@@ -310,6 +315,7 @@
       --color-scrollbar: #c9ccd2;
       --color-scrollbar-hover: #7e838b;
       --color-hover-bg: rgb(23 25 28 / 0.04);
+      --color-selected: rgb(15 20 30 / 0.07);
       --color-overlay-1: rgb(23 25 28 / 0.02);
       --color-overlay-2: rgb(23 25 28 / 0.03);
       --color-overlay-3: rgb(23 25 28 / 0.04);
@@ -456,22 +462,6 @@
 .status-dot.neutral { background: var(--color-neutral); }
 .status-dot.live { background: var(--color-accent); }
 
-/* ── Gauges (components/ui/Gauge.tsx) ── crisp 1px chrome, no glow. */
-.gauge { display: block; overflow: visible; }
-.gauge path, .gauge line { vector-effect: non-scaling-stroke; fill: none; }
-.gauge .gauge-track { stroke: var(--color-progress-track); }
-.gauge .gauge-sweep { stroke: var(--color-accent); stroke-linecap: butt; }
-.gauge .gauge-sweep[data-severity="warn"] { stroke: var(--color-warn); }
-.gauge .gauge-sweep[data-severity="danger"] { stroke: var(--color-danger); }
-.gauge .gauge-tick { stroke: var(--color-border-strong); stroke-width: 1px; shape-rendering: crispEdges; }
-.gauge .gauge-tick[data-major] { stroke: var(--color-text-faint); }
-.gauge .gauge-zone { stroke-width: 2px; }
-.gauge .gauge-zone[data-zone="warn"] { stroke: var(--color-warn); }
-.gauge .gauge-zone[data-zone="danger"] { stroke: var(--color-danger); }
-.gauge .gauge-marker { stroke: var(--color-text); stroke-width: 1.5px; }
-.gauge .gauge-marker[data-severity="warn"] { stroke: var(--color-warn); }
-.gauge .gauge-marker[data-severity="danger"] { stroke: var(--color-danger); }
-
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -510,11 +500,10 @@
   align-items: center;
   gap: 10px;
 }
-/* Selected: surface fill + the accent rule, like the active nav item. */
+/* Selected: the shared neutral selection fill, no edge rule. */
 [cmdk-item][data-selected='true'] {
-  background: var(--color-overlay-5);
+  background: var(--color-selected);
   color: var(--color-text);
-  box-shadow: inset 2px 0 0 var(--color-accent);
 }
 [cmdk-empty] { padding: 16px; color: var(--color-text-muted); font-size: 14px; }
 

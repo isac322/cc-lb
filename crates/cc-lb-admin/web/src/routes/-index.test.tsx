@@ -24,8 +24,6 @@ import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
-  ClosestToLimit,
-  PoolHeadroomBand,
   PoolQuotaLegend,
   Route,
   type TopPrincipal,
@@ -54,8 +52,8 @@ vi.mock('../lib/useLiveEventStream', () => ({
 
 // The upstream strip's grid and its data hook belong to the Upstreams page;
 // the Overview only decides where the strip goes and what an empty pool says.
-vi.mock('../components/upstreams/UpstreamHeadroomGrid', () => ({
-  useUpstreamHeadroomData: () => ({
+vi.mock('../components/upstreams/UpstreamUsageTable', () => ({
+  useUpstreamUsageData: () => ({
     rows: [],
     isLoading: false,
     quotaPending: false,
@@ -64,7 +62,7 @@ vi.mock('../components/upstreams/UpstreamHeadroomGrid', () => ({
     quotaError: false,
     reconnectCount: 0,
   }),
-  UpstreamHeadroomGrid: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
+  UpstreamUsageTable: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
 }));
 
 // The Overview links to other routes; render router links as plain anchors so
@@ -536,111 +534,82 @@ afterEach(() => {
   cleanup();
 });
 
-describe('Overview quota headroom', () => {
-  function twoUpstreamAggregate(): AggregateResponse {
-    const base = aggregateResponse(1_000_000, 60);
-    return {
+describe('Overview pool quota usage', () => {
+  it('leads with the pool chart, legend reads used with its reset, captions qualify it', () => {
+    const base = aggregateResponse(POOL_HISTORY_NOW, 60);
+    const used: Record<string, number> = { '5h': 12, '7d': 83, '7d_fable': 97 };
+    const aggregate: AggregateResponse = {
       ...base,
       windows: base.windows.map((entry) => ({
         ...entry,
-        provider_lots: [
-          { ...entry.provider_lots[0]!, utilization: 0.2 },
-          {
-            ...entry.provider_lots[0]!,
-            upstream_id: 'upstream-2',
-            upstream_name: 'Upstream Two',
-            utilization: entry.window === '7d' ? 0.97 : 0.5,
-            provider_reset_unix_secs: 1_000_000 + 2 * 86_400 + 3 * 3600,
-          },
-        ],
+        utilization_percent: used[entry.window] ?? null,
+        missing_capacity_upstreams: entry.window === '7d' ? 2 : 0,
+        provider_lots: entry.provider_lots.map((lot) => ({
+          ...lot,
+          state: 'stale',
+        })),
       })),
     };
-  }
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 12);
+    history.windows = history.windows.map((entry) => ({
+      ...entry,
+      latest: entry.latest
+        ? { ...entry.latest, utilization_percent: used[entry.window] ?? null }
+        : null,
+    }));
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
 
-  it('opens a window breakdown with each upstream headroom from a named button', async () => {
-    render(
-      <PoolHeadroomBand aggregate={twoUpstreamAggregate()} loading={false} />,
-    );
+    render(<OverviewPage />);
 
-    const trigger = screen.getByRole('button', {
-      name: 'By upstream: 7d headroom',
-    });
-    expect(screen.queryByText('Upstream Two')).toBeNull();
-
-    await act(async () => {
-      fireEvent.click(trigger);
-    });
-
-    const rows = await screen.findAllByTestId('pool-quota-breakdown-row');
-    expect(rows.map((row) => row.textContent)).toEqual([
-      expect.stringContaining('Upstream One'),
-      expect.stringContaining('Upstream Two'),
+    // Time first: the pool chart is the first section under the header.
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map((heading) => heading.textContent);
+    expect(headings.slice(0, 3)).toEqual([
+      'Pool quota usage',
+      'Upstreams',
+      'Traffic',
     ]);
-    expect(rows[1]?.textContent).toContain('3% left');
+
+    const slots = screen.getAllByTestId('pool-quota-legend-slot');
+    expect(slots.map((slot) => slot.textContent)).toEqual([
+      '5h · 12% used · resets in 1h',
+      '7d · 83% used · resets in 1h',
+      '7d (Fable) · 97% used · resets in 1h',
+    ]);
+    const value = (index: number) =>
+      within(slots[index]!).getByText(/% used$/).className;
+    expect(value(0)).toContain('text-text');
+    expect(value(1)).toContain('text-warn-text');
+    expect(value(2)).toContain('text-danger-text');
+
+    const captions = screen.getByTestId('pool-quota-captions');
+    expect(captions.textContent).toContain('Plan-weighted across upstreams');
+    expect(captions.textContent).toContain('Capacity unknown for 2 upstreams');
+    expect(captions.textContent).toContain('Stale reading');
+    expect(screen.getByTestId('pool-quota-card').textContent).not.toMatch(
+      /left|headroom/i,
+    );
   });
 
-  it('leads with the binding window as pool headroom and tags it', () => {
-    const base = aggregateResponse(1_000_000, 60);
-    const used: Record<string, number> = { '5h': 12, '7d': 60, '7d_fable': 41 };
-    render(
-      <PoolHeadroomBand
-        aggregate={{
-          ...base,
-          windows: base.windows.map((entry) => ({
-            ...entry,
-            utilization_percent: used[entry.window] ?? null,
-          })),
-        }}
-        loading={false}
-      />,
-    );
-
+  it('links to the upstreams page from the upstreams table section', () => {
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
     expect(
-      screen.getByRole('img', {
-        name: 'Pool headroom: 40% left, 7d window binds · 60% used',
-      }),
-    ).toBeDefined();
-    const slots = screen.getAllByTestId('pool-quota-snapshot-slot');
-    expect(
-      slots.map((slot) => slot.textContent?.includes('binds pool')),
-    ).toEqual([false, true, false]);
-    expect(slots[0]?.textContent).toContain('88% left');
-    expect(slots[0]?.textContent).toContain('12% used');
-
-    const band = screen.getByTestId('pool-headroom-band');
-    const detail = (term: string) =>
-      within(band).getByText(term).nextElementSibling?.textContent;
-    expect(detail('Time left')).toBe('1h');
-    expect(detail('Provider data')).toContain('just now');
-    expect(detail('Provider data')).not.toContain('Stale');
-  });
-
-  it('ranks upstreams by least headroom left, sized by rank, linking to detail', () => {
-    render(
-      <ClosestToLimit aggregate={twoUpstreamAggregate()} loading={false} />,
-    );
-
-    const rows = screen.getAllByTestId('closest-to-limit-row');
-    expect(rows.map((row) => row.getAttribute('href'))).toEqual([
-      '/upstreams?selectedId=upstream-2',
-      '/upstreams?selectedId=upstream-1',
-    ]);
-    expect(rows.map((row) => row.getAttribute('data-rank'))).toEqual([
-      '1',
-      '2',
-    ]);
-    expect(rows[0]?.textContent).toContain('Upstream Two');
-    expect(rows[0]?.textContent).toContain('3% left');
-    expect(rows[0]?.textContent).toContain('7d window · 97% used');
-    expect(rows[0]?.textContent).toContain('resets in 2d 3h');
-    expect(
-      rows[0]?.querySelector('[data-slot="closest-headroom"] > span')
-        ?.className,
-    ).toContain('text-display-hero');
-    expect(
-      rows[1]?.querySelector('[data-slot="closest-headroom"] > span')
-        ?.className,
-    ).not.toContain('text-display-hero');
+      screen
+        .getByRole('link', { name: 'Manage upstreams' })
+        .getAttribute('href'),
+    ).toBe('/upstreams');
   });
 });
 
@@ -660,7 +629,7 @@ describe('PoolQuotaLegend', () => {
         showFable
       />,
     );
-    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 72% left');
+    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 28% used');
   });
 });
 
@@ -875,7 +844,7 @@ describe('Overview loading geometry', () => {
     ['aggregate', true, false],
     ['history', false, true],
   ])(
-    'keeps the pool band and history structured while the %s query is pending',
+    'keeps the pool chart structured while the %s query is pending',
     (_queryName, aggregatePending, historyPending) => {
       mockPendingOverviewQueries();
       vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
@@ -891,25 +860,10 @@ describe('Overview loading geometry', () => {
 
       render(<OverviewPage />);
 
-      const band = screen.getByTestId('pool-headroom-band');
-      expect(band.getAttribute('aria-busy')).toBe('true');
-      // Pending is not "no reading": nothing claims the pool is empty.
-      expect(band.textContent).not.toContain('No reading');
-      expect(band.textContent).not.toContain('No quota readings yet');
-      expect(band.querySelectorAll('[role="img"]')).toHaveLength(0);
-
-      const snapshotSlots = band.querySelectorAll(
-        '[data-testid="pool-quota-snapshot-slot"]',
-      );
-      expect(
-        Array.from(snapshotSlots, (slot) => slot.getAttribute('data-window')),
-      ).toEqual(['5h', '7d', '7d_fable']);
-      for (const slot of snapshotSlots) {
-        expect(slot.querySelector('.skeleton')).not.toBeNull();
-      }
-
       const card = screen.getByTestId('pool-quota-card');
       expect(card.getAttribute('aria-busy')).toBe('true');
+      // Pending is not "no reading": nothing claims the pool is empty.
+      expect(card.textContent).not.toContain('No reading');
       expect(card.textContent).not.toContain('No timeline data yet');
       const legendSlots = card.querySelectorAll(
         '[data-testid="pool-quota-legend-slot"]',
@@ -922,45 +876,31 @@ describe('Overview loading geometry', () => {
       }
 
       const chartSlot = screen.getByTestId('pool-quota-chart-slot');
-      expect(chartSlot.className).toContain('h-64');
+      expect(chartSlot.className).toContain('lg:h-[320px]');
       expect(chartSlot.querySelector('.skeleton')).not.toBeNull();
     },
   );
 
-  it('keeps the pool band and history mounted when pending resolves to legitimate no-data', () => {
+  it('keeps the pool chart mounted when pending resolves to legitimate no-data', () => {
     mockPendingOverviewQueries();
 
     const { rerender } = render(<OverviewPage />);
-    const pendingBand = screen.getByTestId('pool-headroom-band');
-    const pendingSnapshotSlots = Array.from(
-      pendingBand.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
-    );
     const pendingCard = screen.getByTestId('pool-quota-card');
     const pendingChartSlot = screen.getByTestId('pool-quota-chart-slot');
 
     mockResolvedEmptyQuotaQueries();
     rerender(<OverviewPage />);
 
-    const resolvedBand = screen.getByTestId('pool-headroom-band');
-    const resolvedSnapshotSlots = Array.from(
-      resolvedBand.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
-    );
-    expect(resolvedBand).toBe(pendingBand);
-    expect(resolvedBand.getAttribute('aria-busy')).toBe('false');
-    expect(resolvedSnapshotSlots).toHaveLength(3);
-    for (let index = 0; index < resolvedSnapshotSlots.length; index += 1) {
-      expect(resolvedSnapshotSlots[index]).toBe(pendingSnapshotSlots[index]);
-    }
-    expect(resolvedBand.querySelectorAll('.skeleton')).toHaveLength(0);
-    expect(resolvedBand.textContent?.match(/No reading/g)).toHaveLength(3);
-    expect(resolvedBand.textContent).toContain('No quota readings yet');
-
     const resolvedCard = screen.getByTestId('pool-quota-card');
     expect(resolvedCard).toBe(pendingCard);
     expect(resolvedCard.getAttribute('aria-busy')).toBe('false');
-    expect(
-      resolvedCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]'),
-    ).toHaveLength(3);
+    const legendSlots = resolvedCard.querySelectorAll(
+      '[data-testid="pool-quota-legend-slot"]',
+    );
+    expect(legendSlots).toHaveLength(3);
+    for (const slot of legendSlots) {
+      expect(slot.textContent).toContain('No reading');
+    }
     expect(screen.getByTestId('pool-quota-chart-slot')).toBe(pendingChartSlot);
     expect(resolvedCard.querySelectorAll('.skeleton')).toHaveLength(0);
     expect(resolvedCard.textContent).toContain(
@@ -1001,10 +941,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 80% left');
-      expect(
-        screen.getAllByTestId('pool-quota-snapshot-slot')[0]?.textContent,
-      ).toContain('80% left');
+      ).toBe('5h · 20% used · resets in 1h');
       expect(principalRow.textContent).toContain('Principal Alpha');
       expect(principalRow.textContent).toContain('$3.00');
 
@@ -1038,7 +975,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 80% left');
+      ).toBe('5h · 20% used · resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(screen.queryByTestId('top-principal-skeleton-row')).toBeNull();
       expect(principalRow.textContent).toContain('$3.00');
@@ -1075,10 +1012,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 45% left');
-      expect(
-        screen.getAllByTestId('pool-quota-snapshot-slot')[0]?.textContent,
-      ).toContain('45% left');
+      ).toBe('5h · 55% used · resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(principalRow.textContent).toContain('$9.00');
     } finally {
@@ -1130,7 +1064,7 @@ describe('Overview loading geometry', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: '1h' }));
     expect(
-      screen.getByText('Headroom, higher is better · last 24h'),
+      screen.getByText('Used per window across the pool · last 24h'),
     ).toBeDefined();
 
     const oneHourHistory = poolHistoryResponse(
@@ -1157,7 +1091,7 @@ describe('Overview loading geometry', () => {
     rerender(<OverviewPage />);
 
     expect(
-      screen.getByText('Headroom, higher is better · last 1h'),
+      screen.getByText('Used per window across the pool · last 1h'),
     ).toBeDefined();
     const oneHourDomain = screen
       .getByTestId('pool-quota-x-axis')
@@ -1193,7 +1127,7 @@ describe('Overview loading geometry', () => {
 
     expect(sevenDayOption.getAttribute('aria-checked')).toBe('true');
     expect(
-      screen.getByText('Headroom, higher is better · last 1h'),
+      screen.getByText('Used per window across the pool · last 1h'),
     ).toBeDefined();
     expect(screen.getByText('By virtual cost · 7d')).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
@@ -1231,7 +1165,7 @@ describe('Overview loading geometry', () => {
     rerender(<OverviewPage />);
 
     expect(
-      screen.getByText('Headroom, higher is better · last 7d'),
+      screen.getByText('Used per window across the pool · last 7d'),
     ).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
@@ -1248,7 +1182,7 @@ describe('Overview loading geometry', () => {
     expect(
       quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
         ?.textContent,
-    ).toBe('5h · 45% left');
+    ).toBe('5h · 55% used · resets in 1h');
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 

@@ -56,6 +56,7 @@ vi.mock('../lib/queries', async () => {
     usePrincipalKeys: vi.fn(),
     useIssueKey: vi.fn(),
     useRevokeKey: vi.fn(),
+    useUsage: vi.fn(),
   };
 });
 
@@ -170,6 +171,11 @@ beforeEach(() => {
     isLoading: false,
     isPending: false,
   } as never);
+  vi.mocked(queries.useUsage).mockReturnValue({
+    data: { series: [] },
+    isLoading: false,
+    isPending: false,
+  } as never);
 
   vi.mocked(queries.useCreatePrincipal).mockReturnValue({
     mutate: vi.fn(),
@@ -247,17 +253,16 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
 
   const loadingView = renderWithProviders(<Component />);
 
-  expect(screen.queryByText('0 total')).toBeNull();
+  expect(screen.queryByText('0 principals')).toBeNull();
   expect(screen.queryByText('Select a principal')).toBeNull();
   expect(screen.getByTestId('principal-count-skeleton')).toBeDefined();
 
   const rowGeometryClasses = [
     'w-full',
-    'min-h-[72px]',
+    'min-h-[52px]',
     'text-left',
-    'p-3',
+    'px-3',
     'rounded-sm',
-    'border',
   ];
   const loadingCards = screen.getAllByTestId('principal-list-skeleton');
   expect(loadingCards).toHaveLength(4);
@@ -291,7 +296,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
 
   renderWithProviders(<Component />);
 
-  expect(screen.getByText('1 total')).toBeDefined();
+  expect(screen.getByText('1 principal')).toBeDefined();
   const loadedRow = screen.getByRole('button', { name: /Ada/ });
   for (const className of rowGeometryClasses) {
     expect(loadedRow.className).toContain(className);

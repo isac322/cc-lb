@@ -1,4 +1,9 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  createFileRoute,
+  stripSearchParams,
+  useNavigate,
+} from '@tanstack/react-router';
 import {
   ChevronLeft,
   ExternalLink,
@@ -29,7 +34,12 @@ import {
   CHART_GRID,
   CHART_THRESHOLD,
 } from '../components/ui/charts';
-import { ArcGauge, HeadroomMeter } from '../components/ui/Gauge';
+import {
+  EntityList,
+  type EntityListView,
+  type EntityListViewConfig,
+  useEntityListView,
+} from '../components/ui/EntityList';
 import {
   Button,
   ConfirmDialog,
@@ -37,8 +47,6 @@ import {
   EmptyState,
   Hint,
   Notice,
-  PageContainer,
-  PageHeader,
   Section,
   SegmentedControl,
   Skeleton,
@@ -52,6 +60,7 @@ import {
   ResetCountdown,
 } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { UsageMeter } from '../components/ui/UsageMeter';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
   buildQuotaChartData,
@@ -73,22 +82,23 @@ import { SettingsCard } from '../components/upstreams/SettingsCard';
 import {
   formatQuotaStamp,
   subscriptionPlanLabel,
-  UpstreamHeadroomGrid,
-  useUpstreamHeadroomData,
-} from '../components/upstreams/UpstreamHeadroomGrid';
+  type UpstreamUsageRow,
+  useUpstreamUsageData,
+} from '../components/upstreams/UpstreamUsageTable';
 import { upstreamHealth } from '../components/upstreams/upstreamHealth';
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
   type OrganizationMetadataInner,
   type QuotaSnapshot,
+  type SubscriptionMetadataResponse,
   type SubscriptionQuotaWindow,
   type UpstreamOAuthStatusResponse,
   WINDOW_LABELS,
 } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
-import { fmtChartTooltipTs } from '../lib/format';
+import { fmtChartTooltipTs, formatCount } from '../lib/format';
 import { useTimezone } from '../lib/locale';
 import { isMessagesRequestEvent } from '../lib/logRows';
 import {
@@ -97,6 +107,7 @@ import {
   REFRESH_EXPIRING_SOON_SECS,
 } from '../lib/oauthReconnect';
 import {
+  qk,
   type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
   useDeleteUpstream,
@@ -115,10 +126,11 @@ import {
   useUsage,
 } from '../lib/queries';
 import {
-  formatHeadroom,
   formatQuotaPercent,
   QUOTA_DANGER_PCT,
+  QUOTA_SEVERITY_TEXT_CLASS,
   QUOTA_WARN_PCT,
+  quotaSeverity,
 } from '../lib/quotaSeverity';
 import {
   TIME_PRESET_OPTIONS,
@@ -126,23 +138,163 @@ import {
   type TimePreset,
 } from '../lib/timePresets';
 
+const UPSTREAM_FILTERS = [
+  'all',
+  'attention',
+  'disabled',
+  'oauth',
+  'api_key',
+] as const;
+type UpstreamFilter = (typeof UPSTREAM_FILTERS)[number];
+const UPSTREAM_SORTS = ['attention', 'usage', 'name'] as const;
+type UpstreamSort = (typeof UPSTREAM_SORTS)[number];
+
+const UPSTREAM_VIEW_DEFAULTS = {
+  q: '',
+  filter: 'all',
+  sort: 'attention',
+} as const satisfies EntityListView<UpstreamFilter, UpstreamSort>;
+
 const upstreamSearchSchema = z.object({
   selectedId: z.string().optional(),
   action: z.enum(['new', 'reconnect']).optional(),
+  q: z.string().default('').catch(''),
+  filter: z.enum(UPSTREAM_FILTERS).default('all').catch('all'),
+  sort: z.enum(UPSTREAM_SORTS).default('attention').catch('attention'),
 });
 
 export const Route = createFileRoute('/upstreams')({
   validateSearch: upstreamSearchSchema,
+  // Defaults stay out of the address bar.
+  search: { middlewares: [stripSearchParams(UPSTREAM_VIEW_DEFAULTS)] },
   component: UpstreamsPage,
 });
 
+const UPSTREAM_FILTER_OPTIONS: readonly {
+  value: UpstreamFilter;
+  label: string;
+}[] = [
+  { value: 'all', label: 'All upstreams' },
+  { value: 'attention', label: 'Needs attention' },
+  { value: 'disabled', label: 'Disabled' },
+  { value: 'oauth', label: 'Subscription (OAuth)' },
+  { value: 'api_key', label: 'API key' },
+];
+const UPSTREAM_SORT_OPTIONS: readonly {
+  value: UpstreamSort;
+  label: string;
+}[] = [
+  { value: 'attention', label: 'Needs attention first' },
+  { value: 'usage', label: 'Highest usage' },
+  { value: 'name', label: 'Name' },
+];
+
+/** The row's window facts, in reading order, with their compact names. */
+const ROW_WINDOWS = [
+  ['5h', '5h'],
+  ['7d', '7d'],
+  ['7d_fable', 'Fable'],
+] as const;
+/** Windows whose utilization counts toward a row's peak. */
+const PEAK_WINDOWS: ReadonlySet<string> = new Set([
+  '5h',
+  '7d',
+  '7d_sonnet',
+  '7d_opus',
+  '7d_fable',
+]);
+
+/** Highest used% (0-100) across the subscription windows; null without one. */
+function peakUsedPct(row: UpstreamUsageRow): number | null {
+  let peak: number | null = null;
+  for (const snap of row.windows) {
+    if (!PEAK_WINDOWS.has(snap.window) || snap.utilization == null) continue;
+    const used = snap.utilization * 100;
+    if (peak === null || used > peak) peak = used;
+  }
+  return peak;
+}
+
+/** A status problem worth a phrase: reconnect nudges and danger health. */
+function rowProblem(
+  row: UpstreamUsageRow,
+): { tone: 'warn' | 'danger'; label: string } | null {
+  if (!row.upstream.enabled) return null;
+  if (row.nudge) return { tone: row.nudge.tone, label: row.nudge.label };
+  if (row.health.tone === 'danger' || row.health.tone === 'warn')
+    return { tone: row.health.tone, label: row.health.label };
+  return null;
+}
+
+function needsAttention(row: UpstreamUsageRow): boolean {
+  if (!row.upstream.enabled) return false;
+  return rowProblem(row) !== null || (peakUsedPct(row) ?? 0) >= QUOTA_WARN_PCT;
+}
+
+function compareUpstreamNames(
+  a: UpstreamUsageRow,
+  b: UpstreamUsageRow,
+): number {
+  return a.upstream.name.localeCompare(b.upstream.name, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function compareByUsage(a: UpstreamUsageRow, b: UpstreamUsageRow): number {
+  return (
+    (peakUsedPct(b) ?? -1) - (peakUsedPct(a) ?? -1) ||
+    compareUpstreamNames(a, b)
+  );
+}
+
+/**
+ * Most urgent first: danger (a danger status such as unreadable credentials,
+ * or a window at 95%+ used), then warn (a warn status or 80%+ used), then
+ * healthy, then disabled. Ties fall back to usage, then name.
+ */
+function attentionRank(row: UpstreamUsageRow): number {
+  if (!row.upstream.enabled) return 3;
+  const problem = rowProblem(row);
+  const peak = peakUsedPct(row) ?? 0;
+  if (problem?.tone === 'danger' || peak >= QUOTA_DANGER_PCT) return 0;
+  if (problem || peak >= QUOTA_WARN_PCT) return 1;
+  return 2;
+}
+
+function upstreamRowId(row: UpstreamUsageRow): string {
+  return row.upstream.id;
+}
+
+/** Caption for a healthy row: the Claude plan, or the upstream kind. */
+function UpstreamPlanCaption({ upstream }: { upstream: Upstream }) {
+  const oauth = upstream.kind === 'anthropic_oauth';
+  const meta = useUpstreamSubscriptionMetadata(oauth ? upstream.id : '');
+  if (!oauth) return <span className="truncate">API key</span>;
+  if (meta.data === undefined && meta.isPending)
+    return <Skeleton as="span" className="inline-block h-3 w-24" />;
+  return (
+    <span className="truncate">
+      {subscriptionPlanLabel(meta.data?.organization_metadata) ??
+        'Subscription'}
+    </span>
+  );
+}
+
 function UpstreamsPage() {
-  const { selectedId, action } = Route.useSearch();
+  const search = Route.useSearch();
+  const { selectedId, action } = search;
+  const view: EntityListView<UpstreamFilter, UpstreamSort> = {
+    q: search.q ?? '',
+    filter: search.filter ?? 'all',
+    sort: search.sort ?? 'attention',
+  };
   const navigate = useNavigate({ from: Route.fullPath });
+  const queryClient = useQueryClient();
   // Upstreams, the 5s /latest poll, runtime status, reconnect nudges and
   // 7-day spend in one place; the DetailView polls /latest with the same
   // key, so TanStack dedups it into one request.
-  const headroom = useUpstreamHeadroomData();
+  const upstreamUsage = useUpstreamUsageData();
 
   // One dialog serves every entry point: "Add upstream" (header, empty state,
   // and the ?action=new deep link used by the command palette) and
@@ -169,98 +321,264 @@ function UpstreamsPage() {
     });
   }, [action, navigate, openCreate]);
 
-  const visibleUpstreams = useMemo(
-    () => headroom.rows.map((row) => row.upstream),
-    [headroom.rows],
+  const viewConfig = useMemo<
+    EntityListViewConfig<UpstreamUsageRow, UpstreamFilter, UpstreamSort>
+  >(
+    () => ({
+      searchText: ({ upstream }) => {
+        const oauth = upstream.kind === 'anthropic_oauth';
+        // The plan is whatever the rows already fetched; no extra requests.
+        const plan = oauth
+          ? subscriptionPlanLabel(
+              queryClient.getQueryData<SubscriptionMetadataResponse>(
+                qk.upstreamSubscriptionMetadata(upstream.id),
+              )?.organization_metadata,
+            )
+          : null;
+        return [
+          upstream.name,
+          upstream.id,
+          oauth ? 'Subscription OAuth' : 'API key',
+          plan,
+        ];
+      },
+      defaultFilter: 'all',
+      filters: {
+        all: () => true,
+        attention: needsAttention,
+        disabled: (row) => !row.upstream.enabled,
+        oauth: (row) => row.upstream.kind === 'anthropic_oauth',
+        api_key: (row) => row.upstream.kind !== 'anthropic_oauth',
+      },
+      sorts: {
+        attention: (a, b) =>
+          attentionRank(a) - attentionRank(b) || compareByUsage(a, b),
+        usage: compareByUsage,
+        name: compareUpstreamNames,
+      },
+    }),
+    [queryClient],
   );
+  const listView = useEntityListView(upstreamUsage.rows, view, viewConfig);
 
-  const selected = visibleUpstreams.find((u) => u.id === selectedId) ?? null;
+  const selected =
+    upstreamUsage.rows.find((row) => row.upstream.id === selectedId)
+      ?.upstream ?? null;
+  // `resetScroll: false`: the router's scroll restoration would otherwise
+  // snap the list pane back to its top on every selection, so arrowing to
+  // a row below the fold would leave it out of view.
   const select = (id: string | undefined) =>
-    navigate({ search: id ? { selectedId: id } : {} });
+    navigate({ search: { selectedId: id, ...view }, resetScroll: false });
+  const changeView = (
+    patch: Partial<EntityListView<UpstreamFilter, UpstreamSort>>,
+  ) =>
+    navigate({
+      replace: true,
+      resetScroll: false,
+      search: { selectedId, ...view, ...patch },
+    });
 
+  // From md the detail pane is never blank: pick the first row of the
+  // current sort and filter. The sorts rank by quota and connection status,
+  // so wait for both; picking earlier selects a row that then sorts away
+  // from the top.
+  const firstVisibleId = listView.visible[0]?.upstream.id;
+  const sortInputsPending =
+    upstreamUsage.isLoading ||
+    upstreamUsage.quotaPending ||
+    upstreamUsage.statusPending;
   useEffect(() => {
-    if (!headroom.isLoading && !selected && visibleUpstreams.length > 0) {
-      if (window.matchMedia('(min-width: 768px)').matches) {
-        navigate({
-          search: { selectedId: visibleUpstreams[0].id },
-          replace: true,
-        });
-      }
+    if (sortInputsPending || selected || !firstVisibleId) return;
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      navigate({
+        search: (previous) => ({ ...previous, selectedId: firstVisibleId }),
+        replace: true,
+        resetScroll: false,
+      });
     }
-  }, [headroom.isLoading, selected, visibleUpstreams, navigate]);
+  }, [sortInputsPending, selected, firstVisibleId, navigate]);
+
+  const total = upstreamUsage.rows.length;
 
   return (
-    <PageContainer>
-      <PageHeader title="Upstreams" />
-      {/* Phones show the list or the selected upstream, never both, so the
-          page stays short; from md the detail sits under the list. */}
-      <section
-        aria-labelledby="upstreams-list-title"
-        className={cx('flex-col gap-4', selected ? 'hidden md:flex' : 'flex')}
-      >
-        <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-            <h2
-              id="upstreams-list-title"
-              className="text-title-section text-text"
-            >
-              Upstreams
-            </h2>
-            <p className="flex min-h-5 items-center text-body-sm text-text-muted">
-              {headroom.isLoading ? (
-                <Skeleton as="span" className="h-3 w-28" />
-              ) : (
-                [
-                  `${visibleUpstreams.length} configured`,
-                  headroom.reconnectCount > 0
-                    ? `${headroom.reconnectCount} need${headroom.reconnectCount === 1 ? 's' : ''} reconnect`
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')
-              )}
-            </p>
-          </div>
-          <Button variant="primary" iconLeft={<Plus />} onClick={openCreate}>
+    <div className="h-shell min-h-0 flex w-full max-w-[120rem] mx-auto">
+      <EntityList
+        className={cx(
+          'w-full shrink-0 border-r border-subtle md:w-[360px] xl:w-[400px]',
+          selected ? 'hidden md:flex' : 'flex',
+        )}
+        title="Upstreams"
+        noun="upstreams"
+        countLine={
+          upstreamUsage.isLoading
+            ? null
+            : [
+                `${formatCount(total)} ${total === 1 ? 'upstream' : 'upstreams'}`,
+                upstreamUsage.reconnectCount > 0
+                  ? `${formatCount(upstreamUsage.reconnectCount)} need${upstreamUsage.reconnectCount === 1 ? 's' : ''} reconnect`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+        }
+        action={
+          <Button
+            size="sm"
+            className="max-md:h-11"
+            variant="primary"
+            iconLeft={<Plus />}
+            onClick={openCreate}
+          >
             Add upstream
           </Button>
-        </header>
-        <UpstreamHeadroomGrid
-          data={headroom}
-          empty={<UpstreamsListEmpty onCreate={openCreate} />}
-          onSelect={select}
-          selectedId={selectedId}
-          variant="list"
-        />
-      </section>
+        }
+        loading={upstreamUsage.isLoading}
+        totalCount={total}
+        result={listView}
+        toolbar={{
+          view,
+          filterOptions: UPSTREAM_FILTER_OPTIONS,
+          sortOptions: UPSTREAM_SORT_OPTIONS,
+          onViewChange: changeView,
+          onClear: () => changeView({ q: '', filter: 'all' }),
+        }}
+        getId={upstreamRowId}
+        renderRow={(row) => {
+          const { upstream } = row;
+          const oauth = upstream.kind === 'anthropic_oauth';
+          const quotaPending = oauth && upstreamUsage.quotaPending;
+          const peak = oauth ? peakUsedPct(row) : null;
+          const problem = rowProblem(row);
+          const facts = oauth
+            ? ROW_WINDOWS.flatMap(([windowName, label]) => {
+                const snap = row.windows.find((s) => s.window === windowName);
+                return snap?.utilization == null
+                  ? []
+                  : [{ label, used: snap.utilization * 100 }];
+              })
+            : [];
+          const factsText = facts
+            .map((f) => `${f.label} ${formatQuotaPercent(f.used)}`)
+            .join(' · ');
+          return {
+            name: upstream.name,
+            muted: !upstream.enabled,
+            title: [
+              upstream.name,
+              !upstream.enabled ? 'Disabled' : problem?.label,
+              factsText ? `${factsText} used` : null,
+              row.runtimeError,
+            ]
+              .filter(Boolean)
+              .join('\n'),
+            trailing: quotaPending ? (
+              <Skeleton as="span" className="inline-block h-4 w-8" />
+            ) : peak != null ? (
+              <>
+                <span
+                  className={QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(peak)]}
+                >
+                  {formatQuotaPercent(peak)}
+                </span>
+                <span className="sr-only"> used</span>
+              </>
+            ) : null,
+            caption: !upstream.enabled ? (
+              <span className="text-text-muted">Disabled</span>
+            ) : problem ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className={cx('status-dot shrink-0', problem.tone)}
+                />
+                <span
+                  className={cx(
+                    'truncate',
+                    problem.tone === 'danger'
+                      ? 'text-danger-text'
+                      : 'text-warn-text',
+                  )}
+                >
+                  {problem.label}
+                </span>
+              </>
+            ) : (
+              <UpstreamPlanCaption upstream={upstream} />
+            ),
+            captionTrailing: quotaPending ? (
+              <Skeleton as="span" className="inline-block h-3 w-24" />
+            ) : facts.length ? (
+              <span className="text-text-faint">
+                {facts.map((f, i) => (
+                  <span key={f.label}>
+                    {i > 0 ? ' · ' : null}
+                    {f.label}{' '}
+                    <span
+                      className={
+                        quotaSeverity(f.used) === 'ok'
+                          ? 'text-text-muted'
+                          : QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(f.used)]
+                      }
+                    >
+                      {formatQuotaPercent(f.used)}
+                    </span>
+                  </span>
+                ))}
+              </span>
+            ) : null,
+          };
+        }}
+        selectedId={selectedId}
+        onSelect={select}
+        empty={<UpstreamsListEmpty onCreate={openCreate} />}
+        skeletonTestId="upstream-list-loading-row"
+      />
 
-      {selected ? (
-        <DetailView
-          key={selected.id}
-          upstream={selected}
-          onBack={() => select(undefined)}
-          onConnect={() =>
-            setConnectTarget({ mode: 'reconnect', upstream: selected })
-          }
-        />
-      ) : headroom.isLoading ? (
-        <UpstreamDetailLoadingShell />
-      ) : visibleUpstreams.length ? (
-        <div className="hidden md:block">
-          <EmptyState
-            headingLevel={2}
-            title="Select an upstream"
-            description="Pick an upstream from the list to see its configuration, OAuth state, and recent requests."
-          />
+      {/* Phones show the list or the selected upstream, never both; from md
+          the detail sits beside the list with its own scroll. Keyed by the
+          selection so each upstream opens at the top of its detail. */}
+      <div
+        key={selected?.id ?? 'none'}
+        className={cx(
+          'min-h-0 min-w-0 flex-1 overflow-y-auto',
+          selected ? 'block' : 'hidden md:block',
+        )}
+        data-testid="upstream-detail-pane"
+      >
+        <div className="px-4 pt-5 pb-10 md:px-8 md:pt-8 md:pb-16">
+          {selected ? (
+            <DetailView
+              key={selected.id}
+              upstream={selected}
+              onBack={() => select(undefined)}
+              onConnect={() =>
+                setConnectTarget({ mode: 'reconnect', upstream: selected })
+              }
+            />
+          ) : upstreamUsage.isLoading ? (
+            <UpstreamDetailLoadingShell />
+          ) : total ? (
+            <EmptyState
+              headingLevel={2}
+              title="Select an upstream"
+              description="Pick an upstream from the list to see its configuration, OAuth state, and recent requests."
+            />
+          ) : (
+            <EmptyState
+              headingLevel={2}
+              title="Upstream details appear here"
+              description="Quota, OAuth state, settings, and recent requests show here once you add an upstream."
+            />
+          )}
         </div>
-      ) : null}
+      </div>
 
       <UpstreamConnectDialog
         target={connectTarget}
         onClose={() => setConnectTarget(null)}
         onCreated={(created) => select(created.id)}
       />
-    </PageContainer>
+    </div>
   );
 }
 
@@ -271,19 +589,25 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
   'inline-flex items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5';
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
-// Window cards reserve one gauge row (dial, label, reset and observed facts,
-// ETA and burn) so the loaded cards never push the chart down.
+// Window blocks reserve one meter row (label, N% used, meter, reset,
+// ETA and burn facts, observed caption) so the loaded blocks never push
+// the chart down.
 const QUOTA_WINDOW_GRID_CLASS =
-  'grid min-h-[22rem] gap-x-10 gap-y-8 sm:gap-y-10 [grid-template-columns:repeat(auto-fill,minmax(13rem,1fr))]';
+  'grid min-h-70 grid-cols-2 items-start gap-x-6 gap-y-8 @lg:gap-x-10 @lg:gap-y-10 @lg:[grid-template-columns:repeat(auto-fill,minmax(11rem,1fr))]';
 const QUOTA_CHART_HEIGHT = 280;
+// Sized by the detail pane, not the viewport: beside the list the pane is
+// ~800-1000px wide, too narrow for a 20rem identity aside next to three
+// window blocks and the chart. The aside sits beside the main column only
+// when the pane is 56rem+; otherwise it drops under it. Parents carry
+// `@container`.
 const DETAIL_GRID_CLASS =
-  'grid gap-x-12 gap-y-12 lg:grid-cols-[minmax(0,1fr)_20rem] xl:grid-cols-[minmax(0,1fr)_22rem]';
+  'grid gap-x-12 gap-y-12 @4xl:grid-cols-[minmax(0,1fr)_20rem]';
 /** The one series drawn dashed, so 7d and 7d (Fable) stay apart without a new hue. */
 const DASHED_WINDOW = '7d_fable';
-/** Headroom thresholds on the chart: warn below 20% left, danger below 5%. */
-const HEADROOM_THRESHOLDS = [
-  { y: 100 - QUOTA_WARN_PCT, tone: 'warn' },
-  { y: 100 - QUOTA_DANGER_PCT, tone: 'danger' },
+/** Usage thresholds on the chart: warn at 80% used, danger at 95% used. */
+const USAGE_THRESHOLDS = [
+  { y: QUOTA_WARN_PCT, tone: 'warn' },
+  { y: QUOTA_DANGER_PCT, tone: 'danger' },
 ] as const;
 
 function IdentitySkeleton() {
@@ -307,11 +631,14 @@ function QuotaWindowCardSkeleton() {
       data-testid="quota-snapshot-skeleton-card"
       className="flex flex-col gap-3"
     >
-      <Skeleton className="size-32 rounded-full" />
-      <Skeleton className="h-5 w-16" />
-      <Skeleton className="h-4 w-28" />
-      <Skeleton className="mt-2 h-4 w-40" />
+      <Skeleton className="h-5 w-12" />
+      <Skeleton className="h-4 w-20" />
+      <Skeleton className="h-1.5 w-full" />
+      <Skeleton className="mt-2 h-3 w-10" />
       <Skeleton className="h-4 w-36" />
+      <Skeleton className="h-3 w-16" />
+      <Skeleton className="h-4 w-24" />
+      <Skeleton className="mt-2 h-3 w-28" />
     </div>
   );
 }
@@ -322,7 +649,7 @@ function UpstreamDetailLoadingShell() {
       data-testid="upstream-detail-loading-shell"
       aria-busy="true"
       aria-label="Loading upstream details"
-      className="flex flex-col gap-12"
+      className="@container flex flex-col gap-12"
     >
       <div className="flex flex-col gap-2">
         <Skeleton className="h-4 w-28" />
@@ -400,7 +727,7 @@ function WindowFact({
   children: React.ReactNode;
 }) {
   return (
-    <div className="grid grid-cols-[6rem_minmax(0,1fr)] items-baseline gap-x-3">
+    <div className="flex flex-col gap-0.5">
       <dt className="text-label text-text-muted">{label}</dt>
       <dd className="min-w-0 text-body-sm tabular-nums text-text">
         {children}
@@ -738,7 +1065,7 @@ function DetailView({
       ? isolatedWindow
       : null;
 
-  // The chart plots headroom (100 - used), like every other quota figure.
+  // The chart plots used% (as Claude reports it), clamped to the 0-100 axis.
   const chartRows = useMemo(
     () =>
       chartData.rows
@@ -747,7 +1074,7 @@ function DetailView({
           const next: typeof row = { ...row };
           for (const [key, value] of Object.entries(row)) {
             if (key !== 'unix' && typeof value === 'number') {
-              next[key] = Math.min(100, Math.max(0, 100 - value));
+              next[key] = Math.min(100, Math.max(0, value));
             }
           }
           return next;
@@ -1048,7 +1375,7 @@ function DetailView({
   const quotaWindows = (
     <Section
       title="Quota windows"
-      subtitle="Headroom per window with its reset time"
+      subtitle="Used per window with its reset time"
     >
       {quotaLatestPending ? (
         <div
@@ -1113,21 +1440,24 @@ function DetailView({
                   'insufficient_growth_intervals');
             const status =
               snap.status && snap.status !== 'allowed' ? snap.status : null;
-            let caption: string;
+            // The meter carries `N% used`; the caption only adds what it
+            // cannot say: a limit status, a missing reading, or the extra
+            // usage budget in dollars.
+            let caption: string | null;
             if (isOverage) {
               caption =
                 overageLimit != null && overageUsed != null
-                  ? `$${((overageLimit - overageUsed) / 100).toFixed(2)} of $${(
+                  ? `$${(overageUsed / 100).toFixed(2)} of $${(
                       overageLimit / 100
                     ).toLocaleString('en-US', {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
-                    })} USD left`
+                    })} USD used`
                   : 'Enabled — no limit set';
             } else if (usedPct == null) {
-              caption = snap.status ?? 'No reading';
+              caption = status ?? 'No reading';
             } else {
-              caption = `${formatQuotaPercent(usedPct)} used${status ? ` · ${status}` : ''}`;
+              caption = status;
             }
             return (
               <article
@@ -1135,24 +1465,16 @@ function DetailView({
                 data-window={snap.window}
                 className="flex min-w-0 flex-col gap-4"
               >
-                {/* Phones read a linear meter; the dial needs the room. */}
-                <div className="hidden sm:block">
-                  <ArcGauge
-                    caption={caption}
-                    label={windowLabel(snap.window)}
-                    usedPct={usedPct}
-                  />
-                </div>
-                <div className="flex flex-col gap-2 sm:hidden">
+                <div className="flex flex-col gap-2">
                   <span className="text-title-section text-text">
                     {windowLabel(snap.window)}
                   </span>
-                  <HeadroomMeter
+                  <UsageMeter
                     label={windowLabel(snap.window)}
                     size="md"
                     usedPct={usedPct}
                   />
-                  {isOverage || usedPct == null || status ? (
+                  {caption ? (
                     <span className="text-body-sm text-text-muted">
                       {caption}
                     </span>
@@ -1227,7 +1549,7 @@ function DetailView({
   const quotaHistory = (
     <Section
       title="Quota history"
-      subtitle="Headroom per window; higher is better"
+      subtitle="Used per window over time"
       action={
         <div data-testid="quota-history-range-control">
           <SegmentedControl
@@ -1286,14 +1608,21 @@ function DetailView({
                       {windowLabel(windowName)}
                     </span>
                     {current != null ? (
-                      <span className="tabular-nums text-text">
-                        {formatHeadroom(current * 100)}
+                      <span
+                        className={cx(
+                          'tabular-nums',
+                          QUOTA_SEVERITY_TEXT_CLASS[
+                            quotaSeverity(current * 100)
+                          ],
+                        )}
+                      >
+                        {formatQuotaPercent(current * 100)} used
                       </span>
                     ) : null}
                   </button>
                 );
               })}
-              {HEADROOM_THRESHOLDS.map(({ y, tone }) => (
+              {USAGE_THRESHOLDS.map(({ y, tone }) => (
                 <span
                   key={tone}
                   className="flex items-center gap-1.5 text-body-sm text-text-muted"
@@ -1305,7 +1634,7 @@ function DetailView({
                       tone === 'warn' ? 'border-warn' : 'border-danger',
                     )}
                   />
-                  {tone === 'warn' ? 'Warn' : 'Danger'} below {y}% left
+                  {tone === 'warn' ? 'Warn' : 'Danger'} at {y}% used
                 </span>
               ))}
             </>
@@ -1354,7 +1683,7 @@ function DetailView({
                   domain={[0, 100]}
                   allowDataOverflow={false}
                 />
-                {HEADROOM_THRESHOLDS.map(({ y, tone }) => (
+                {USAGE_THRESHOLDS.map(({ y, tone }) => (
                   <ReferenceLine
                     key={y}
                     y={y}
@@ -1393,9 +1722,17 @@ function DetailView({
                                 />
                                 {windowLabel(key)}
                               </span>
-                              <span className="tabular-nums">
+                              <span
+                                className={cx(
+                                  'tabular-nums',
+                                  typeof p.value === 'number' &&
+                                    QUOTA_SEVERITY_TEXT_CLASS[
+                                      quotaSeverity(p.value)
+                                    ],
+                                )}
+                              >
                                 {typeof p.value === 'number'
-                                  ? formatHeadroom(100 - p.value)
+                                  ? `${formatQuotaPercent(p.value)} used`
                                   : '—'}
                               </span>
                             </div>
@@ -1550,13 +1887,13 @@ function DetailView({
     <>
       <section
         aria-labelledby="upstream-detail-title"
-        className="flex flex-col gap-12"
+        className="@container flex flex-col gap-12"
       >
         <div className="flex flex-col gap-3">
           <button
             type="button"
             onClick={onBack}
-            className="-ml-1 inline-flex min-h-9 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text md:hidden"
+            className="-ml-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text md:hidden"
           >
             <ChevronLeft className="size-4" strokeWidth={1.75} /> All upstreams
           </button>
@@ -1665,7 +2002,7 @@ function DetailView({
         </div>
 
         {isOauth ? (
-          <div className="grid gap-12 2xl:grid-cols-2">
+          <div className="grid gap-12 @4xl:grid-cols-2">
             <WarmupCardMinimal
               upstream={upstream}
               credentialNoticeShown={reconnectNudge != null}

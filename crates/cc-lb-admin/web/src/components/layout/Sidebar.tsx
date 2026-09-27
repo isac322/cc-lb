@@ -67,11 +67,15 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
       />
     );
   }
+  // The tint is mixed into the ground rather than layered over it, so the
+  // badge keeps its contrast on the selected nav fill.
   return (
     <span
       className={cx(
         'ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-caption font-medium tabular-nums',
-        danger ? 'bg-danger/15 text-danger-text' : 'bg-warn/15 text-warn-text',
+        danger
+          ? 'bg-[color-mix(in_oklab,var(--color-danger)_15%,var(--color-bg))] text-danger-text'
+          : 'bg-[color-mix(in_oklab,var(--color-warn)_15%,var(--color-bg))] text-warn-text',
       )}
     >
       <span aria-hidden="true">{count}</span>
@@ -81,7 +85,7 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
 }
 
 /**
- * The mark: a 240° headroom dial with a violet sweep. `size` in px.
+ * The mark: an open 240° dial with a violet sweep. `size` in px.
  */
 export function BrandMark({ size = 24 }: { size?: number }) {
   return (
@@ -138,13 +142,12 @@ const LABEL_FADE =
 
 /**
  * Nav item chrome. TanStack `Link` marks the current route with
- * `data-status="active"`: surface fill, full ink and a 2px accent rule on
- * the sidebar's left edge.
+ * `data-status="active"` and `aria-current="page"`: the neutral selection
+ * fill and full ink. No edge rule.
  */
 const NAV_ITEM =
-  'relative flex items-center gap-2.5 h-9 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-panel hover:text-text ' +
-  "before:absolute before:-left-3 before:top-1.5 before:bottom-1.5 before:w-0.5 before:content-[''] " +
-  'data-[status=active]:bg-panel-strong data-[status=active]:text-text data-[status=active]:before:bg-accent ' +
+  'relative flex items-center gap-2.5 h-9 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-overlay-2 hover:text-text ' +
+  'data-[status=active]:bg-selected data-[status=active]:text-text data-[status=active]:hover:bg-selected ' +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
 
 function SidebarNavGroup({
@@ -284,13 +287,12 @@ const TAB_BAR_PATHS = ['/', '/upstreams', '/principals', '/logs'] as const;
 
 const TAB_ITEM =
   'relative flex flex-col items-center justify-center gap-1 min-w-0 text-caption font-medium text-text-muted transition-colors hover:text-text ' +
-  "before:absolute before:top-0 before:inset-x-1/4 before:h-0.5 before:content-[''] " +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
 
 /**
  * Bottom tab bar below `lg`: four primary pages plus "More", which opens
- * the full navigation sheet. The active tab gets full ink and a 2px accent
- * rule on its top edge. Page titles stay in the top bar only.
+ * the full navigation sheet. The active tab gets full ink on the neutral
+ * selection fill. Page titles stay in the top bar only.
  */
 export function SidebarTabBar({
   pathname,
@@ -320,7 +322,7 @@ export function SidebarTabBar({
             activeOptions={{ exact: path === '/' }}
             className={cx(
               TAB_ITEM,
-              'h-14 data-[status=active]:text-text data-[status=active]:before:bg-accent',
+              'h-14 data-[status=active]:bg-selected data-[status=active]:text-text',
             )}
           >
             <Icon className="size-4" strokeWidth={1.75} aria-hidden="true" />
@@ -337,11 +339,7 @@ export function SidebarTabBar({
         aria-expanded={moreOpen}
         aria-current={moreActive ? 'page' : undefined}
         onClick={onMore}
-        className={cx(
-          TAB_ITEM,
-          'h-14',
-          moreActive && 'text-text before:bg-accent',
-        )}
+        className={cx(TAB_ITEM, 'h-14', moreActive && 'bg-selected text-text')}
       >
         <MoreHorizontal
           className="size-4"

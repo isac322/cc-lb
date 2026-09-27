@@ -61,7 +61,7 @@ function ChartFrame({
 // ─── Sparkline ───────────────────────────────────────────────────────────────
 /**
  * 1.25px line over a flat series-opacity fill, neutral by default (the
- * accent is reserved for headroom). Renders nothing when every value is
+ * accent is reserved for pool quota). Renders nothing when every value is
  * zero (or there is no data): a flat line on the tile's bottom edge reads
  * as a second border, not as "no traffic".
  */

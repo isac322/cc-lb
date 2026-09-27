@@ -1,9 +1,8 @@
 import type { AggregateResponse, PoolHistoryWindowResponse } from '../lib/api';
-import { headroomPct } from '../lib/quotaSeverity';
 
 export const POOL_QUOTA_WINDOWS = ['5h', '7d', '7d_fable'] as const;
 export type PoolQuotaWindow = (typeof POOL_QUOTA_WINDOWS)[number];
-/** One history bucket, as pool headroom per window (0-100, higher is better). */
+/** One history bucket, as pool utilization per window (0-100 used). */
 export type PoolQuotaChartRow = {
   unix: number;
   '5h': number | null;
@@ -24,8 +23,9 @@ export function hasFableHistoryData(
 }
 
 /**
- * Pool history as headroom: each bucket plots `100 - used`, clamped to
- * 0-100, so the chart reads the same way as every gauge on the page.
+ * Pool history as used percent: each bucket plots the pool utilization,
+ * clamped to 0-100 so an over-limit reading pins to the top of the plot
+ * instead of leaving it.
  */
 export function buildPoolQuotaChartData(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
@@ -42,8 +42,10 @@ export function buildPoolQuotaChartData(
         '7d': null,
         '7d_fable': null,
       };
-      const left = headroomPct(point.utilization_percent);
-      if (left != null) row[window] = left;
+      const used = point.utilization_percent;
+      if (used != null && Number.isFinite(used)) {
+        row[window] = Math.min(100, Math.max(0, used));
+      }
       buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
@@ -73,26 +75,45 @@ export function poolQuotaResponseLatest(
 }
 
 /**
- * The pool window that runs out first: the highest pool utilization among
- * 5h / 7d / 7d (Fable). Ties keep the shorter window. `null` without any
- * reading.
+ * When each pool window next refills (`cc_window_reset_unix_secs`), or
+ * `null` for a window without a reading or a reset time.
  */
-export function bindingPoolWindow(
+export function poolWindowResets(
   aggregate: AggregateResponse | undefined,
-): PoolQuotaWindow | null {
-  let binding: PoolQuotaWindow | null = null;
-  let bindingUsed = -Infinity;
+): Record<PoolQuotaWindow, number | null> {
+  const resets: Record<PoolQuotaWindow, number | null> = {
+    '5h': null,
+    '7d': null,
+    '7d_fable': null,
+  };
   for (const window of POOL_QUOTA_WINDOWS) {
-    const used = aggregate?.windows.find(
-      (entry) => entry.window === window,
-    )?.utilization_percent;
-    if (used == null || !Number.isFinite(used)) continue;
-    if (used > bindingUsed) {
-      binding = window;
-      bindingUsed = used;
+    const entry = aggregate?.windows.find(
+      (candidate) => candidate.window === window,
+    );
+    if (entry && entry.cc_window_reset_unix_secs > 0) {
+      resets[window] = entry.cc_window_reset_unix_secs;
     }
   }
-  return binding;
+  return resets;
+}
+
+/**
+ * Upstreams whose share of the pool cannot be sized: the most any pool
+ * window reports as `missing_capacity_upstreams`.
+ */
+export function missingCapacityUpstreams(
+  aggregate: AggregateResponse | undefined,
+): number {
+  let missing = 0;
+  for (const window of POOL_QUOTA_WINDOWS) {
+    const entry = aggregate?.windows.find(
+      (candidate) => candidate.window === window,
+    );
+    if (entry && entry.missing_capacity_upstreams > missing) {
+      missing = entry.missing_capacity_upstreams;
+    }
+  }
+  return missing;
 }
 
 /**
@@ -125,57 +146,6 @@ export function oldestProviderObservation(
     stale = true;
   }
   return { observedAtUnixSecs: oldest, stale };
-}
-
-/** One upstream's most-used quota window, as ranked by the Overview. */
-export type ClosestToLimitEntry = {
-  upstreamId: string;
-  upstreamName: string;
-  window: PoolQuotaWindow;
-  /** 0-100 */
-  utilizationPercent: number;
-  resetUnixSecs: number | null;
-  state: string;
-};
-
-/**
- * Ranks upstreams by least headroom left (highest window utilization first).
- * Each upstream appears once, with the window that is closest to its limit;
- * ties inside an upstream keep the window order (5h before 7d before 7d
- * (Fable)). Lots without a utilization reading are skipped.
- */
-export function closestToLimit(
-  aggregate: AggregateResponse | undefined,
-): ClosestToLimitEntry[] {
-  const byUpstream = new Map<string, ClosestToLimitEntry>();
-  for (const window of POOL_QUOTA_WINDOWS) {
-    const entry = aggregate?.windows.find(
-      (candidate) => candidate.window === window,
-    );
-    for (const lot of entry?.provider_lots ?? []) {
-      if (lot.utilization == null || !Number.isFinite(lot.utilization)) {
-        continue;
-      }
-      const utilizationPercent = lot.utilization * 100;
-      const current = byUpstream.get(lot.upstream_id);
-      if (current && current.utilizationPercent >= utilizationPercent) {
-        continue;
-      }
-      byUpstream.set(lot.upstream_id, {
-        upstreamId: lot.upstream_id,
-        upstreamName: lot.upstream_name,
-        window,
-        utilizationPercent,
-        resetUnixSecs: lot.provider_reset_unix_secs,
-        state: lot.state,
-      });
-    }
-  }
-  return Array.from(byUpstream.values()).sort(
-    (left, right) =>
-      right.utilizationPercent - left.utilizationPercent ||
-      left.upstreamName.localeCompare(right.upstreamName),
-  );
 }
 
 /** "2d 4h" / "3h 12m" / "8m": the two largest units, rounded down, at least 1m. */

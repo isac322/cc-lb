@@ -1176,8 +1176,8 @@ export type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
  * - `inline` (default): a well inside a card — tone/8 fill, no border, 14px
  *   icon. Use it inside the object that owns the problem.
  * - `banner`: the page-level incident line (at most one per page) — tone/8
- *   fill, tone/45 1px line with the left edge in the full tone, 16px
- *   icon, title + short summary and at most one action. Collapse lists
+ *   fill, a uniform 1px tone/45 line, 16px icon, title + short summary and
+ *   at most one action. Collapse lists
  *   into a sentence.
  */
 export type NoticeVariant = 'inline' | 'banner';
@@ -1189,10 +1189,10 @@ const NOTICE_FILL: Record<NoticeTone, string> = {
   danger: 'bg-danger/8',
 };
 const NOTICE_BORDER: Record<NoticeTone, string> = {
-  info: 'border-subtle border-l-text-faint',
-  success: 'border-subtle border-l-text-muted',
-  warning: 'border-warn/45 border-l-warn',
-  danger: 'border-danger/45 border-l-danger',
+  info: 'border-subtle',
+  success: 'border-subtle',
+  warning: 'border-warn/45',
+  danger: 'border-danger/45',
 };
 // `info` is neutral: there is no blue in the system.
 const NOTICE_ICON: Record<

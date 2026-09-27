@@ -642,7 +642,7 @@ describe('/upstreams cold-load geometry', () => {
     ).toContain('min-h-5');
     expect(
       within(shell).getByTestId('quota-snapshot-grid').className,
-    ).toContain('min-h-[22rem]');
+    ).toContain('min-h-70');
     const rangeControl = within(shell).getByTestId(
       'quota-history-range-control',
     );
@@ -657,7 +657,7 @@ describe('/upstreams cold-load geometry', () => {
     ).toBeNull();
     expect(within(shell).queryByTestId('warmup-card')).toBeNull();
     expect(within(shell).queryByTestId('oauth-status-card-body')).toBeNull();
-    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(3);
+    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(4);
     expect(screen.queryByText('Select an upstream')).toBeNull();
   });
 
@@ -676,7 +676,7 @@ describe('/upstreams cold-load geometry', () => {
     expect(legend.querySelectorAll('.skeleton')).toHaveLength(2);
 
     const snapshotGrid = screen.getByTestId('quota-snapshot-grid');
-    expect(snapshotGrid.className).toContain('min-h-[22rem]');
+    expect(snapshotGrid.className).toContain('min-h-70');
     expect(
       within(snapshotGrid).getAllByTestId('quota-snapshot-skeleton-card'),
     ).toHaveLength(3);
@@ -696,18 +696,19 @@ describe('/upstreams cold-load geometry', () => {
     expect(requestSlot.querySelectorAll('tbody tr')).toHaveLength(5);
     expect(screen.queryByText(/Loading/)).toBeNull();
     expect(screen.queryByText('—%')).toBeNull();
+    // Pending quota reserves the row's usage figures; an API-key row has
+    // no subscription quota to wait for and reads as its kind at once.
     const oauthListRow = screen.getByRole('button', {
       name: /OAuth Primary/,
     });
     expect(
       oauthListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(5);
+    ).toBeGreaterThanOrEqual(2);
     const apiKeyListRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(
-      apiKeyListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(2);
+    expect(apiKeyListRow.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(within(apiKeyListRow).getByText('API key')).toBeDefined();
   });
 
   test('retains the reserved slots after empty and loaded queries resolve', () => {
@@ -776,7 +777,7 @@ describe('/upstreams cold-load geometry', () => {
       'min-h-5',
     );
     expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
-      'min-h-[22rem]',
+      'min-h-70',
     );
     const rangeControl = screen.getByTestId('quota-history-range-control');
     const rangeItems = within(rangeControl).getAllByRole('radio');
@@ -793,6 +794,42 @@ describe('/upstreams cold-load geometry', () => {
     expect(
       screen.getByTestId('recent-requests-table-slot').className,
     ).toContain('min-h-48');
+  });
+});
+
+describe('/upstreams desktop auto-select', () => {
+  test('waits for quota before picking the first row of the usage-ranked list', () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockReturnValue({ matches: true }),
+    });
+    try {
+      searchState = {};
+      vi.mocked(queries.useStatus).mockReturnValue(
+        queryResult({ upstreams: [] }),
+      );
+
+      const view = renderRoute();
+      // Quota still loading: the ranking is not final, so nothing is picked.
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+        queryResult(quotaLatestData(upstream, 0.42)),
+      );
+      view.rerender(routeElement());
+
+      expect(navigateMock).toHaveBeenCalledTimes(1);
+      const { search } = navigateMock.mock.calls[0][0] as {
+        search: (previous: object) => { selectedId?: string };
+      };
+      expect(search({}).selectedId).toBe(upstream.id);
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        value: originalMatchMedia,
+      });
+    }
   });
 });
 
@@ -945,7 +982,7 @@ describe('/upstreams refresh retention', () => {
     );
   });
 
-  test('keeps API usage, sidebar totals, and recent rows during placeholder refresh', () => {
+  test('keeps API usage, the list row, and recent rows during placeholder refresh', () => {
     searchState = { selectedId: apiKeyUpstream.id };
     let phase: 'old' | 'new' = 'old';
     let isPlaceholderData = false;
@@ -1006,14 +1043,12 @@ describe('/upstreams refresh retention', () => {
     const apiSidebarRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
 
     isPlaceholderData = true;
     fireEvent.click(screen.getByRole('radio', { name: '7d' }));
 
     expect(screen.getByText('old-usage-model')).toBeDefined();
     expect(screen.getByText('old-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
     expect(
       screen.getByTestId('api-usage-card').querySelectorAll('.skeleton'),
     ).toHaveLength(0);
@@ -1032,7 +1067,6 @@ describe('/upstreams refresh retention', () => {
     expect(screen.queryByText('old-request-model')).toBeNull();
     expect(screen.getByText('new-usage-model')).toBeDefined();
     expect(screen.getByText('new-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$2.50 · 200 tok');
   });
 
   test('resets detail-local state and never renders the previous OAuth identity after selection changes', () => {

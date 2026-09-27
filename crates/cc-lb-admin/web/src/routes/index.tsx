@@ -25,7 +25,6 @@ import {
   CHART_THRESHOLD,
   Sparkline,
 } from '../components/ui/charts';
-import { ArcGauge, HeadroomMeter } from '../components/ui/Gauge';
 import {
   Badge,
   Card,
@@ -47,9 +46,9 @@ import {
 } from '../components/ui/usage/costCategories';
 import { OAuthReconnectSummary } from '../components/upstreams/OAuthReconnectNotice';
 import {
-  UpstreamHeadroomGrid,
-  useUpstreamHeadroomData,
-} from '../components/upstreams/UpstreamHeadroomGrid';
+  UpstreamUsageTable,
+  useUpstreamUsageData,
+} from '../components/upstreams/UpstreamUsageTable';
 import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
 import {
   cacheHitRatio,
@@ -76,8 +75,6 @@ import {
   useUsage,
 } from '../lib/queries';
 import {
-  formatHeadroom,
-  formatHeadroomValue,
   formatQuotaPercent,
   QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
@@ -94,19 +91,17 @@ import {
 import { formatInTimezone } from '../lib/timezone';
 import { useLiveEventStream } from '../lib/useLiveEventStream';
 import {
-  bindingPoolWindow,
   buildPoolQuotaChartData,
-  type ClosestToLimitEntry,
-  closestToLimit,
   formatAgo,
-  formatDuration,
   formatResetIn,
+  missingCapacityUpstreams,
   oldestProviderObservation,
   POOL_QUOTA_WINDOWS,
   type PoolQuotaChartRow,
   type PoolQuotaLatest,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
+  poolWindowResets,
 } from './-overviewPoolQuota';
 export const Route = createFileRoute('/')({
   component: OverviewPage,
@@ -206,7 +201,7 @@ function kpiSecondaryY(value: number): number {
 
 // KPI series are data, not status: they draw in neutral ink. Only the error
 // rate turns danger, and only when there are errors to report. The brand hue
-// is reserved for headroom, so the cache-miss overlay is full-strength ink.
+// is reserved for pool quota, so the cache-miss overlay is full-strength ink.
 const KPI_SERIES_COLOR = 'var(--color-text-muted)';
 
 const TOKENS_CACHE_MISS_SERIES: KpiSecondarySeries = {
@@ -677,11 +672,9 @@ export function TopPrincipalsSection({
   );
 }
 
-type AggregateWindow = AggregateResponse['windows'][number];
-
-/** Text link on the ground: ink with an underline rule that turns brand on hover. */
+/** Text link on the ground: ink with an underline rule that turns brand on hover. 44px tall on phones. */
 const OVERVIEW_LINK_CLASS =
-  'rounded-sm text-body text-text underline decoration-border-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
+  'inline-flex items-center rounded-sm text-body text-text underline decoration-border-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:min-h-11';
 
 /** "10-01 09:00" in the viewer's timezone. */
 function formatMonthDayTime(unixSecs: number, timeZone: string): string {
@@ -691,376 +684,30 @@ function formatMonthDayTime(unixSecs: number, timeZone: string): string {
 }
 
 /** Numeral ink for a quota figure: default ink until warn / danger by used. */
-const HEADROOM_TONE_CLASS: Record<QuotaSeverity, string> = {
+const QUOTA_VALUE_CLASS: Record<QuotaSeverity, string> = {
   ...QUOTA_SEVERITY_TEXT_CLASS,
-  none: 'text-text',
+  none: 'text-text-faint',
   ok: 'text-text',
 };
 
-/** Each upstream's share of one pool window: headroom, plan weight, impact. */
-function PoolBreakdownTable({ w }: { w: AggregateWindow }) {
-  const totalRatio = w.provider_lots.reduce(
-    (sum, lot) => sum + lot.capacity_ratio,
-    0,
-  );
-  return (
-    <div className="flex flex-col gap-0.5 text-body text-text">
-      <div className="mb-0.5 flex items-center gap-3 border-b border-row px-2 pb-1.5 text-label text-text-muted">
-        <span className="min-w-32 flex-1">Upstream</span>
-        <span className="w-20 text-right">Left</span>
-        <span className="w-14 text-right">Weight</span>
-        <span className="w-14 text-right">Impact</span>
-      </div>
-      {w.provider_lots.map((lot) => {
-        const utilPct = lot.utilization != null ? lot.utilization * 100 : null;
-        const weightedContribution =
-          totalRatio > 0
-            ? (((lot.utilization ?? 0) * lot.capacity_ratio) / totalRatio) * 100
-            : 0;
-        return (
-          <div
-            key={lot.upstream_id}
-            className="flex items-center gap-3 px-2 py-1.5"
-            data-testid="pool-quota-breakdown-row"
-          >
-            <span
-              className="min-w-32 flex-1 truncate text-text"
-              title={lot.upstream_name}
-            >
-              {lot.upstream_name}
-            </span>
-            <span
-              className={cx(
-                'w-20 text-right font-medium tabular-nums',
-                QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(utilPct)],
-              )}
-            >
-              {formatHeadroom(utilPct)}
-            </span>
-            <span className="w-14 text-right tabular-nums text-text-muted">
-              {lot.capacity_ratio.toFixed(1)}x
-            </span>
-            <span className="w-14 text-right tabular-nums text-text-muted">
-              {`${weightedContribution.toFixed(1)}%`}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Disclosure under a window gauge: the per-upstream breakdown of that window. */
-function PoolBreakdownPopover({
-  window,
-  w,
-}: {
-  window: PoolQuotaWindow;
-  w: AggregateWindow;
-}) {
-  const label = WINDOW_LABELS[window];
-  return (
-    <BasePopover.Root>
-      <BasePopover.Trigger
-        aria-label={`By upstream: ${label} headroom`}
-        className="self-start rounded-sm text-body text-text-muted underline decoration-border-strong underline-offset-4 transition-colors hover:text-text hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
-        closeDelay={100}
-        delay={100}
-        openOnHover
-      >
-        By upstream
-      </BasePopover.Trigger>
-      <BasePopover.Portal>
-        <BasePopover.Positioner align="start" side="bottom" sideOffset={8}>
-          <BasePopover.Popup
-            aria-label={`${label} pool by upstream`}
-            className="glass-strong z-50 w-max min-w-[22rem] max-w-[calc(100vw-1rem)] rounded-md p-2"
-            initialFocus={false}
-          >
-            <PoolBreakdownTable w={w} />
-          </BasePopover.Popup>
-        </BasePopover.Positioner>
-      </BasePopover.Portal>
-    </BasePopover.Root>
-  );
-}
+/** Upstream rows shown before "Show all N". */
+const UPSTREAM_TABLE_ROWS = 8;
 
 /**
- * One pool window: a sub arc gauge (a headroom meter on phones), the used
- * share and contributing upstreams, when it refills, and the per-upstream
- * breakdown. The window that runs out first carries the "binds pool" tag.
+ * Every upstream's usage per window, most-used first; rows link into the
+ * upstream's detail.
  */
-function PoolWindowGauge({
-  window,
-  w,
-  binds,
-  loading,
-  upstreamCount,
-  nowUnixSecs,
-  timeZone,
-  className,
-}: {
-  window: PoolQuotaWindow;
-  w: AggregateWindow | undefined;
-  binds: boolean;
-  loading: boolean;
-  upstreamCount: number;
-  nowUnixSecs: number | null;
-  timeZone: string;
-  className?: string;
-}) {
-  const label = WINDOW_LABELS[window];
-  const used = w?.utilization_percent ?? null;
-  const hasReading = used != null && Number.isFinite(used);
-  const resetSecs = hasReading && w ? w.cc_window_reset_unix_secs : null;
-  const resetLine =
-    resetSecs != null && resetSecs > 0
-      ? [
-          `Resets ${formatMonthDayTime(resetSecs, timeZone)}`,
-          nowUnixSecs == null
-            ? null
-            : resetSecs > nowUnixSecs
-              ? `in ${formatDuration(resetSecs - nowUnixSecs)}`
-              : 'reset time passed',
-        ]
-          .filter(Boolean)
-          .join(' · ')
-      : null;
-
-  return (
-    <div
-      className={cx('flex min-w-0 flex-col gap-3', className)}
-      data-testid="pool-quota-snapshot-slot"
-      data-window={window}
-    >
-      {loading ? (
-        <>
-          <Skeleton className="hidden size-32 rounded-full md:block" />
-          <Skeleton className="h-5 w-12" />
-          <Skeleton className="h-1.5 w-full md:hidden" />
-          <Skeleton className="h-4 w-40" />
-        </>
-      ) : (
-        <>
-          <div className="hidden md:block">
-            <ArcGauge label={label} usedPct={used} />
-          </div>
-          <div className="flex flex-col gap-1.5 md:hidden">
-            <span className="text-title-section text-text">{label}</span>
-            <HeadroomMeter label={label} size="md" usedPct={used} />
-          </div>
-          <div className="flex flex-col items-start gap-1 text-body text-text-muted">
-            {binds ? <Badge tone="accent">binds pool</Badge> : null}
-            <span>
-              {hasReading ? (
-                <>
-                  <span className="hidden md:inline">{`${formatQuotaPercent(used)} used · `}</span>
-                  {`${formatCount(w?.contributing_upstreams ?? 0)} of ${formatCount(upstreamCount)} upstreams`}
-                </>
-              ) : (
-                'No reading'
-              )}
-            </span>
-            {resetLine ? (
-              <span className="tabular-nums">{resetLine}</span>
-            ) : null}
-          </div>
-          {w && w.provider_lots.length > 0 ? (
-            <PoolBreakdownPopover window={window} w={w} />
-          ) : null}
-        </>
-      )}
-    </div>
-  );
-}
-
-/**
- * The cluster band: one large pool-headroom dial for the window that runs
- * out first, when it refills and how old the data is beside it, then the
- * three window sub-gauges. Phones get linear meters instead of dials.
- */
-export function PoolHeadroomBand({
-  aggregate,
-  loading,
-}: {
-  aggregate: AggregateResponse | undefined;
-  loading: boolean;
-}) {
-  const { effective: timeZone } = useTimezone();
-  const binding = bindingPoolWindow(aggregate);
-  const bindingWindow = binding
-    ? aggregate?.windows.find((entry) => entry.window === binding)
-    : undefined;
-  const bindingUsed = bindingWindow?.utilization_percent ?? null;
-  const serverNow = aggregate?.now_unix_secs ?? null;
-  const clientNow = Date.now() / 1000;
-  const provider = oldestProviderObservation(aggregate);
-  const refillSecs =
-    bindingWindow && bindingWindow.cc_window_reset_unix_secs > 0
-      ? bindingWindow.cc_window_reset_unix_secs
-      : null;
-  const heroCaption = binding
-    ? `${WINDOW_LABELS[binding]} window binds · ${formatQuotaPercent(bindingUsed)} used`
-    : 'No quota readings yet';
-  const details: { term: string; value: string; stale?: boolean }[] = [
-    {
-      term: 'Refills',
-      value:
-        refillSecs == null ? '—' : formatMonthDayTime(refillSecs, timeZone),
-    },
-    {
-      term: 'Time left',
-      value:
-        refillSecs == null || serverNow == null
-          ? '—'
-          : refillSecs > serverNow
-            ? formatDuration(refillSecs - serverNow)
-            : 'Refill time passed',
-    },
-    {
-      term: 'Pool snapshot',
-      value:
-        serverNow == null
-          ? '—'
-          : `${formatInTimezone(serverNow * 1000, timeZone).slice(11)} · ${formatAgo(serverNow, clientNow)}`,
-    },
-    {
-      term: 'Provider data',
-      value:
-        provider.observedAtUnixSecs == null || serverNow == null
-          ? '—'
-          : `${formatMonthDayTime(provider.observedAtUnixSecs, timeZone)} · ${formatAgo(provider.observedAtUnixSecs, serverNow)}`,
-      stale: provider.stale,
-    },
-  ];
-
-  return (
-    <section
-      aria-busy={loading}
-      aria-labelledby="pool-headroom-title"
-      className="grid grid-cols-1 gap-8 md:gap-10 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-center lg:gap-12"
-      data-testid="pool-headroom-band"
-    >
-      <h2 className="sr-only" id="pool-headroom-title">
-        Pool headroom
-      </h2>
-      <div
-        className="flex flex-col gap-6 md:flex-row md:items-center lg:flex-col lg:items-start"
-        data-testid="pool-headroom-hero"
-      >
-        {loading ? (
-          <>
-            <Skeleton className="hidden size-[264px] rounded-full md:block" />
-            <div className="flex flex-col gap-2 md:hidden">
-              <Skeleton className="h-4 w-24" />
-              <Skeleton className="h-14 w-32" />
-              <Skeleton className="h-1 w-full" />
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="hidden md:block">
-              <ArcGauge
-                caption={heroCaption}
-                label="Pool headroom"
-                size="hero"
-                usedPct={bindingUsed}
-              />
-            </div>
-            <div className="flex flex-col gap-2 md:hidden">
-              <span className="text-label text-text-muted">Pool headroom</span>
-              <span
-                className={cx(
-                  'inline-flex items-baseline tabular-nums',
-                  HEADROOM_TONE_CLASS[quotaSeverity(bindingUsed)],
-                )}
-              >
-                <span className="text-display-hero">
-                  {formatHeadroomValue(bindingUsed)}
-                </span>
-                {bindingUsed == null ? null : (
-                  <span className="ml-0.5 text-title-section font-normal text-text-muted">
-                    % left
-                  </span>
-                )}
-              </span>
-              <HeadroomMeter label="Pool headroom" usedPct={bindingUsed} />
-              <span className="text-body text-text-muted">{heroCaption}</span>
-            </div>
-          </>
-        )}
-        <div className="flex flex-col gap-4">
-          <dl className="grid max-w-md grid-cols-2 gap-x-8 gap-y-3">
-            {details.map((detail) => (
-              <div key={detail.term} className="flex min-w-0 flex-col gap-0.5">
-                <dt className="text-label text-text-muted">{detail.term}</dt>
-                <dd className="flex flex-wrap items-center gap-1.5 text-body tabular-nums text-text">
-                  {loading ? (
-                    <Skeleton as="span" className="inline-block h-4 w-24" />
-                  ) : (
-                    <>
-                      {detail.value}
-                      {detail.stale ? <Badge tone="warn">Stale</Badge> : null}
-                    </>
-                  )}
-                </dd>
-              </div>
-            ))}
-          </dl>
-          <Hint
-            label={
-              <span className="block max-w-72 whitespace-normal leading-5">
-                Each upstream's usage counts in proportion to its plan size
-                relative to Claude Pro (Pro 1×, Max 5× counts 5×). Unknown plans
-                count as Pro. Routing is not affected.
-              </span>
-            }
-          >
-            <span
-              tabIndex={0}
-              className="self-start cursor-help rounded-sm text-body text-text-muted underline decoration-dotted decoration-border-strong underline-offset-4 hover:text-text"
-            >
-              Plan-weighted across upstreams
-            </span>
-          </Hint>
-        </div>
-      </div>
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-3 md:gap-0">
-        {POOL_QUOTA_WINDOWS.map((window, index) => (
-          <PoolWindowGauge
-            key={window}
-            binds={window === binding}
-            className={
-              index > 0 ? 'md:border-l md:border-row md:pl-6' : 'md:pr-6'
-            }
-            loading={loading}
-            nowUnixSecs={serverNow}
-            timeZone={timeZone}
-            upstreamCount={aggregate?.upstream_count ?? 0}
-            w={aggregate?.windows.find((entry) => entry.window === window)}
-            window={window}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Every upstream's headroom per window on the shared end-label grid. Rows
- * link into the upstream's detail.
- */
-function UpstreamStrip() {
-  const headroom = useUpstreamHeadroomData();
-  const count = headroom.rows.length;
-  const subtitle = headroom.isLoading
+function UpstreamsUsageSection() {
+  const usage = useUpstreamUsageData();
+  const count = usage.rows.length;
+  const subtitle = usage.isLoading
     ? undefined
     : [
         `${formatCount(count)} configured`,
-        headroom.reconnectCount > 0
-          ? `${formatCount(headroom.reconnectCount)} need reconnect`
+        usage.reconnectCount > 0
+          ? `${formatCount(usage.reconnectCount)} need reconnect`
           : null,
-        'headroom per window, as last observed',
+        'used per window, as last observed',
       ]
         .filter(Boolean)
         .join(' · ');
@@ -1070,192 +717,18 @@ function UpstreamStrip() {
       subtitle={subtitle}
       action={
         <Link to="/upstreams" className={OVERVIEW_LINK_CLASS}>
-          Open upstreams
+          Manage upstreams
         </Link>
       }
     >
-      <UpstreamHeadroomGrid
-        ariaLabel="Upstream headroom per window"
-        data={headroom}
+      <UpstreamUsageTable
+        collapsedRows={UPSTREAM_TABLE_ROWS}
+        data={usage}
         empty={
           <p className="text-body text-text-muted">No upstreams configured.</p>
         }
-        variant="strip"
       />
     </Section>
-  );
-}
-
-const CLOSEST_TO_LIMIT_ROWS = 5;
-/** Closest to limit is sized by rank: the first two rows lead, the rest read as a list. */
-const CLOSEST_RANK_TYPE = [
-  {
-    numeral: 'text-display-hero',
-    unit: 'text-body md:text-title-section',
-    name: 'text-title-section md:text-title-page',
-  },
-  { numeral: 'text-display', unit: 'text-body', name: 'text-title-section' },
-] as const;
-const CLOSEST_REST_TYPE = {
-  numeral: 'text-body font-semibold',
-  unit: 'text-body',
-  name: 'text-body font-medium',
-} as const;
-const CLOSEST_ROW_CLASS =
-  'grid grid-cols-[minmax(4.5rem,auto)_minmax(0,1fr)] items-center gap-x-5 py-4';
-
-export function ClosestToLimit({
-  aggregate,
-  loading,
-  className,
-}: {
-  aggregate: AggregateResponse | undefined;
-  loading: boolean;
-  className?: string;
-}) {
-  const { effective: timeZone } = useTimezone();
-  const entries = useMemo(() => closestToLimit(aggregate), [aggregate]);
-  const shown = entries.slice(0, CLOSEST_TO_LIMIT_ROWS);
-  const hidden = entries.length - shown.length;
-  return (
-    <div
-      aria-busy={loading}
-      className={cx('min-w-0', className)}
-      data-testid="closest-to-limit"
-    >
-      <Section
-        title="Closest to limit"
-        subtitle="Least headroom first, by each upstream's tightest window"
-        action={
-          hidden > 0 ? (
-            <Link to="/upstreams" className={OVERVIEW_LINK_CLASS}>
-              {`${hidden} more`}
-            </Link>
-          ) : undefined
-        }
-      >
-        {loading ? (
-          <ul aria-hidden="true" className="flex flex-col">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <li
-                key={index}
-                className={cx(
-                  CLOSEST_ROW_CLASS,
-                  'border-t border-row first:border-t-0 first:pt-0',
-                )}
-              >
-                <Skeleton className="h-9 w-20" />
-                <Skeleton className="h-5 w-40" />
-              </li>
-            ))}
-          </ul>
-        ) : shown.length === 0 ? (
-          <p className="text-body text-text-muted">
-            No quota readings from any upstream yet.
-          </p>
-        ) : (
-          <ol className="flex flex-col">
-            {shown.map((entry, rank) => (
-              <ClosestToLimitRow
-                key={entry.upstreamId}
-                entry={entry}
-                rank={rank}
-                nowUnixSecs={aggregate?.now_unix_secs ?? Date.now() / 1000}
-                timeZone={timeZone}
-              />
-            ))}
-          </ol>
-        )}
-      </Section>
-    </div>
-  );
-}
-
-function ClosestToLimitRow({
-  entry,
-  rank,
-  nowUnixSecs,
-  timeZone,
-}: {
-  entry: ClosestToLimitEntry;
-  rank: number;
-  nowUnixSecs: number;
-  timeZone: string;
-}) {
-  const type = CLOSEST_RANK_TYPE[rank] ?? CLOSEST_REST_TYPE;
-  const severity = quotaSeverity(entry.utilizationPercent);
-  const windowLabel = WINDOW_LABELS[entry.window];
-  const resetAt =
-    entry.resetUnixSecs != null
-      ? `Resets ${formatMonthDayTime(entry.resetUnixSecs, timeZone)}`
-      : undefined;
-  const meta = [
-    `${windowLabel} window`,
-    `${formatQuotaPercent(entry.utilizationPercent)} used`,
-    formatResetIn(entry.resetUnixSecs, nowUnixSecs),
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  return (
-    <li className="border-t border-row first:border-t-0">
-      <Link
-        to="/upstreams"
-        search={{ selectedId: entry.upstreamId }}
-        className={cx(
-          CLOSEST_ROW_CLASS,
-          'group rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-          rank === 0 && 'pt-0',
-        )}
-        data-rank={rank + 1}
-        data-testid="closest-to-limit-row"
-      >
-        <span
-          className={cx(
-            'inline-flex items-baseline whitespace-nowrap tabular-nums',
-            HEADROOM_TONE_CLASS[severity],
-          )}
-          data-slot="closest-headroom"
-        >
-          <span className={type.numeral}>
-            {formatHeadroomValue(entry.utilizationPercent)}
-          </span>
-          <span
-            className={cx(
-              'ml-0.5 font-normal',
-              type.unit,
-              HEADROOM_TONE_CLASS[severity] === 'text-text' &&
-                'text-text-muted',
-            )}
-          >
-            % left
-          </span>
-        </span>
-        <span className="flex min-w-0 flex-col gap-1">
-          <span
-            className={cx(
-              'truncate text-text group-hover:underline',
-              type.name,
-            )}
-          >
-            {entry.upstreamName}
-          </span>
-          <span
-            className="text-body tabular-nums text-text-muted"
-            title={resetAt}
-          >
-            {meta}
-          </span>
-          {entry.state === 'stale' ? (
-            <span className="text-body text-warn-text">Stale reading</span>
-          ) : null}
-          <HeadroomMeter
-            className="mt-1 max-w-72"
-            label={`${entry.upstreamName} ${windowLabel} headroom`}
-            usedPct={entry.utilizationPercent}
-          />
-        </span>
-      </Link>
-    </li>
   );
 }
 
@@ -1269,8 +742,8 @@ type PoolQuotaChartProps = {
 };
 
 /**
- * Headroom history series: 7d is the brand line, 7d (Fable) the same hue
- * dashed, 5h a thin neutral line. No fills, so crossings stay readable.
+ * Pool usage series: 7d is the brand line, 7d (Fable) the same hue dashed,
+ * 5h a thin neutral line. No fills, so crossings stay readable.
  */
 const POOL_SERIES: Record<
   PoolQuotaWindow,
@@ -1284,10 +757,6 @@ const POOL_SERIES: Record<
     strokeDasharray: '4 3',
   },
 };
-
-/** Headroom levels where the warn / danger zones begin (100 − used threshold). */
-const WARN_LEFT_PCT = 100 - QUOTA_WARN_PCT;
-const DANGER_LEFT_PCT = 100 - QUOTA_DANGER_PCT;
 
 function LegendSwatch({
   stroke,
@@ -1313,16 +782,28 @@ function LegendSwatch({
   );
 }
 
-const PoolQuotaHistory = memo(function PoolQuotaHistory({
+const PLAN_WEIGHT_NOTE =
+  "Each upstream's usage counts in proportion to its plan size relative to Claude Pro (Pro 1×, Max 5× counts 5×). Unknown plans count as Pro. Routing is not affected.";
+
+/**
+ * The Overview's lead: how pool usage moved over the selected range, with
+ * each window's current `N% used` and next reset in the legend and the
+ * caveats that qualify the figures underneath.
+ */
+const PoolQuotaUsage = memo(function PoolQuotaUsage({
   chart,
+  aggregate,
   loading,
-  className,
 }: {
   chart: PoolQuotaChartProps;
+  aggregate: AggregateResponse | undefined;
   loading: boolean;
-  className?: string;
 }) {
   const { effective: timeZone } = useTimezone();
+  const resets = poolWindowResets(aggregate);
+  const provider = oldestProviderObservation(aggregate);
+  const missingCapacity = missingCapacityUpstreams(aggregate);
+  const serverNow = aggregate?.now_unix_secs ?? null;
   const first = chart.data[0];
   const last = chart.data.at(-1);
   const proof =
@@ -1330,22 +811,21 @@ const PoolQuotaHistory = memo(function PoolQuotaHistory({
       ? `${formatCount(chart.data.length)} snapshots · ${formatMonthDayTime(first.unix, timeZone)} → ${formatMonthDayTime(last.unix, timeZone)}`
       : null;
   return (
-    <div
-      aria-busy={loading}
-      className={cx('min-w-0', className)}
-      data-testid="pool-quota-card"
-    >
+    <div aria-busy={loading} className="min-w-0" data-testid="pool-quota-card">
       <Section
-        title="Pool quota history"
-        subtitle={`Headroom, higher is better · last ${chart.range}`}
+        title="Pool quota usage"
+        subtitle={`Used per window across the pool · last ${chart.range}`}
       >
         <PoolQuotaLegend
           latest={chart.latest}
+          resets={resets}
+          nowUnixSecs={serverNow}
+          timeZone={timeZone}
           showFable={chart.showFable}
           loading={loading}
         />
         <div
-          className="relative h-64 w-full min-w-0"
+          className="relative h-[200px] w-full min-w-0 md:h-[240px] lg:h-[320px]"
           data-testid="pool-quota-chart-slot"
         >
           {loading ? (
@@ -1359,9 +839,51 @@ const PoolQuotaHistory = memo(function PoolQuotaHistory({
             />
           )}
         </div>
-        {proof && !loading ? (
-          <p className="text-body tabular-nums text-text-muted">{proof}</p>
-        ) : null}
+        <div
+          className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-caption tabular-nums text-text-muted"
+          data-testid="pool-quota-captions"
+        >
+          {loading ? (
+            <Skeleton as="span" className="inline-block h-3 w-48" />
+          ) : (
+            <>
+              <Hint
+                label={
+                  <span className="block max-w-72 whitespace-normal leading-5">
+                    {PLAN_WEIGHT_NOTE}
+                  </span>
+                }
+              >
+                <span
+                  tabIndex={0}
+                  className="cursor-help rounded-sm underline decoration-dotted decoration-border-strong underline-offset-4 hover:text-text"
+                >
+                  Plan-weighted across upstreams
+                </span>
+              </Hint>
+              {missingCapacity > 0 ? (
+                <span className="text-warn-text">
+                  {`Capacity unknown for ${formatCount(missingCapacity)} upstream${missingCapacity === 1 ? '' : 's'}`}
+                </span>
+              ) : null}
+              {provider.observedAtUnixSecs != null && serverNow != null ? (
+                <span
+                  className="inline-flex items-center gap-1.5"
+                  title={formatMonthDayTime(
+                    provider.observedAtUnixSecs,
+                    timeZone,
+                  )}
+                >
+                  {`Provider data ${formatAgo(provider.observedAtUnixSecs, serverNow)}`}
+                  {provider.stale ? (
+                    <Badge tone="warn">Stale reading</Badge>
+                  ) : null}
+                </span>
+              ) : null}
+              {proof ? <span>{proof}</span> : null}
+            </>
+          )}
+        </div>
       </Section>
     </div>
   );
@@ -1377,7 +899,7 @@ export function PoolQuotaThemedChart({
   rangeEndUnix,
   showFable,
 }: {
-  /** Headroom rows (0-100, higher is better). */
+  /** Used rows (0-100). */
   seriesData: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
@@ -1394,7 +916,7 @@ export function PoolQuotaThemedChart({
         responsive
         className="size-full"
         data={seriesData}
-        margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+        margin={{ top: 16, right: 8, bottom: 0, left: 0 }}
       >
         <CartesianGrid {...CHART_GRID} />
         <XAxis
@@ -1417,21 +939,23 @@ export function PoolQuotaThemedChart({
           allowDataOverflow={false}
         />
         <ReferenceLine
-          y={WARN_LEFT_PCT}
+          y={QUOTA_WARN_PCT}
           {...CHART_THRESHOLD.warn}
+          // Both labels sit under their lines: with one above and one below
+          // they collide at the 200px phone chart height.
           label={{
             position: 'insideTopRight',
-            value: `${WARN_LEFT_PCT}% left`,
+            value: `${QUOTA_WARN_PCT}%`,
             fill: 'var(--color-warn-text)',
             fontSize: 12,
           }}
         />
         <ReferenceLine
-          y={DANGER_LEFT_PCT}
+          y={QUOTA_DANGER_PCT}
           {...CHART_THRESHOLD.danger}
           label={{
             position: 'insideTopRight',
-            value: `${DANGER_LEFT_PCT}% left`,
+            value: `${QUOTA_DANGER_PCT}%`,
             fill: 'var(--color-danger-text)',
             fontSize: 12,
           }}
@@ -1464,7 +988,7 @@ export function PoolQuotaThemedChart({
                       </span>
                       <span className="font-medium tabular-nums">
                         {typeof p.value === 'number'
-                          ? formatHeadroom(100 - p.value)
+                          ? `${formatQuotaPercent(p.value)} used`
                           : '—'}
                       </span>
                     </div>
@@ -1492,49 +1016,85 @@ export function PoolQuotaThemedChart({
   );
 }
 
+/**
+ * The chart's header row: per window its swatch, current `N% used` in the
+ * severity ink and when it resets (absolute time in the `title`), then the
+ * two threshold rules.
+ */
 export function PoolQuotaLegend({
   latest,
+  resets,
+  nowUnixSecs = null,
+  timeZone = 'UTC',
   showFable,
   loading = false,
 }: {
   latest?: PoolQuotaLatest;
+  resets?: Record<PoolQuotaWindow, number | null>;
+  nowUnixSecs?: number | null;
+  timeZone?: string;
   showFable: boolean;
   loading?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-body text-text-muted">
+    <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 text-body text-text-muted">
       {POOL_QUOTA_WINDOWS.filter(
         (window) => showFable || window !== '7d_fable',
       ).map((window) => {
-        const value = latest?.[window];
+        const value = latest?.[window] ?? null;
+        const reset = resets?.[window] ?? null;
+        const resetText =
+          reset != null && nowUnixSecs != null
+            ? formatResetIn(reset, nowUnixSecs)
+            : null;
         return (
           <span
             key={window}
             className="inline-flex min-h-5 items-center gap-1.5"
             data-testid="pool-quota-legend-slot"
+            data-window={window}
           >
             <LegendSwatch {...POOL_SERIES[window]} />
             {WINDOW_LABELS[window]}
             {loading ? (
-              <Skeleton as="span" className="inline-block h-3 w-12" />
+              <Skeleton as="span" className="inline-block h-3 w-16" />
             ) : value != null ? (
               <>
                 {' · '}
-                <span className="tabular-nums text-text">
-                  {formatHeadroom(value)}
+                <span
+                  className={cx(
+                    'font-medium tabular-nums',
+                    QUOTA_VALUE_CLASS[quotaSeverity(value)],
+                  )}
+                >
+                  {`${formatQuotaPercent(value)} used`}
                 </span>
+                {resetText ? (
+                  <span
+                    className="text-caption tabular-nums"
+                    title={
+                      reset != null
+                        ? `Resets ${formatMonthDayTime(reset, timeZone)}`
+                        : undefined
+                    }
+                  >
+                    {` · ${resetText}`}
+                  </span>
+                ) : null}
               </>
-            ) : null}
+            ) : (
+              <span className="text-text-faint">{' · No reading'}</span>
+            )}
           </span>
         );
       })}
-      <span className="inline-flex min-h-5 items-center gap-1.5">
+      <span className="inline-flex min-h-5 items-center gap-1.5 text-caption">
         <LegendSwatch {...CHART_THRESHOLD.warn} />
-        {`Warn below ${WARN_LEFT_PCT}% left`}
+        {`Warn at ${QUOTA_WARN_PCT}% used`}
       </span>
-      <span className="inline-flex min-h-5 items-center gap-1.5">
+      <span className="inline-flex min-h-5 items-center gap-1.5 text-caption">
         <LegendSwatch {...CHART_THRESHOLD.danger} />
-        {`Danger below ${DANGER_LEFT_PCT}% left`}
+        {`Danger at ${QUOTA_DANGER_PCT}% used`}
       </span>
     </div>
   );
@@ -1818,22 +1378,15 @@ function OverviewPage() {
 
       {firstRunIncomplete ? null : (
         <>
-          {/* Instrument cluster: pool headroom first, then every upstream,
-          then what runs out first beside the pool's history, then traffic. */}
-          <PoolHeadroomBand
+          {/* Time first: how pool usage moved, then every upstream's
+          usage, then traffic. */}
+          <PoolQuotaUsage
             aggregate={quotaAggregate.data}
+            chart={poolQuotaChart}
             loading={quotaLoading}
           />
 
-          <UpstreamStrip />
-
-          <div className="grid min-w-0 grid-cols-1 gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-10">
-            <ClosestToLimit
-              aggregate={quotaAggregate.data}
-              loading={quotaLoading}
-            />
-            <PoolQuotaHistory chart={poolQuotaChart} loading={quotaLoading} />
-          </div>
+          <UpstreamsUsageSection />
 
           <div className="grid min-w-0 grid-cols-1 gap-12 lg:grid-cols-[minmax(0,7fr)_minmax(0,5fr)] lg:gap-10">
             <Section

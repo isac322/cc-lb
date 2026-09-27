@@ -2,9 +2,9 @@
 
 ## 1. Identity
 
-cc-lb admin is an instrument cluster for a quota pool. The question it answers first is how much is left: per window, what runs out first, and when it refills. Everything else (traffic, upstreams, principals, logs) is a drill-down from that reading.
+cc-lb admin is an instrument cluster for a quota pool. The question it answers first is how quota usage is moving: per window, how much is used, what is closest to the limit, and when it resets. Everything else (traffic, upstreams, principals, logs) is a drill-down from that reading.
 
-- Headroom is the instrument. Every quota figure is written as what is **left**; used is secondary text.
+- Usage is the instrument. Every quota figure is written as what is **used** (`N% used`), the same utilization Claude reports, so it compares with Claude's own screens without conversion. Usage over time comes before any single current value.
 - Readability comes before atmosphere. When a choice trades legibility for character, legibility wins.
 - The ground is graphite at night and cool daylight gray by day. Surfaces sit one flat step above it, drawn with 1px lines. No blur, no glow, no decorative gradient.
 - One brand hue, Ion violet, used at instrument scale only. Warn and danger are the only other hues; healthy is neutral ink.
@@ -22,20 +22,21 @@ Night is the default (`:root`, `[data-theme="dark"]`). Day applies with `[data-t
 | Ground | `--color-bg` | `#15171a` | `#e6e7ea` | Page, rail, top bar, tab bar, "More" sheet |
 | Raised surface | `--color-bg-sub` | `#23272c` | `#f8f8f9` | Dialogs, drawers, popovers, menus, select popups, tooltips |
 | Panel | `--color-panel` | `#1c1f23` | `#f1f2f4` | Card fill (`.glass`), sticky table header, nav hover |
-| Panel strong | `--color-panel-strong` | `#23272c` | `#f8f8f9` | Active nav item, selected segment, secondary button hover |
+| Panel strong | `--color-panel-strong` | `#23272c` | `#f8f8f9` | Selected segment, secondary button and theme pill hover, pressed toolbar toggle |
 | Input | `--color-input-bg` | `#15171a` | `#f8f8f9` | Inputs and select triggers |
 | Toast | `--color-toast-bg` | `#23272c` | `#f8f8f9` | Sonner toasts |
 | Line | `--color-border` (`border-subtle`) | `#2f343a` | `#c9ccd2` | Card edges, card header rule, top bar and rail edges, chart gridlines |
-| Line strong | `--color-border-strong` (`border-subtle-strong`) | `#666d76` | `#7e838b` | Inputs, secondary buttons, overlays, gauge minor ticks, chart cursor |
+| Line strong | `--color-border-strong` (`border-subtle-strong`) | `#666d76` | `#7e838b` | Inputs, secondary buttons, overlays, chart cursor |
 | Row line | `--color-border-row` (`border-row`) | `#272b30` | `#d7d9de` | Table and list row dividers, dividers between peers |
-| Meter track | `--color-progress-track` | `#2c3036` | `#cfd2d8` | Gauge and meter tracks, switch off |
-| Overlay steps | `--color-overlay-{1..6}` | 2–8% white | 2–8% ink (`#17191c`) | Wells (`overlay-3`), neutral badges (`overlay-5`), cmdk selection |
-| Hover | `--color-hover-bg` | 4% white | 4% ink | Row and ghost-button hover |
-| Text | `--color-text` | `#eceef0` | `#17191c` | Primary text, headroom numerals |
+| Meter track | `--color-progress-track` | `#2c3036` | `#cfd2d8` | Usage meter and stacked-bar tracks, switch off |
+| Overlay steps | `--color-overlay-{1..6}` | 2–8% white | 2–8% ink (`#17191c`) | Wells (`overlay-3`), neutral badges (`overlay-5`), list-row and nav hover (`overlay-2`) |
+| Hover | `--color-hover-bg` | 4% white | 4% ink | Interactive table row and ghost-button hover |
+| Selected | `--color-selected` (`bg-selected`) | 8% white | `#0f141e` at 7% | Selected list and table rows, active nav item and tab bar item, command-palette selection |
+| Text | `--color-text` | `#eceef0` | `#17191c` | Primary text, healthy quota figures |
 | Text muted | `--color-text-muted` | `#b3b9c1` | `#464b52` | Secondary text, labels, used %, notice bodies |
 | Text faint | `--color-text-faint` | `#959ca5` | `#565a61` | Captions, table headers, chart ticks, placeholders |
 | Accent (Ion violet) | `--color-accent` | `#a493ff` | `#5a3fd6` | See "Brand violet" below |
-| Accent dim | `--color-accent-dim` | `#a493ff` at 14% | `#5a3fd6` at 10% | Selected table row, text selection, live-row flash |
+| Accent dim | `--color-accent-dim` | `#a493ff` at 14% | `#5a3fd6` at 10% | Text selection, live-row flash, calendar day selection, time-strip wash |
 | Accent text | `--color-accent-text` | `#b3a6ff` | `#4c31c4` | Links, accent badge text, select check marks |
 | Accent ink | `--color-accent-ink` | `#15171a` | `#ffffff` | Text and the switch knob on a solid accent fill |
 | Healthy | `--color-ok` / `--color-success-text` | `#b3b9c1` | `#464b52` | Healthy dots and text: neutral ink, not green |
@@ -58,9 +59,7 @@ Window series hues: 5h blue (235 night / 240 day), 7d teal (180 / 185), Fable gr
 
 Ion violet marks the instrument and the one thing to do next. It appears only as:
 
-- gauge sweeps and headroom meter fills (while severity is healthy),
-- the active nav rule (rail, bottom tab bar, command palette selection),
-- the selected table row (`accent-dim` fill plus a 2px inset accent rule),
+- the brand mark and the 7d and 7d (Fable) lines of the Overview pool usage chart,
 - the one `primary` button per view,
 - focus rings, the switch "on" track, the live connection dot, tab underlines, accent badges and links (as `accent-text`).
 
@@ -71,21 +70,22 @@ It is never a KPI color, a sparkline color, a page decoration or a card fill. Th
 - Status colors mark state only: dots, badges, severity, incident notices, destructive actions. Healthy is neutral ink; there is no green and no blue. Informational notices are neutral.
 - Status-colored text always uses the `*-text` tokens. Never use raw Tailwind palette classes (`text-red-400`, `zinc-*`) or hex literals in components.
 - Series never use amber, orange or red hues; those mean severity.
-- Window identity colors appear only in chart series and legends, never on a gauge, a meter or a quota numeral.
+- Window identity colors appear only in chart series and legends, never on a meter or a quota numeral.
 - No gradients, glows or brand-color surfaces.
 - Tokens are registered through `@theme inline`, so every utility (`text-text`, `bg-overlay-3`, `border-subtle`, `bg-series-5h`) supports `hover:`, `focus-visible:`, `dark:` and `/opacity` variants. `dark:` follows the app theme (`data-theme`), not only the OS.
 - For data colors computed in JS and used as text, use CSS `light-dark(<light>, <dark>)`.
 
-### Headroom and severity
+### Usage and severity
 
 `lib/quotaSeverity.ts` is the only source of quota wording and color.
 
-- The primary figure is headroom, written `N% left` (`formatHeadroom`). A bare percentage that could mean used is never shown. `formatHeadroomValue` gives the bare number for layouts that set `% left` apart, such as a gauge numeral.
-- Used appears only as secondary text, `M% used` (`formatQuotaPercent` plus " used"), in `text-muted`.
-- Rounding never lies: `0% left` only once the window is exhausted, `<1% left` for a sliver, never `100% left` once anything is used. No reading is `—`.
-- Severity is judged on **used**: below 80% healthy, 80% and up `warn`, 95% and up `danger` (`QUOTA_WARN_PCT`, `QUOTA_DANGER_PCT`). In headroom terms that is warn below 20% left and danger below 5% left.
-- Healthy headroom numerals are `text-text`; warn and danger numerals use `QUOTA_SEVERITY_TEXT_CLASS` (`warn-text`, `danger-text`). The sweep or fill turns `warn` / `danger` at the same thresholds.
-- Rankings of quota ("Closest to limit") order by least left.
+- The primary figure is what is used, written `N% used`: `formatQuotaPercent` gives the number and the layout adds "used" (as a muted word, or `sr-only` where a compact row shows only `N%`). `left` and `headroom` are never used for quota, and charts never invert usage.
+- Rounding never lies (`formatQuotaPercent`): whole percent everywhere, lists, cards and chart tooltips alike. A non-zero reading below 1% is `<1%`, never `0%`; a reading from 99% up to 100% is `99%`, so `100%` means exhausted. No reading (null or non-finite) is `—`.
+- Severity (`quotaSeverity`) is judged on used: below 80% healthy, 80% and up `warn`, 95% and up `danger` (`QUOTA_WARN_PCT`, `QUOTA_DANGER_PCT`).
+- Numerals: healthy is `text-text`; warn and danger use `QUOTA_SEVERITY_TEXT_CLASS` (`text-warn-text`, `text-danger-text`); no reading is `text-text-faint`. Compact per-window facts in a list caption stay `text-muted` while healthy.
+- Meter fills follow the same thresholds: `text-muted` ink while healthy, the `warn` and `danger` fills past them. Never the accent, never a window color.
+- Rankings order by the most-used window, highest first; a row without a reading sorts last in its group.
+- API-key upstreams have no subscription quota. The Overview usage table spans the window columns with `No subscription quota` (`text-body-sm` muted); the upstream list shows no figure and no window facts, only `API key` as the caption.
 
 ## 3. Typography
 
@@ -95,15 +95,14 @@ Each role is one Tailwind utility (`@theme` in `index.css`) that sets size, line
 
 | Utility | Size / line height | Weight | Tracking | Use |
 |---------|--------------------|--------|----------|-----|
-| `text-display-hero` | 56 / 60 | 300 | -0.03em | The hero headroom numeral (pool dial, the top "Closest to limit" row) |
-| `text-display` | 32 / 36 | 300 | -0.02em | Sub-gauge numerals and KPI values |
+| `text-display` | 32 / 36 | 300 | -0.02em | KPI values and single headline figures in detail panes |
 | `text-title-page` | 24 / 32 | 600 | -0.01em | `PageHeader` h1 when it is not already the top bar's page name; entity titles on detail panes. Sans, never mono |
-| `text-title-section` | 15 / 22 | 600 | 0 | `Section` h2, top bar page name, sub-gauge labels, Modal and Drawer titles |
-| `text-title-card` | 14 / 20 | 600 | 0 | `CardHeader`, confirm-dialog title, empty-state title, `N% left` on a `md` meter |
+| `text-title-section` | 15 / 22 | 600 | 0 | `Section` h2, top bar page name, quota window names on upstream detail, Modal and Drawer titles |
+| `text-title-card` | 14 / 20 | 600 | 0 | `CardHeader`, confirm-dialog title, empty-state title, `N% used` on a `md` meter |
 | `text-body` | 14 / 21 | 400 | 0 | Primary copy, table cells, dialog descriptions, notices |
-| `text-body-sm` | 13 / 20 | 400 | 0 | Section and card subtitles, gauge captions, field-adjacent copy |
+| `text-body-sm` | 13 / 20 | 400 | 0 | Section and card subtitles, window captions, field-adjacent copy |
 | `text-label` | 13 / 18 | 500 | 0 | Form labels, metric labels, `dl` keys, identity name. Sentence case |
-| `text-caption` | 12 / 16 | 400 | 0 | Hints, timestamps, used %, badges (at 500), tab bar labels |
+| `text-caption` | 12 / 16 | 400 | 0 | Hints, timestamps, reset captions, list-row captions, badges (at 500), tab bar labels |
 | `text-overline` | 12 / 16, uppercase | 500 | 0.08em | **Only** rail and command-palette group headings |
 | `font-mono text-data` | 12 / 16 | 400 | 0 | IDs, hashes, key IDs, model IDs, error codes, paths, env vars, request IDs, code |
 | `text-2xs` | 11 / 16 | — | — | **Only** the sidebar footer (version line) |
@@ -119,10 +118,10 @@ Table headers use the `table-header` utility: 12 / 16, 500, `text-faint`, senten
 
 - 12px is the floor. The one exception is the 11px sidebar footer; chart ticks, badges, captions and tab bar labels are all 12px or larger.
 - Weights are 300, 400, 500 and 600. 300 is for display numerals only; 600 for titles; 500 for labels, buttons and emphasized numbers. No 700 (the base layer resets the UA `th` bold).
-- Numbers (%, $, ms, counts, durations) are sans with tabular figures everywhere. Units sit in `text-muted`, at the same size in running text ("669 ms") and smaller only beside a display numeral (`59` + `% left`).
+- Numbers (%, $, ms, counts, durations) are sans with tabular figures everywhere. Units sit in `text-muted`, at the same size in running text ("669 ms") and one step smaller only beside an emphasized figure (`87%` + `used`).
 - Mono only for machine strings an operator copies or compares character by character. Never for times, dates, durations, names people chose, prose, labels or badges.
 - Uppercase only through `text-overline`. Never uppercase a string that contains a unit, version or identifier (5h, 7d, 5m, v0.6.0).
-- Sentence case for every heading, button, tab and label ("Recent requests", "Delete plugin", "Pool headroom"). Use plain words ("Admin address", not "Admin Addr").
+- Sentence case for every heading, button, tab and label ("Recent requests", "Delete plugin", "Pool quota usage"). Use plain words ("Admin address", not "Admin Addr").
 - No eyebrow or kicker text above a heading.
 - Every route renders exactly one `h1` through `PageHeader`. When its string title equals the page name the top bar already shows (`ShellPageTitleProvider`), the h1 stays for assistive tech but is visually hidden, so the name is never printed twice. `CardHeader` defaults to `h2`; cards nested under a titled section pass `headingLevel={3}`. Do not skip levels.
 - Keep dashboard copy short; detailed debug text belongs in drawers.
@@ -153,7 +152,7 @@ All spacing is on a 4px base: 4, 8, 12, 16, 20, 24, 32, 40, 48, 64 (`1, 2, 3, 4,
 - Cards collapse to one column on phones; avoid forced `flex-row` headers unless the content fits.
 - A card is as tall as its content. No `min-h`, `h-[50vh]` or stretched grid cells to fill space.
 - Prefer fewer groups with clear hierarchy over dense metric grids. Put raw logs and verbose diagnostics in drawers.
-- Phones stay short: gauges become linear meters and repeated cards collapse into rows, so no page turns into a multi-thousand-pixel scroll.
+- Phones stay short: usage table rows stack and repeated cards collapse into rows, so no page turns into a multi-thousand-pixel scroll.
 - Check layouts at 390px, 768px and 1440px.
 
 ### Radii
@@ -165,37 +164,34 @@ All spacing is on a 4px base: 4, 8, 12, 16, 20, 24, 32, 40, 48, 64 (`1, 2, 3, 4,
 | `rounded-md` (`--radius-md`) | 6px | Cards, dialogs, popovers, toasts, tooltips, page banners |
 | `rounded-full` | — | Status dots, switches, the theme pill and the sidebar count pill. Never bars or tracks |
 
-Headroom meter tracks and gauge strokes are square (butt caps, no radius).
+Usage meter tracks and fills are square (no radius).
 
 ## 5. Components
 
-Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, Notice, Field, …), `Gauge.tsx`, `charts.tsx`, `StackedBar.tsx`, `Select.tsx`, `Table.tsx`, `Tabs.tsx`. The shell lives in `src/components/layout/`.
+Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, Notice, Field, …), `UsageMeter.tsx`, `EntityList.tsx`, `charts.tsx`, `StackedBar.tsx`, `Select.tsx`, `Table.tsx`, `Tabs.tsx`. The shell lives in `src/components/layout/`.
 
 ### Shell
 
-- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B (the width snaps, labels fade). Brand mark (a small 240° headroom dial) and "cc-lb" at the top, nav groups with `text-overline` headings, then the footer (Docs link and the 11px version line).
-- **Nav item**: 36px, 14/500 `text-muted`; hover `panel` fill. Active (`data-status="active"`) is `panel-strong` fill, full ink and a 2px accent rule on the rail's left edge. The Upstreams item carries the reconnect count pill (`warn` / `danger` at 15% with `*-text` numerals; a 6px dot when collapsed).
+- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B (the width snaps, labels fade). Brand mark (a small 240° dial with a violet sweep) and "cc-lb" at the top, nav groups with `text-overline` headings, then the footer (Docs link and the 11px version line).
+- **Nav item**: 36px, 14/500 `text-muted`; hover `overlay-2` fill and full ink. Active (`data-status="active"`, `aria-current="page"`) is the `selected` fill with full ink, and stays filled on hover; no edge rule. The Upstreams item carries the reconnect count pill (`warn` / `danger` at 15% with `*-text` numerals; a 6px dot when collapsed).
 - **Top bar**: 48px, sticky, on the ground with a 1px bottom line. Left: the rail toggle (`lg`+) or the brand mark (below `lg`), then the page name in `text-title-section`. Right: Search (⌘K) field, identity (name and kind from `xl`, a popover below), API connection status (dot + word; the healthy "Live" word hides on phones, other states always show their word), and the Night / Day theme pill.
-- **Bottom tab bar** (below `lg`): fixed, 56px plus the safe-area inset, on the ground with a 1px top line. Overview, Upstreams, Principals, Logs and More; 16px icons over 12px labels. The active tab is full ink with a 2px accent rule on its top edge. More opens the full navigation as a left sheet. Page titles stay in the top bar only; `main` pads by `--shell-bottom` and toasts sit above the bar.
+- **Bottom tab bar** (below `lg`): fixed, 56px plus the safe-area inset, on the ground with a 1px top line. Overview, Upstreams, Principals, Logs and More; 16px icons over 12px labels. The active tab (and More while one of its pages is open) takes the `selected` fill and full ink; no edge rule. More opens the full navigation as a left sheet. Page titles stay in the top bar only; `main` pads by `--shell-bottom` and toasts sit above the bar.
 - `h-shell` is the viewport minus the top bar and, below `lg`, the tab bar; use it for viewport-fit consoles.
 
-### Gauges and meters
+### Meters
 
-`Gauge.tsx` holds the two headroom instruments. Both draw what is **left**, in the accent, switching to `warn` / `danger` by used (80 / 95). Both are static SVG or CSS; nothing animates.
+`UsageMeter` (`UsageMeter.tsx`) is the one quota instrument. There are no arc gauges or dials. It is static CSS; nothing animates.
 
-- **`ArcGauge`**: a 240° dial opening at the bottom. 1px ticks every 10% (major at 0, 50 and 100 in `text-faint`, minor in `border-strong`), 2px warn and danger zones just outside the dial at the low-headroom end, the sweep from zero to the headroom, and a 1.5px marker at the sweep's end. The numeral is a light display number with a small `% left`.
-  - `size="hero"`: 264px, label and caption inside the dial. One per page: the pool dial on Overview.
-  - `size="sub"`: 128px, label (`text-title-section`) and caption (`text-body-sm` muted) below. Per-window gauges.
-  - One `role="img"` with the name `"<label>: N% left"` plus the caption when it is a string; pass `ariaLabel` when the caption is not plain text ("5h: 59% left, resets Thu 10-01 09:00").
-- **`HeadroomMeter`**: the linear sibling for lists and phones. Fill = headroom in the accent (warn / danger by used) on the meter track, with a 1px `text-faint` mark where the warn zone starts (20% left). `sm` is a 4px bar for dense rows; `md` is a 6px bar with `N% left` (`text-title-card`) and `M% used` (`text-caption` muted) above it. `role="meter"` valued as headroom, so assistive tech hears "59% left".
-- Below `md`, every dial becomes a `HeadroomMeter`.
-- Quota is only ever shown through these two components. Window identity colors never fill them.
+- The fill is what is **used** of the window, clamped to 0–100, on the meter track: `text-muted` ink below 80%, `warn` from 80%, `danger` from 95%. A non-zero reading draws at least 1% wide; no reading or 0% draws an empty track. A 1px `text-faint` mark sits at 80% where the warn zone starts.
+- `size="sm"`: a 4px bar for dense rows (the Overview usage table). `size="md"`: a 6px bar with `N% used` (`text-title-card`, severity ink) above it (upstream detail window blocks), or `—` without a reading.
+- `role="meter"` named by `label` (the window), valued 0–100 as used, with `aria-valuetext` "N% used" or "No reading".
+- Quota bars are only ever this component. Window identity colors never fill it.
 - **`StackedBar`**: breakdowns (latency attribution, token usage), not quota. 6px (`sm`) or 8px (`md`), `rounded-xs` track, square segments in a `gap-px` row with `min-width: 2px`, so the track shows between them. Renders nothing when every segment is zero. Breakdowns live in drawers and popovers, never in table cells.
 
 ### Card and Section
 
 - **Card** (`Card` + optional `CardHeader` + `CardBody`): a self-contained object with its own header or actions — a chart, a table, a form group, a detail block. Flat `panel` fill, 1px line, `rounded-md`. `CardHeader` owns `px-4 py-3`, a 1px rule below, and a `text-title-card` heading with an optional `text-caption` subtitle; `CardBody` owns `p-4`.
-- **Section** (`Section`): a flat page region on the ground with a `text-title-section` h2, optional `text-body-sm` muted subtitle, and no box. Use it for groups of peers (window gauges, the upstream strip, "Used by" lists) and around page-level tables that already have a frame.
+- **Section** (`Section`): a flat page region on the ground with a `text-title-section` h2, optional `text-body-sm` muted subtitle, and no box. Use it for groups of peers (quota windows, the upstream usage table, "Used by" lists) and around page-level tables that already have a frame.
 - A section title and a card title never share a size.
 
 ### Button
@@ -225,16 +221,59 @@ Every icon-only control. `label` is required and becomes the accessible name. 44
 - At most one status badge per object header. In lists, status is a dot plus a short `*-text` phrase, not a filled chip. Healthy states are shown by omission (no "Active" ×12).
 - Status dot: `.status-dot` 6px (`.status-dot.lg` 8px in lists), flat and static. `live` is an accent dot that does not pulse; state is always carried by text as well.
 
+### Selection
+
+One rule for every list, table and nav:
+
+- Selected: the neutral `selected` fill (`bg-selected`, a clear step above hover) with the name in full ink, `font-medium` in entity lists. `aria-current="true"` on list rows; `aria-current="page"` on nav items and nav tabs. The fill stays on hover.
+- Hover: `bg-overlay-2` on list rows and nav items (`hover-bg` on interactive table rows).
+- Focus-visible: the standard 2px accent outline. Focus is not selection.
+- Never a side stripe: no colored left border, no inset box-shadow, no pseudo-element bar, and never an accent tint as the only cue.
+- Applies to the rail nav item, the bottom tab bar, the command palette, `EntityList` rows, `TableRow selected` and the keepalive sessions drawer.
+
 ### Tables
 
 Use `Table`, `TableHead`, `TableHeadCell`, `TableRow`, `TableCell`, `TableEmptyRow` and `EmptyValue` from `Table.tsx`, or the `table-header` (on `thead`) and `table-th` (on `th`) utilities for existing markup.
 
 - Header: 12/500 sans sentence case in `text-faint`, 36px, opaque sticky `panel` with a 1px line. No uppercase, no tracking, no blur.
 - Body: `text-body` 14px sans. Mono (`TableCell mono`) only for ID, model, path and hash columns. Numbers right-aligned and tabular (`numeric`), units muted at the same size.
-- Rows: 40px (32px `dense`), `border-row` divider, `hover-bg` on interactive rows. Selected is `accent-dim` with a 2px inset accent rule on the left edge — the one place a row carries a colored edge.
-- No per-cell bars except a `HeadroomMeter sm` in a headroom column. Breakdowns go in the drawer.
+- Rows: 40px (32px `dense`), `border-row` divider, `hover-bg` on interactive rows. Selected (`TableRow selected`) is the neutral `selected` fill, kept on hover; no edge rule, no inset shadow.
+- No per-cell bars except a `UsageMeter sm` in a quota window cell. Breakdowns go in the drawer.
 - Hide a column when every visible row is null; show a null cell as `—` in `text-faint` (`EmptyValue`, with a screen-reader label).
 - A table inside a card drops the card body padding; the first and last cells keep a 16px inset so the header aligns with the card title.
+
+### Lists at any size
+
+`EntityList` (`EntityList.tsx`) is the one list pane behind Upstreams and Principals. It reads the same with 1 item and with dozens.
+
+- **Split pane**: inside `h-shell`, the list pane is 360px from `md` (400px from `xl`) with a 1px right line and its own scroll; the detail pane takes the rest and scrolls on its own. Below `md` the page shows the list or the selected item's detail, never both, and the detail carries a back button. From `md` the first visible row (under the current sort and filter) is selected automatically, so the detail pane is never blank.
+- **Pane header**: `PageHeader` title, a faint `text-caption` count line (`15 upstreams · 3 need reconnect`, `37 principals · 2 disabled`), and the Add / New `primary` button.
+- **Toolbar** only from 8 items (`ENTITY_LIST_TOOLBAR_MIN_ITEMS`); below that it is noise. A search field (`Search upstreams`, Escape clears it), one filter `Select` and one sort `Select`, all `sm`. Search is client-side over the name, id and kind or plan. Below 8 items search and filter do not apply; sort always does.
+- **URL state**: `q`, `filter` and `sort` live in the route search params with zod defaults, and defaults stay out of the address bar. Changing them replaces history and keeps `selectedId`; a selected item the filter hides stays open in the detail pane.
+- **Result line** while search or a non-default filter narrows the list: `Showing 4 of 37` (`role="status"`) and a ghost `Clear` that resets search and filter, not sort.
+- **No match vs first run**: when items exist but none match, a centered `No principals match "abc"` (or `No principals match this filter`) with `Clear filters`. When nothing exists at all, the page's own first-run empty state shows instead.
+- **Keyboard**: the list is one tab stop (rows are `tabIndex=-1`). ArrowUp, ArrowDown, Home and End move the selection from `md`, scrolling it into view within the pane only. On phones they move a highlight (`overlay-2` + accent outline) and Enter or Space opens the detail. `/` is not bound; ⌘K is the palette.
+- **Rows**: full-width buttons, min 52px, `rounded-sm px-3 py-2`, two lines. Line 1: the name (`text-body`, truncated) with one tabular figure on the right. Line 2: a faint `text-caption` caption with compact tabular facts on the right. The full value sits in `title`. Disabled items read muted until selected.
+
+Upstream rows:
+
+- Line 1, right: the highest used % across the subscription windows, in severity ink; nothing for API-key upstreams.
+- Line 2: `Disabled` (muted) for a disabled upstream; otherwise, when there is a reconnect nudge or health problem, a status dot and phrase in `warn-text` / `danger-text`; otherwise the plan (`Claude Max 20x`) or `API key`. Right: `5h 12% · 7d 87% · Fable 10%`, labels faint, each figure muted while healthy and severity-colored from 80 / 95; missing windows are omitted.
+- Filter: All upstreams / Needs attention / Disabled / Subscription (OAuth) / API key. Sort: Needs attention first (default) / Highest usage / Name. An upstream needs attention when it is enabled and has a status problem or any window at 80% used or more. The default sort ranks danger first (a danger status such as unreadable credentials, or a window at 95% used or more), then warn, then healthy, then disabled; ties go to the most-used window, then name.
+
+Principal rows:
+
+- Line 1, right: requests in the last 24h (muted, tabular; `—` when none), from the same per-principal 24h usage query as Overview's Top principals: one request for the whole list.
+- Line 2: `Disabled · ` (muted) when disabled, then kind · `Any model` / `N models` · `No limits` / `N limits`. The revision lives in the detail, not the row.
+- Filter: All principals / Enabled / Disabled / Human / Machine / Admin. Sort: Name (default) / Most active (24h). There is no "recently updated": principals carry no update timestamp.
+
+### Overview
+
+The Overview leads with how usage moved, then who is using it. Top to bottom (`routes/index.tsx`): the incident banners (`LiveTailFailureBanner`, `OAuthReconnectSummary`), `PageHeader` with the range `SegmentedControl`, then either the first-run checklist alone or:
+
+1. **Pool quota usage** (`Section`, full width): a line chart of pool used % per window (5h, 7d, 7d (Fable)) over the selected range, with the 80 / 95 threshold lines. 200px tall on phones, 240px from `md`, 320px from `lg`. Current values ride along the chart in the legend row above the plot: each window's swatch and name, its current `N% used` (`font-medium`, severity ink) and `resets in 3h 12m` (absolute time in `title`), then the two threshold entries. Captions under the plot keep the honesty notes: plan weighting, upstreams with unknown capacity, and the provider reading's age with a `Stale reading` badge.
+2. **Upstreams** (`Section`, full width, `Manage upstreams` link): `UpstreamUsageTable`, one row per upstream with columns Upstream, 5h, 7d and 7d (Fable). The name cell adds a dot and status phrase only when something is wrong. Each window cell is `N%` with a muted `used`, a `UsageMeter sm` and a reset caption (the limit status in `danger-text` when the window is limited). Order: needs attention, subscription, API key, disabled; most used first inside each group. Up to 8 rows show; past 8 the rest sit behind an inline `Show all N` / `Show fewer` toggle (`aria-expanded`). Rows link to `/upstreams?selectedId=`. Below the container's `@4xl` width a row stacks: the name line, then the three window cells side by side, each repeating its label.
+3. **Traffic** KPIs with sparklines beside **Top principals** (7 : 5 from `lg`), then **Latest requests (any time)**.
 
 ### Charts (Recharts)
 
@@ -244,8 +283,9 @@ Use `Table`, `TableHead`, `TableHeadCell`, `TableRow`, `TableCell`, `TableEmptyR
 - `CHART_AXIS`: no axis or tick lines, 12px sans tabular ticks in `text-faint`. About 4 x-ticks.
 - `CHART_CURSOR`: a 1px `border-strong` hover rule.
 - Tooltip: `bg-sub`, 1px `border-strong`, `rounded-md`, the overlay shadow, 12px sans; label `text-muted`, values `text`, tabular.
-- **Quota history plots headroom**, the same way every gauge reads: each bucket is `100 − used`, clamped to 0–100 (`buildPoolQuotaChartData`, the upstream quota chart). The y axis is `0–100` with ticks at 0, 25, 50, 75 and 100, labeled `N%`; higher is better.
-- Thresholds (`CHART_THRESHOLD`): 1px dashed (`3 3`) `warn` and `danger` reference lines at **20% left** and **5% left** (`100 − QUOTA_WARN_PCT`, `100 − QUOTA_DANGER_PCT`), labeled "20% left" / "5% left" or listed in the legend as "Warn below 20% left" / "Danger below 5% left". No tinted `ReferenceArea` bands.
+- **Quota history plots used**, the same figure every meter reads. The y axis is `0–100` with ticks at 0, 25, 50, 75 and 100, labeled `N%`; higher is closer to the limit.
+- Thresholds (`CHART_THRESHOLD`): 1px dashed (`3 3`) `warn` and `danger` reference lines at **80%** and **95%** used (`QUOTA_WARN_PCT`, `QUOTA_DANGER_PCT`). The Overview labels them `80%` / `95%` inside the right edge in `warn-text` / `danger-text` and lists "Warn at 80% used" / "Danger at 95% used" in the legend. No tinted `ReferenceArea` bands.
+- The Overview pool usage chart draws 7d as a 1.5px accent line, 7d (Fable) as the same line dashed `4 3`, and 5h as a 1px `text-muted` line, with no fills so crossings stay readable.
 - Series colors come from `--color-series-*` via `getWindowColor`; 1.5px strokes. Quota windows draw as lines without fill (7d (Fable) dashed `5 3` where it shares a plot with 7d); areas elsewhere use a flat fill at `SERIES_FILL_OPACITY`, never a gradient. When series overlap, fill only the primary or hovered series.
 - Legend: in the chart header row or directly under the plot: a short line swatch (dashed for thresholds), a `text-muted` label and a tabular value. A legend entry may isolate its window.
 - `Sparkline`: a 1.25px `text-muted` line over a flat fill; renders nothing when every value is zero. `QuotaMiniChart`: 1.5px step lines for 5h and 7d, no fill. Chart animation is off.
@@ -266,7 +306,7 @@ Use `Table`, `TableHead`, `TableHeadCell`, `TableRow`, `TableCell`, `TableEmptyR
 
 `Notice` has two variants:
 
-- `variant="banner"`: the page-level incident line, at most one per page. `rounded-md`, 1px `tone/45` line whose left edge is drawn in the full tone, `tone/8` fill, 16px icon, one line: a 600-weight title plus a short summary, and at most one action on the right. Lists collapse into a sentence ("3 upstreams can't authenticate: isac-max, bear-max, bh322yoo-max").
+- `variant="banner"`: the page-level incident line, at most one per page. `rounded-md`, a uniform 1px `tone/45` line (`border-subtle` for neutral tones), `tone/8` fill, 16px icon, one line: a 600-weight title plus a short summary, and at most one action on the right. Lists collapse into a sentence ("3 upstreams can't authenticate: isac-max, bear-max, bh322yoo-max").
 - `variant="inline"` (default): a well inside a card, `tone/8` fill with no border, a 14px icon in the tone text color, body in `text-muted`.
 
 Tones are `info` and `success` (both neutral: overlay fill, muted icon), `warning` and `danger`. The object that owns the problem shows the full notice; everywhere else shows a dot and a short phrase.
@@ -275,7 +315,7 @@ Tones are `info` and `success` (both neutral: overlay fill, muted icon), `warnin
 
 - `EmptyState` has no frame of its own. In a card it is one centered 13px `text-muted` line with `py-8`; with a description or action the title steps up to `text-title-card`.
 - The containing card collapses to its content. Dashed borders are only for drop zones.
-- Metrics with no traffic show `—`, not a fake-precise `0 ms` or `0.00%`. A quota with no reading shows `—` and an empty dial or track, never `0% left`.
+- Metrics with no traffic show `—`, not a fake-precise `0 ms` or `0.00%`. A quota with no reading shows `—` and an empty track, never `0% used`.
 
 ### Dialogs and drawers
 
@@ -302,21 +342,21 @@ Tones are `info` and `success` (both neutral: overlay fill, muted icon), `warnin
 ### Rules
 
 - Animate only color, opacity or transform. Width never animates: the rail width snaps and only its labels fade.
-- Instruments are still. Gauges, meters and charts do not animate, and the live dot does not pulse; nothing loops except the skeleton shimmer while loading.
+- Instruments are still. Meters and charts do not animate, and the live dot does not pulse; nothing loops except the skeleton shimmer while loading.
 - Every interactive element stays keyboard-focusable with the 2px accent focus outline.
 - No emoji or Unicode glyphs as icons; use lucide at `strokeWidth={1.75}` or text-only labels.
 - Honor `prefers-reduced-motion`: shimmer and live-row flashes become static, drawers fade instead of sliding, switches and the "More" sheet stop transitioning. Never use a global 0.01ms kill.
-- Mobile (below `md`): request tables stack into three-line cards, filter panels sit behind a "Filters (n)" disclosure, dials become linear meters, and quota comes before traffic KPIs.
+- Mobile (below `md`): request tables stack into three-line cards, filter panels sit behind a "Filters (n)" disclosure, entity pages show the list or the detail, and quota comes before traffic KPIs.
 
 ## 7. Depth & Surface
 
 | Level | Treatment | When |
 |-------|-----------|------|
 | Ground | `bg-bg` | The page, rail, top bar and tab bar |
-| Flat section | No box: `text-title-section` title + content, separated from the next section by space | Groups of peers; the cluster band; page-level tables with their own frame |
+| Flat section | No box: `text-title-section` title + content, separated from the next section by space | Groups of peers; page-level tables with their own frame |
 | Card | `.glass` (`panel` fill + 1px `border`) + `rounded-md` | A self-contained object with its own header or actions |
 | Well | `.well` (`overlay-3` fill, `rounded-sm`, no border) + `p-3` | A sub-group inside a card: an inline notice, a credit strip, toggle rows |
-| Divider | 1px `border-row` (`divide-y divide-row`, `border-t border-row`) | Between rows, between peer gauges in a band, or between sub-sections inside a card |
+| Divider | 1px `border-row` (`divide-y divide-row`, `border-t border-row`) | Between rows, or between sub-sections inside a card |
 | Overlay | `.glass-strong` (`bg-sub` + 1px `border-strong` + `shadow-overlay`) + `rounded-md` | Popovers, menus, select popups, tooltips, toasts. Dialogs and drawers use the same fill, line and shadow |
 
 ### Rules
@@ -325,7 +365,7 @@ Tones are `info` and `success` (both neutral: overlay fill, muted icon), `warnin
 - Elevation is declared once: `shadow-overlay` (`0 8px 24px -12px` in the overlay-shadow color) and only on overlays.
 - Separate sections with space, not borders. Page regions are not boxed unless they are a self-contained object.
 - A bordered box never sits inside another bordered box. Inside a card, group with wells and dividers.
-- No side-stripe borders to mark a card, row or list item as special; use a leading dot, an icon or a badge. The only colored edges are the 2px accent rules on the active nav item, the active tab and the selected table row, and the full-tone 1px left edge of a page banner.
+- No side-stripe borders to mark a card, row or list item as special or selected; use a leading dot, an icon, a badge, or the `selected` fill. The only colored edge is the 2px accent rule under the active tab.
 - A simplified warmup card shows one status story, one action cluster and one drawer entry point; everything else is summarized or moved behind disclosure.
 
 ## 8. Time Controls & Bounded History

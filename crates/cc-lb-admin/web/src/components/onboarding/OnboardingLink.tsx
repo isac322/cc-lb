@@ -10,7 +10,7 @@ export type OnboardingTarget =
   | 'logs';
 
 // Ink text with a quiet rule that turns brand on hover; accent stays reserved
-// for gauges and the one primary action.
+// for the pool quota lines and the one primary action.
 const LINK_CLASS =
   'inline-flex items-center gap-1 min-h-11 md:min-h-0 rounded-sm text-label text-text underline decoration-border-strong decoration-1 underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
 

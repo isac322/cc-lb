@@ -20,7 +20,11 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import {
+  createFileRoute,
+  stripSearchParams,
+  useNavigate,
+} from '@tanstack/react-router';
 import {
   ArrowDown,
   ArrowUp,
@@ -45,6 +49,12 @@ import {
 } from '../components/principals/cache-keepalive/CacheKeepaliveCard';
 import { PrincipalSection } from '../components/principals/PrincipalSection';
 import {
+  EntityList,
+  type EntityListView,
+  type EntityListViewConfig,
+  useEntityListView,
+} from '../components/ui/EntityList';
+import {
   Badge,
   Button,
   ConfirmDialog,
@@ -56,7 +66,6 @@ import {
   IconButton,
   INPUT_CLASS,
   Modal,
-  PageHeader,
   Skeleton,
   SkeletonRow,
   Spinner,
@@ -74,6 +83,7 @@ import {
   TableHeadCell,
   TableRow,
 } from '../components/ui/Table';
+import { formatCount } from '../lib/format';
 import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   type ChainSlot,
@@ -102,6 +112,7 @@ import {
   useUpdatePrincipalDefaultLimits,
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
+  useUsage,
 } from '../lib/queries';
 import {
   PRINCIPAL_LIMITS_ANCHOR,
@@ -110,13 +121,64 @@ import {
 import { undoToast } from '../lib/undoToast';
 import { useCopyButton } from '../lib/useCopyButton';
 
+const PRINCIPAL_FILTERS = [
+  'all',
+  'enabled',
+  'disabled',
+  'human',
+  'machine',
+  'admin',
+] as const;
+type PrincipalFilter = (typeof PRINCIPAL_FILTERS)[number];
+// Principal carries no update timestamp, so there is no "Recently updated".
+const PRINCIPAL_SORTS = ['name', 'active'] as const;
+type PrincipalSort = (typeof PRINCIPAL_SORTS)[number];
+
 const principalSearchSchema = z.object({
   selectedId: z.string().optional(),
   action: z.literal('new').optional(),
+  q: z.string().default('').catch(''),
+  filter: z.enum(PRINCIPAL_FILTERS).default('all').catch('all'),
+  sort: z.enum(PRINCIPAL_SORTS).default('name').catch('name'),
 });
 
-const PRINCIPAL_LIST_ROW_CLASS =
-  'w-full min-h-[72px] text-left p-3 rounded-sm border';
+const PRINCIPAL_FILTER_OPTIONS: readonly {
+  value: PrincipalFilter;
+  label: string;
+}[] = [
+  { value: 'all', label: 'All principals' },
+  { value: 'enabled', label: 'Enabled' },
+  { value: 'disabled', label: 'Disabled' },
+  { value: 'human', label: 'Human' },
+  { value: 'machine', label: 'Machine' },
+  { value: 'admin', label: 'Admin' },
+];
+const PRINCIPAL_SORT_OPTIONS: readonly {
+  value: PrincipalSort;
+  label: string;
+}[] = [
+  { value: 'name', label: 'Name' },
+  { value: 'active', label: 'Most active (24h)' },
+];
+const EMPTY_PRINCIPALS: readonly Principal[] = [];
+
+function compareNames(a: { name: string }, b: { name: string }): number {
+  return a.name.localeCompare(b.name, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  });
+}
+
+function principalId(p: Principal): string {
+  return p.id;
+}
+
+const PRINCIPAL_VIEW_DEFAULTS = {
+  q: '',
+  filter: 'all',
+  sort: 'name',
+} as const satisfies EntityListView<PrincipalFilter, PrincipalSort>;
+
 const PRINCIPAL_DETAIL_HEADER_CLASS =
   'px-4 md:px-8 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0';
 const PRINCIPAL_DETAIL_BODY_CLASS =
@@ -167,6 +229,8 @@ function slotLabel(slot: ChainSlot): string {
 
 export const Route = createFileRoute('/principals')({
   validateSearch: principalSearchSchema,
+  // Defaults stay out of the address bar.
+  search: { middlewares: [stripSearchParams(PRINCIPAL_VIEW_DEFAULTS)] },
   component: PrincipalsPage,
 });
 
@@ -312,15 +376,72 @@ function PrincipalDetailLoadingShell() {
 }
 
 function PrincipalsPage() {
-  const { selectedId, action } = Route.useSearch();
+  const search = Route.useSearch();
+  const { selectedId, action } = search;
+  const view: EntityListView<PrincipalFilter, PrincipalSort> = {
+    q: search.q ?? '',
+    filter: search.filter ?? 'all',
+    sort: search.sort ?? 'name',
+  };
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
+  // Same key as Overview's Top principals at 24h: one request for the list.
+  const usage24h = useUsage('24h', 'hour', 'principal', undefined, 'totals');
   const [createOpen, setCreateOpen] = useState(false);
 
-  const selected =
-    principals.data?.principals.find((p) => p.id === selectedId) ?? null;
+  const all = principals.data?.principals ?? EMPTY_PRINCIPALS;
+  const requests24h = useMemo(() => {
+    const byId = new Map<string, number>();
+    for (const series of usage24h.data?.series ?? []) {
+      if (!series.key) continue;
+      let requests = 0;
+      for (const bucket of series.buckets)
+        requests += bucket.request_count ?? 0;
+      byId.set(series.key, requests);
+    }
+    return byId;
+  }, [usage24h.data]);
+  const usagePending = usage24h.data === undefined && usage24h.isPending;
+
+  const viewConfig = useMemo<
+    EntityListViewConfig<Principal, PrincipalFilter, PrincipalSort>
+  >(
+    () => ({
+      searchText: (p) => [p.name, p.id, PRINCIPAL_KIND_LABEL[p.kind]],
+      defaultFilter: 'all',
+      filters: {
+        all: () => true,
+        enabled: (p) => p.enabled,
+        disabled: (p) => !p.enabled,
+        human: (p) => p.kind === 'human',
+        machine: (p) => p.kind === 'machine',
+        admin: (p) => p.kind === 'admin',
+      },
+      sorts: {
+        name: compareNames,
+        active: (a, b) =>
+          (requests24h.get(b.id) ?? 0) - (requests24h.get(a.id) ?? 0) ||
+          compareNames(a, b),
+      },
+    }),
+    [requests24h],
+  );
+  const listView = useEntityListView(all, view, viewConfig);
+
+  const selected = all.find((p) => p.id === selectedId) ?? null;
+  // `resetScroll: false`: the router's scroll restoration would otherwise
+  // snap the list pane back to its top on every selection, so arrowing to
+  // a row below the fold would leave it out of view.
   const select = (id: string | undefined) =>
-    navigate({ search: id ? { selectedId: id } : {} });
+    navigate({ search: { selectedId: id, ...view }, resetScroll: false });
+  const changeView = (
+    patch: Partial<EntityListView<PrincipalFilter, PrincipalSort>>,
+  ) =>
+    navigate({
+      replace: true,
+      resetScroll: false,
+      search: { selectedId, ...view, ...patch },
+    });
 
   useEffect(() => {
     if (action !== 'new') return;
@@ -331,127 +452,107 @@ function PrincipalsPage() {
     });
   }, [action, navigate]);
 
+  // From md the detail pane is never blank: pick the first row of the
+  // current sort and filter.
+  const firstVisibleId = listView.visible[0]?.id;
   useEffect(() => {
-    if (
-      !principals.isLoading &&
-      !selected &&
-      principals.data?.principals &&
-      principals.data.principals.length > 0
-    ) {
-      if (window.matchMedia('(min-width: 768px)').matches) {
-        navigate({
-          search: { selectedId: principals.data.principals[0].id },
-          replace: true,
-        });
-      }
+    if (principals.isLoading || selected || !firstVisibleId) return;
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      navigate({
+        search: (prev) => ({ ...prev, selectedId: firstVisibleId }),
+        replace: true,
+        resetScroll: false,
+      });
     }
-  }, [principals.isLoading, selected, principals.data?.principals, navigate]);
+  }, [principals.isLoading, selected, firstVisibleId, navigate]);
+
+  const disabledCount = all.filter((p) => !p.enabled).length;
 
   return (
     <div className="h-shell min-h-0 flex w-full max-w-[120rem] mx-auto">
-      <aside
+      <EntityList
         className={cx(
-          'border-r border-subtle flex flex-col min-h-0 w-full md:w-[360px] shrink-0',
+          'w-full shrink-0 border-r border-subtle md:w-[360px] xl:w-[400px]',
           selected ? 'hidden md:flex' : 'flex',
         )}
-      >
-        <div className="px-4 py-3 border-b border-subtle shrink-0 [&>header]:mb-0">
-          <PageHeader
-            title="Principals"
-            description={
-              <span className="flex h-4 items-center text-caption text-text-faint">
-                {principals.isLoading ? (
-                  <span
-                    className="skeleton inline-block h-3 w-12"
-                    data-testid="principal-count-skeleton"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  `${principals.data?.principals.length ?? 0} total`
-                )}
+        title="Principals"
+        noun="principals"
+        countLine={
+          principals.isLoading
+            ? null
+            : [
+                `${formatCount(all.length)} ${all.length === 1 ? 'principal' : 'principals'}`,
+                disabledCount > 0
+                  ? `${formatCount(disabledCount)} disabled`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')
+        }
+        countSkeletonTestId="principal-count-skeleton"
+        action={
+          <Button
+            id="btn-new-principal"
+            size="sm"
+            className="max-md:h-11"
+            variant="primary"
+            iconLeft={<Plus />}
+            onClick={() => setCreateOpen(true)}
+          >
+            New
+          </Button>
+        }
+        loading={principals.isLoading}
+        totalCount={all.length}
+        result={listView}
+        toolbar={{
+          view,
+          filterOptions: PRINCIPAL_FILTER_OPTIONS,
+          sortOptions: PRINCIPAL_SORT_OPTIONS,
+          onViewChange: changeView,
+          onClear: () => changeView({ q: '', filter: 'all' }),
+        }}
+        getId={principalId}
+        renderRow={(p) => {
+          const requests = requests24h.get(p.id) ?? 0;
+          const facts = [
+            PRINCIPAL_KIND_LABEL[p.kind],
+            p.allowed_models.length === 0
+              ? 'Any model'
+              : `${p.allowed_models.length} ${p.allowed_models.length === 1 ? 'model' : 'models'}`,
+            p.default_limits.length === 0
+              ? 'No limits'
+              : `${p.default_limits.length} ${p.default_limits.length === 1 ? 'limit' : 'limits'}`,
+          ].join(' · ');
+          return {
+            name: p.name,
+            muted: !p.enabled,
+            title: `${p.name}\n${p.enabled ? '' : 'Disabled · '}${facts}`,
+            trailing: usagePending ? (
+              <Skeleton as="span" className="inline-block h-3 w-6" />
+            ) : requests > 0 ? (
+              <span className="text-text-muted">
+                {formatCount(requests)}
+                <span className="sr-only"> requests in 24h</span>
               </span>
-            }
-            actions={
-              <Button
-                id="btn-new-principal"
-                size="sm"
-                iconLeft={<Plus />}
-                onClick={() => setCreateOpen(true)}
-              >
-                New
-              </Button>
-            }
-          />
-        </div>
-        <div className="flex-1 overflow-y-auto p-2 pb-8 space-y-1">
-          {principals.isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => (
-              <div
-                key={i}
-                className={cx(PRINCIPAL_LIST_ROW_CLASS, 'border-transparent')}
-                data-testid="principal-list-skeleton"
-                aria-hidden="true"
-              >
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <Skeleton className="h-4 w-28" />
-                  <Skeleton className="h-5 w-14" />
-                </div>
-                <div className="flex items-center justify-between mt-2">
-                  <Skeleton className="h-3 w-32" />
-                  <Skeleton className="h-3 w-10" />
-                </div>
-              </div>
-            ))
-          ) : principals.data?.principals.length ? (
-            principals.data.principals.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => select(p.id)}
-                className={cx(
-                  PRINCIPAL_LIST_ROW_CLASS,
-                  'border-transparent transition-colors',
-                  p.id === selectedId
-                    ? 'bg-accent-dim shadow-[inset_3px_0_0_var(--color-accent)]'
-                    : 'hover:bg-overlay-2',
+            ) : (
+              <EmptyValue label="No requests in 24h" />
+            ),
+            caption: (
+              <span className="truncate">
+                {p.enabled ? null : (
+                  <span className="text-text-muted">Disabled · </span>
                 )}
-                aria-current={p.id === selectedId ? 'true' : undefined}
-              >
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <span
-                    className={cx(
-                      'text-body font-medium truncate',
-                      p.enabled ? 'text-text' : 'text-text-muted',
-                    )}
-                  >
-                    {p.name}
-                  </span>
-                  <Badge>{PRINCIPAL_KIND_LABEL[p.kind]}</Badge>
-                </div>
-                <div className="flex items-center justify-between gap-2 text-caption text-text-faint mt-2">
-                  <span className="truncate">
-                    {p.enabled ? null : (
-                      <span className="text-text-muted">Disabled · </span>
-                    )}
-                    {p.allowed_models.length === 0
-                      ? 'Any model'
-                      : `${p.allowed_models.length} ${p.allowed_models.length === 1 ? 'model' : 'models'}`}
-                    {' · '}
-                    {p.default_limits.length === 0
-                      ? 'No limits'
-                      : `${p.default_limits.length} ${p.default_limits.length === 1 ? 'limit' : 'limits'}`}
-                  </span>
-                  <span className="tabular-nums shrink-0">
-                    rev {p.revision}
-                  </span>
-                </div>
-              </button>
-            ))
-          ) : (
-            <PrincipalsListEmpty onCreate={() => setCreateOpen(true)} />
-          )}
-        </div>
-      </aside>
+                {facts}
+              </span>
+            ),
+          };
+        }}
+        selectedId={selectedId}
+        onSelect={select}
+        empty={<PrincipalsListEmpty onCreate={() => setCreateOpen(true)} />}
+        skeletonTestId="principal-list-skeleton"
+      />
 
       <section
         className={cx(
@@ -531,9 +632,9 @@ function PrincipalDetail({
           <button
             type="button"
             onClick={onBack}
-            className="md:hidden inline-flex items-center gap-1 text-caption text-text-faint hover:text-text mb-1"
+            className="-ml-1 mb-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text md:hidden"
           >
-            <ChevronLeft className="w-3 h-3" /> Back
+            <ChevronLeft className="size-4" strokeWidth={1.75} /> All principals
           </button>
           <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
             <h2 className="text-title-page text-text truncate">

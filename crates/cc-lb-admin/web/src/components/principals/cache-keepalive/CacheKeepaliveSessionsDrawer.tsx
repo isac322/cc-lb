@@ -176,7 +176,7 @@ function SessionListRow({
           'w-full min-h-[68px] text-left rounded-sm border-b px-4 py-3 transition-colors',
           'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
           isSelected
-            ? 'bg-accent-dim border-subtle shadow-[inset_3px_0_0_var(--color-accent)]'
+            ? 'bg-selected border-subtle'
             : isError
               ? 'bg-danger/5 border-subtle hover:bg-danger/10'
               : 'border-subtle hover:bg-overlay-2',
@@ -190,7 +190,14 @@ function SessionListRow({
                 aria-hidden="true"
               />
             )}
-            <span className="font-mono text-data text-text">{row.id}</span>
+            <span
+              className={cx(
+                'font-mono text-data text-text',
+                isSelected && 'font-medium',
+              )}
+            >
+              {row.id}
+            </span>
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
             {isError && <Badge tone="danger">Error</Badge>}
           </div>

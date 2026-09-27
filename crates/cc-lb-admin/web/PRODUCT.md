@@ -12,7 +12,7 @@ A team of several operators who run cc-lb together. They take turns watching the
 
 ## Product Purpose
 
-cc-lb is an Anthropic-compatible multi-principal reverse proxy. It pools upstream credentials (Claude subscriptions and API keys) and routes requests from many principals across them. The admin web is where operators see whether the pool is healthy and has headroom, change its configuration, and decide how to spend subscription quota well.
+cc-lb is an Anthropic-compatible multi-principal reverse proxy. It pools upstream credentials (Claude subscriptions and API keys) and routes requests from many principals across them. The admin web is where operators see whether the pool is healthy and how its quota is being used, change its configuration, and decide how to spend subscription quota well.
 
 Success means an operator can, within seconds, answer: is anything down or about to run out, who is consuming what, and is the pool spending quota and cache efficiently.
 
@@ -41,8 +41,9 @@ Success means an operator can, within seconds, answer: is anything down or about
 
 ## Product Principles
 
-1. Headroom first: remaining quota and imminent exhaustion are the most important facts on any screen that shows them.
+1. Usage over time first: how quota usage has moved and whether it will hit a limit before reset matter more than any single current value. Quota is always expressed as used, the same utilization Claude itself reports, so figures can be compared with Claude's own screens without conversion.
 2. Legible to the next operator: state, ownership, and recent changes must be understandable without context from whoever made them.
 3. Calm under pressure: dense but scannable; status color carries meaning, never decoration.
 4. Safe configuration: destructive or pool-affecting changes are explicit, reversible where possible, and confirmed.
 5. Same truth on every screen size: mobile shows the same facts in a different arrangement, not a reduced product.
+6. Any fleet size: a pool may have one upstream and one principal, or dozens of each. Every list works at both ends: short lists stay quiet, long lists can be searched, filtered and sorted, and the selected item's detail never gets pushed off screen by the list.

@@ -5,14 +5,14 @@ import type {
   PoolHistoryWindowResponse,
 } from '../lib/api';
 import {
-  bindingPoolWindow,
   buildPoolQuotaChartData,
-  closestToLimit,
   formatAgo,
   formatResetIn,
   hasFableHistoryData,
+  missingCapacityUpstreams,
   oldestProviderObservation,
   poolQuotaResponseLatest,
+  poolWindowResets,
 } from './-overviewPoolQuota';
 
 function historyWindow(
@@ -49,7 +49,7 @@ describe('Overview pooled Fable history', () => {
     ).toBe(false);
   });
 
-  it('plots headroom per bucket and keeps exact latest utilization for the legend', () => {
+  it('plots used per bucket and keeps exact latest utilization for the legend', () => {
     const windows = [
       historyWindow('5h', [[100, 20]], 18),
       historyWindow('7d', [[100, 40]], 35),
@@ -58,8 +58,8 @@ describe('Overview pooled Fable history', () => {
 
     expect(hasFableHistoryData(windows)).toBe(true);
     const data = buildPoolQuotaChartData(windows, true);
-    // Over-limit utilization clamps to zero headroom rather than going negative.
-    expect(data).toEqual([{ unix: 100, '5h': 80, '7d': 60, '7d_fable': 0 }]);
+    // Over-limit utilization pins to the top of the plot rather than leaving it.
+    expect(data).toEqual([{ unix: 100, '5h': 20, '7d': 40, '7d_fable': 100 }]);
     expect(poolQuotaResponseLatest(windows, data, true)).toEqual({
       '5h': 18,
       '7d': 35,
@@ -128,26 +128,39 @@ function aggregate(
   };
 }
 
-describe('bindingPoolWindow', () => {
-  it('binds on the most-used pool window, shorter window on a tie', () => {
-    expect(
-      bindingPoolWindow(
-        aggregate(
-          { '5h': [], '7d': [], '7d_fable': [] },
-          { '5h': 12, '7d': 41, '7d_fable': 41 },
-        ),
-      ),
-    ).toBe('7d');
-    expect(
-      bindingPoolWindow(
-        aggregate({ '5h': [], '7d': [] }, { '5h': 90, '7d': null }),
-      ),
-    ).toBe('5h');
+describe('poolWindowResets', () => {
+  it('reads each window reset and treats an unset reset as none', () => {
+    const base = aggregate({ '5h': [], '7d': [], '7d_fable': [] });
+    const resets = poolWindowResets({
+      ...base,
+      windows: base.windows.map((entry) => ({
+        ...entry,
+        cc_window_reset_unix_secs: entry.window === '7d' ? 5_000 : 0,
+      })),
+    });
+    expect(resets).toEqual({ '5h': null, '7d': 5_000, '7d_fable': null });
+    expect(poolWindowResets(undefined)).toEqual({
+      '5h': null,
+      '7d': null,
+      '7d_fable': null,
+    });
   });
+});
 
-  it('has no binding window without a pool reading', () => {
-    expect(bindingPoolWindow(undefined)).toBeNull();
-    expect(bindingPoolWindow(aggregate({ '5h': [], '7d': [] }))).toBeNull();
+describe('missingCapacityUpstreams', () => {
+  it('reports the most unsized upstreams any pool window has', () => {
+    const base = aggregate({ '5h': [], '7d': [], '7d_opus': [] });
+    const missing: Record<string, number> = { '5h': 1, '7d': 2, '7d_opus': 9 };
+    expect(
+      missingCapacityUpstreams({
+        ...base,
+        windows: base.windows.map((entry) => ({
+          ...entry,
+          missing_capacity_upstreams: missing[entry.window] ?? 0,
+        })),
+      }),
+    ).toBe(2);
+    expect(missingCapacityUpstreams(undefined)).toBe(0);
   });
 });
 
@@ -191,36 +204,6 @@ describe('oldestProviderObservation', () => {
       observedAtUnixSecs: 100,
       stale: true,
     });
-  });
-});
-
-describe('closestToLimit', () => {
-  it('lists each upstream once under its most-used window, highest first', () => {
-    const ranked = closestToLimit(
-      aggregate({
-        '5h': [lot('a', 0.2, 500), lot('b', 0.9, 600), lot('c', null)],
-        '7d': [lot('a', 1, 700), lot('b', 0.9, 800), lot('c', null)],
-        '7d_fable': [lot('a', 0.5)],
-      }),
-    );
-
-    expect(
-      ranked.map((entry) => [
-        entry.upstreamId,
-        entry.window,
-        entry.utilizationPercent,
-        entry.resetUnixSecs,
-      ]),
-    ).toEqual([
-      ['a', '7d', 100, 700],
-      // A tie inside one upstream keeps the earlier (shorter) window.
-      ['b', '5h', 90, 600],
-    ]);
-  });
-
-  it('ignores windows outside the pool set and returns nothing without data', () => {
-    expect(closestToLimit(undefined)).toEqual([]);
-    expect(closestToLimit(aggregate({ '7d_opus': [lot('a', 1)] }))).toEqual([]);
   });
 });
 

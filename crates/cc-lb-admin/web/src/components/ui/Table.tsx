@@ -64,7 +64,7 @@ export function TableHeadCell({
 
 /**
  * 40px row (32px with `dense`), 1px `border-row` divider, hover fill, and
- * when selected the accent-dim fill with a 2px accent rule on the left.
+ * when selected the neutral selection fill (no edge rule).
  */
 export function TableRow({
   className,
@@ -84,7 +84,7 @@ export function TableRow({
         'border-b border-row last:border-b-0 transition-colors',
         dense ? 'h-8' : 'h-10',
         interactive && 'cursor-pointer hover:bg-hover-bg',
-        selected && 'bg-accent-dim shadow-[inset_2px_0_0_var(--color-accent)]',
+        selected && 'bg-selected hover:bg-selected',
         className,
       )}
       {...rest}
