@@ -180,6 +180,30 @@ function lookup(
   return { kind, name: name ?? id, id, resolved: name != null };
 }
 
+/**
+ * Some entries record the upstream by name rather than id. The upstream map
+ * holds both `id -> name` and an identity `name -> name`, so the id is the key
+ * that maps to the name without being the name itself. With no such key the
+ * id stays null so the target renders as text instead of a broken link.
+ */
+function upstreamByRecordedValue(
+  recorded: string,
+  maps: NameMaps,
+): AuditTarget {
+  const mapped = maps.upstreams.get(recorded);
+  if (mapped != null && mapped !== recorded) {
+    return { kind: 'upstream', name: mapped, id: recorded, resolved: true };
+  }
+  let id: string | null = null;
+  for (const [key, value] of maps.upstreams) {
+    if (value === recorded && key !== recorded) {
+      id = key;
+      break;
+    }
+  }
+  return { kind: 'upstream', name: recorded, id, resolved: true };
+}
+
 /** The entity an entry acted on, named where the lists know the id. */
 export function auditTarget(
   entry: AuditEntryLike,
@@ -203,8 +227,7 @@ export function auditTarget(
   if (entry.principal_id) return lookup('principal', entry.principal_id, maps);
   // Admin entries without an upstream target store the placeholder "admin".
   if (entry.upstream && entry.upstream !== 'admin') {
-    const target = lookup('upstream', entry.upstream, maps);
-    return { ...target, resolved: true };
+    return upstreamByRecordedValue(entry.upstream, maps);
   }
   return null;
 }

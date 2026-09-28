@@ -149,8 +149,10 @@ export function QuotaWindowRow({
         </span>
       </Hint>,
     );
+  // Unified carries a reset (anthropic-ratelimit-unified-reset) but is never
+  // `timed`: once observed it counts down, without pace or a "Not started".
   if (
-    (started || isOverage) &&
+    (started || isOverage || (isUnified && !unobserved)) &&
     snap.resets_at_unix_secs != null &&
     snap.resets_at_unix_secs > nowUnixSecs
   )

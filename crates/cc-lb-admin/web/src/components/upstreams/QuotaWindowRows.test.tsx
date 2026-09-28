@@ -96,4 +96,27 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).not.toContain('Resets in');
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
+
+  it('counts down to reset on an observed unified window, without pace', () => {
+    const row = renderRow(
+      snap({ window: 'unified', resets_at_unix_secs: NOW + 7200 }),
+    );
+    expect(row.textContent).toContain('Unified');
+    expect(row.textContent).toContain('42% used');
+    expect(row.textContent).toContain('Resets in');
+    expect(row.textContent).not.toContain('Not started');
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+  });
+
+  it('shows no reset countdown on an unobserved unified window', () => {
+    const row = renderRow(
+      snap({
+        window: 'unified',
+        state: 'unobserved',
+        resets_at_unix_secs: NOW + 7200,
+      }),
+    );
+    expect(row.textContent).toContain('No reading');
+    expect(row.textContent).not.toContain('Resets in');
+  });
 });
