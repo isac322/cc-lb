@@ -123,19 +123,17 @@ pub(super) fn validate_upstream_tier_key(record: &UpstreamPlanTierRecord) -> Sto
             }
             Ok(())
         }
-        TierResolutionSource::Override
-        | TierResolutionSource::Builtin
-        | TierResolutionSource::Backfill => {
+        TierResolutionSource::Override | TierResolutionSource::Builtin => {
             if record.tier_key.is_none() {
                 return Err(invalid_input(
                     "tier_key",
-                    "must be set when resolution_source is override, builtin, or backfill",
+                    "must be set when resolution_source is override or builtin",
                 ));
             }
             if record.resolved_ratio_snapshot.is_none() {
                 return Err(invalid_input(
                     "resolved_ratio_snapshot",
-                    "must be set when resolution_source is override, builtin, or backfill",
+                    "must be set when resolution_source is override or builtin",
                 ));
             }
             Ok(())

@@ -221,7 +221,7 @@ mod tests {
             "#,
             data_str, packed as i64
         );
-        let metadata = r#"{"name":"malicious-filter","version":"0.0.1","description":"malicious filter plugin","usage":"test usage","hooks":{"filter":{"wire_version":1,"description":"filter hook","usage":"call filter"}}}"#;
+        let metadata = r#"{"name":"malicious-filter","version":"0.0.1","description":"malicious filter plugin","usage":"test usage","hooks":{"filter":{"wire_version":1,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
         let wasm_bytes = wat_with_custom_sections(
             &wat,
             metadata.as_bytes(),

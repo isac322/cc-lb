@@ -305,7 +305,7 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
 
     let mut unrolled = rolled.clone();
     unrolled.request_id = "req-totals-lag-unrolled".to_owned();
-    unrolled.event_id = None;
+    unrolled.event_id = Some("event-req-totals-lag-unrolled".to_owned());
     unrolled.ts_ms = Some(now.saturating_sub(1) * 1_000);
     unrolled.cost_usd_micros = Some(5);
     unrolled.cost_input_micros = Some(5);
@@ -370,7 +370,7 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
 
     let mut zero_tail = rolled.clone();
     zero_tail.request_id = "req-totals-zero-tail".to_owned();
-    zero_tail.event_id = None;
+    zero_tail.event_id = Some("event-req-totals-zero-tail".to_owned());
     zero_tail.ts_ms = Some(now.saturating_sub(1) * 1_000);
     zero_tail.cost_input_micros = Some(0);
     zero_tail.cost_output_micros = Some(0);
@@ -728,7 +728,7 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
 
     let mut unrolled = rolled.clone();
     unrolled.request_id = "req-principal-unrolled".to_owned();
-    unrolled.event_id = None;
+    unrolled.event_id = Some("event-req-principal-unrolled".to_owned());
     unrolled.ts_ms = Some((bucket_ts + 1) * 1_000);
     unrolled.cost_usd_micros = Some(5);
     unrolled.cost_input_micros = Some(5);
@@ -985,6 +985,7 @@ fn usage_event(
 ) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(ts * 1000),
+        event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
         principal_id: Some("principal-a".to_owned()),
         key_id: Some("test-key".to_owned()),

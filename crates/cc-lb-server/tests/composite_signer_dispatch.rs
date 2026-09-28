@@ -264,57 +264,6 @@ async fn api_key_upstream_resolves_canonical_raw_utf8_credential() {
 }
 
 #[tokio::test]
-async fn api_key_upstream_resolves_legacy_id_aad_json_quoted_credential() {
-    // Pre-PR PATCH/PUT writes: AAD = upstream.id, plaintext = serde_json::to_vec(&String),
-    // i.e. the key wrapped in literal double quotes.
-    let fixture = Fixture::new().await;
-    let upstream_id = fixture
-        .create_api_key_upstream_record("api-key-legacy-update")
-        .await;
-    let plaintext =
-        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
-    fixture
-        .store_api_key_ciphertext(upstream_id, upstream_id.as_bytes(), &plaintext)
-        .await;
-
-    let (status, body) =
-        drive_proxied_request(&fixture, "api-key-legacy-update-principal", upstream_id).await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-
-    let last = fetch_last_request(&fixture).await;
-    assert_eq!(
-        last.x_api_key.as_deref(),
-        Some("sk-ant-UPSTREAM-SECRET"),
-        "legacy JSON-quoted credential must be unquoted before signing"
-    );
-}
-
-#[tokio::test]
-async fn api_key_upstream_resolves_legacy_name_aad_json_quoted_credential() {
-    // Pre-PR POST /admin/v1/upstreams writes: AAD = upstream.name, plaintext =
-    // the same JSON-quoted form.
-    let fixture = Fixture::new().await;
-    let name = "api-key-legacy-create";
-    let upstream_id = fixture.create_api_key_upstream_record(name).await;
-    let plaintext =
-        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
-    fixture
-        .store_api_key_ciphertext(upstream_id, name.as_bytes(), &plaintext)
-        .await;
-
-    let (status, body) =
-        drive_proxied_request(&fixture, "api-key-legacy-create-principal", upstream_id).await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-
-    let last = fetch_last_request(&fixture).await;
-    assert_eq!(
-        last.x_api_key.as_deref(),
-        Some("sk-ant-UPSTREAM-SECRET"),
-        "legacy name-AAD credential must decrypt and be unquoted before signing"
-    );
-}
-
-#[tokio::test]
 async fn api_key_upstream_rejects_credential_that_is_not_a_valid_header_value() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture

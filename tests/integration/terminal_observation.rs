@@ -1451,7 +1451,15 @@ async fn terminal_connection_reused() -> Result<(), Box<dyn std::error::Error>> 
     let second = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(second.status(), StatusCode::OK);
 
-    let row = wait_for_request_event(&sqlite_path).await?;
+    // Both rows are status 200 and the writer commits asynchronously, so the
+    // latest row alone may still be the first request's. Wait for both rows
+    // and select the second request by its start time.
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(&storage, 2).await?;
+    let row = rows
+        .into_iter()
+        .max_by_key(|row| row.ts_ms)
+        .expect("two request_event rows");
     assert_eq!(row.status, 200);
     assert_eq!(row.connection_reused, Some(true));
     assert!(row.connect_ms.is_none());

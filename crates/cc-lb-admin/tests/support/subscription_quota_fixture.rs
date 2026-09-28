@@ -72,6 +72,7 @@ pub(crate) fn usage_event(
 ) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(timestamp.saturating_mul(1_000)),
+        event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
         principal_id: Some("quota-parity-principal".to_owned()),
         key_id: Some("quota-parity-key".to_owned()),

@@ -157,7 +157,6 @@ pub use pg_notify_fanout::{
     PgNotifier, PgNotifyFanout,
 };
 #[cfg(not(loom))]
-
 pub use storage_tail_poller::StorageTailPoller;
 #[cfg(not(loom))]
 pub use subscription_quota_events::{

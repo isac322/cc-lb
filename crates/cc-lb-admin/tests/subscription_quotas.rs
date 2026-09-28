@@ -650,6 +650,7 @@ fn usage_event(
 ) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(ts.saturating_mul(1_000)),
+        event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
         principal_id: Some("principal-a".to_owned()),
         key_id: Some("test-key".to_owned()),

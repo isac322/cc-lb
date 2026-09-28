@@ -57,7 +57,6 @@ cc-lb-request-log.workspace = true
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
 cc-lb-engine = { path = "../cc-lb-engine" }
-cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-lifecycle.workspace = true
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }

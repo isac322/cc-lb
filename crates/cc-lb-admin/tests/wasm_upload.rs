@@ -107,7 +107,7 @@ fn metadata(name: &str) -> String {
 
 fn metadata_with_version(name: &str, version: &str) -> String {
     format!(
-        r#"{{"name":"{name}","version":"{version}","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router"}}}}}}"#
+        r#"{{"name":"{name}","version":"{version}","description":"test plugin","usage":"test usage","hooks":{{"filter":{{"wire_version":1,"description":"filter hook","usage":"called by router","mode":"active"}}}}}}"#
     )
 }
 
@@ -165,7 +165,7 @@ fn filter_wasm_with_import() -> Vec<u8> {
     )
 }
 
-fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u8> {
+fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
         results: Box::new([]),
     })
@@ -229,14 +229,12 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
-            let mut metadata = serde_json::json!({
+            let metadata = serde_json::json!({
                 "wire_version": 1,
                 "description": format!("{} hook", hook.as_str()),
                 "usage": format!("call {}", hook.as_str()),
+                "mode": mode,
             });
-            if let Some(mode) = mode {
-                metadata["mode"] = serde_json::Value::String((*mode).to_owned());
-            }
             (hook.as_str().to_owned(), metadata)
         })
         .collect::<serde_json::Map<_, _>>();
@@ -470,10 +468,10 @@ async fn registers_all_supported_slots_for_multi_hook_upload() {
     let wasm = plugin_wasm(
         "multi-slot",
         &[
-            (HookKind::Filter, None),
-            (HookKind::Shape, Some("active")),
-            (HookKind::TransformResponse, Some("noop")),
-            (HookKind::TransformSseEvent, Some("noop")),
+            (HookKind::Filter, "active"),
+            (HookKind::Shape, "active"),
+            (HookKind::TransformResponse, "noop"),
+            (HookKind::TransformSseEvent, "noop"),
         ],
     );
     let body = multipart_body(&[("original_filename", b"multi-slot.wasm"), ("bytes", &wasm)]);
@@ -499,7 +497,7 @@ async fn registers_all_supported_slots_for_multi_hook_upload() {
 async fn rejects_incomplete_shape() {
     // Given: Shape is declared without either Shape-owned response hook.
     let server = spawn_admin_server().await;
-    let wasm = plugin_wasm("incomplete-shape", &[(HookKind::Shape, Some("active"))]);
+    let wasm = plugin_wasm("incomplete-shape", &[(HookKind::Shape, "active")]);
     let body = multipart_body(&[
         ("original_filename", b"incomplete-shape.wasm"),
         ("bytes", &wasm),

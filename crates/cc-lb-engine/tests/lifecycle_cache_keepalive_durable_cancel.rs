@@ -18,9 +18,7 @@ use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use uuid::Uuid;
 
-use common::{
-    TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle,
-};
+use common::{TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle};
 
 #[tokio::test]
 async fn cache_keepalive_user_turn_cancels_durable_without_scheduler() {

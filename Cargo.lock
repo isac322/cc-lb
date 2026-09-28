@@ -851,7 +851,6 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-domain",
  "cc-lb-lifecycle",
- "cc-lb-observability",
  "cc-lb-request-log",
  "cc-lb-routing",
  "cc-lb-storage-api",
@@ -880,17 +879,6 @@ dependencies = [
  "ulid 3.0.0",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "cc-lb-dialect-anthropic"
-version = "0.8.1"
-dependencies = [
- "bytes",
- "cc-lb-domain",
- "cc-lb-upstream",
- "http",
- "url",
 ]
 
 [[package]]
@@ -1251,7 +1239,6 @@ dependencies = [
  "cc-lb-clock",
  "cc-lb-config",
  "cc-lb-control",
- "cc-lb-dialect-anthropic",
  "cc-lb-domain",
  "cc-lb-engine",
  "cc-lb-lifecycle",
@@ -1455,7 +1442,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "tracing",
  "url",
  "uuid",
 ]

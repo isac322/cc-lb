@@ -167,10 +167,7 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
     Ok(())
 }
 
-fn lifecycle_with_pipeline(
-    filters: Vec<Arc<dyn FilterPlugin>>,
-    state: TestState,
-) -> Lifecycle {
+fn lifecycle_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>, state: TestState) -> Lifecycle {
     let principal_view = principal_view(filters);
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
     let dispatcher = Arc::new(MockDispatch {

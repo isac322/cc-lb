@@ -251,7 +251,8 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
     admin_old.admin_action = Some("principal_update".to_owned());
     let mut admin_new = audit_entry("admin-action-new", NOW + 300, AUTHORITY, SUBJECT);
     admin_new.admin_action = Some("config_apply".to_owned());
-    let plain = audit_entry("kind-only", NOW + 299, AUTHORITY, "bob");
+    let mut bob_admin = audit_entry("bob-admin", NOW + 299, AUTHORITY, "bob");
+    bob_admin.admin_action = Some("upstream_update".to_owned());
     let mut other_principal_admin =
         audit_entry("other-principal-admin", NOW + 298, AUTHORITY, SUBJECT);
     other_principal_admin.principal_id = "other-principal".to_owned();
@@ -266,7 +267,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
             SUBJECT,
         ));
     }
-    entries.push(plain);
+    entries.push(bob_admin);
     entries.push(other_principal_admin);
     entries.push(admin_new);
     storage
@@ -300,7 +301,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         request_ids(&admin_rows),
         [
             "admin-action-new",
-            "kind-only",
+            "bob-admin",
             "other-principal-admin",
             "admin-action-old"
         ]
@@ -319,7 +320,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         .expect("query recent audit admin only by principal");
     assert_eq!(
         request_ids(&principal_admin_rows),
-        ["admin-action-new", "kind-only", "admin-action-old"]
+        ["admin-action-new", "bob-admin", "admin-action-old"]
     );
 
     let actor_admin_rows = storage
@@ -351,6 +352,6 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         .expect("query recent audit admin only bounded");
     assert_eq!(
         request_ids(&bounded_admin_rows),
-        ["kind-only", "other-principal-admin"]
+        ["bob-admin", "other-principal-admin"]
     );
 }

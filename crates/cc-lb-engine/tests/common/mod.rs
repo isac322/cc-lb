@@ -342,11 +342,7 @@ impl UpstreamDispatch for MockDispatch {
 }
 
 pub fn lifecycle_with(authn: TestAuthn, dispatcher: MockDispatch) -> Lifecycle {
-    lifecycle_with_parts(
-        authn,
-        Arc::new(dispatcher),
-        LifecycleConfig::default(),
-    )
+    lifecycle_with_parts(authn, Arc::new(dispatcher), LifecycleConfig::default())
 }
 
 pub fn lifecycle_with_parts(

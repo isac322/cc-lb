@@ -41,6 +41,8 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         88,
         1235,
     ));
+    // Candidates stamp the cache-wide refresh time, not a per-record time.
+    rate_limits.updated_at_unix_secs = 1236;
     let cache = Arc::new(RwLock::new(rate_limits));
     let view = test_view(
         vec![principal("principal", Vec::new())],
@@ -246,4 +248,3 @@ impl Signer for TestSigner {
         RetryDecision::Fail
     }
 }
-

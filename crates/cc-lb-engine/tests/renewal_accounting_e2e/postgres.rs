@@ -104,6 +104,7 @@ async fn claim_after_barrier(
 fn renewal_event() -> RequestEvent {
     RequestEvent {
         ts: 1_003,
+        ts_ms: Some(1_003_000),
         request_id: "renewal:postgres-renewal-session:1".to_owned(),
         event_id: Some("renewal:postgres-renewal-session:1".to_owned()),
         source_kind: Some("renewal".to_owned()),

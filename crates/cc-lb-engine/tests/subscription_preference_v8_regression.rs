@@ -4,10 +4,7 @@ use cc_lb_domain::{
     SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
-    init_global_catalog,
-};
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use std::collections::HashMap;
@@ -497,11 +494,7 @@ fn install_test_pricing() {
         cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     };
-    let catalog = PriceCatalog::new_empty();
-    catalog.install_snapshot(snapshot.clone());
-    if init_global_catalog(catalog).is_err() {
-        global_catalog().install_snapshot(snapshot);
-    }
+    global_catalog().install_snapshot(snapshot);
 }
 
 fn recorded_isac_personal_warning_snapshot() -> UpstreamCandidate {

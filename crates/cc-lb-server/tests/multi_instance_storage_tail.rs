@@ -156,7 +156,7 @@ fn test_config(database_url: &str, label: &str) -> Config {
 fn admin_stream_request() -> TestResult<Request<Body>> {
     Ok(Request::builder()
         .method("GET")
-        .uri("/admin/events/stream")
+        .uri("/admin/v1/events/stream")
         .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::empty())?)
 }

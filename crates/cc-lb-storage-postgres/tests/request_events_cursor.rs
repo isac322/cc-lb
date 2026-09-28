@@ -135,8 +135,18 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
     storage.initialize().await?;
     let upstream_id = Uuid::from_u128(0x51);
     let uuid_principal = upstream_id.to_string();
+    let other_uuid_principal = Uuid::from_u128(0x52).to_string();
+    // Interleave a second canonical principal with the selected one, as
+    // production traffic does. With only the selected UUID and NULL rows,
+    // principal_id correlation is 1.0 and a heap-fetching scan of
+    // request_events_v1_principal_key_ts_idx outcosts the covering index
+    // whenever a concurrent snapshot keeps VACUUM from setting all-visible.
     for index in 0..128_u64 {
-        for (suffix, principal_id) in [("uuid", Some(uuid_principal.as_str())), ("null", None)] {
+        for (suffix, principal_id) in [
+            ("uuid", Some(uuid_principal.as_str())),
+            ("other-uuid", Some(other_uuid_principal.as_str())),
+            ("null", None),
+        ] {
             storage
                 .append_request_event(&RequestEvent {
                     ts: BASE_TS_SECS + index % 120,

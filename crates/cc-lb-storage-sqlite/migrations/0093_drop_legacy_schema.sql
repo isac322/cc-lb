@@ -121,6 +121,7 @@ SELECT
     (SELECT COUNT(*) FROM managed_keys_v1) AS managed_keys,
     (SELECT COUNT(*) FROM cache_keepalive_decisions) AS keepalive_decisions,
     (SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1) AS quota_checkpoints,
+    (SELECT COUNT(*) FROM upstream_plan_tier_history_v1) AS plan_tier_history,
     (SELECT COUNT(*) FROM upstream_subscription_quota_latest_v1) AS quota_latest;
 
 -- managed_keys_v1: the synthetic id and name columns duplicated
@@ -425,6 +426,74 @@ CREATE INDEX upstream_subscription_quota_latest_lookup_idx
     ON upstream_subscription_quota_latest_v1
     (upstream_id, window, observed_at_unix_millis DESC);
 
+-- Plan-tier history: the one-shot backfill source is gone. Rewrite its rows
+-- to 'builtin' and rebuild the table with the tightened resolution_source
+-- CHECK.
+DROP TABLE IF EXISTS upstream_plan_tier_history_v1_new;
+
+CREATE TABLE upstream_plan_tier_history_v1_new (
+    upstream_id TEXT NOT NULL,
+    organization_uuid TEXT,
+    organization_type TEXT,
+    rate_limit_tier TEXT,
+    seat_tier TEXT,
+    tier_key TEXT CHECK (tier_key IS NULL OR tier_key IN ('pro','team_standard','max_5x','team_premium','max_20x')),
+    resolution_source TEXT NOT NULL CHECK (resolution_source IN ('override','builtin','unknown')),
+    resolved_ratio_snapshot REAL CHECK (resolved_ratio_snapshot IS NULL OR (resolved_ratio_snapshot > 0.0 AND resolved_ratio_snapshot < 1.0e308)),
+    observed_at_unix_millis INTEGER NOT NULL CHECK (observed_at_unix_millis >= 0),
+    effective_from_unix_millis INTEGER NOT NULL CHECK (effective_from_unix_millis >= 0),
+    effective_to_unix_millis INTEGER CHECK (effective_to_unix_millis IS NULL OR effective_to_unix_millis > effective_from_unix_millis),
+    provenance TEXT NOT NULL CHECK (length(trim(provenance)) > 0),
+    created_at_unix_millis INTEGER NOT NULL CHECK (created_at_unix_millis >= 0),
+    PRIMARY KEY (upstream_id, effective_from_unix_millis),
+    CHECK ((tier_key IS NULL) = (resolution_source = 'unknown')),
+    CHECK (resolution_source <> 'unknown' OR resolved_ratio_snapshot IS NULL)
+);
+
+INSERT INTO upstream_plan_tier_history_v1_new (
+    upstream_id,
+    organization_uuid,
+    organization_type,
+    rate_limit_tier,
+    seat_tier,
+    tier_key,
+    resolution_source,
+    resolved_ratio_snapshot,
+    observed_at_unix_millis,
+    effective_from_unix_millis,
+    effective_to_unix_millis,
+    provenance,
+    created_at_unix_millis
+)
+SELECT
+    upstream_id,
+    organization_uuid,
+    organization_type,
+    rate_limit_tier,
+    seat_tier,
+    tier_key,
+    CASE WHEN resolution_source = 'backfill' THEN 'builtin' ELSE resolution_source END,
+    resolved_ratio_snapshot,
+    observed_at_unix_millis,
+    effective_from_unix_millis,
+    effective_to_unix_millis,
+    provenance,
+    created_at_unix_millis
+FROM upstream_plan_tier_history_v1;
+
+DROP TABLE upstream_plan_tier_history_v1;
+ALTER TABLE upstream_plan_tier_history_v1_new RENAME TO upstream_plan_tier_history_v1;
+
+CREATE UNIQUE INDEX upstream_plan_tier_history_v1_one_open_idx
+    ON upstream_plan_tier_history_v1 (upstream_id)
+    WHERE effective_to_unix_millis IS NULL;
+
+CREATE INDEX upstream_plan_tier_history_v1_asof_idx
+    ON upstream_plan_tier_history_v1 (upstream_id, effective_from_unix_millis DESC, effective_to_unix_millis);
+
+CREATE INDEX upstream_plan_tier_history_v1_tier_time_idx
+    ON upstream_plan_tier_history_v1 (tier_key, effective_from_unix_millis DESC);
+
 CREATE TEMP TABLE legacy_schema_rebuild_guard (
     ok INTEGER NOT NULL CHECK (ok = 1)
 );
@@ -434,6 +503,7 @@ SELECT CASE
     WHEN (SELECT COUNT(*) FROM managed_keys_v1) = b.managed_keys
      AND (SELECT COUNT(*) FROM cache_keepalive_decisions) = b.keepalive_decisions
      AND (SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1) = b.quota_checkpoints
+     AND (SELECT COUNT(*) FROM upstream_plan_tier_history_v1) = b.plan_tier_history
      AND (SELECT COUNT(*) FROM upstream_subscription_quota_latest_v1) = b.quota_latest
     THEN 1
     ELSE 0

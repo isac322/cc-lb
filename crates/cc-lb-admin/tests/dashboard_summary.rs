@@ -201,6 +201,7 @@ fn test_clock(now_unix_secs: u64) -> ClockHandle {
 fn usage_event(ts: u64) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(ts * 1_000),
+        event_id: Some("event-current-partial-bucket".to_owned()),
         request_id: "current-partial-bucket".to_owned(),
         principal_id: Some("principal-a".to_owned()),
         key_id: Some("test-key".to_owned()),

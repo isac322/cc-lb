@@ -8,7 +8,6 @@ mod loader_cache;
 mod tier_resolver;
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
@@ -244,27 +243,10 @@ impl PriceCatalog {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CatalogAlreadyInitialized;
-
-impl fmt::Display for CatalogAlreadyInitialized {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("price catalog is already initialized")
-    }
-}
-
-impl std::error::Error for CatalogAlreadyInitialized {}
-
 static GLOBAL_CATALOG: OnceLock<Arc<PriceCatalog>> = OnceLock::new();
 
 pub fn global_catalog() -> &'static Arc<PriceCatalog> {
     GLOBAL_CATALOG.get_or_init(PriceCatalog::new_empty)
-}
-
-pub fn init_global_catalog(catalog: Arc<PriceCatalog>) -> Result<(), CatalogAlreadyInitialized> {
-    GLOBAL_CATALOG
-        .set(catalog)
-        .map_err(|_catalog| CatalogAlreadyInitialized)
 }
 
 pub fn normalize_model_id(model: &str) -> String {

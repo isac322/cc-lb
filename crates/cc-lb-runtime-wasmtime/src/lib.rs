@@ -24,7 +24,6 @@ mod slot;
 mod tests;
 mod wire_dispatch;
 
-
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{LoadedPluginSlot, PluginCell};

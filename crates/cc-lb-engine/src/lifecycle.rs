@@ -9541,7 +9541,10 @@ mod tests {
     }
 
     fn default_artifacts() -> cc_lb_control::api_keys::principal_view::PrincipalRoutingArtifacts {
-        (None, cc_lb_control::api_keys::principal_view::DialectCache::Inherit)
+        (
+            None,
+            cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+        )
     }
 
     fn provenance_view(

@@ -201,7 +201,7 @@ async fn post_happy(server: &common::TestServer) -> common::RawResponse {
 async fn open_admin_sse(addr: SocketAddr) -> BufReader<TcpStream> {
     let mut stream = TcpStream::connect(addr).await.expect("connect admin sse");
     let request = format!(
-        "GET /admin/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())

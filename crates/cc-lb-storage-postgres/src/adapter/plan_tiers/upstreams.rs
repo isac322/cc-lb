@@ -187,9 +187,7 @@ fn validate_tier_key(record: &UpstreamPlanTierRecord) -> StorageResult<()> {
             }
             Ok(())
         }
-        TierResolutionSource::Override
-        | TierResolutionSource::Builtin
-        | TierResolutionSource::Backfill => {
+        TierResolutionSource::Override | TierResolutionSource::Builtin => {
             if record.tier_key.is_none() {
                 return Err(invalid_tier_key(
                     "must be present when resolution_source is override or builtin",

@@ -76,10 +76,10 @@ async fn partial_state() {
     .await
     .unwrap();
     let registries = [
-        seed_registry(&fixture.storage, 1, "plugin-a").await,
-        seed_registry(&fixture.storage, 2, "plugin-b").await,
-        seed_registry(&fixture.storage, 3, "plugin-c").await,
-        seed_registry(&fixture.storage, 4, "plugin-d").await,
+        seed_registry(&fixture.storage, 1, "plugin-a", PluginSlotKind::Router).await,
+        seed_registry(&fixture.storage, 2, "plugin-b", PluginSlotKind::Shape).await,
+        seed_registry(&fixture.storage, 3, "plugin-c", PluginSlotKind::Router).await,
+        seed_registry(&fixture.storage, 4, "plugin-d", PluginSlotKind::Shape).await,
     ];
     seed_chain(
         &fixture.storage,
@@ -250,7 +250,12 @@ async fn seed_principal(
     .unwrap()
 }
 
-async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmRegistryEntry {
+async fn seed_registry(
+    storage: &SqliteStorage,
+    seed: u8,
+    name: &str,
+    supported_slot: PluginSlotKind,
+) -> WasmRegistryEntry {
     let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
@@ -268,7 +273,7 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
                 description: format!("{name} description"),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),
-                supported_slots: vec![PluginSlotKind::Router, PluginSlotKind::ObservabilityHook],
+                supported_slots: vec![supported_slot],
             },
         )
         .await

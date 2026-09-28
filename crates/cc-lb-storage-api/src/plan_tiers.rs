@@ -66,9 +66,6 @@ pub enum TierResolutionSource {
     Override,
     /// Matched the built-in `classify_plan_tier` logic.
     Builtin,
-    /// Written by the retired one-shot contributor-ratio backfill; kept so
-    /// existing history rows still decode.
-    Backfill,
     /// Not recognized by either; surfaced for human attention.
     Unknown,
 }
@@ -78,7 +75,6 @@ impl TierResolutionSource {
         match self {
             TierResolutionSource::Override => "override",
             TierResolutionSource::Builtin => "builtin",
-            TierResolutionSource::Backfill => "backfill",
             TierResolutionSource::Unknown => "unknown",
         }
     }
