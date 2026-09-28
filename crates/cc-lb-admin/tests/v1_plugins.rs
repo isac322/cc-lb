@@ -327,27 +327,22 @@ async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
 async fn chain_insert_position_last_uses_next_after() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-last").await;
-    let entry = seed_registry_with_slots(
-        &storage,
-        8,
-        "plugin-last",
-        vec![PluginSlotKind::ObservabilityHook],
-    )
-    .await;
+    let entry =
+        seed_registry_with_slots(&storage, 8, "plugin-last", vec![PluginSlotKind::Router]).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, first, _) = authed_json(
         app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id })),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
     )
     .await;
     let (_, _, second, _) = authed_json(
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -360,22 +355,8 @@ async fn chain_insert_position_before_uses_sparse_between() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-before").await;
     let entry = seed_registry(&storage, 9, "plugin-before").await;
-    let first = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1000,
-    )
-    .await;
-    let second = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        2000,
-    )
-    .await;
+    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -383,7 +364,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "ObservabilityHook",
+            "slot": "Router",
             "wasm_registry_id": entry.id,
             "position": { "before": second.id }
         })),
@@ -429,14 +410,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-first").await;
     let entry = seed_registry(&storage, 10, "plugin-first").await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        2000,
-    )
-    .await;
+    seed_chain(&storage, principal_id, entry.id, 2000).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -444,14 +418,14 @@ async fn chain_insert_position_first_uses_min_minus_step() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "ObservabilityHook",
+            "slot": "Router",
             "wasm_registry_id": entry.id,
             "position": "first"
         })),
     )
     .await;
 
-    assert_eq!(inserted["order"], 1000);
+    assert_eq!(inserted["order"], -sparse_order::STEP);
 }
 
 #[tokio::test]
@@ -506,14 +480,6 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         1000,
     )
     .await;
-    let observe = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1000,
-    )
-    .await;
     let shape = seed_chain_with_slot(
         &storage,
         principal_id,
@@ -524,11 +490,7 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
     .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
-    for (slot, expected_id) in [
-        ("filter", router.id),
-        ("observe", observe.id),
-        ("shape", shape.id),
-    ] {
+    for (slot, expected_id) in [("filter", router.id), ("shape", shape.id)] {
         let (status, _, body, _) = authed_json(
             app.clone(),
             "GET",
@@ -763,7 +725,7 @@ async fn chain_update_stale_if_match_returns_412_with_current_revision() {
         app,
         "PUT",
         &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
-        Some(json!({ "sse_per_event": true })),
+        Some(json!({ "config": { "enabled": true } })),
         Some("W/\"99\""),
     )
     .await;
@@ -849,22 +811,8 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder").await;
     let entry = seed_registry(&storage, 12, "plugin-reorder").await;
-    let first = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1000,
-    )
-    .await;
-    let second = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        2000,
-    )
-    .await;
+    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -887,30 +835,9 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
     let entry = seed_registry(&storage, 21, "plugin-reorder-invalid-order").await;
-    let first = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        100,
-    )
-    .await;
-    let second = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        200,
-    )
-    .await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        300,
-    )
-    .await;
+    let first = seed_chain(&storage, principal_id, entry.id, 100).await;
+    let second = seed_chain(&storage, principal_id, entry.id, 200).await;
+    seed_chain(&storage, principal_id, entry.id, 300).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -933,30 +860,14 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-rebalance").await;
     let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1000,
-    )
-    .await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1001,
-    )
-    .await;
+    seed_chain(&storage, principal_id, entry.id, 1000).await;
+    seed_chain(&storage, principal_id, entry.id, 1001).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
         app,
         "POST",
-        &format!(
-            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
-        ),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
         None,
     )
     .await;
@@ -971,30 +882,14 @@ async fn chain_rebalance_emits_chain_audit() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
     let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1000,
-    )
-    .await;
-    seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::ObservabilityHook,
-        entry.id,
-        1001,
-    )
-    .await;
+    seed_chain(&storage, principal_id, entry.id, 1000).await;
+    seed_chain(&storage, principal_id, entry.id, 1001).await;
     let app = app(test_state(Config::default(), Some(storage.clone())));
 
     let (status, _, _, _) = authed_json(
         app,
         "POST",
-        &format!(
-            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
-        ),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
         None,
     )
     .await;
@@ -1010,9 +905,10 @@ async fn chain_rebalance_emits_chain_audit() {
             .any(|entry| {
                 entry.route == expected_route
                     && entry.admin_action.as_deref().is_some_and(|action| {
-                        action == format!(
-                            "plugin_chain_update(principal={principal_id}, slots=observability_hook)"
-                        )
+                        action
+                            == format!(
+                                "plugin_chain_update(principal={principal_id}, slots=router)"
+                            )
                     })
             })
     );
@@ -1127,11 +1023,7 @@ async fn seed_registry(
         storage,
         seed,
         name,
-        vec![
-            PluginSlotKind::Router,
-            PluginSlotKind::Shape,
-            PluginSlotKind::ObservabilityHook,
-        ],
+        vec![PluginSlotKind::Router, PluginSlotKind::Shape],
     )
     .await
 }
@@ -1198,9 +1090,6 @@ async fn seed_chain_with_slot(
             order,
             wasm_registry_id,
             config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 1,
-            batched_flush_ms: 100,
         })
         .await
         .unwrap()

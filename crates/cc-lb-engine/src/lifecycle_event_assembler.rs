@@ -180,7 +180,6 @@ struct Partial {
     finalize_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
     limit_reconcile_ms: Option<u64>,
-    observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     internal_errors: Vec<InternalError>,
 
@@ -917,7 +916,6 @@ async fn handle_event(
         request_body_bytes,
         finalize_ms,
         limit_reconcile_ms,
-        observability_post_ms,
         proxy_setup_ms,
         setup_timings,
         upstream_body_ms,
@@ -944,7 +942,6 @@ async fn handle_event(
             partial.request_body_bytes = *request_body_bytes;
             partial.finalize_ms = *finalize_ms;
             partial.limit_reconcile_ms = *limit_reconcile_ms;
-            partial.observability_post_ms = *observability_post_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
             apply_setup_timings(&mut partial, setup_timings);
             partial.upstream_body_ms = *upstream_body_ms;
@@ -980,7 +977,6 @@ async fn handle_event(
         partial.request_body_bytes = partial.request_body_bytes.or(*request_body_bytes);
         partial.finalize_ms = partial.finalize_ms.or(*finalize_ms);
         partial.limit_reconcile_ms = partial.limit_reconcile_ms.or(*limit_reconcile_ms);
-        partial.observability_post_ms = partial.observability_post_ms.or(*observability_post_ms);
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
@@ -1499,7 +1495,6 @@ fn finalize_base(
         connect_ms: partial.connect_ms,
         connection_reused: partial.connection_reused,
         limit_reconcile_ms: partial.limit_reconcile_ms,
-        observability_post_ms: partial.observability_post_ms,
         proxy_setup_ms: partial.proxy_setup_ms,
         shape_ms: partial.shape_ms,
         sign_ms: partial.sign_ms,
@@ -1908,7 +1903,6 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -1953,7 +1947,6 @@ mod tests {
                 request_body_bytes: Some(917_567),
                 finalize_ms: Some(4),
                 limit_reconcile_ms: Some(5),
-                observability_post_ms: Some(6),
                 proxy_setup_ms: Some(0),
                 setup_timings: cc_lb_lifecycle::RequestSetupTimings {
                     json_parse_ms: Some(0.0),
@@ -2003,7 +1996,6 @@ mod tests {
                 request_body_bytes: None,
                 finalize_ms: None,
                 limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -2034,7 +2026,6 @@ mod tests {
         assert_eq!(row.request_body_bytes, Some(917_567));
         assert_eq!(row.finalize_ms, Some(4));
         assert_eq!(row.limit_reconcile_ms, Some(5));
-        assert_eq!(row.observability_post_ms, Some(6));
         assert_eq!(row.proxy_setup_ms, Some(0));
         assert_eq!(row.json_parse_ms, Some(0.0));
         assert_eq!(row.cache_structure_ms, Some(1.0));
@@ -2099,7 +2090,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2154,7 +2144,6 @@ mod tests {
                 request_body_bytes: None,
                 finalize_ms: None,
                 limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: Some(4),
                 setup_timings: cc_lb_lifecycle::RequestSetupTimings {
                     json_parse_ms: Some(0.125),
@@ -2222,7 +2211,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2272,7 +2260,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2322,7 +2309,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2362,7 +2348,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2405,7 +2390,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2452,7 +2436,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2503,7 +2486,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2565,7 +2547,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2620,7 +2601,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2684,7 +2664,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2722,7 +2701,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2775,7 +2753,6 @@ mod tests {
                 message: Some("connection refused".to_owned()),
             }],
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2853,7 +2830,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2898,7 +2874,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: Some(1),
-            observability_post_ms: Some(2),
             proxy_setup_ms: Some(3),
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3198,7 +3173,6 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -3271,7 +3245,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3477,7 +3450,6 @@ mod tests {
                 connection_reused: None,
                 internal_errors: Vec::new(),
                 limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -3585,7 +3557,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3821,7 +3792,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: RequestIoTimings {
@@ -4015,7 +3985,6 @@ mod tests {
             request_body_bytes: None,
             finalize_ms: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -4143,7 +4112,6 @@ mod tests {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

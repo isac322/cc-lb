@@ -225,7 +225,7 @@ pub use pg_notify_fanout::{
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
-pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
+pub use sse_relay::{RelayError, SseRelay, StreamingUsage};
 #[cfg(not(loom))]
 pub use storage_tail_poller::StorageTailPoller;
 #[cfg(not(loom))]

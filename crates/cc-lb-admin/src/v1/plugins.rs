@@ -87,9 +87,6 @@ struct InsertChainBody {
     slot: SlotParam,
     wasm_registry_id: Uuid,
     config: Option<Value>,
-    sse_per_event: Option<bool>,
-    batched_events_per_flush: Option<u32>,
-    batched_flush_ms: Option<u64>,
     position: Option<Position>,
 }
 
@@ -483,9 +480,6 @@ async fn insert_chain(
         order,
         wasm_registry_id: body.wasm_registry_id,
         config: body.config.unwrap_or_else(|| json!({})),
-        sse_per_event: body.sse_per_event.unwrap_or(false),
-        batched_events_per_flush: body.batched_events_per_flush.unwrap_or(1),
-        batched_flush_ms: body.batched_flush_ms.unwrap_or(100),
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {
@@ -872,11 +866,7 @@ async fn find_chain_entry(
         }
         offset += principals.len();
         for principal in principals {
-            for slot in [
-                PluginSlotKind::Router,
-                PluginSlotKind::ObservabilityHook,
-                PluginSlotKind::Shape,
-            ] {
+            for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
                 let entries = storage.list_chain_for_principal(principal.id, slot).await?;
                 if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
                     return Ok(Some(entry));
@@ -888,9 +878,6 @@ async fn find_chain_entry(
 
 fn plugin_chain_update_empty(update: &PluginChainEntryUpdate) -> bool {
     update.config.is_none()
-        && update.sse_per_event.is_none()
-        && update.batched_events_per_flush.is_none()
-        && update.batched_flush_ms.is_none()
 }
 
 fn registry_entry_unsupported_slot(
@@ -907,11 +894,7 @@ async fn infer_reorder_chain(
     principal_id: Uuid,
     entries: &[ReorderEntry],
 ) -> Result<(PluginSlotKind, Vec<PluginChainEntry>), Box<axum::response::Response>> {
-    for slot in [
-        PluginSlotKind::Router,
-        PluginSlotKind::ObservabilityHook,
-        PluginSlotKind::Shape,
-    ] {
+    for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
         let chain = storage
             .list_chain_for_principal(principal_id, slot)
             .await
@@ -1101,9 +1084,6 @@ fn supported_slot_strings(slots: &[PluginSlotKind]) -> Vec<String> {
 fn parse_slot(value: &str) -> Option<SlotParam> {
     match value {
         "Router" | "router" | "filter" => Some(SlotParam::Stored(PluginSlotKind::Router)),
-        "ObservabilityHook" | "observability_hook" | "observe" => {
-            Some(SlotParam::Stored(PluginSlotKind::ObservabilityHook))
-        }
         "Shape" | "shape" => Some(SlotParam::Stored(PluginSlotKind::Shape)),
         "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
         _ => None,

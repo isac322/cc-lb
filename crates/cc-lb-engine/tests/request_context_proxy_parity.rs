@@ -5,9 +5,7 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
+use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_upstream::SignedRequest;
@@ -93,11 +91,7 @@ fn lifecycle(state: ParityState) -> Lifecycle {
     let mut chains = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     let principal_view = Arc::new(PrincipalView::for_tests(
         "principal-test",
@@ -116,7 +110,6 @@ fn lifecycle(state: ParityState) -> Lifecycle {
                 .expect("fixture URL parses"),
         }),
         Arc::new(CapturingDispatch { state }),
-        Vec::new(),
         LifecycleConfig::default(),
     )
 }

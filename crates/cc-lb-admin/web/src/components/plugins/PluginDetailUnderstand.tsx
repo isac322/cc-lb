@@ -12,8 +12,6 @@ import { SLOTS } from './slots/model';
 
 const SLOT_DESCRIPTIONS: Record<string, string> = {
   router: 'Filters or reorders upstreams before a request is sent.',
-  observability_hook:
-    'Receives events for logging, metrics, or other side effects.',
   shape:
     'Modifies requests before they are sent and responses before they are returned.',
 };
@@ -26,7 +24,6 @@ function getSlotForHook(hookName: string): string {
     hookName === 'transform_sse_event'
   )
     return 'Shape';
-  if (hookName === 'observe') return 'Observability';
   return 'Unknown';
 }
 

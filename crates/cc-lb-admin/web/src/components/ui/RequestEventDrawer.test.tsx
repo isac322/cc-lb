@@ -161,7 +161,6 @@ describe('RequestEventDrawer', () => {
           route_ms: 5,
           upstream_ttfb_ms: 90,
           upstream_body_ms: 40,
-          observability_post_ms: 7,
           body_bytes: 2048,
         }),
       );

@@ -63,7 +63,6 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
         request_body_read_ms: None,
         request_body_bytes: None,
         limit_reconcile_ms: None,
-        observability_post_ms: None,
         proxy_setup_ms: Some(1),
         setup_timings: RequestSetupTimings {
             json_parse_ms: Some(0.125),
@@ -245,7 +244,6 @@ fn kind_labels_cover_every_variant() {
             request_body_read_ms: None,
             request_body_bytes: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

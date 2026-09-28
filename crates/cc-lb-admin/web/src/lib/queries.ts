@@ -170,7 +170,7 @@ interface PluginListResp {
   entries: PluginEntry[];
 }
 
-export type ChainSlot = 'router' | 'observability_hook' | 'shape';
+export type ChainSlot = 'router' | 'shape';
 export interface PluginChainEntry {
   id: string;
   principal_id: string;
@@ -178,9 +178,6 @@ export interface PluginChainEntry {
   order: number;
   wasm_registry_id: string;
   config: unknown;
-  sse_per_event: boolean;
-  batched_events_per_flush: number;
-  batched_flush_ms: number;
   revision: number;
 }
 interface PluginChainResp {
@@ -1493,9 +1490,6 @@ export function useInsertChainEntry() {
         wasm_registry_id: string;
         order?: number;
         config?: unknown;
-        sse_per_event?: boolean;
-        batched_events_per_flush?: number;
-        batched_flush_ms?: number;
       };
     }) =>
       postJson<PluginChainEntry, typeof body>(

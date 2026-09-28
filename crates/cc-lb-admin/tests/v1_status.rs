@@ -136,9 +136,6 @@ async fn export_round_trips_through_stable_key_ordering() {
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({ "zeta": 1, "alpha": { "zeta": true, "alpha": false } }),
-            sse_per_event: true,
-            batched_events_per_flush: 3,
-            batched_flush_ms: 250,
         })
         .await
         .unwrap();

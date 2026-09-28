@@ -1,12 +1,10 @@
 use crate::sse_relay_support;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cc_lb_engine::SseBatchConfig;
 use http_body_util::BodyExt;
-use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
+use sse_relay_support::{body_from_chunks, collect_response_body, relay_for};
 
 const MESSAGE_START_WITH_CACHE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}\n\n";
 const CONTENT_DELTA: &str = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
@@ -16,10 +14,7 @@ const MESSAGE_STOP: &str = "event: message_stop\ndata: {\"type\":\"message_stop\
 
 #[tokio::test]
 async fn full_stream_captures_anthropic_usage() {
-    let relay = relay_for(
-        Arc::new(RecordingHook::default()),
-        SseBatchConfig::default(),
-    );
+    let relay = relay_for();
     let handle = relay.clone();
     let stream =
         format!("{MESSAGE_START_WITH_CACHE}{CONTENT_DELTA}{MESSAGE_DELTA_OUTPUT}{MESSAGE_STOP}");
@@ -48,10 +43,7 @@ async fn full_stream_captures_anthropic_usage() {
 
 #[tokio::test]
 async fn mid_cancel_preserves_last_anthropic_usage() {
-    let relay = relay_for(
-        Arc::new(RecordingHook::default()),
-        SseBatchConfig::default(),
-    );
+    let relay = relay_for();
     let handle = relay.clone();
     let response = relay.into_response_from_body(body_from_chunks(
         vec![
@@ -87,10 +79,7 @@ async fn mid_cancel_preserves_last_anthropic_usage() {
 
 #[tokio::test]
 async fn no_message_delta_keeps_zero_output_tokens() {
-    let relay = relay_for(
-        Arc::new(RecordingHook::default()),
-        SseBatchConfig::default(),
-    );
+    let relay = relay_for();
     let handle = relay.clone();
     let stream = format!("{MESSAGE_START_WITH_CACHE}{CONTENT_DELTA}{MESSAGE_STOP}");
 
@@ -118,10 +107,7 @@ async fn no_message_delta_keeps_zero_output_tokens() {
 
 #[tokio::test]
 async fn message_delta_can_supply_cache_creation_tokens() {
-    let relay = relay_for(
-        Arc::new(RecordingHook::default()),
-        SseBatchConfig::default(),
-    );
+    let relay = relay_for();
     let handle = relay.clone();
     let message_start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}\n\n";
     let message_delta = "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":50,\"cache_creation_input_tokens\":7}}\n\n";

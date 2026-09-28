@@ -31,7 +31,7 @@ Success means an operator can, within seconds, answer: is anything down or about
 
 - Served as an embedded SPA by the Rust admin listener; the SPA asset routes are the only unauthenticated admin routes.
 - Stack: React 19, TanStack Router and Query, Tailwind CSS 4, Base UI, Recharts, Hanken Grotesk / Geist Mono.
-- Terminology to keep: upstream, principal, proxy key, pool, 5h window, 7d window, plugin chain, filter / shape / observe slots, warm-up, keepalive.
+- Terminology to keep: upstream, principal, proxy key, pool, 5h window, 7d window, plugin chain, filter / shape slots, warm-up, keepalive.
 
 ## Evidence on Hand
 

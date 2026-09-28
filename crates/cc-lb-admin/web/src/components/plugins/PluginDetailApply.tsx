@@ -21,11 +21,6 @@ export function PluginDetailApply({ plugin }: { plugin: PluginEntry }) {
             Apply to router (Principals)
           </a>
         )}
-        {plugin.supported_slots?.includes('observability_hook') && (
-          <a href="/principals" className={SECONDARY_LINK_CLASS}>
-            Apply to observability (Principals)
-          </a>
-        )}
         {plugin.supported_slots?.includes('shape') && (
           <>
             <a href="/principals" className={SECONDARY_LINK_CLASS}>

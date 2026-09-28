@@ -16,8 +16,8 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 use common::{
-    RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
-    lifecycle_with_parts, messages_request,
+    TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body, lifecycle_with_parts,
+    messages_request,
 };
 
 #[tokio::test]
@@ -43,7 +43,6 @@ async fn unauthorized_refresh_observes_only_final_attempt() {
                 },
             ]))),
         }),
-        vec![Arc::new(RecordingHook::default())],
         cc_lb_engine::LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc());

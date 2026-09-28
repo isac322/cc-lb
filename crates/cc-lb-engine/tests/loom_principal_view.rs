@@ -7,9 +7,8 @@ mod principal_view_swap {
     use arc_swap::ArcSwap;
     use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
     use cc_lb_engine::api_keys::principal_view::{
-        DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
+        DialectCache, PrincipalView, RouterPipelineCache,
     };
-    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_routing::RoutingContext;
     use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
     use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
@@ -35,27 +34,14 @@ mod principal_view_swap {
 
                     let global_pipeline =
                         StdArc::new(RouterPipelineCache::empty(TerminalStrategy::FirstPick));
-                    let global_hooks: Vec<StdArc<dyn ObservabilityHook>> =
-                        vec![StdArc::new(StubHook::new(0))];
 
                     let cached = view
                         .get(PRINCIPAL_ID)
                         .expect("principal exists in loaded view snapshot");
                     let pipeline = cached.resolved_pipeline(Some(&global_pipeline));
-                    let hooks = cached.resolved_hooks(&global_hooks);
 
                     assert!(StdArc::strong_count(&pipeline) > 0);
                     assert_eq!(pipeline.user_filters.len(), 1);
-                    assert_eq!(hooks.len(), 1);
-                    assert!(StdArc::strong_count(&hooks[0]) > 0);
-
-                    for hook in hooks {
-                        hook.observe(ObserveEvent::AuthnComplete {
-                            principal_id: PRINCIPAL_ID.to_owned(),
-                            kind: cc_lb_domain::PrincipalKind::ApiKey,
-                        })
-                        .expect("stub hook accepts authn event");
-                    }
                 })
                 .expect("reader thread spawns");
 
@@ -100,7 +86,6 @@ mod principal_view_swap {
                     terminal: TerminalStrategy::FirstPick,
                     instantiation_error: None,
                 })),
-                ObservabilityHooksCache::Explicit(vec![StdArc::new(StubHook::new(generation))]),
                 DialectCache::Inherit,
             ),
         );
@@ -137,24 +122,6 @@ mod principal_view_swap {
 
         fn plugin_name(&self) -> &str {
             "stub-filter"
-        }
-    }
-
-    struct StubHook {
-        generation: u8,
-    }
-
-    impl StubHook {
-        fn new(generation: u8) -> Self {
-            Self { generation }
-        }
-    }
-
-    impl ObservabilityHook for StubHook {
-        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            assert!(matches!(event, ObserveEvent::AuthnComplete { .. }));
-            let _ = self.generation;
-            Ok(())
         }
     }
 }

@@ -51,7 +51,7 @@ impl PrincipalStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         sqlx::query(
-            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, FALSE, 1, 100, 0)",
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, 0)",
         )
         .bind(Uuid::new_v4())
         .bind(id)

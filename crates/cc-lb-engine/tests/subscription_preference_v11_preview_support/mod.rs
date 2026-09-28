@@ -8,9 +8,7 @@ use cc_lb_domain::{
     Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
     UpstreamCandidate,
 };
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
+use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteInput, PreviewRouteOutcome};
 use cc_lb_engine::{
@@ -26,7 +24,7 @@ use parking_lot::Mutex as ParkingMutex;
 use url::Url;
 use uuid::Uuid;
 
-use super::common::{RecordingHook, TestAuthn, TestState, collect_body, messages_request};
+use super::common::{TestAuthn, TestState, collect_body, messages_request};
 
 const PRINCIPAL: &str = "principal-test";
 const NOW: u64 = 1_700_000_000;
@@ -165,7 +163,6 @@ fn lifecycle(
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(NoopRouter))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(principal_view)
         .subscription_quota_cache(cache)
         .subscription_quota_routing_max_staleness_secs(60)
@@ -193,11 +190,7 @@ fn principal_view() -> Arc<PrincipalView> {
         Vec::new(),
         HashMap::from([(
             PRINCIPAL.to_owned(),
-            (
-                Some(pipeline),
-                ObservabilityHooksCache::Inherit,
-                DialectCache::Inherit,
-            ),
+            (Some(pipeline), DialectCache::Inherit),
         )]),
     ))
 }

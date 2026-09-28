@@ -15,8 +15,7 @@ use cc_lb_domain::{
     Upstream,
 };
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache, ShapePluginCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::{
     DynamicViewBuilder, DynamicViewHolder, InternalFailure, Lifecycle, LifecycleConfig,
@@ -45,7 +44,7 @@ use client_disconnect_support::{
     refusal_sse_body, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
     upstream_frame_error, upstream_frame_error_after,
 };
-use common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
+use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
 use url::Url;
@@ -1076,7 +1075,6 @@ fn prompt_cache_lifecycle_with(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: uuid::Uuid::from_u128(1),
@@ -1374,7 +1372,6 @@ fn prompt_cache_transform_lifecycle(
             Some(Arc::new(RouterPipelineCache::empty(
                 TerminalStrategy::FirstPick,
             ))),
-            ObservabilityHooksCache::Inherit,
             DialectCache::Explicit(ShapePluginCache { dialect }),
         ),
     );
@@ -1404,7 +1401,6 @@ fn prompt_cache_transform_lifecycle(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: upstream_id,

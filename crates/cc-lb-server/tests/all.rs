@@ -6,8 +6,6 @@ mod admin_separate_listener;
 mod api_wildcard_forwarding;
 #[path = "backend_kind_mismatch_fatal.rs"]
 mod backend_kind_mismatch_fatal;
-#[path = "backward_compat_observe.rs"]
-mod backward_compat_observe;
 #[path = "bad_postgres_url_fatal.rs"]
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]

@@ -19,7 +19,6 @@
 
 - [ ] Prove the existing tokenizer call count is 4 on the 4-nested-breakpoint fixture.
 - [ ] Prove the current metrics registry has no prompt-cache analysis metrics.
-- [ ] Pin with an existing component test that `observability_post_ms` is included in the timeline stage even though it is a separate post-response value.
 - [ ] Prove with a work counter that cumulative serialized/tokenized bytes grow well beyond the deepest prefix on the 4.4MB production-like fixture.
 
 ### B. Exact serialization and key
@@ -103,13 +102,9 @@ Permanent component/integration tests:
 
 Permanent Vitest/component tests:
 
-- [ ] `observability_post_ms` is excluded from the `internalPost` total
 - [ ] The timeline total denominator keeps the existing `duration_ms`
-- [ ] The `Observability post` stage/button/detail is not rendered
-- [ ] Even when the `observability_post_ms` API field is present, other stages' width/percentage are correct
 - [ ] `limit_reconcile_ms` keeps its existing meaning
 - [ ] Existing behavior of partial/live rows is preserved
-- [ ] The LatencyCell popover has no Observability item
 
 ## 3. Real proxy-path QA matrix
 
@@ -142,7 +137,6 @@ For each case, check the applicable items together.
 Use an isolated admin-web and mock request events.
 
 - [ ] Open the final request drawer in Logs.
-- [ ] Even on an event that has `observability_post_ms`, the timeline has no Observability stage.
 - [ ] Auth/Route/Setup/TTFB/Body/Limit reconcile display normally.
 - [ ] The total displayed time and percentages keep the existing `duration_ms` basis.
 - [ ] No clipping/overflow at 375×812, 768×1024, 1280×800.
@@ -205,9 +199,8 @@ Used an isolated SQLite DB, a local fake Anthropic upstream, and dynamic proxy/a
 - `cc_lb_prompt_cache_tokenized_bytes_total`, `cc_lb_prompt_cache_tokenized_tokens_total`, fallback-prefix counter, worker-failure counter exposed
 
 ### Browser/component
-- Displayed total kept the existing `duration_ms=4,400ms` basis, excluding the separate post-response value of 600ms
+- Displayed total kept the existing `duration_ms=4,400ms` basis
 - Rendered the persisted `LatencyTimeline` component in a real WKWebView at 1280×800 and 375×812
-- `Observability post` not displayed with the `observability_post_ms=600` fixture
 - Internal pre, Wait, Upstream, Body, Limit reconcile, Unaccounted displayed normally
 - Horizontal overflow 0 on both viewports, no clipping/overlap
 

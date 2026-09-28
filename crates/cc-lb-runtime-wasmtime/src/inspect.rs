@@ -266,7 +266,6 @@ fn require_hooks_for_slot(
     match kind {
         HookKind::Shape => require_shape_hook_contracts(metadata, metadata_json),
         HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
-        HookKind::Observe => require_declared_hook(metadata, HookKind::Observe, "this slot"),
         HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
         HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
     }
@@ -323,7 +322,7 @@ fn reject_shape_owned_hook_as_slot(hook: HookKind) -> Result<(), WasmtimeRuntime
 }
 
 fn reject_non_response_noop_modes(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
-    for hook in [HookKind::Filter, HookKind::Shape, HookKind::Observe] {
+    for hook in [HookKind::Filter, HookKind::Shape] {
         if metadata
             .hooks
             .get(hook.as_str())
@@ -376,9 +375,6 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::Shape, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
         }
-        (HookKind::Observe, WireVersion::V1) => {
-            Some(<cc_lb_plugin_wire::v1::ObserveEvent as WireSchema>::FINGERPRINT)
-        }
         (HookKind::TransformResponse, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::TransformResponseRequest as WireSchema>::FINGERPRINT)
         }
@@ -411,11 +407,6 @@ mod tests {
     fn shape_section_bytes() -> Vec<u8> {
         expected_fingerprint(HookKind::Shape, WireVersion::V1)
             .expect("shape V1 schema")
-            .to_vec()
-    }
-    fn observe_section_bytes() -> Vec<u8> {
-        expected_fingerprint(HookKind::Observe, WireVersion::V1)
-            .expect("observe V1 schema")
             .to_vec()
     }
     fn transform_response_section_bytes() -> Vec<u8> {
@@ -519,17 +510,6 @@ mod tests {
             (func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)
             (func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)
             (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)
-        )
-        "#
-    }
-
-    fn observe_plugin_wat() -> &'static str {
-        r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 0)
-            (func (export "cc_lb_free") (param i32 i32 i32))
-            (func (export "cc_lb_observe") (param i32 i32) (result i64) i64.const 0)
         )
         "#
     }
@@ -662,25 +642,6 @@ mod tests {
         let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape hook cannot be noop");
         let msg = format!("{err}");
         assert!(msg.contains("shape") && msg.contains("noop"), "got: {msg}");
-    }
-
-    #[test]
-    fn accepts_observe_plugin() {
-        let bytes = wat_with_custom_sections(
-            observe_plugin_wat(),
-            &[
-                (
-                    &schema_section_name(HookKind::Observe, WireVersion::V1),
-                    &observe_section_bytes(),
-                ),
-                ("cc_lb.plugin.v1", &metadata_section("observe")),
-            ],
-        );
-        let inspection = inspect_wasm(HookKind::Observe, &bytes).expect("observe plugin OK");
-        assert_eq!(
-            inspection.hook_versions[&HookKind::Observe],
-            WireVersion::V1
-        );
     }
 
     #[test]

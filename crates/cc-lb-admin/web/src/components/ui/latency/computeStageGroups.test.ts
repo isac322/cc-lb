@@ -91,20 +91,6 @@ describe('computeStageGroups', () => {
     expect(r.upstream).toBe(300);
   });
 
-  it('excludes post-response observability from timeline stages', () => {
-    const event = ev({
-      upstream_body_ms: 200,
-      observability_post_ms: 15,
-      limit_reconcile_ms: 10,
-      duration_ms: 1000,
-    });
-    const r = computeStageGroups(event);
-    expect(deriveProxyTimelineDuration(event)).toBe(1000);
-    expect(r.body).toBe(200);
-    expect(r.internalPost).toBe(10);
-    expect(r.unaccounted).toBe(790);
-  });
-
   it('computes unaccounted as duration minus sum', () => {
     const r = computeStageGroups(ev({ auth_ms: 100, duration_ms: 500 }));
     expect(r.unaccounted).toBe(400);

@@ -65,7 +65,7 @@ fn format_hex(bytes: &[u8; 32]) -> String {
 ///
 /// `kind` is set at registration time and never changes — a slot
 /// registered as [`HookKind::Filter`] cannot later be replaced by a
-/// shape or observe plugin. [`WasmtimeRuntime::register_*`][crate::WasmtimeRuntime]
+/// shape plugin. [`WasmtimeRuntime::register_*`][crate::WasmtimeRuntime]
 /// rejects a kind switch with `ModuleRejected`.
 pub struct LoadedPluginSlot {
     pub name: String,

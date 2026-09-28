@@ -75,7 +75,6 @@ impl RenewalFixture {
             DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(RenewalSignerFactory))
                 .global_router(Arc::new(NoRouteRouter))
-                .global_observability_hooks(vec![])
                 .principal_view(principal_view)
                 .upstream_records(vec![upstream.clone()])
                 .build(),

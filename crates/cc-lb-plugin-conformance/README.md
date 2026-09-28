@@ -36,7 +36,7 @@ let wasm = std::fs::read(
 let suite = ConformanceSuite::from_wasm(&wasm);
 ```
 
-Use `for_filter`, `for_shape`, or `for_observe` instead when a single wasm
+Use `for_filter` or `for_shape` instead when a single wasm
 artifact exports multiple hooks.
 
 ## `assert_recognisable_by_current_host()`
@@ -59,8 +59,8 @@ hook boundary with canonical sample payloads selected from the declared wire
 version. Filter plugins receive a V1 request whose `service_tier` is
 `Some("priority")`.
 
-It verifies allocator exports, hook exports, rkyv encode/decode round-trips,
-and observe variant handling. It does not verify plugin business semantics such
+It verifies allocator exports, hook exports, and rkyv encode/decode round-trips.
+It does not verify plugin business semantics such
 as routing policy or URL rewriting; keep those assertions in your own tests.
 
 ## Sample Test

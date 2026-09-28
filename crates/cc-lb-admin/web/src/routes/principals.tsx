@@ -3,22 +3,6 @@ import { Popover as BasePopover } from '@base-ui/react/popover';
 import { Radio as BaseRadio } from '@base-ui/react/radio';
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import { Tabs as BaseTabs } from '@base-ui/react/tabs';
-import {
-  closestCenter,
-  DndContext,
-  type DragEndEvent,
-  KeyboardSensor,
-  PointerSensor,
-  useSensor,
-  useSensors,
-} from '@dnd-kit/core';
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   createFileRoute,
@@ -31,7 +15,6 @@ import {
   CheckCircle2,
   ChevronDown,
   Copy,
-  GripVertical,
   KeyRound,
   Plus,
   Trash2,
@@ -218,8 +201,6 @@ function slotLabel(slot: ChainSlot): string {
       return 'Router';
     case 'shape':
       return 'Shape';
-    case 'observability_hook':
-      return 'Observability';
   }
 }
 
@@ -326,6 +307,7 @@ function PrincipalDetailLoadingShell() {
         </DetailSection>
 
         <DetailSection
+          span="full"
           className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
           title={<Skeleton as="span" className="block h-5 w-20" />}
           description={<Skeleton as="span" className="block h-4 w-64" />}
@@ -344,14 +326,6 @@ function PrincipalDetailLoadingShell() {
               </div>
             ))}
           </div>
-        </DetailSection>
-
-        <DetailSection
-          title={<Skeleton as="span" className="block h-5 w-32" />}
-          description={<Skeleton as="span" className="block h-4 w-64" />}
-          action={<Skeleton className="h-7 w-16" />}
-        >
-          <Skeleton className="h-10" />
         </DetailSection>
       </DetailSectionGrid>
     </DetailPane>
@@ -588,16 +562,11 @@ function PrincipalDetail({
   const del = useDeletePrincipal();
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const routerChain = usePluginChain(principal.id, 'router');
-  const observabilityChain = usePluginChain(principal.id, 'observability_hook');
   const shapeChain = usePluginChain(principal.id, 'shape');
   const deleteChainCount =
     (routerChain.data?.entries.length ?? 0) +
-    (observabilityChain.data?.entries.length ?? 0) +
     (shapeChain.data?.entries.length ?? 0);
-  const deleteChainCountLoading =
-    routerChain.isLoading ||
-    observabilityChain.isLoading ||
-    shapeChain.isLoading;
+  const deleteChainCountLoading = routerChain.isLoading || shapeChain.isLoading;
   const deleteChainCountLabel = deleteChainCountLoading ? (
     <span
       className="skeleton inline-block h-3 w-48"
@@ -721,9 +690,9 @@ function PrincipalDetail({
         }
       />
 
-      {/* Reading order. From 56rem only Access and Observability share a row:
-          measured at half width, Router runs ~150px taller than Shape and
-          API keys is a wide table, so pairing any of them leaves a hole. */}
+      {/* Reading order. Every section spans the full row: measured at half
+          width, Router runs ~150px taller than Shape and API keys is a wide
+          table, so pairing any of them leaves a hole. */}
       <DetailSectionGrid>
         {/* `contents` keeps the keepalive section itself the grid item. */}
         <fieldset className="contents" disabled={principalWritePending}>
@@ -734,7 +703,6 @@ function PrincipalDetail({
         <ShapeSlotEditor principalId={principal.id} />
         <ApiKeysCard principal={principal} />
         <AccessCard principal={principal} />
-        <ObservabilityHookEditor principalId={principal.id} />
       </DetailSectionGrid>
     </DetailPane>
   );
@@ -802,6 +770,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
 function AccessCard({ principal }: { principal: Principal }) {
   return (
     <DetailSection
+      span="full"
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.access}
       title="Access"
       description="Which models this principal may call, and the rate caps applied to every API key"
@@ -1667,10 +1636,6 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                       wasm_registry_id: removed.wasm_registry_id,
                       order: removed.order,
                       config: removed.config,
-                      sse_per_event: removed.sse_per_event,
-                      batched_events_per_flush:
-                        removed.batched_events_per_flush,
-                      batched_flush_ms: removed.batched_flush_ms,
                     },
                   },
                   {
@@ -2307,288 +2272,6 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
         </BaseRadioGroup>
       </div>
     </DetailSection>
-  );
-}
-
-function ObservabilityHookEditor({ principalId }: { principalId: string }) {
-  const slot = 'observability_hook';
-  const label = 'Observability';
-  const chain = usePluginChain(principalId, slot);
-  const registry = usePluginRegistry();
-  const reorder = useReorderChain();
-  const insert = useInsertChainEntry();
-  const del = useDeleteChainEntry();
-  const [addOpen, setAddOpen] = useState(false);
-  const [selectedPluginId, setSelectedPluginId] = useState<string>('');
-  const [pendingRemove, setPendingRemove] = useState<{
-    id: string;
-    revision: number;
-    name: string;
-  } | null>(null);
-
-  const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
-
-  const entries = useMemo(
-    () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
-    [chain.data],
-  );
-
-  // Reorder, insert, and delete all rewrite this one chain, and each write bumps
-  // sibling revisions: a second write started mid-flight either races the first
-  // or 409s on revisions the server already moved. One lock therefore covers
-  // drag, add, and remove; the mutation that owns the interaction still renders
-  // its own progress so the operator sees which write holds the chain.
-  const chainBusy = reorder.isPending || insert.isPending || del.isPending;
-
-  const onDragEnd = (e: DragEndEvent) => {
-    if (chainBusy) return;
-    if (!e.over || e.over.id === e.active.id) return;
-    const ids = entries.map((x) => x.id);
-    const oldIx = ids.indexOf(String(e.active.id));
-    const newIx = ids.indexOf(String(e.over.id));
-    if (oldIx < 0 || newIx < 0) return;
-    const reordered = [...entries];
-    const [moved] = reordered.splice(oldIx, 1);
-    reordered.splice(newIx, 0, moved!);
-    reorder.mutate(
-      {
-        pid: principalId,
-        entries: reordered.map((x, i) => ({
-          id: x.id,
-          order: (i + 1) * 100,
-          expected_revision: x.revision,
-        })),
-      },
-      { onSuccess: () => toast.success('Chain reordered') },
-    );
-  };
-
-  return (
-    <DetailSection
-      title="Observability"
-      description="SSE / audit hooks. Executed in order. Multiple allowed."
-      action={
-        <>
-          {reorder.isPending ? (
-            <span
-              role="status"
-              aria-live="polite"
-              className="inline-flex items-center gap-1.5 text-caption text-text-muted"
-            >
-              <Spinner className="w-3 h-3 text-text-muted" />
-              Saving order...
-            </span>
-          ) : null}
-          <Button
-            size="sm"
-            iconLeft={<Plus className="w-3 h-3" />}
-            disabled={chainBusy}
-            onClick={() => setAddOpen(true)}
-          >
-            Add
-          </Button>
-        </>
-      }
-    >
-      <div>
-        {entries.length ? (
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={onDragEnd}
-          >
-            <SortableContext
-              items={entries.map((e) => e.id)}
-              strategy={verticalListSortingStrategy}
-            >
-              <ul
-                className="border-t border-row"
-                aria-busy={chainBusy || undefined}
-              >
-                {entries.map((e) => {
-                  const reg = registry.data?.entries.find(
-                    (r) => r.id === e.wasm_registry_id,
-                  );
-                  return (
-                    <SortableChainItem
-                      key={e.id}
-                      id={e.id}
-                      order={e.order}
-                      name={reg?.name ?? e.wasm_registry_id}
-                      disabled={chainBusy}
-                      onDelete={() =>
-                        setPendingRemove({
-                          id: e.id,
-                          revision: e.revision,
-                          name: reg?.name ?? e.wasm_registry_id,
-                        })
-                      }
-                    />
-                  );
-                })}
-              </ul>
-            </SortableContext>
-          </DndContext>
-        ) : (
-          <p className="text-body text-text-muted">
-            No {label.toLowerCase()} plugins. Add one to run it on every
-            request.
-          </p>
-        )}
-
-        <Modal
-          open={addOpen}
-          onOpenChange={setAddOpen}
-          preventDismiss={insert.isPending}
-          title={`Add plugin to ${label}`}
-          footer={
-            <>
-              <Button
-                disabled={insert.isPending}
-                onClick={() => setAddOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                disabled={!selectedPluginId || chainBusy}
-                loading={insert.isPending}
-                onClick={() => {
-                  if (chainBusy) return;
-                  insert.mutate(
-                    {
-                      pid: principalId,
-                      body: { slot, wasm_registry_id: selectedPluginId },
-                    },
-                    {
-                      onSuccess: () => {
-                        toast.success('Plugin added');
-                        setAddOpen(false);
-                        setSelectedPluginId('');
-                      },
-                    },
-                  );
-                }}
-              >
-                {insert.isPending ? 'Adding...' : 'Add'}
-              </Button>
-            </>
-          }
-        >
-          <Field label="Plugin" required>
-            <Select
-              className="w-full"
-              value={selectedPluginId}
-              disabled={insert.isPending}
-              placeholder="Select a plugin"
-              onChange={setSelectedPluginId}
-              options={(registry.data?.entries ?? [])
-                .filter((p) => pluginSupportsSlot(p, 'observability_hook'))
-                .map((p) => ({ value: p.id, label: p.name }))}
-            />
-          </Field>
-        </Modal>
-
-        <ConfirmDialog
-          open={pendingRemove !== null}
-          onOpenChange={(o) => {
-            if (!o) setPendingRemove(null);
-          }}
-          title="Remove plugin from chain?"
-          description={
-            pendingRemove ? (
-              <>
-                <span className="font-medium text-text">
-                  {pendingRemove.name}
-                </span>{' '}
-                will be removed from the {label} chain. You can re-add it later.
-              </>
-            ) : null
-          }
-          confirmLabel={del.isPending ? 'Removing...' : 'Remove'}
-          destructive
-          pending={del.isPending}
-          closeOnConfirm={false}
-          onConfirm={() => {
-            if (!pendingRemove || chainBusy) return;
-            del.mutate(
-              { id: pendingRemove.id, revision: pendingRemove.revision },
-              {
-                onSuccess: () => {
-                  toast.success('Plugin removed from chain');
-                  setPendingRemove(null);
-                },
-              },
-            );
-          }}
-        />
-      </div>
-    </DetailSection>
-  );
-}
-
-function SortableChainItem({
-  id,
-  order,
-  name,
-  onDelete,
-  disabled = false,
-}: {
-  id: string;
-  order: number;
-  name: string;
-  onDelete: () => void;
-  disabled?: boolean;
-}) {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id, disabled });
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  } as React.CSSProperties;
-  return (
-    <li
-      ref={setNodeRef}
-      style={style}
-      className="flex items-center gap-2 py-2 bg-bg border-b border-row"
-    >
-      <button
-        type="button"
-        {...attributes}
-        {...listeners}
-        aria-label="Drag to reorder"
-        disabled={disabled}
-        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:control-disabled"
-      >
-        <GripVertical className="w-3.5 h-3.5" />
-      </button>
-      <span className="w-8 text-caption tabular-nums text-text-faint">
-        #{Math.floor(order)}
-      </span>
-      <span className="flex-1 text-body font-medium text-text truncate">
-        {name}
-      </span>
-      <IconButton
-        label={`Remove ${name}`}
-        disabled={disabled}
-        className="hover:text-danger-text"
-        onClick={onDelete}
-      >
-        <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
-      </IconButton>
-    </li>
   );
 }
 

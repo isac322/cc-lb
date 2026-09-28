@@ -171,7 +171,6 @@ async fn assemble_route(
     first_body_chunk_ms: None,
     internal_errors: Vec::new(),
     limit_reconcile_ms: None,
-    observability_post_ms: None,
     proxy_setup_ms: None,
     request_body_read_ms: None,
     request_body_bytes: None,

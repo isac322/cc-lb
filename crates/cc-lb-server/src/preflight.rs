@@ -198,11 +198,7 @@ async fn list_plugin_chain_entries(
 ) -> Result<Vec<PluginChainEntry>, PreflightError> {
     let mut entries = Vec::new();
     for principal in principals {
-        for slot in [
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ] {
+        for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
             entries.extend(
                 stores
                     .plugin_registry

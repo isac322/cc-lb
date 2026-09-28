@@ -15,8 +15,7 @@ use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_engine::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
@@ -494,7 +493,6 @@ fn lifecycle_with_terminal_and_upstream_dispatch(
             signer_fails,
         }))
         .global_router(Arc::new(NullRouter))
-        .global_observability_hooks(Vec::new())
         .principal_view(principal_view)
         .upstream_records(records)
         .build();
@@ -568,11 +566,7 @@ fn principal_view(
     let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::from_db(&[principal()], chains))
 }

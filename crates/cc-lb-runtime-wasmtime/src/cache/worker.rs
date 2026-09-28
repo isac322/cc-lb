@@ -13,7 +13,6 @@ pub(super) struct WorkerInstance {
     pub(super) free_fn: TypedFunc<(u32, u32, u32), ()>,
     pub(super) filter_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) shape_fn: Option<TypedFunc<(u32, u32), u64>>,
-    pub(super) observe_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) transform_response_fn: Option<TypedFunc<(u32, u32), u64>>,
     pub(super) transform_sse_event_fn: Option<TypedFunc<(u32, u32), u64>>,
 }
@@ -54,78 +53,60 @@ pub(super) fn build_worker_instance(
             reason: format!("missing or mistyped `cc_lb_free` export: {e}"),
         })?;
 
-    let (filter_fn, shape_fn, observe_fn, transform_response_fn, transform_sse_event_fn) =
-        match hook {
-            HookFn::Filter => (
-                Some(
-                    instance
-                        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_filter")
-                        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                            reason: format!("missing or mistyped `cc_lb_filter` export: {e}"),
-                        })?,
-                ),
-                None,
-                None,
-                None,
-                None,
+    let (filter_fn, shape_fn, transform_response_fn, transform_sse_event_fn) = match hook {
+        HookFn::Filter => (
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_filter")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_filter` export: {e}"),
+                    })?,
             ),
-            HookFn::Shape => (
-                None,
-                Some(
-                    instance
-                        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_shape")
-                        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                            reason: format!("missing or mistyped `cc_lb_shape` export: {e}"),
-                        })?,
-                ),
-                None,
-                None,
-                None,
+            None,
+            None,
+            None,
+        ),
+        HookFn::Shape => (
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_shape")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!("missing or mistyped `cc_lb_shape` export: {e}"),
+                    })?,
             ),
-            HookFn::Observe => (
-                None,
-                None,
-                Some(
-                    instance
-                        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_observe")
-                        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                            reason: format!("missing or mistyped `cc_lb_observe` export: {e}"),
-                        })?,
-                ),
-                None,
-                None,
+            None,
+            None,
+        ),
+        HookFn::TransformResponse => (
+            None,
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_transform_response")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!(
+                            "missing or mistyped `cc_lb_transform_response` export: {e}"
+                        ),
+                    })?,
             ),
-            HookFn::TransformResponse => (
-                None,
-                None,
-                None,
-                Some(
-                    instance
-                        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_transform_response")
-                        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                            reason: format!(
-                                "missing or mistyped `cc_lb_transform_response` export: {e}"
-                            ),
-                        })?,
-                ),
-                None,
+            None,
+        ),
+        HookFn::TransformSseEvent => (
+            None,
+            None,
+            None,
+            Some(
+                instance
+                    .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_transform_sse_event")
+                    .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
+                        reason: format!(
+                            "missing or mistyped `cc_lb_transform_sse_event` export: {e}"
+                        ),
+                    })?,
             ),
-            HookFn::TransformSseEvent => (
-                None,
-                None,
-                None,
-                None,
-                Some(
-                    instance
-                        .get_typed_func::<(u32, u32), u64>(&mut store, "cc_lb_transform_sse_event")
-                        .map_err(|e| WasmtimeRuntimeError::ModuleRejected {
-                            reason: format!(
-                                "missing or mistyped `cc_lb_transform_sse_event` export: {e}"
-                            ),
-                        })?,
-                ),
-            ),
-        };
+        ),
+    };
 
     Ok(WorkerInstance {
         store,
@@ -134,7 +115,6 @@ pub(super) fn build_worker_instance(
         free_fn,
         filter_fn,
         shape_fn,
-        observe_fn,
         transform_response_fn,
         transform_sse_event_fn,
     })

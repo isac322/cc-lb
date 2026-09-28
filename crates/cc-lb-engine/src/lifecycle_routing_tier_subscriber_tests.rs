@@ -103,7 +103,6 @@ fn terminated(event_id: &str) -> LifecycleEvent {
         connection_reused: None,
         internal_errors: Vec::new(),
         limit_reconcile_ms: None,
-        observability_post_ms: None,
         proxy_setup_ms: None,
         setup_timings: Default::default(),
         io_timings: Default::default(),

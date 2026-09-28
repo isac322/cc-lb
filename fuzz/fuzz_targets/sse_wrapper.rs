@@ -1,13 +1,11 @@
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
-use cc_lb_engine::{RequestContext, SseBatchConfig, SseRelay};
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_engine::{RequestContext, SseRelay};
 use cc_lb_upstream::{DialectError, ShapedRequest, ShapedRequestBuilder, UpstreamDialect};
 use http::StatusCode;
 use http_body_util::BodyExt;
@@ -33,25 +31,12 @@ fn runtime() -> Option<&'static Runtime> {
 
 fn relay() -> SseRelay {
     SseRelay {
-        obs: Arc::new(NoopHook),
         dialect: Arc::new(NoopDialect),
-        batch: SseBatchConfig {
-            max_events: 8,
-            max_age: Duration::from_secs(60),
-        },
         quota: None,
         principal_id: "fuzz-principal".to_owned(),
         reservation: None,
         error_normalizer: None,
         upstream_kind: None,
-    }
-}
-
-struct NoopHook;
-
-impl ObservabilityHook for NoopHook {
-    fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-        Ok(())
     }
 }
 

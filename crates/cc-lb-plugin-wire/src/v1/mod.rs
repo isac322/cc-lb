@@ -3,11 +3,11 @@
 //! Shared types between host (`cc-lb-runtime-wasmtime`) and guest
 //! (`cc-lb-pdk-wasmtime`) compiled in lockstep.
 //!
-//! Wire types for the three hooks the wasmtime runtime ships:
-//! filter (Phase 1), shape (Phase 2), observe
-//! (Phase 2). Signer extension is intentionally not exposed across
-//! the plugin boundary — host-side built-in Anthropic API-key and OAuth
-//! signers handle credential signing in-process.
+//! Wire types for the hooks the wasmtime runtime ships: filter (Phase 1),
+//! shape (Phase 2), and the response transform hooks. Signer extension is
+//! intentionally not exposed across the plugin boundary — host-side
+//! built-in Anthropic API-key and OAuth signers handle credential signing
+//! in-process.
 //!
 //! rkyv derives `Archive` + `Serialize` + `Deserialize` for every wire type.
 //! The host calls `rkyv::access::<ArchivedFilterRequest, rkyv::rancor::Error>`
@@ -420,42 +420,6 @@ pub enum TransformSseEventResult {
     Unchanged,
     Replace { events: Box<[SseEvent]> },
     Drop,
-}
-
-/// Lifecycle event delivered to the observe hook. rkyv mirror of
-/// `cc_lb_observability::ObserveEvent`.
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-#[rkyv(derive(Debug))]
-pub enum ObserveEvent {
-    RequestStarted {
-        request_id: Box<str>,
-        downstream_user_agent: Option<Box<str>>,
-    },
-    AuthnComplete {
-        principal_id: Box<str>,
-        principal_kind: Box<str>,
-    },
-    UpstreamChosen {
-        upstream: Upstream,
-    },
-    Chunk {
-        batch_index: u64,
-        event_count: u64,
-        total_bytes: u64,
-    },
-    RequestFinished {
-        status: u16,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-        cache_read_input_tokens: Option<u64>,
-        duration_ms: u64,
-    },
-    Error {
-        code: Box<str>,
-        message: Box<str>,
-        source: Box<str>,
-    },
 }
 
 include!(concat!(env!("OUT_DIR"), "/wire_schema_impls.rs"));

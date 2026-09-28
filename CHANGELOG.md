@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Breaking changes
 
 - The admin endpoint `GET /admin/v1/subscription-quotas/analysis` (and its unversioned alias `/admin/subscription-quotas/analysis`) has been removed, along with its burn-rate, projected-burn, deficit, and ETA estimates. The admin dashboard no longer calls it. Scripts that queried it now receive 404; use `/admin/v1/subscription-quotas/series` for quota history and `/admin/v1/subscription-quotas/aggregate` for current pool state.
+- The Wasm observability plugin slot has been removed. `slot_kind=observe` uploads and `ObservabilityHook` plugin-chain slots are now rejected as unknown, existing observability-hook chain entries are deleted on migration, and the unused `sse_per_event`, `batched_events_per_flush`, and `batched_flush_ms` plugin-chain fields are gone. Plugins can target only the `filter` and `shape` slots; the `cc_lb_observe` export, `ObserveEvent`, and `HookKind::Observe` no longer exist in the plugin wire, PDK, runtime, and conformance crates.
+- Request events no longer carry `observability_post_ms`, which measured the removed observability-hook fan-out and has always been empty since that fan-out moved off the response path. The field is gone from the admin request-event APIs, and SQLite drops the `request_events_v1.list_observability_post_ms` column on migration.
 
 ### Added
 

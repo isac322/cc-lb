@@ -465,7 +465,7 @@ impl PluginRegistryStore for SqliteStorage {
         }
         let id = Uuid::new_v4();
         let row = sqlx::query(
-            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
         )
         .bind(id.to_string())
         .bind(input.principal_id.to_string())
@@ -473,9 +473,6 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(input.wasm_registry_id.to_string())
         .bind(input.order)
         .bind(serde_json::to_string(&input.config)?)
-        .bind(input.sse_per_event)
-        .bind(i64::from(input.batched_events_per_flush))
-        .bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
@@ -540,17 +537,13 @@ impl PluginRegistryStore for SqliteStorage {
         expected_revision: u64,
         update: PluginChainEntryUpdate,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        if update.config.is_none()
-            && update.sse_per_event.is_none()
-            && update.batched_events_per_flush.is_none()
-            && update.batched_flush_ms.is_none()
-        {
+        let Some(config) = update.config else {
             return Err(StorageError::InvalidInput {
                 field: "plugin_chain.update".to_owned(),
                 reason: "empty_update".to_owned(),
             });
-        }
-        let mut current = match self.get_chain_by_id(id).await? {
+        };
+        let current = match self.get_chain_by_id(id).await? {
             Some(current) => current,
             None => return Ok(None),
         };
@@ -559,25 +552,10 @@ impl PluginRegistryStore for SqliteStorage {
                 current: current.revision,
             });
         }
-        if let Some(value) = update.config {
-            current.config = value;
-        }
-        if let Some(value) = update.sse_per_event {
-            current.sse_per_event = value;
-        }
-        if let Some(value) = update.batched_events_per_flush {
-            current.batched_events_per_flush = value;
-        }
-        if let Some(value) = update.batched_flush_ms {
-            current.batched_flush_ms = value;
-        }
         let row = sqlx::query(
-            "UPDATE plugin_chains_v2 SET config = ?, sse_per_event = ?, batched_events_per_flush = ?, batched_flush_ms = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
+            "UPDATE plugin_chains_v2 SET config = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
         )
-        .bind(serde_json::to_string(&current.config)?)
-        .bind(current.sse_per_event)
-        .bind(i64::from(current.batched_events_per_flush))
-        .bind(u64_to_i64(current.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
+        .bind(serde_json::to_string(&config)?)
         .bind(id.to_string())
         .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
         .fetch_optional(self.pool())
@@ -898,19 +876,6 @@ fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
         order: row.try_get("order_value").map_err(map_sqlx_error)?,
         wasm_registry_id: parse_uuid(&wasm_registry_id, "plugin_chain.wasm_registry_id")?,
         config: serde_json::from_str::<Value>(&config_text)?,
-        sse_per_event: row
-            .try_get::<i64, _>("sse_per_event")
-            .map_err(map_sqlx_error)?
-            != 0,
-        batched_events_per_flush: u32_from_i64(
-            row.try_get("batched_events_per_flush")
-                .map_err(map_sqlx_error)?,
-            "plugin_chain.batched_events_per_flush",
-        )?,
-        batched_flush_ms: i64_to_u64(
-            row.try_get("batched_flush_ms").map_err(map_sqlx_error)?,
-            "plugin_chain.batched_flush_ms",
-        )?,
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",
@@ -1058,12 +1023,6 @@ fn map_sqlite_error(error: sqlx::Error) -> StorageError {
 fn sha_to_array(bytes: &[u8]) -> StorageResult<[u8; 32]> {
     <[u8; 32]>::try_from(bytes).map_err(|_| StorageError::Corrupted {
         message: "sha256 must be 32 bytes".to_owned(),
-    })
-}
-
-fn u32_from_i64(value: i64, field: &str) -> StorageResult<u32> {
-    u32::try_from(value).map_err(|_| StorageError::Corrupted {
-        message: format!("{field} is outside u32 range"),
     })
 }
 

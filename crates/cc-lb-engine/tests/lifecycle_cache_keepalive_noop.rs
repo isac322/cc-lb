@@ -19,8 +19,7 @@ use http::{Response, StatusCode};
 use uuid::Uuid;
 
 use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts,
-    managed_api_key, settle,
+    TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle,
 };
 
 #[tokio::test]
@@ -37,7 +36,6 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
-        vec![Arc::new(RecordingHook::default())],
         LifecycleConfig::default(),
     );
 
@@ -85,7 +83,6 @@ async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
-        vec![Arc::new(RecordingHook::default())],
         LifecycleConfig::default(),
     )
     .with_cache_keepalive_enqueuer(Arc::new(FailingEnqueuer {

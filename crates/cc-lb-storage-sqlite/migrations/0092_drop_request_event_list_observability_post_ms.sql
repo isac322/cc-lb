@@ -1,0 +1,1 @@
+ALTER TABLE request_events_v1 DROP COLUMN list_observability_post_ms;

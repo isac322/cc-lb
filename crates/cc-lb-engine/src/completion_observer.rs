@@ -2,7 +2,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::sync::watch;
@@ -11,12 +10,13 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 const QUEUE_FULL_REASON: &str = "stream_completion_observer_full";
 const QUEUE_CLOSED_REASON: &str = "stream_completion_observer_closed";
-const CALLBACK_PANIC_REASON: &str = "stream_completion_observer_callback_panic";
 const JOB_PANIC_REASON: &str = "stream_completion_observer_job_panic";
 const WORKER_PANIC_REASON: &str = "stream_completion_observer_worker_panic";
+/// Bounded so a stalled log sink sheds latency lines instead of growing memory.
+const COMPLETION_QUEUE_CAPACITY: usize = 4096;
 
 pub(crate) struct CompletionObserver {
-    sender: ArcSwapOption<mpsc::Sender<Option<StreamCompletionObservation>>>,
+    sender: ArcSwapOption<mpsc::Sender<Option<StreamCompletionLog>>>,
     completion: watch::Receiver<bool>,
     record_drop: DropRecorder,
 }
@@ -25,10 +25,7 @@ type DropRecorder = fn(&'static str, u64);
 
 impl CompletionObserver {
     pub(crate) fn new() -> Self {
-        Self::spawn(
-            cc_lb_observability::DEFAULT_HOOK_CHANNEL_CAPACITY,
-            record_observation_drop,
-        )
+        Self::spawn(COMPLETION_QUEUE_CAPACITY, record_observation_drop)
     }
 
     fn spawn(capacity: usize, record_drop: DropRecorder) -> Self {
@@ -47,14 +44,14 @@ impl CompletionObserver {
 
     pub(crate) fn enqueue(
         &self,
-        observation: StreamCompletionObservation,
+        log: StreamCompletionLog,
     ) -> Result<(), CompletionObservationDrop> {
         let sender = self.sender.load();
         let Some(sender) = sender.as_ref() else {
             (self.record_drop)(QUEUE_CLOSED_REASON, 1);
             return Err(CompletionObservationDrop::Closed);
         };
-        match sender.try_send(Some(observation)) {
+        match sender.try_send(Some(log)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 (self.record_drop)(QUEUE_FULL_REASON, 1);
@@ -98,38 +95,6 @@ impl Drop for CompletionObserver {
 pub(crate) enum CompletionObservationDrop {
     Full,
     Closed,
-}
-
-pub(crate) struct StreamCompletionObservation {
-    hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-    event: ObserveEvent,
-    log: Option<StreamCompletionLog>,
-}
-
-impl StreamCompletionObservation {
-    pub(crate) fn new(
-        hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-        event: ObserveEvent,
-        log: Option<StreamCompletionLog>,
-    ) -> Self {
-        Self { hooks, event, log }
-    }
-
-    // Native callback isolation is effective only for unwind builds. The release profile aborts
-    // Rust panics; production Wasm traps are returned as errors before reaching this boundary.
-    fn process(self, record_drop: DropRecorder) {
-        if let Some(log) = self.log
-            && catch_unwind(AssertUnwindSafe(|| log.emit())).is_err()
-        {
-            record_drop(JOB_PANIC_REASON, 1);
-        }
-        for hook in self.hooks.iter() {
-            let event = self.event.clone();
-            if catch_unwind(AssertUnwindSafe(|| hook.observe(event))).is_err() {
-                record_drop(CALLBACK_PANIC_REASON, 1);
-            }
-        }
-    }
 }
 
 pub(crate) struct StreamCompletionLog {
@@ -264,19 +229,19 @@ fn record_observation_drop(reason: &'static str, amount: u64) {
 // These catches protect unwind builds. They cannot intercept the workspace release profile's
 // panic=abort behavior.
 fn completion_observer_loop(
-    mut receiver: mpsc::Receiver<Option<StreamCompletionObservation>>,
+    mut receiver: mpsc::Receiver<Option<StreamCompletionLog>>,
     completion: watch::Sender<bool>,
     record_drop: DropRecorder,
 ) {
     if catch_unwind(AssertUnwindSafe(|| {
         while let Some(message) = receiver.blocking_recv() {
             match message {
-                Some(observation) => process_observation(observation, record_drop),
+                Some(log) => process_log(&log, record_drop),
                 None => {
                     receiver.close();
                     while let Some(message) = receiver.blocking_recv() {
-                        if let Some(observation) = message {
-                            process_observation(observation, record_drop);
+                        if let Some(log) = message {
+                            process_log(&log, record_drop);
                         }
                     }
                     break;
@@ -291,8 +256,8 @@ fn completion_observer_loop(
     let _ = completion.send(true);
 }
 
-fn process_observation(observation: StreamCompletionObservation, record_drop: DropRecorder) {
-    if catch_unwind(AssertUnwindSafe(|| observation.process(record_drop))).is_err() {
+fn process_log(log: &StreamCompletionLog, record_drop: DropRecorder) {
+    if catch_unwind(AssertUnwindSafe(|| log.emit())).is_err() {
         record_drop(JOB_PANIC_REASON, 1);
     }
 }
@@ -303,7 +268,6 @@ mod tests {
     use std::sync::{Condvar, Mutex as StdMutex, mpsc as std_mpsc};
     use std::time::Duration;
 
-    use cc_lb_observability::ObservabilityError;
     use http::StatusCode;
 
     use super::*;
@@ -318,138 +282,142 @@ mod tests {
         }
     }
 
-    fn event(duration_ms: u64) -> ObserveEvent {
-        ObserveEvent::RequestFinished {
-            status: StatusCode::OK,
-            input_tokens: Some(1),
-            output_tokens: Some(2),
-            cache_creation_input_tokens: Some(3),
-            cache_read_input_tokens: Some(4),
-            duration_ms,
-        }
+    type Release = Arc<(StdMutex<bool>, Condvar)>;
+
+    /// Records the `request_id` of every emitted latency line and can block or panic inside
+    /// the worker's log emission.
+    #[derive(Default)]
+    struct LogProbe {
+        gate: Option<(std_mpsc::SyncSender<()>, Release)>,
+        panic_first: AtomicBool,
+        request_ids: StdMutex<Vec<String>>,
     }
 
-    fn observation(
-        hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-        event: ObserveEvent,
-    ) -> StreamCompletionObservation {
-        StreamCompletionObservation::new(
-            hooks,
-            event,
-            Some(StreamCompletionLog::new(
-                "request-test".to_owned(),
-                &Span::none(),
-                StreamLatency {
-                    status: StatusCode::OK.as_u16(),
-                    stream_first_chunk_ms: Some(1),
-                    stream_message_start_ms: Some(2),
-                    stream_content_block_start_ms: Some(3),
-                    stream_first_content_delta_ms: Some(4),
-                    stream_last_content_delta_ms: Some(5),
-                    stream_message_stop_ms: Some(6),
-                    stream_last_chunk_ms: Some(7),
-                    stream_total_ms: 8,
-                    sse_event_count: 9,
-                    content_delta_count: 10,
-                    ping_count: 11,
-                    inter_token_avg_ms: Some(12),
-                    total_bytes: 13,
-                },
-                tracing::dispatcher::get_default(|dispatch| dispatch.clone()),
-            )),
-        )
+    impl LogProbe {
+        fn blocking(entered: std_mpsc::SyncSender<()>, released: Release) -> Arc<Self> {
+            Arc::new(Self {
+                gate: Some((entered, released)),
+                ..Self::default()
+            })
+        }
+
+        fn request_ids(&self) -> Vec<String> {
+            self.request_ids.lock().expect("request id lock").clone()
+        }
     }
 
     #[derive(Default)]
-    struct RecordingHook {
-        events: StdMutex<Vec<ObserveEvent>>,
-    }
+    struct RequestIdVisitor(Option<String>);
 
-    impl ObservabilityHook for RecordingHook {
-        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            self.events.lock().expect("event lock").push(event);
-            Ok(())
-        }
-    }
-
-    struct BlockingHook {
-        entered: std_mpsc::SyncSender<()>,
-        released: Arc<(StdMutex<bool>, Condvar)>,
-        events: StdMutex<Vec<ObserveEvent>>,
-    }
-
-    impl ObservabilityHook for BlockingHook {
-        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            self.events.lock().expect("event lock").push(event);
-            let _ = self.entered.send(());
-            let (released, wake) = &*self.released;
-            let mut released = released.lock().expect("release lock");
-            while !*released {
-                released = wake.wait(released).expect("release wait");
+    impl tracing::field::Visit for RequestIdVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "request_id" {
+                self.0 = Some(format!("{value:?}"));
             }
-            Ok(())
         }
     }
 
-    struct PanicOnceHook {
-        panicked: AtomicBool,
-        events: StdMutex<Vec<ObserveEvent>>,
-    }
+    struct ProbeSubscriber(Arc<LogProbe>);
 
-    impl ObservabilityHook for PanicOnceHook {
-        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            if !self.panicked.swap(true, Ordering::SeqCst) {
-                panic!("intentional completion hook panic");
+    impl tracing::Subscriber for ProbeSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let probe = &self.0;
+            if probe.panic_first.swap(false, Ordering::SeqCst) {
+                panic!("intentional completion log panic");
             }
-            self.events.lock().expect("event lock").push(event);
-            Ok(())
+            let mut visitor = RequestIdVisitor::default();
+            event.record(&mut visitor);
+            if let Some(request_id) = visitor.0 {
+                probe
+                    .request_ids
+                    .lock()
+                    .expect("request id lock")
+                    .push(request_id);
+            }
+            if let Some((entered, released)) = &probe.gate {
+                let _ = entered.send(());
+                let (released, wake) = &**released;
+                let mut released = released.lock().expect("release lock");
+                while !*released {
+                    released = wake.wait(released).expect("release wait");
+                }
+            }
         }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn log(request_id: &str, probe: &Arc<LogProbe>) -> StreamCompletionLog {
+        StreamCompletionLog::new(
+            request_id.to_owned(),
+            &Span::none(),
+            StreamLatency {
+                status: StatusCode::OK.as_u16(),
+                stream_first_chunk_ms: Some(1),
+                stream_message_start_ms: Some(2),
+                stream_content_block_start_ms: Some(3),
+                stream_first_content_delta_ms: Some(4),
+                stream_last_content_delta_ms: Some(5),
+                stream_message_stop_ms: Some(6),
+                stream_last_chunk_ms: Some(7),
+                stream_total_ms: 8,
+                sse_event_count: 9,
+                content_delta_count: 10,
+                ping_count: 11,
+                inter_token_avg_ms: Some(12),
+                total_bytes: 13,
+            },
+            Dispatch::new(ProbeSubscriber(Arc::clone(probe))),
+        )
+    }
+
+    fn release(released: &Arc<(StdMutex<bool>, Condvar)>) {
+        let (release_lock, wake) = &**released;
+        *release_lock.lock().expect("release lock") = true;
+        wake.notify_all();
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn queue_full_and_closed_are_counted_and_never_run_dropped_callbacks() {
+    async fn queue_full_and_closed_are_counted_and_never_emit_dropped_logs() {
         let _serial = SERIAL.lock().await;
         TEST_DROPS.lock().expect("test drop lock").clear();
         let (entered_tx, entered_rx) = std_mpsc::sync_channel(2);
         let released = Arc::new((StdMutex::new(false), Condvar::new()));
-        let hook = Arc::new(BlockingHook {
-            entered: entered_tx,
-            released: Arc::clone(&released),
-            events: StdMutex::new(Vec::new()),
-        });
-        let hooks: Arc<[Arc<dyn ObservabilityHook>]> =
-            vec![hook.clone() as Arc<dyn ObservabilityHook>].into();
+        let probe = LogProbe::blocking(entered_tx, Arc::clone(&released));
         let observer = CompletionObserver::with_capacity_and_recorder(1, test_record_drop);
 
-        assert_eq!(
-            observer.enqueue(observation(Arc::clone(&hooks), event(1))),
-            Ok(())
-        );
+        assert_eq!(observer.enqueue(log("req-1", &probe)), Ok(()));
         entered_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("worker entered first callback");
+            .expect("worker entered first log");
+        assert_eq!(observer.enqueue(log("req-2", &probe)), Ok(()));
         assert_eq!(
-            observer.enqueue(observation(Arc::clone(&hooks), event(2))),
-            Ok(())
-        );
-        assert_eq!(
-            observer.enqueue(observation(Arc::clone(&hooks), event(3))),
+            observer.enqueue(log("req-3", &probe)),
             Err(CompletionObservationDrop::Full)
         );
 
-        let (release_lock, wake) = &*released;
-        *release_lock.lock().expect("release lock") = true;
-        wake.notify_all();
+        release(&released);
         observer.shutdown().await;
         assert_eq!(
-            observer.enqueue(observation(hooks, event(4))),
+            observer.enqueue(log("req-4", &probe)),
             Err(CompletionObservationDrop::Closed)
         );
 
-        assert_eq!(
-            hook.events.lock().expect("event lock").as_slice(),
-            &[event(1), event(2)]
-        );
+        assert_eq!(probe.request_ids(), ["req-1", "req-2"]);
         assert_eq!(
             TEST_DROPS.lock().expect("test drop lock").as_slice(),
             &[QUEUE_FULL_REASON, QUEUE_CLOSED_REASON]
@@ -460,23 +428,15 @@ mod tests {
     async fn shutdown_drains_accepted_payloads_exactly_once() {
         let _serial = SERIAL.lock().await;
         TEST_DROPS.lock().expect("test drop lock").clear();
-        let hook = Arc::new(RecordingHook::default());
-        let hooks: Arc<[Arc<dyn ObservabilityHook>]> =
-            vec![hook.clone() as Arc<dyn ObservabilityHook>].into();
+        let probe = Arc::new(LogProbe::default());
         let observer = CompletionObserver::with_capacity_and_recorder(4, test_record_drop);
 
-        for duration_ms in 1..=3 {
-            assert_eq!(
-                observer.enqueue(observation(Arc::clone(&hooks), event(duration_ms))),
-                Ok(())
-            );
+        for request_id in ["req-1", "req-2", "req-3"] {
+            assert_eq!(observer.enqueue(log(request_id, &probe)), Ok(()));
         }
         observer.shutdown().await;
 
-        assert_eq!(
-            hook.events.lock().expect("event lock").as_slice(),
-            &[event(1), event(2), event(3)]
-        );
+        assert_eq!(probe.request_ids(), ["req-1", "req-2", "req-3"]);
         assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
     }
 
@@ -484,49 +444,34 @@ mod tests {
     async fn shutdown_drains_observation_from_sender_loaded_before_close() {
         let _serial = SERIAL.lock().await;
         TEST_DROPS.lock().expect("test drop lock").clear();
-        let (entered_tx, entered_rx) = std_mpsc::sync_channel(1);
+        let (entered_tx, entered_rx) = std_mpsc::sync_channel(2);
         let released = Arc::new((StdMutex::new(false), Condvar::new()));
-        let hook = Arc::new(BlockingHook {
-            entered: entered_tx,
-            released: Arc::clone(&released),
-            events: StdMutex::new(Vec::new()),
-        });
-        let hooks: Arc<[Arc<dyn ObservabilityHook>]> =
-            vec![hook.clone() as Arc<dyn ObservabilityHook>].into();
+        let probe = LogProbe::blocking(entered_tx, Arc::clone(&released));
         let observer = CompletionObserver::with_capacity_and_recorder(2, test_record_drop);
 
-        assert_eq!(
-            observer.enqueue(observation(Arc::clone(&hooks), event(1))),
-            Ok(())
-        );
+        assert_eq!(observer.enqueue(log("req-1", &probe)), Ok(()));
         entered_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("worker entered first callback");
+            .expect("worker entered first log");
         let preloaded_sender = observer.sender.load_full().expect("sender is open");
         let shutdown = observer.shutdown();
         tokio::pin!(shutdown);
         tokio::select! {
             biased;
-            _ = &mut shutdown => panic!("shutdown completed while callback remained blocked"),
+            _ = &mut shutdown => panic!("shutdown completed while log emission remained blocked"),
             _ = tokio::task::yield_now() => {}
         }
         assert!(
             preloaded_sender
-                .try_send(Some(observation(hooks, event(2))))
+                .try_send(Some(log("req-2", &probe)))
                 .is_ok(),
             "preloaded sender queues the racing observation behind shutdown"
         );
 
-        let (release_lock, wake) = &*released;
-        *release_lock.lock().expect("release lock") = true;
-        wake.notify_all();
+        release(&released);
         shutdown.await;
 
-        assert_eq!(
-            hook.events.lock().expect("event lock").as_slice(),
-            &[event(1), event(2)]
-        );
-
+        assert_eq!(probe.request_ids(), ["req-1", "req-2"]);
         assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
     }
 
@@ -536,25 +481,19 @@ mod tests {
         TEST_DROPS.lock().expect("test drop lock").clear();
         let (entered_tx, entered_rx) = std_mpsc::sync_channel(1);
         let released = Arc::new((StdMutex::new(false), Condvar::new()));
-        let hook = Arc::new(BlockingHook {
-            entered: entered_tx,
-            released: Arc::clone(&released),
-            events: StdMutex::new(Vec::new()),
-        });
-        let hooks: Arc<[Arc<dyn ObservabilityHook>]> =
-            vec![hook.clone() as Arc<dyn ObservabilityHook>].into();
+        let probe = LogProbe::blocking(entered_tx, Arc::clone(&released));
         let observer = CompletionObserver::with_capacity_and_recorder(1, test_record_drop);
 
-        assert_eq!(observer.enqueue(observation(hooks, event(1))), Ok(()));
+        assert_eq!(observer.enqueue(log("req-1", &probe)), Ok(()));
         entered_rx
             .recv_timeout(Duration::from_secs(1))
-            .expect("worker entered callback");
+            .expect("worker entered log");
 
         let first_shutdown = observer.shutdown();
         tokio::pin!(first_shutdown);
         tokio::select! {
             biased;
-            _ = &mut first_shutdown => panic!("first shutdown completed while callback remained blocked"),
+            _ = &mut first_shutdown => panic!("first shutdown completed while log emission remained blocked"),
             _ = tokio::task::yield_now() => {}
         }
         let second_shutdown = observer.shutdown();
@@ -565,46 +504,33 @@ mod tests {
             _ = tokio::task::yield_now() => {}
         }
 
-        let (release_lock, wake) = &*released;
-        *release_lock.lock().expect("release lock") = true;
-        wake.notify_all();
+        release(&released);
         first_shutdown.await;
         second_shutdown.await;
 
-        assert_eq!(
-            hook.events.lock().expect("event lock").as_slice(),
-            &[event(1)]
-        );
+        assert_eq!(probe.request_ids(), ["req-1"]);
         assert!(TEST_DROPS.lock().expect("test drop lock").is_empty());
     }
 
     #[cfg(panic = "unwind")]
     #[tokio::test(flavor = "current_thread")]
-    async fn callback_panic_is_counted_and_worker_processes_following_job() {
+    async fn log_panic_is_counted_and_worker_processes_following_job() {
         let _serial = SERIAL.lock().await;
         TEST_DROPS.lock().expect("test drop lock").clear();
-        let hook = Arc::new(PanicOnceHook {
-            panicked: AtomicBool::new(false),
-            events: StdMutex::new(Vec::new()),
+        let probe = Arc::new(LogProbe {
+            panic_first: AtomicBool::new(true),
+            ..LogProbe::default()
         });
-        let hooks: Arc<[Arc<dyn ObservabilityHook>]> =
-            vec![hook.clone() as Arc<dyn ObservabilityHook>].into();
         let observer = CompletionObserver::with_capacity_and_recorder(2, test_record_drop);
 
-        assert_eq!(
-            observer.enqueue(observation(Arc::clone(&hooks), event(1))),
-            Ok(())
-        );
-        assert_eq!(observer.enqueue(observation(hooks, event(2))), Ok(()));
+        assert_eq!(observer.enqueue(log("req-1", &probe)), Ok(()));
+        assert_eq!(observer.enqueue(log("req-2", &probe)), Ok(()));
         observer.shutdown().await;
 
-        assert_eq!(
-            hook.events.lock().expect("event lock").as_slice(),
-            &[event(2)]
-        );
+        assert_eq!(probe.request_ids(), ["req-2"]);
         assert_eq!(
             TEST_DROPS.lock().expect("test drop lock").as_slice(),
-            &[CALLBACK_PANIC_REASON]
+            &[JOB_PANIC_REASON]
         );
     }
 }

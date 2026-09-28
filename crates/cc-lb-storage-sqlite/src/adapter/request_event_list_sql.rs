@@ -67,7 +67,6 @@ SELECT \
     list_connect_ms AS connect_ms, \
     list_connection_reused AS connection_reused, \
     list_limit_reconcile_ms AS limit_reconcile_ms, \
-    list_observability_post_ms AS observability_post_ms, \
     list_finalize_ms AS finalize_ms, \
     list_proxy_setup_ms AS proxy_setup_ms, \
     list_shape_ms AS shape_ms, \
@@ -184,7 +183,6 @@ pub(super) struct ListRow {
     pub(super) connect_ms: Option<i64>,
     pub(super) connection_reused: Option<i64>,
     pub(super) limit_reconcile_ms: Option<i64>,
-    pub(super) observability_post_ms: Option<i64>,
     pub(super) finalize_ms: Option<i64>,
     pub(super) proxy_setup_ms: Option<i64>,
     pub(super) shape_ms: Option<i64>,

@@ -43,11 +43,9 @@ The host and generated guest code use a small C ABI surface:
 - `cc_lb_free(ptr, size, align)`
 - `cc_lb_filter(in_ptr, in_len) -> packed_u64`
 - `cc_lb_shape(in_ptr, in_len) -> packed_u64`
-- `cc_lb_observe(in_ptr, in_len) -> packed_u64`
 
-Non-observe hooks return `(out_ptr, out_len)` packed into a `u64` as
-`(ptr << 32) | len`. Observe hooks return `(0, 0)` because they are
-side-effect-only.
+Hooks return `(out_ptr, out_len)` packed into a `u64` as
+`(ptr << 32) | len`.
 
 ## Typical Usage
 

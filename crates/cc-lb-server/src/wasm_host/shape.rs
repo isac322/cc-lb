@@ -197,14 +197,6 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
     }
 }
 
-pub(super) fn host_upstream_to_wire(upstream: &Upstream) -> cc_lb_plugin_wire::Upstream {
-    match upstream {
-        Upstream::AnthropicDirect { base_url } => cc_lb_plugin_wire::Upstream::AnthropicDirect {
-            base_url: base_url.as_ref().map(|u| u.to_string().into_boxed_str()),
-        },
-    }
-}
-
 fn with_wire_shape_request<R>(
     context: &DialectShapeContext,
     upstream: &Upstream,

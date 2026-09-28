@@ -15,7 +15,6 @@ use cc_lb_domain::{
     Principal, PrincipalKind, RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
     TtlClass, Upstream, UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
-use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
 use cc_lb_request_log::{
     HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
@@ -58,9 +57,7 @@ use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
 use crate::clock::{Clock, ClockHandle, unix_millis, unix_secs};
-use crate::completion_observer::{
-    CompletionObserver, StreamCompletionLog, StreamCompletionObservation, StreamLatency,
-};
+use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
 use crate::error_format::{
     anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
@@ -2149,7 +2146,6 @@ pub struct LifecycleStaticView {
     pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
     pub global_router: Arc<dyn RouterPlugin>,
     pub dispatcher: Arc<dyn UpstreamDispatch>,
-    pub global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
 }
 
 impl Lifecycle {
@@ -2163,7 +2159,6 @@ impl Lifecycle {
         let dynamic_view = DynamicViewBuilder::new(0)
             .signer_factory(static_view.signer_factory)
             .global_router(static_view.global_router)
-            .global_observability_hooks(static_view.global_observability_hooks)
             .principal_view(static_view.principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build();
@@ -2411,7 +2406,6 @@ impl Lifecycle {
             &ctx,
             &principal,
             candidates,
-            None,
         );
         let terminal_decision = self.select_terminal_upstream(
             resolved_pipeline.terminal.clone(),
@@ -2581,24 +2575,17 @@ impl Lifecycle {
         if body_view.stream() {
             handle_span.record("gen_ai.request.stream", true);
         }
-        let mut observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
+        let observer: Option<LifecycleContext> = observer_from_ext.or_else(|| {
             self.event_bus
                 .as_ref()
                 .map(|bus| LifecycleContext::new(ctx.request_id.clone(), bus.clone(), &self.clock))
         });
-        if observer.is_none() && !view.global_observability_hooks.is_empty() {
-            observer = Some(LifecycleContext::without_bus(
-                ctx.request_id.clone(),
-                &self.clock,
-            ));
-        }
         if let Some(o) = observer.as_ref() {
             // Holding `auth` is proof that authentication already succeeded, so
             // this request is inside the observation guarantee. Mark it here
             // rather than at the HTTP handler: `handle` is a public entry point
             // and every caller reaching it has passed the credential check.
             o.mark_authn_reached();
-            o.set_observability_hooks(&view.global_observability_hooks);
             o.set_request_span(handle_span.clone());
             o.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(&ctx.path));
             o.emit_request_started(body_view.stream());
@@ -2718,13 +2705,6 @@ impl Lifecycle {
         handle_span.record("cc_lb.principal.id", principal_id.as_str());
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
-            if let Some(o) = observer.as_ref() {
-                o.notify_error_hooks(
-                    "principal_missing",
-                    "authenticated principal is unavailable",
-                    "authn",
-                );
-            }
             let response = anthropic_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "api_error",
@@ -2762,24 +2742,6 @@ impl Lifecycle {
                 }),
             });
         }
-        let hooks = cached.resolved_hooks(&view.global_observability_hooks);
-        if observer.is_none() && !hooks.is_empty() {
-            observer = Some(LifecycleContext::without_bus(
-                ctx.request_id.clone(),
-                &self.clock,
-            ));
-        }
-        if let Some(o) = observer.as_ref() {
-            o.set_observability_hooks(hooks);
-        }
-        observe_many(
-            hooks,
-            ObserveEvent::AuthnComplete {
-                principal_id: principal_id.clone(),
-                kind: PrincipalKind::InternalKey,
-            },
-        );
-        let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
             id: principal_id,
             kind: PrincipalKind::InternalKey,
@@ -2817,7 +2779,6 @@ impl Lifecycle {
             Ok(resolution) => resolution,
             Err(failure) => {
                 if let Some(o) = observer.as_ref() {
-                    o.notify_error_hooks(UPSTREAM_AFFINITY_ERROR_TYPE, failure.message, "storage");
                     o.terminate_failure(InternalFailure {
                         status: failure.status,
                         error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
@@ -2840,9 +2801,6 @@ impl Lifecycle {
 
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
-            if let Some(o) = observer.as_ref() {
-                o.notify_error_hooks("router_pipeline_unavailable", error, "router");
-            }
             let response = anthropic_error_response(
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
@@ -2900,13 +2858,8 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
-        let mut pipeline_result = execute_filter_pipeline(
-            &router_pipeline.user_filters,
-            &ctx,
-            &principal,
-            candidates,
-            observer.as_ref(),
-        );
+        let mut pipeline_result =
+            execute_filter_pipeline(&router_pipeline.user_filters, &ctx, &principal, candidates);
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -2918,9 +2871,6 @@ impl Lifecycle {
         );
         if pipeline_result.candidates.is_empty() {
             let message = "no upstream candidates remain after routing filters";
-            if let Some(o) = observer.as_ref() {
-                o.notify_error_hooks("route_no_upstream_after_filter", message, "router");
-            }
             self.emit_routing_failure_event(
                 observer.as_ref(),
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2946,13 +2896,6 @@ impl Lifecycle {
             .iter()
             .find(|record| record.id == resolved_upstream_id)
         else {
-            if let Some(o) = observer.as_ref() {
-                o.notify_error_hooks(
-                    "route_not_configured",
-                    "router selected an upstream missing from the dynamic view",
-                    "router",
-                );
-            }
             let response = anthropic_error_response(
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
@@ -2993,9 +2936,6 @@ impl Lifecycle {
         let route_upstream = match upstream_for_record(resolved_record) {
             Ok(upstream) => upstream,
             Err(reason) => {
-                if let Some(o) = observer.as_ref() {
-                    o.notify_error_hooks("route_not_configured", &reason, "router");
-                }
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
@@ -3151,7 +3091,7 @@ impl Lifecycle {
                             limit_violation: info.limit_violation,
                         },
                     });
-                    o.set_termination_timings(None, None, Some(proxy_setup_ms), None, None);
+                    o.set_termination_timings(None, Some(proxy_setup_ms), None, None);
                     o.terminate_failure(InternalFailure {
                         status,
                         error_code: error_codes::LIMIT_REJECTED,
@@ -3208,9 +3148,6 @@ impl Lifecycle {
         let signer = match signer_result {
             Ok(signer) => signer,
             Err(source) => {
-                if let Some(o) = observer.as_ref() {
-                    o.notify_error_hooks("signing_error", &source.to_string(), "signer_factory");
-                }
                 let mut response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
@@ -3446,7 +3383,6 @@ impl Lifecycle {
                     } else {
                         UpstreamErrorCode::Upstream5xx
                     };
-                    o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
                     o.set_upstream_error(status, code);
                     o.finish();
                 }
@@ -3484,7 +3420,6 @@ impl Lifecycle {
                 reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
                 status,
-                stream_hooks,
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
                     thread_id: ctx.thread_id.clone(),
@@ -3617,7 +3552,6 @@ impl Lifecycle {
         response_accounting_guard: Option<ResponseAccountingGuard>,
         duration: Duration,
         status: StatusCode,
-        stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
         prompt_cache_observation_context: Option<PromptCacheObservationContext>,
@@ -3637,7 +3571,6 @@ impl Lifecycle {
             let mut response = self.relay_response(
                 response,
                 response_status,
-                stream_hooks,
                 response_accounting_guard,
                 event_ctx.clone(),
                 transform_ctx,
@@ -3943,7 +3876,6 @@ impl Lifecycle {
             });
             o.set_termination_timings(
                 None,
-                None,
                 event_ctx.proxy_setup_ms,
                 Some(body_collect_ms),
                 first_body_chunk_ms,
@@ -3963,16 +3895,10 @@ impl Lifecycle {
                 } else {
                     UpstreamErrorCode::Upstream5xx
                 };
-                o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
                 o.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::StreamError);
             } else if affinity_bind_failed {
-                o.notify_error_hooks(
-                    UPSTREAM_AFFINITY_ERROR_TYPE,
-                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                    "storage",
-                );
                 o.set_failure(InternalFailure {
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
@@ -4002,7 +3928,6 @@ impl Lifecycle {
             }
             let finalize_ms = duration_to_ms(finalize_started.elapsed());
             o.set_finalize_ms(finalize_ms);
-            o.mark_observe_finished_emitted();
             o.finish();
             finalize_ms
         } else {
@@ -4011,19 +3936,6 @@ impl Lifecycle {
         let response_span = tracing::Span::current();
         response_span.record("cc_lb.response_body_ms", body_collect_ms);
         response_span.record("cc_lb.request.finalize_ms", finalize_ms);
-        observe_many(
-            stream_hooks.as_slice(),
-            ObserveEvent::RequestFinished {
-                status: client_status,
-                input_tokens: usage.present.then_some(usage.input_tokens),
-                output_tokens: usage.present.then_some(usage.output_tokens),
-                cache_creation_input_tokens: usage
-                    .present
-                    .then_some(usage.cache_creation_input_tokens),
-                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
-                duration_ms: duration_to_ms(duration),
-            },
-        );
         Response::from_parts(parts, Body::from(downstream_body))
     }
 
@@ -4173,9 +4085,6 @@ impl Lifecycle {
             Err(source) => {
                 let message = source.to_string();
                 tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
-                if let Some(o) = observer {
-                    o.notify_error_hooks("shape_error", &message, "dialect");
-                }
                 record_shape_internal_error(observer, &message);
                 (
                     raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?,
@@ -4196,9 +4105,6 @@ impl Lifecycle {
             .map_err(|source| {
                 tracing::error!(%source, "sign_request failed");
                 timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
-                if let Some(o) = observer {
-                    o.notify_error_hooks("signing_error", &source.to_string(), "signer");
-                }
                 AttemptFailure::Sign(source)
             })?;
         timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
@@ -4239,9 +4145,6 @@ impl Lifecycle {
                     DispatchError::Transport { .. } => "transport",
                 },
             );
-            if let Some(o) = observer {
-                o.notify_error_hooks("upstream_dispatch_error", &source.to_string(), "dispatch");
-            }
             AttemptFailure::Dispatch(source)
         })?;
         // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
@@ -4254,7 +4157,6 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         status: StatusCode,
-        hooks: StreamHooks,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         event_ctx: RequestEventContext,
         transform_ctx: ResponseTransformContext,
@@ -4312,7 +4214,6 @@ impl Lifecycle {
             } else {
                 UpstreamErrorCode::Upstream5xx
             };
-            o.notify_error_hooks(code.as_str(), status.as_str(), "upstream");
             o.set_upstream_error(status, code);
         }
         let stream_span = tracing::info_span!(
@@ -4423,11 +4324,6 @@ impl Lifecycle {
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                 );
-                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                    batch_index,
-                                    event_count: 1,
-                                    total_bytes: frame.len(),
-                                });
                                 if let Some(o) = observer.as_ref() {
                                     o.set_upstream_error(
                                         StatusCode::OK,
@@ -4480,11 +4376,6 @@ impl Lifecycle {
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                         );
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        });
                                         if let Some(o) = observer.as_ref() {
                                             o.set_upstream_error(
                                                 StatusCode::OK,
@@ -4521,14 +4412,6 @@ impl Lifecycle {
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 &error_message,
                                             );
-                                            observe_many(
-                                                hooks.as_slice(),
-                                                ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                },
-                                            );
                                             stream_upstream_error_frame_emitted = true;
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
@@ -4564,14 +4447,6 @@ impl Lifecycle {
                                                 };
                                             let frame =
                                                 make_response_transform_error_frame(&transform_error);
-                                            observe_many(
-                                                hooks.as_slice(),
-                                                ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                },
-                                            );
                                             stream_transform_error = Some(transform_error);
                                             if let Some(o) = observer.as_ref()
                                                 && !upstream_error_status
@@ -4674,14 +4549,6 @@ impl Lifecycle {
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             );
-                                            observe_many(
-                                                hooks.as_slice(),
-                                                ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                },
-                                            );
                                             batch_index = batch_index.saturating_add(1);
                                             if let Some(o) = observer.as_ref() {
                                                 o.set_upstream_error(
@@ -4735,14 +4602,6 @@ impl Lifecycle {
                                             let frame = make_error_frame(
                                                 "api_error",
                                                 UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                                            );
-                                            observe_many(
-                                                hooks.as_slice(),
-                                                ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                },
                                             );
                                             batch_index = batch_index.saturating_add(1);
                                             yield Ok::<Bytes, Infallible>(frame);
@@ -4894,14 +4753,6 @@ impl Lifecycle {
                                                     };
                                                     let frame =
                                                         make_response_transform_error_frame(&error);
-                                                    observe_many(
-                                                        hooks.as_slice(),
-                                                        ObserveEvent::Chunk {
-                                                            batch_index,
-                                                            event_count: 1,
-                                                            total_bytes: frame.len(),
-                                                        },
-                                                    );
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
@@ -4923,11 +4774,6 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                        batch_index,
-                                                        event_count: 1,
-                                                        total_bytes: raw.len(),
-                                                    });
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -4952,14 +4798,6 @@ impl Lifecycle {
                                                     } else {
                                                         make_response_transform_error_frame(&error)
                                                     };
-                                                    observe_many(
-                                                        hooks.as_slice(),
-                                                        ObserveEvent::Chunk {
-                                                            batch_index,
-                                                            event_count: 1,
-                                                            total_bytes: frame.len(),
-                                                        },
-                                                    );
                                                     stream_transform_error = Some(error);
                                                     if let Some(o) = observer.as_ref()
                                                         && !upstream_error_status
@@ -4981,11 +4819,6 @@ impl Lifecycle {
                                                 raw_passthrough_current_chunk = true;
                                                 for raw in raw_before_transform_output.drain(..) {
                                                     downstream_sse_boundary.observe(&raw);
-                                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                                        batch_index,
-                                                        event_count: 1,
-                                                        total_bytes: raw.len(),
-                                                    });
                                                     batch_index = batch_index.saturating_add(1);
                                                     yield Ok::<Bytes, Infallible>(raw);
                                                 }
@@ -5005,11 +4838,6 @@ impl Lifecycle {
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                         );
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        });
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break 'upstream;
                                     } else {
@@ -5020,20 +4848,10 @@ impl Lifecycle {
                                     if raw_passthrough_current_chunk {
                                         break;
                                     }
-                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                        batch_index,
-                                        event_count: 1,
-                                        total_bytes: outgoing.len(),
-                                    });
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(outgoing);
                                 } else if success_sse_affinity_gate {
                                     downstream_sse_boundary.observe(&raw);
-                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                        batch_index,
-                                        event_count: 1,
-                                        total_bytes: raw.len(),
-                                    });
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(raw);
                                 }
@@ -5062,11 +4880,6 @@ impl Lifecycle {
                                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                         UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                     );
-                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                        batch_index,
-                                        event_count: 1,
-                                        total_bytes: frame.len(),
-                                    });
                                     if let Some(o) = observer.as_ref() {
                                         o.set_upstream_error(
                                             StatusCode::OK,
@@ -5096,11 +4909,6 @@ impl Lifecycle {
                                             },
                                         };
                                         let frame = make_response_transform_error_frame(&error);
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        });
                                         stream_transform_error = Some(error);
                                         if let Some(o) = observer.as_ref()
                                             && !upstream_error_status
@@ -5119,11 +4927,6 @@ impl Lifecycle {
                                     sse_transform_active = false;
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: raw.len(),
-                                        });
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -5135,11 +4938,6 @@ impl Lifecycle {
                                     if upstream_is_sse && downstream_stream_is_identity {
                                         downstream_sse_boundary.observe(&data);
                                     }
-                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                        batch_index,
-                                        event_count: 1,
-                                        total_bytes: data.len(),
-                                    });
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
                                         debug_assert!(deferred_terminal_chunk.is_none());
@@ -5197,11 +4995,6 @@ impl Lifecycle {
                                     && !sse_transform_active
                                     && downstream_sse_boundary.partial_event_pending(),
                             );
-                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                batch_index,
-                                event_count: 1,
-                                total_bytes: frame.len(),
-                            });
                             stream_upstream_error_frame_emitted = true;
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
@@ -5262,11 +5055,6 @@ impl Lifecycle {
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                         );
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        });
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break;
@@ -5309,14 +5097,6 @@ impl Lifecycle {
                                     let frame = make_error_frame(
                                         "api_error",
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                                    );
-                                    observe_many(
-                                        hooks.as_slice(),
-                                        ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        },
                                     );
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(frame);
@@ -5384,11 +5164,6 @@ impl Lifecycle {
                                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                         );
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: frame.len(),
-                                        });
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(frame);
                                         break;
@@ -5418,14 +5193,6 @@ impl Lifecycle {
                                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                                 UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                             );
-                                            observe_many(
-                                                hooks.as_slice(),
-                                                ObserveEvent::Chunk {
-                                                    batch_index,
-                                                    event_count: 1,
-                                                    total_bytes: frame.len(),
-                                                },
-                                            );
                                             batch_index = batch_index.saturating_add(1);
                                             yield Ok::<Bytes, Infallible>(frame);
                                             break;
@@ -5435,11 +5202,6 @@ impl Lifecycle {
                                     raw
                                 };
                                 downstream_sse_boundary.observe(&outgoing);
-                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                    batch_index,
-                                    event_count: 1,
-                                    total_bytes: outgoing.len(),
-                                });
                                 batch_index = batch_index.saturating_add(1);
                                 yield Ok::<Bytes, Infallible>(outgoing);
                             }
@@ -5469,11 +5231,6 @@ impl Lifecycle {
                                     UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                     UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                                 );
-                                observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                    batch_index,
-                                    event_count: 1,
-                                    total_bytes: frame.len(),
-                                });
                                 yield Ok::<Bytes, Infallible>(frame);
                             } else if sse_transform_active && stream_transform_error.is_none() {
                                 if transformed_output_started
@@ -5491,11 +5248,6 @@ impl Lifecycle {
                                         },
                                     };
                                     let frame = make_response_transform_error_frame(&error);
-                                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                        batch_index,
-                                        event_count: 1,
-                                        total_bytes: frame.len(),
-                                    });
                                     stream_transform_error = Some(error);
                                     downstream_drop_guard.mark_proxy_error(
                                         StreamTerminationCause::TransformError,
@@ -5512,11 +5264,6 @@ impl Lifecycle {
                                 } else {
                                     for raw in raw_before_transform_output.drain(..) {
                                         downstream_sse_boundary.observe(&raw);
-                                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                            batch_index,
-                                            event_count: 1,
-                                            total_bytes: raw.len(),
-                                        });
                                         batch_index = batch_index.saturating_add(1);
                                         yield Ok::<Bytes, Infallible>(raw);
                                     }
@@ -5553,11 +5300,6 @@ impl Lifecycle {
                             UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                             UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE,
                         );
-                        observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                            batch_index,
-                            event_count: 1,
-                            total_bytes: frame.len(),
-                        });
                         yield Ok::<Bytes, Infallible>(frame);
                     } else if upstream_is_sse
                         && upstream_decode_failed
@@ -5593,11 +5335,6 @@ impl Lifecycle {
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 &error_message,
                             );
-                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                batch_index,
-                                event_count: 1,
-                                total_bytes: frame.len(),
-                            });
                             if let Some(o) = observer.as_ref()
                                 && !upstream_error_status
                             {
@@ -5623,11 +5360,6 @@ impl Lifecycle {
                                 },
                             };
                             let frame = make_response_transform_error_frame(&transform_error);
-                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                                batch_index,
-                                event_count: 1,
-                                total_bytes: frame.len(),
-                            });
                             stream_transform_error = Some(transform_error);
                             downstream_drop_guard.mark_proxy_error(
                                 StreamTerminationCause::TransformError,
@@ -5679,11 +5411,6 @@ impl Lifecycle {
                             && !sse_transform_active
                             && downstream_sse_boundary.partial_event_pending(),
                     );
-                    observe_many(hooks.as_slice(), ObserveEvent::Chunk {
-                        batch_index,
-                        event_count: 1,
-                        total_bytes: frame.len(),
-                    });
                     if let Some(o) = observer.as_ref()
                         && !upstream_error_status
                     {
@@ -5723,14 +5450,6 @@ impl Lifecycle {
                     let frame = make_error_frame(
                         "api_error",
                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                    );
-                    observe_many(
-                        hooks.as_slice(),
-                        ObserveEvent::Chunk {
-                            batch_index,
-                            event_count: 1,
-                            total_bytes: frame.len(),
-                        },
                     );
                     batch_index = batch_index.saturating_add(1);
                     yield Ok::<Bytes, Infallible>(frame);
@@ -5838,7 +5557,6 @@ impl Lifecycle {
                 }
                 o.set_termination_timings(
                     None,
-                    None,
                     event_ctx.proxy_setup_ms,
                     Some(stream_total_ms),
                     elapsed_ms(first_chunk_at),
@@ -5859,11 +5577,6 @@ impl Lifecycle {
                     });
                 }
                 if stream_affinity_error.is_some() && !upstream_error_status {
-                    o.notify_error_hooks(
-                        UPSTREAM_AFFINITY_ERROR_TYPE,
-                        UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                        "storage",
-                    );
                     o.set_failure(InternalFailure {
                         status: StatusCode::OK,
                         error_code: error_codes::UPSTREAM_STREAM_ERROR,
@@ -5899,14 +5612,13 @@ impl Lifecycle {
                 let finalize_ms = duration_to_ms(response_body_completed_at.elapsed());
                 o.set_finalize_ms(finalize_ms);
                 o.set_io_timings(stream_body_io_timing.snapshot());
-                o.mark_observe_finished_emitted();
                 o.finish();
                 finalize_ms
             } else {
                 duration_to_ms(response_body_completed_at.elapsed())
             };
             // Mandatory lifecycle, accounting, affinity, and termination work is complete.
-            // Only best-effort hook dispatch and latency logging cross this bounded boundary.
+            // Only best-effort latency logging crosses this bounded boundary.
             let stream_latency = StreamLatency {
                 status: status.as_u16(),
                 stream_first_chunk_ms: elapsed_ms(first_chunk_at),
@@ -5925,30 +5637,12 @@ impl Lifecycle {
             };
             stream_latency.record_on_span(&stream_span);
             downstream_drop_guard.finish(stream_total_ms, finalize_ms);
-            if stream_latency_log_dispatch.is_some() || !hooks.is_empty() {
-                let completion_log = stream_latency_log_dispatch.map(|dispatch| {
-                    StreamCompletionLog::new(
-                        event_ctx.request_id,
-                        &stream_span,
-                        stream_latency,
-                        dispatch,
-                    )
-                });
-                let _ = completion_observer.enqueue(StreamCompletionObservation::new(
-                    hooks.into_arc(),
-                    ObserveEvent::RequestFinished {
-                        status,
-                        input_tokens: usage.present.then_some(usage.input_tokens),
-                        output_tokens: usage.present.then_some(usage.output_tokens),
-                        cache_creation_input_tokens: usage
-                            .present
-                            .then_some(usage.cache_creation_input_tokens),
-                        cache_read_input_tokens: usage
-                            .present
-                            .then_some(usage.cache_read_input_tokens),
-                        duration_ms: stream_total_ms,
-                    },
-                    completion_log,
+            if let Some(dispatch) = stream_latency_log_dispatch {
+                let _ = completion_observer.enqueue(StreamCompletionLog::new(
+                    event_ctx.request_id,
+                    &stream_span,
+                    stream_latency,
+                    dispatch,
                 ));
             }
             if let Some(chunk) = deferred_terminal_chunk {
@@ -6024,7 +5718,6 @@ fn execute_filter_pipeline(
     ctx: &RequestContext,
     principal: &Principal,
     candidates: Vec<UpstreamCandidate>,
-    observer: Option<&LifecycleContext>,
 ) -> FilterPipelineResult {
     let routing_context = ctx.routing_context();
     let mut current = candidates;
@@ -6054,13 +5747,6 @@ fn execute_filter_pipeline(
                             error = message.as_str(),
                             "router filter returned invalid output; passing candidates through"
                         );
-                        if let Some(o) = observer {
-                            o.notify_error_hooks(
-                                "router_filter_invalid_output",
-                                &message,
-                                "router",
-                            );
-                        }
                         stages.push(StageDecision {
                             stage_name,
                             upstream_id: current.first().map(|candidate| candidate.upstream_id),
@@ -6102,9 +5788,6 @@ fn execute_filter_pipeline(
                     error = message.as_str(),
                     "router filter stage failed; passing candidates through"
                 );
-                if let Some(o) = observer {
-                    o.notify_error_hooks("router_filter_passthrough", &message, "router");
-                }
                 stages.push(StageDecision {
                     stage_name,
                     upstream_id: current.first().map(|candidate| candidate.upstream_id),
@@ -6219,31 +5902,6 @@ fn terminal_candidates(
         .cloned()
         .into_iter()
         .collect()
-}
-
-#[derive(Clone)]
-struct StreamHooks {
-    hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-}
-
-impl StreamHooks {
-    fn new(hooks: &[Arc<dyn ObservabilityHook>]) -> Self {
-        Self {
-            hooks: hooks.iter().cloned().collect(),
-        }
-    }
-
-    fn as_slice(&self) -> &[Arc<dyn ObservabilityHook>] {
-        &self.hooks
-    }
-
-    fn is_empty(&self) -> bool {
-        self.hooks.is_empty()
-    }
-
-    fn into_arc(self) -> Arc<[Arc<dyn ObservabilityHook>]> {
-        self.hooks
-    }
 }
 
 struct CollectedResponse {
@@ -7208,12 +6866,6 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
                 media_type.trim().eq_ignore_ascii_case("text/event-stream")
             })
         })
-}
-
-fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
-    for hook in hooks {
-        let _result = hook.observe(event.clone());
-    }
 }
 
 fn to_usage_snapshot(u: &UsageCounts) -> cc_lb_lifecycle::UsageSnapshot {
@@ -9581,7 +9233,6 @@ mod tests {
         let mut builder = DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .global_observability_hooks(Vec::new())
             .principal_view(Arc::new(PrincipalView::from_db(
                 &[principal_record("principal")],
                 HashMap::new(),
@@ -9943,21 +9594,6 @@ mod tests {
         ))
     }
 
-    #[derive(Default)]
-    struct RecordingHook {
-        events: Mutex<Vec<ObserveEvent>>,
-    }
-
-    impl ObservabilityHook for RecordingHook {
-        fn observe(
-            &self,
-            event: ObserveEvent,
-        ) -> Result<(), cc_lb_observability::ObservabilityError> {
-            self.events.lock().expect("recording hook lock").push(event);
-            Ok(())
-        }
-    }
-
     /// Deterministic dispatcher: replays a scripted queue of outcomes.
     struct QueueDispatch {
         calls: AtomicUsize,
@@ -10196,23 +9832,17 @@ mod tests {
     }
 
     fn default_artifacts() -> crate::api_keys::principal_view::PrincipalRoutingArtifacts {
-        (
-            None,
-            crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
-            crate::api_keys::principal_view::DialectCache::Inherit,
-        )
+        (None, crate::api_keys::principal_view::DialectCache::Inherit)
     }
 
     fn provenance_view(
         principal_view: Arc<PrincipalView>,
         signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-        hooks: Vec<Arc<dyn ObservabilityHook>>,
         upstreams: Vec<UpstreamRecord>,
     ) -> Arc<DynamicView> {
         DynamicViewBuilder::new(0)
             .signer_factory(signer_factory)
             .global_router(Arc::new(TestRouter))
-            .global_observability_hooks(hooks)
             .principal_view(principal_view)
             .upstream_records(upstreams)
             .build()
@@ -10331,7 +9961,6 @@ mod tests {
         let view_a = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let holder = Arc::new(DynamicViewHolder::new(view_a));
@@ -10356,7 +9985,6 @@ mod tests {
         holder.store(provenance_view(
             failure_principal_view("other-principal", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         ));
 
@@ -10420,12 +10048,10 @@ mod tests {
                 "principal-test",
                 (
                     Some(Arc::new(pipeline)),
-                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
                     crate::api_keys::principal_view::DialectCache::Inherit,
                 ),
             ),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
@@ -10492,12 +10118,10 @@ mod tests {
                 "principal-test",
                 (
                     Some(Arc::new(pipeline)),
-                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
                     crate::api_keys::principal_view::DialectCache::Inherit,
                 ),
             ),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
@@ -10554,7 +10178,6 @@ mod tests {
             Arc::new(FailingSignerFactory(|| SignerError::MissingCredentials {
                 reason: "no credential material".to_owned(),
             })),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
@@ -10612,7 +10235,6 @@ mod tests {
                     reason: "hmac exploded".to_owned(),
                 }
             })),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
@@ -10666,7 +10288,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
@@ -10717,7 +10338,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
@@ -10785,7 +10405,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::BulkheadFull {
@@ -10855,7 +10474,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(RefreshingSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![
@@ -10930,7 +10548,6 @@ mod tests {
                 "principal-test",
                 (
                     None,
-                    crate::api_keys::principal_view::ObservabilityHooksCache::Inherit,
                     crate::api_keys::principal_view::DialectCache::Explicit(
                         crate::api_keys::principal_view::ShapePluginCache {
                             dialect: Arc::new(FailingDialect),
@@ -10939,7 +10556,6 @@ mod tests {
                 ),
             ),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(upstream_response(
@@ -10993,7 +10609,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Ok(upstream_response(
@@ -11033,69 +10648,9 @@ mod tests {
         assert!(terminal.internal_errors.is_empty());
     }
 
-    /// QA-CTRL-13 (handle path): `ObserveEvent::Error` hooks still fire with
-    /// the same payload and relative order after the emit migration.
-    #[tokio::test]
-    async fn error_hooks_preserve_payload_and_order_on_dispatch_failure() {
-        let bus = Arc::new(crate::event_bus::InMemoryBus::new());
-        let hook = Arc::new(RecordingHook::default());
-        let upstream_id = Uuid::new_v4();
-        let view = provenance_view(
-            failure_principal_view("principal-test", default_artifacts()),
-            Arc::new(TestSignerFactory),
-            vec![hook.clone()],
-            vec![upstream_record(upstream_id)],
-        );
-        let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
-            source: Box::new(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "refused",
-            )),
-        })]));
-        let lifecycle = provenance_lifecycle(view, dispatcher, &bus);
-
-        let request = failure_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[]}"#,
-        ));
-        let auth = lifecycle
-            .authenticate(request.headers())
-            .await
-            .expect("request authenticates");
-        let response = lifecycle
-            .handle(request, &auth)
-            .await
-            .expect("lifecycle handles request");
-        let (status, _body) = collect_response_body(response).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-
-        let events = hook.events.lock().expect("recording hook lock").clone();
-        let authn_pos = events
-            .iter()
-            .position(|event| matches!(event, ObserveEvent::AuthnComplete { .. }))
-            .expect("AuthnComplete hook event");
-        let error_pos = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    event,
-                    ObserveEvent::Error { code, source, .. }
-                        if code == "upstream_dispatch_error" && source == "dispatch"
-                )
-            })
-            .expect("upstream_dispatch_error hook event");
-        let finished_pos = events
-            .iter()
-            .position(|event| matches!(event, ObserveEvent::RequestFinished { .. }))
-            .expect("RequestFinished hook event");
-        assert!(
-            authn_pos < error_pos && error_pos < finished_pos,
-            "hook order must be AuthnComplete < Error < RequestFinished: {events:?}"
-        );
-    }
-
-    /// QA-AUTH-01/05 + QA-CTRL-13 (authn_rail site): `reject_unauthenticated`
+    /// QA-AUTH-01/05: `reject_unauthenticated`
     /// persists the exact BuiltinAuthError Display literal with the typed
-    /// stage/kind, and the error hook fires before the terminal hook.
+    /// stage/kind.
     #[tokio::test]
     async fn reject_unauthenticated_records_exact_auth_error() {
         for (error, expected_status, expected_kind) in [
@@ -11112,7 +10667,6 @@ mod tests {
         ] {
             let bus = Arc::new(crate::event_bus::InMemoryBus::new());
             let mut rx = subscribe_lifecycle(&bus);
-            let hook = Arc::new(RecordingHook::default());
             let clock: ClockHandle = Arc::new(crate::clock::SystemClock);
             let observer = LifecycleContext::new(
                 "req-authn-reject".to_owned(),
@@ -11120,9 +10674,6 @@ mod tests {
                 &clock,
             );
             observer.mark_authn_reached();
-            let hook_trait: Arc<dyn ObservabilityHook> = hook.clone();
-            observer.set_observability_hooks(std::slice::from_ref(&hook_trait));
-
             let response = crate::authn_rail::reject_unauthenticated(&error, Some(&observer));
             assert_eq!(response.status(), expected_status);
             let (_status, body) = collect_response_body(response).await;
@@ -11178,26 +10729,6 @@ mod tests {
                 terminal.internal_errors[0].message.as_deref(),
                 Some(error.to_string().as_str()),
                 "exact BuiltinAuthError Display literal must persist"
-            );
-
-            let hook_events = hook.events.lock().expect("recording hook lock").clone();
-            let error_pos = hook_events
-                .iter()
-                .position(|event| {
-                    matches!(
-                        event,
-                        ObserveEvent::Error { code, source, .. }
-                            if code == "authentication_error" && source == "authn"
-                    )
-                })
-                .expect("authentication_error hook event");
-            let finished_pos = hook_events
-                .iter()
-                .position(|event| matches!(event, ObserveEvent::RequestFinished { .. }))
-                .expect("RequestFinished hook event");
-            assert!(
-                error_pos < finished_pos,
-                "error hook must precede terminal hook: {hook_events:?}"
             );
         }
     }
@@ -11295,7 +10826,6 @@ mod tests {
         let view = provenance_view(
             failure_principal_view("principal-test", default_artifacts()),
             Arc::new(TestSignerFactory),
-            Vec::new(),
             vec![upstream_record(upstream_id)],
         );
         let dispatcher = Arc::new(QueueDispatch::new(vec![Err(DispatchError::Transport {
@@ -11359,7 +10889,6 @@ mod tests {
             let view = provenance_view(
                 failure_principal_view("principal-test", default_artifacts()),
                 Arc::new(TestSignerFactory),
-                Vec::new(),
                 vec![upstream_record(upstream_id)],
             );
             let dispatcher = Arc::new(QueueDispatch::new(vec![Err(source)]));

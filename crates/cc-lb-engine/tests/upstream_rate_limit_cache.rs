@@ -12,7 +12,6 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DynamicView, DynamicViewBuilder, RequestKind, UpstreamRateLimitCache,
     build_candidates,
 };
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
@@ -26,9 +25,7 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
-use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, messages_request,
-};
+use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
 
 #[test]
 fn build_candidates_populates_observations_from_dynamic_view_cache() {
@@ -82,7 +79,6 @@ async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
             state,
             mode: DispatchMode::HeadersOk(rate_limit_headers(321)),
         },
-        Arc::new(RecordingHook::default()),
         Arc::clone(&shared_cache),
     )
     .with_event_bus(test_bus.bus_arc());
@@ -128,7 +124,6 @@ fn test_view(
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
         .global_router(Arc::new(TestRouter))
-        .global_observability_hooks(vec![Arc::new(TestHook)])
         .principal_view(Arc::new(PrincipalView::from_db(
             &principals,
             std::collections::HashMap::new(),
@@ -267,13 +262,5 @@ impl RouterPlugin for TestRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         panic!("cache candidate test must not route")
-    }
-}
-
-struct TestHook;
-
-impl ObservabilityHook for TestHook {
-    fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-        Ok(())
     }
 }

@@ -4,7 +4,6 @@ use arc_swap::ArcSwap;
 #[doc(hidden)]
 pub use cc_lb_domain::PlanInfo;
 use cc_lb_domain::RateLimitObservation;
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::RouterPlugin;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
@@ -22,7 +21,6 @@ use crate::traits::{
 pub struct DynamicView {
     pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
     pub global_router: Arc<dyn RouterPlugin>,
-    pub global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
@@ -180,7 +178,6 @@ pub struct DynamicViewBuilder {
     previous_generation: u64,
     signer_factory: Option<Arc<dyn ApiKeyAwareSignerFactory>>,
     global_router: Option<Arc<dyn RouterPlugin>>,
-    global_observability_hooks: Option<Arc<[Arc<dyn ObservabilityHook>]>>,
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
@@ -200,7 +197,6 @@ impl DynamicViewBuilder {
             previous_generation,
             signer_factory: None,
             global_router: None,
-            global_observability_hooks: None,
             principal_view: None,
             upstream_status_snapshot: None,
             upstream_rate_limit_cache: None,
@@ -220,7 +216,6 @@ impl DynamicViewBuilder {
             previous_generation: view.generation,
             signer_factory: Some(Arc::clone(&view.signer_factory)),
             global_router: Some(Arc::clone(&view.global_router)),
-            global_observability_hooks: Some(Arc::clone(&view.global_observability_hooks)),
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
             upstream_rate_limit_cache: Some(Arc::clone(&view.upstream_rate_limit_cache)),
@@ -244,14 +239,6 @@ impl DynamicViewBuilder {
 
     pub fn global_router(mut self, global_router: Arc<dyn RouterPlugin>) -> Self {
         self.global_router = Some(global_router);
-        self
-    }
-
-    pub fn global_observability_hooks(
-        mut self,
-        global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
-    ) -> Self {
-        self.global_observability_hooks = Some(Arc::from(global_observability_hooks));
         self
     }
 
@@ -330,9 +317,6 @@ impl DynamicViewBuilder {
             global_router: self
                 .global_router
                 .expect("DynamicViewBuilder requires global_router"),
-            global_observability_hooks: self
-                .global_observability_hooks
-                .expect("DynamicViewBuilder requires global_observability_hooks"),
             principal_view: self
                 .principal_view
                 .expect("DynamicViewBuilder requires principal_view"),
@@ -362,7 +346,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-    use cc_lb_observability::{ObservabilityError, ObserveEvent};
     use cc_lb_routing::{RouteDecision, RouteError, RoutingContext};
     use cc_lb_upstream::{
         RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -419,14 +402,6 @@ mod tests {
         }
     }
 
-    struct TestHook;
-
-    impl ObservabilityHook for TestHook {
-        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-            Ok(())
-        }
-    }
-
     fn test_view(previous_generation: u64) -> Arc<DynamicView> {
         let principal_view = Arc::new(PrincipalView::from_db(
             &[],
@@ -435,7 +410,6 @@ mod tests {
         DynamicViewBuilder::new(previous_generation)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .global_observability_hooks(vec![Arc::new(TestHook)])
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

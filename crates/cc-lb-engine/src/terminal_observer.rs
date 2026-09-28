@@ -35,7 +35,6 @@
 
 use std::error::Error as StdError;
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -43,9 +42,7 @@ use std::time::Instant;
 use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
 use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, RequestSetupTimings, TerminationReason};
-use cc_lb_observability::{
-    ObservabilityHook, ObserveEvent, RedactionPolicy, redact_internal_errors, truncate_reason,
-};
+use cc_lb_observability::{RedactionPolicy, redact_internal_errors, truncate_reason};
 use cc_lb_storage_api::types::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
@@ -380,7 +377,7 @@ pub struct LifecycleContext {
 
 struct Inner {
     event_id: String,
-    bus: Option<Arc<dyn RequestEventBus>>,
+    bus: Arc<dyn RequestEventBus>,
     /// Set once the request reaches the authentication attempt. Until then
     /// lifecycle events are buffered in `TerminalState::pending_events`
     /// instead of reaching the bus.
@@ -388,7 +385,6 @@ struct Inner {
     started_unix_ms: u64,
     started: Instant,
     state: Mutex<TerminalState>,
-    observability_hooks: Mutex<Arc<[Arc<dyn ObservabilityHook>]>>,
     finalized: AtomicBool,
 }
 
@@ -403,7 +399,6 @@ struct TerminalState {
     request_body_read_ms: Option<u64>,
     request_body_bytes: Option<u64>,
     limit_reconcile_ms: Option<u64>,
-    observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     setup_timings: RequestSetupTimings,
     io_timings: RequestIoTimings,
@@ -420,7 +415,6 @@ struct TerminalState {
     upstream_body_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
     finalize_ms: Option<u64>,
-    observe_finished_emitted: bool,
     request_started_emitted: bool,
     /// Lifecycle events emitted before the request reached authentication.
     /// Flushed to the bus in order by `mark_authn_reached`, or discarded if
@@ -430,18 +424,6 @@ struct TerminalState {
 
 impl LifecycleContext {
     pub fn new(request_id: String, bus: Arc<dyn RequestEventBus>, clock: &ClockHandle) -> Self {
-        Self::new_inner(request_id, Some(bus), clock)
-    }
-
-    pub(crate) fn without_bus(request_id: String, clock: &ClockHandle) -> Self {
-        Self::new_inner(request_id, None, clock)
-    }
-
-    fn new_inner(
-        request_id: String,
-        bus: Option<Arc<dyn RequestEventBus>>,
-        clock: &ClockHandle,
-    ) -> Self {
         let event_id = Uuid::now_v7().to_string();
         let started_unix_ms = unix_millis(clock.now()).min(u128::from(u64::MAX)) as u64;
         Self {
@@ -450,7 +432,6 @@ impl LifecycleContext {
                 bus,
                 started_unix_ms,
                 started: Instant::now(),
-                observability_hooks: Mutex::new(Arc::from([])),
                 state: Mutex::new(TerminalState {
                     request_id,
                     ..TerminalState::default()
@@ -582,7 +563,6 @@ impl LifecycleContext {
     pub(crate) fn set_termination_timings(
         &self,
         limit_reconcile_ms: Option<u64>,
-        observability_post_ms: Option<u64>,
         proxy_setup_ms: Option<u64>,
         upstream_body_ms: Option<u64>,
         first_body_chunk_ms: Option<u64>,
@@ -590,9 +570,6 @@ impl LifecycleContext {
         let mut state = self.lock_state();
         if let Some(value) = limit_reconcile_ms {
             state.limit_reconcile_ms = Some(value);
-        }
-        if let Some(value) = observability_post_ms {
-            state.observability_post_ms = Some(value);
         }
         if let Some(value) = proxy_setup_ms {
             state.proxy_setup_ms = Some(value);
@@ -641,9 +618,6 @@ impl LifecycleContext {
         self.lock_state().setup_timings = timings;
     }
 
-    pub(crate) fn mark_observe_finished_emitted(&self) {
-        self.lock_state().observe_finished_emitted = true;
-    }
     pub(crate) fn finish(&self) {
         if self
             .inner
@@ -665,16 +639,12 @@ impl LifecycleContext {
     /// concurrent `emit_or_buffer` waiting on that lock cannot publish a later
     /// event ahead of the buffered earlier ones.
     pub fn mark_authn_reached(&self) {
-        let Some(bus) = self.inner.bus.as_ref() else {
-            self.inner.authn_reached.store(true, Ordering::Release);
-            return;
-        };
         let mut state = self.lock_state();
         if self.inner.authn_reached.swap(true, Ordering::AcqRel) {
             return;
         }
         for event in std::mem::take(&mut state.pending_events) {
-            bus.publish_lifecycle(event);
+            self.inner.bus.publish_lifecycle(event);
         }
     }
 
@@ -785,38 +755,6 @@ impl LifecycleContext {
             });
     }
 
-    pub fn set_observability_hooks(&self, hooks: &[Arc<dyn ObservabilityHook>]) {
-        *self
-            .inner
-            .observability_hooks
-            .lock()
-            .expect("terminal observer hooks mutex poisoned") = hooks.iter().cloned().collect();
-    }
-
-    /// Notify observability hooks of an error observation.
-    ///
-    /// This is the surviving half of the removed `emit_provider_error`: the
-    /// `ProviderErrorObserved` bus event was deleted (the assembler discarded
-    /// it), so this only fans `ObserveEvent::Error` out to the registered
-    /// hooks, in registration order, with the same `code`/`message`/`source`
-    /// the caller would previously have published.
-    pub(crate) fn notify_error_hooks(&self, code: &str, message: &str, source: &str) {
-        let hooks = self
-            .inner
-            .observability_hooks
-            .lock()
-            .expect("terminal observer hooks mutex poisoned")
-            .clone();
-        let event = ObserveEvent::Error {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            source: source.to_owned(),
-        };
-        for hook in hooks.iter() {
-            let _ = hook.observe(event.clone());
-        }
-    }
-
     fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalState> {
         self.inner
             .state
@@ -887,14 +825,10 @@ fn terminal_accounted_ms(state: &TerminalState) -> u64 {
 
 impl Inner {
     /// Publish a lifecycle event on the bus, or buffer it until the request
-    /// reaches authentication. Without a bus the event is dropped, matching
-    /// the previous fire-and-forget behavior.
+    /// reaches authentication.
     fn emit_or_buffer(&self, event: LifecycleEvent) {
-        let Some(bus) = self.bus.as_ref() else {
-            return;
-        };
         if self.authn_reached.load(Ordering::Acquire) {
-            bus.publish_lifecycle(event);
+            self.bus.publish_lifecycle(event);
             return;
         }
         let mut state = self
@@ -905,7 +839,7 @@ impl Inner {
         // flag and drained the buffer between the load and the lock.
         if self.authn_reached.load(Ordering::Acquire) {
             drop(state);
-            bus.publish_lifecycle(event);
+            self.bus.publish_lifecycle(event);
         } else {
             state.pending_events.push(event);
         }
@@ -918,7 +852,6 @@ impl Inner {
             .expect("terminal observer state mutex poisoned");
         // A request that never reached authentication leaves no request-log
         // row: drop any buffered pre-auth events and skip `RequestTerminated`.
-        // Observability hooks below still run; only bus emission is gated.
         // When authentication was reached, any events still buffered are
         // drained here so they always precede `RequestTerminated` on the bus.
         let publish_terminated = self.authn_reached.load(Ordering::Acquire);
@@ -940,57 +873,31 @@ impl Inner {
             }
             span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
         }
-        if publish_terminated && let Some(bus) = self.bus.as_ref() {
+        if publish_terminated {
             for event in pending {
-                bus.publish_lifecycle(event);
+                self.bus.publish_lifecycle(event);
             }
-            bus.publish_lifecycle(LifecycleEvent::RequestTerminated {
-                event_id: self.event_id.clone(),
-                reason,
-                client_status: state.status,
-                duration_ms,
-                request_body_read_ms: state.request_body_read_ms,
-                request_body_bytes: state.request_body_bytes,
-                limit_reconcile_ms: state.limit_reconcile_ms,
-                observability_post_ms: state.observability_post_ms,
-                proxy_setup_ms: state.proxy_setup_ms,
-                setup_timings: state.setup_timings,
-                io_timings: state.io_timings,
-                upstream_body_ms: state.upstream_body_ms,
-                dns_ms: state.dns_ms,
-                connect_ms: state.connect_ms,
-                connection_reused: state.connection_reused,
-                first_body_chunk_ms: state.first_body_chunk_ms,
-                finalize_ms: state.finalize_ms,
-                internal_errors: state.internal_errors.clone(),
-                event_kind: state.event_kind,
-            });
-        }
-        let terminal_hook_event =
-            (!state.observe_finished_emitted).then(|| ObserveEvent::RequestFinished {
-                status: StatusCode::from_u16(state.status).unwrap_or(StatusCode::OK),
-                input_tokens: None,
-                output_tokens: None,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                duration_ms,
-            });
-        drop(state);
-
-        if let Some(event) = terminal_hook_event {
-            let hooks = self
-                .observability_hooks
-                .lock()
-                .expect("terminal observer hooks mutex poisoned")
-                .clone();
-            for hook in hooks.iter() {
-                let event = event.clone();
-                if catch_unwind(AssertUnwindSafe(|| hook.observe(event))).is_err() {
-                    tracing::warn!(
-                        "observability hook panicked while recording request termination"
-                    );
-                }
-            }
+            self.bus
+                .publish_lifecycle(LifecycleEvent::RequestTerminated {
+                    event_id: self.event_id.clone(),
+                    reason,
+                    client_status: state.status,
+                    duration_ms,
+                    request_body_read_ms: state.request_body_read_ms,
+                    request_body_bytes: state.request_body_bytes,
+                    limit_reconcile_ms: state.limit_reconcile_ms,
+                    proxy_setup_ms: state.proxy_setup_ms,
+                    setup_timings: state.setup_timings,
+                    io_timings: state.io_timings,
+                    upstream_body_ms: state.upstream_body_ms,
+                    dns_ms: state.dns_ms,
+                    connect_ms: state.connect_ms,
+                    connection_reused: state.connection_reused,
+                    first_body_chunk_ms: state.first_body_chunk_ms,
+                    finalize_ms: state.finalize_ms,
+                    internal_errors: state.internal_errors.clone(),
+                    event_kind: state.event_kind,
+                });
         }
     }
 }
@@ -1330,8 +1237,8 @@ mod tests {
         observer.set_io_timings(RequestIoTimings::default());
         observer.set_request_body_timing(7, Some(4_096));
         observer.set_request_body_timing(8, None);
-        observer.set_termination_timings(Some(1), Some(2), Some(3), Some(4), Some(5));
-        observer.set_termination_timings(None, None, None, None, None);
+        observer.set_termination_timings(Some(1), Some(3), Some(4), Some(5));
+        observer.set_termination_timings(None, None, None, None);
         observer.set_upstream_body_ms_if_absent(99);
         observer.set_finalize_ms(6);
         observer.finish();
@@ -1341,7 +1248,6 @@ mod tests {
             request_body_read_ms,
             request_body_bytes,
             limit_reconcile_ms,
-            observability_post_ms,
             proxy_setup_ms,
             upstream_body_ms,
             first_body_chunk_ms,
@@ -1355,7 +1261,6 @@ mod tests {
         assert_eq!(request_body_read_ms, Some(8));
         assert_eq!(request_body_bytes, Some(4_096));
         assert_eq!(limit_reconcile_ms, Some(1));
-        assert_eq!(observability_post_ms, Some(2));
         assert_eq!(proxy_setup_ms, Some(3));
         assert_eq!(upstream_body_ms, Some(4));
         assert_eq!(first_body_chunk_ms, Some(5));
@@ -1446,7 +1351,7 @@ mod tests {
         let (span, recorded) = request_span();
         observer.set_request_span(span);
         observer.set_request_body_timing(u64::MAX, None);
-        observer.set_termination_timings(None, None, Some(7), Some(11), None);
+        observer.set_termination_timings(None, Some(7), Some(11), None);
         observer.set_attempt_timings(Some(13), Some(17), Some(19));
         observer.set_finalize_ms(23);
         observer.finish();
@@ -1800,34 +1705,6 @@ mod tests {
         server.await.expect("HTTP/2 server task completes");
         client_connection.abort();
     }
-    struct PanickingHook;
-
-    impl cc_lb_observability::ObservabilityHook for PanickingHook {
-        fn observe(
-            &self,
-            _event: cc_lb_observability::ObserveEvent,
-        ) -> Result<(), cc_lb_observability::ObservabilityError> {
-            panic!("intentional terminal hook panic");
-        }
-    }
-
-    #[test]
-    fn terminal_drop_isolates_panicking_hook() {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let clock: ClockHandle = Arc::new(SystemClock);
-            let observer = LifecycleContext::without_bus("panic-hook".to_owned(), &clock);
-            let hooks: Vec<Arc<dyn cc_lb_observability::ObservabilityHook>> =
-                vec![Arc::new(PanickingHook)];
-            observer.set_observability_hooks(&hooks);
-            observer.set_upstream_error(StatusCode::BAD_GATEWAY, UpstreamErrorCode::Upstream5xx);
-            drop(observer);
-        }));
-
-        assert!(
-            result.is_ok(),
-            "hook panic must not escape LifecycleContext drop"
-        );
-    }
 
     #[tokio::test]
     async fn pre_authn_termination_publishes_no_events() {
@@ -2134,55 +2011,5 @@ mod tests {
             expect_terminated(rx.recv().await.expect("terminal event delivered"));
         assert_eq!(status, StatusCode::OK.as_u16());
         assert!(matches!(reason, TerminationReason::Success));
-    }
-
-    #[tokio::test]
-    async fn notify_error_hooks_fans_out_without_bus_event() {
-        use parking_lot::Mutex as ParkingMutex;
-
-        struct RecordingHook {
-            events: ParkingMutex<Vec<ObserveEvent>>,
-        }
-        impl cc_lb_observability::ObservabilityHook for RecordingHook {
-            fn observe(
-                &self,
-                event: ObserveEvent,
-            ) -> Result<(), cc_lb_observability::ObservabilityError> {
-                self.events.lock().push(event);
-                Ok(())
-            }
-        }
-
-        let bus = Arc::new(InMemoryBus::new());
-        let mut rx = subscribe(&bus);
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::new(
-            "req_hooks".to_owned(),
-            bus.clone() as Arc<dyn RequestEventBus>,
-            &clock,
-        );
-        let hook = Arc::new(RecordingHook {
-            events: ParkingMutex::new(Vec::new()),
-        });
-        let hooks: Vec<Arc<dyn cc_lb_observability::ObservabilityHook>> = vec![hook.clone()];
-        observer.set_observability_hooks(&hooks);
-        observer.mark_authn_reached();
-
-        observer.notify_error_hooks("signing_error", "signer blew up", "signer");
-
-        let events = hook.events.lock();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            ObserveEvent::Error { code, message, source }
-                if code == "signing_error" && message == "signer blew up" && source == "signer"
-        ));
-        drop(events);
-
-        // No lifecycle event is published for the hook notification.
-        assert!(
-            rx.try_recv().is_err(),
-            "notify_error_hooks must not publish a bus event"
-        );
     }
 }

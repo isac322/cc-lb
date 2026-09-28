@@ -32,7 +32,6 @@ fn root_schema_exports_describe_supported_hooks() {
         HookKind::TransformSseEvent,
         WireVersion::V1
     ));
-    assert!(schema::host_supports(HookKind::Observe, WireVersion::V1));
     assert!(schema::host_supports(HookKind::Filter, WireVersion::V1));
 }
 

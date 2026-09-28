@@ -4,13 +4,13 @@
 //! wire types benefit from explicit struct-literal construction (the
 //! author can see every field they're setting, and unset fields fall
 //! through to `Default` explicitly in the plugin's own test). What the
-//! author actually re-types every time is header construction, a
-//! synthetic principal, and the six-variant observe sample.
+//! author actually re-types every time is header construction and a
+//! synthetic principal.
 
 use cc_lb_plugin_wire::v1::FilterRequest;
 use cc_lb_plugin_wire::{
-    CachePricingSummary, Header, ObserveEvent, Principal, ShapeRequest, SseEvent,
-    TransformResponseRequest, TransformSseEventRequest, Upstream,
+    CachePricingSummary, Header, Principal, ShapeRequest, SseEvent, TransformResponseRequest,
+    TransformSseEventRequest, Upstream,
 };
 
 /// Build a `Header` from `(name, value)`. Value can be `&str`, `&[u8]`,
@@ -32,43 +32,6 @@ pub fn synth_principal() -> Principal {
         kind: Box::from("api_key"),
         claims: Box::new([]),
     }
-}
-
-/// One synthetic `ObserveEvent` per enum variant. Used by
-/// [`crate::PluginSession::exercise_observe_variants`] to prove no
-/// variant traps in the guest.
-pub fn observe_event_samples() -> Vec<ObserveEvent> {
-    vec![
-        ObserveEvent::RequestStarted {
-            request_id: Box::from("conformance-req-1"),
-            downstream_user_agent: Some(Box::from("conformance/1.0")),
-        },
-        ObserveEvent::AuthnComplete {
-            principal_id: Box::from("conformance-principal"),
-            principal_kind: Box::from("api_key"),
-        },
-        ObserveEvent::UpstreamChosen {
-            upstream: Upstream::AnthropicDirect { base_url: None },
-        },
-        ObserveEvent::Chunk {
-            batch_index: 0,
-            event_count: 1,
-            total_bytes: 64,
-        },
-        ObserveEvent::RequestFinished {
-            status: 200,
-            input_tokens: Some(10),
-            output_tokens: Some(20),
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
-            duration_ms: 42,
-        },
-        ObserveEvent::Error {
-            code: Box::from("conformance_error"),
-            message: Box::from("synthetic"),
-            source: Box::from("conformance"),
-        },
-    ]
 }
 
 /// Protocol-valid minimal `ShapeRequest` — POST /v1/messages, JSON

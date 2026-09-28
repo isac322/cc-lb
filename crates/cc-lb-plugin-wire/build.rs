@@ -140,11 +140,6 @@ fn main() {
             ty: "TransformSseEventResult",
             descriptor: "TransformSseEventResult[Unchanged,Replace{events:Box<[SseEvent]>},Drop]",
         },
-        SchemaEntry {
-            impl_generics: "",
-            ty: "ObserveEvent",
-            descriptor: "ObserveEvent[RequestStarted{request_id:Box<str>,downstream_user_agent:Option<Box<str>>},AuthnComplete{principal_id:Box<str>,principal_kind:Box<str>},UpstreamChosen{upstream:Upstream},Chunk{batch_index:u64,event_count:u64,total_bytes:u64},RequestFinished{status:u16,input_tokens:Option<u64>,output_tokens:Option<u64>,cache_creation_input_tokens:Option<u64>,cache_read_input_tokens:Option<u64>,duration_ms:u64},Error{code:Box<str>,message:Box<str>,source:Box<str>}]",
-        },
     ];
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));

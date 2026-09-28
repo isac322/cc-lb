@@ -4,8 +4,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
@@ -123,11 +122,7 @@ fn view_with_pipeline(
     if router_pipeline.is_some() {
         chains.insert(
             PRINCIPAL_ID.to_owned(),
-            (
-                router_pipeline,
-                ObservabilityHooksCache::Inherit,
-                DialectCache::Inherit,
-            ),
+            (router_pipeline, DialectCache::Inherit),
         );
     }
     PrincipalView::from_db(&[principal(terminal)], chains)

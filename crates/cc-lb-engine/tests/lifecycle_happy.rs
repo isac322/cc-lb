@@ -19,8 +19,8 @@ use http_body_util::BodyExt;
 use tokio::time::{Duration, timeout};
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState,
-    lifecycle_with, messages_request,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestRouter, TestState, lifecycle_with,
+    messages_request,
 };
 
 #[derive(Default)]
@@ -51,16 +51,14 @@ impl LimitCostEstimator for RecordingLimitCostEstimator {
 }
 
 #[tokio::test]
-async fn happy_sse_relays_incrementally_and_observes_chunks() {
+async fn happy_sse_relays_incrementally() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
             state: state.clone(),
             mode: DispatchMode::StreamingOk,
         },
-        hook.clone(),
     );
 
     let request = messages_request(Bytes::from_static(
@@ -89,41 +87,17 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
         "expected at least 50 data lines, got {data_lines}"
     );
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
-    assert!(
-        hook.events
-            .lock()
-            .expect("events lock")
-            .iter()
-            .any(|event| matches!(event, cc_lb_observability::ObserveEvent::Chunk { .. }))
-    );
-    timeout(
-        Duration::from_secs(1),
-        hook.wait_for_event(|event| {
-            matches!(
-                event,
-                cc_lb_observability::ObserveEvent::RequestFinished {
-                    input_tokens: Some(7),
-                    output_tokens: Some(42),
-                    ..
-                }
-            )
-        }),
-    )
-    .await
-    .expect("request-finished observation arrives");
 }
 
 #[tokio::test]
-async fn happy_non_streaming_observes_usage_tokens() {
+async fn happy_non_streaming_relays_response() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
             state: state.clone(),
             mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
         },
-        hook.clone(),
     );
 
     let request = messages_request(Bytes::from_static(
@@ -147,28 +121,12 @@ async fn happy_non_streaming_observes_usage_tokens() {
         .to_bytes();
 
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
-    timeout(
-        Duration::from_secs(1),
-        hook.wait_for_event(|event| {
-            matches!(
-                event,
-                cc_lb_observability::ObserveEvent::RequestFinished {
-                    input_tokens: Some(1),
-                    output_tokens: Some(1),
-                    ..
-                }
-            )
-        }),
-    )
-    .await
-    .expect("request-finished observation arrives");
 }
 
 #[tokio::test]
 async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
     // Given a priority request with limit reservation enabled.
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let estimator = Arc::new(RecordingLimitCostEstimator::default());
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
@@ -180,7 +138,6 @@ async fn requested_service_tier_reaches_limit_cost_estimator_before_dispatch() {
             state,
             mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
         },
-        hook,
     )
     .with_static_limit_subject(
         limit_engine,
@@ -242,7 +199,6 @@ async fn oauth_db_record_drives_route_pricing_and_rejection_audit_identity() {
         .global_router(Arc::new(TestRouter {
             base_url: "http://upstream.local/".parse().expect("test URL parses"),
         }))
-        .global_observability_hooks(Vec::new())
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![oauth_upstream_record()])
         .build();
@@ -330,14 +286,12 @@ async fn oauth_db_record_drives_route_pricing_and_rejection_audit_identity() {
 #[tokio::test]
 async fn invalid_key_is_rejected_at_the_authentication_boundary() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
             state,
             mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
         },
-        hook.clone(),
     );
     let mut request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,

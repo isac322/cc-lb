@@ -6,14 +6,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
+use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
     DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
 };
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
 };
@@ -82,14 +79,6 @@ impl UpstreamDispatch for TestDispatcher {
             .status(StatusCode::OK)
             .body(Body::from(Bytes::new()))
             .expect("test response builds"))
-    }
-}
-
-struct TestHook;
-
-impl ObservabilityHook for TestHook {
-    fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-        Ok(())
     }
 }
 
@@ -177,11 +166,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     let mut chains = HashMap::new();
     chains.insert(
         "limited".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     let principal_view = Arc::new(PrincipalView::from_db(
         &[principal("limited", vec![third, first, second])],
@@ -263,7 +248,6 @@ fn test_view_with_principal_view(
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
         .global_router(router)
-        .global_observability_hooks(vec![Arc::new(TestHook)])
         .principal_view(principal_view)
         .upstream_records(upstreams)
         .build()

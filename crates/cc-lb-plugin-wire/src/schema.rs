@@ -47,7 +47,6 @@ impl fmt::Display for WireVersion {
 pub enum HookKind {
     Filter,
     Shape,
-    Observe,
     TransformResponse,
     TransformSseEvent,
 }
@@ -57,7 +56,6 @@ impl HookKind {
         match self {
             Self::Filter => "filter",
             Self::Shape => "shape",
-            Self::Observe => "observe",
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
         }
@@ -68,7 +66,6 @@ impl HookKind {
         match self {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
-            Self::Observe => "cc_lb_observe",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
         }
@@ -80,7 +77,6 @@ impl HookKind {
         match self {
             Self::Filter => "cc_lb.schema.filter",
             Self::Shape => "cc_lb.schema.shape",
-            Self::Observe => "cc_lb.schema.observe",
             Self::TransformResponse => "cc_lb.schema.transform_response",
             Self::TransformSseEvent => "cc_lb.schema.transform_sse_event",
         }
@@ -90,7 +86,6 @@ impl HookKind {
     pub const ALL: &'static [HookKind] = &[
         Self::Filter,
         Self::Shape,
-        Self::Observe,
         Self::TransformResponse,
         Self::TransformSseEvent,
     ];
@@ -99,7 +94,6 @@ impl HookKind {
         match s {
             "filter" => Some(Self::Filter),
             "shape" => Some(Self::Shape),
-            "observe" => Some(Self::Observe),
             "transform_response" => Some(Self::TransformResponse),
             "transform_sse_event" => Some(Self::TransformSseEvent),
             _ => None,
@@ -116,7 +110,6 @@ impl fmt::Display for HookKind {
 /// Host-supported versions per hook. Update when adding new versions.
 pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 pub const HOST_SUPPORTED_SHAPE_VERSIONS: &[WireVersion] = &[WireVersion::V1];
-pub const HOST_SUPPORTED_OBSERVE_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 pub const HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 
@@ -124,7 +117,6 @@ pub fn host_supported_versions(hook: HookKind) -> &'static [WireVersion] {
     match hook {
         HookKind::Filter => HOST_SUPPORTED_FILTER_VERSIONS,
         HookKind::Shape => HOST_SUPPORTED_SHAPE_VERSIONS,
-        HookKind::Observe => HOST_SUPPORTED_OBSERVE_VERSIONS,
         HookKind::TransformResponse => HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS,
         HookKind::TransformSseEvent => HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS,
     }

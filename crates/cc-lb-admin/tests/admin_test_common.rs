@@ -15,7 +15,6 @@ use cc_lb_control::{
     UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine,
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -47,7 +46,6 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -219,7 +217,6 @@ pub fn set_dynamic_principal(dynamic_view: &DynamicViewHolder, principal_id: &st
     let view = DynamicViewBuilder::new(dynamic_view.generation().saturating_add(1))
         .signer_factory(Arc::new(NoopSignerFactory))
         .global_router(Arc::new(NoopRouter))
-        .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
         .principal_view(principal_view)
         .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
         .build();

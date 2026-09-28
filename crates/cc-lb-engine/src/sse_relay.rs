@@ -5,23 +5,20 @@ use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant as StdInstant};
 
 use crate::clock::unix_secs;
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_observability::{ObservabilityHook, ObserveEvent};
 use cc_lb_upstream::UpstreamDialect;
 use eventsource_stream::{Event, EventStream, EventStreamError};
 use futures_core::Stream;
 use http::header::CONTENT_TYPE;
-use http::{HeaderValue, Response, StatusCode};
+use http::{HeaderValue, Response};
 use http_body_util::BodyStream;
 use hyper::body::Frame;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::lifecycle::{
@@ -30,13 +27,9 @@ use crate::lifecycle::{
 };
 use crate::sse_error_frame::make_error_frame;
 
-const CLIENT_DISCONNECTED_STATUS: u16 = 499;
-
 #[derive(Clone)]
 pub struct SseRelay {
-    pub obs: Arc<dyn ObservabilityHook>,
     pub dialect: Arc<dyn UpstreamDialect>,
-    pub batch: SseBatchConfig,
     pub error_normalizer: Option<Arc<ErrorNormalizer>>,
     pub upstream_kind: Option<UpstreamKind>,
     pub streaming_usage: Arc<Mutex<StreamingUsage>>,
@@ -52,21 +45,6 @@ pub struct StreamingUsage {
     pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
     pub complete: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SseBatchConfig {
-    pub max_events: usize,
-    pub max_age: Duration,
-}
-
-impl Default for SseBatchConfig {
-    fn default() -> Self {
-        Self {
-            max_events: 32,
-            max_age: Duration::from_millis(100),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -93,13 +71,10 @@ impl fmt::Display for RelayError {
 impl Error for RelayError {}
 
 struct RelayRuntime {
-    obs: Arc<dyn ObservabilityHook>,
-    batch: SseBatchConfig,
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     upstream_kind: Option<UpstreamKind>,
     streaming_usage: Arc<Mutex<StreamingUsage>>,
     prompt_cache_observation_context: Option<PromptCacheObservationContext>,
-    started: StdInstant,
 }
 
 impl SseRelay {
@@ -178,13 +153,10 @@ impl SseRelay {
 
     fn into_runtime(self) -> RelayRuntime {
         RelayRuntime {
-            obs: self.obs,
-            batch: self.batch.normalized(),
             error_normalizer: self.error_normalizer,
             upstream_kind: self.upstream_kind,
             streaming_usage: self.streaming_usage,
             prompt_cache_observation_context: self.prompt_cache_observation_context,
-            started: StdInstant::now(),
         }
     }
 }
@@ -258,15 +230,6 @@ fn apply_cache_creation_split(usage: &mut StreamingUsage, reported: &Value) {
     }
 }
 
-impl SseBatchConfig {
-    fn normalized(self) -> Self {
-        Self {
-            max_events: self.max_events.max(1),
-            max_age: self.max_age,
-        }
-    }
-}
-
 impl RelayRuntime {
     async fn relay_stream_task(
         self,
@@ -276,29 +239,15 @@ impl RelayRuntime {
     ) {
         let mut stream = BodyStream::new(upstream_body);
         let mut buffer = BytesMut::new();
-        let mut batcher = SseBatcher::new(self.batch);
         let mut usage = self.current_usage();
         let mut prompt_cache_observations_published = false;
-        let mut deadline = Box::pin(sleep(self.batch.max_age));
-        reset_deadline(&mut deadline, self.batch.max_age);
 
         loop {
             tokio::select! {
                 changed = cancel_rx.changed() => {
-                    if changed.is_ok() && *cancel_rx.borrow() {
-                        batcher.flush(&self.obs);
-                        self.observe_finished(client_disconnected_status(), None, None, None, None);
+                    if changed.is_err() || *cancel_rx.borrow() {
                         break;
                     }
-                    if changed.is_err() {
-                        batcher.flush(&self.obs);
-                        self.observe_finished(client_disconnected_status(), None, None, None, None);
-                        break;
-                    }
-                }
-                _ = &mut deadline, if batcher.has_pending() => {
-                    batcher.flush(&self.obs);
-                    reset_deadline(&mut deadline, self.batch.max_age);
                 }
                 frame = next_body_frame(&mut stream) => {
                     match frame {
@@ -308,53 +257,28 @@ impl RelayRuntime {
                                 if self.drain_complete_events(
                                     &mut buffer,
                                     &tx,
-                                    &mut batcher,
-                                    &mut deadline,
                                     &mut usage,
                                     &mut prompt_cache_observations_published,
                                 ).await.is_err() {
-                                    self.observe_finished(client_disconnected_status(), None, None, None, None);
                                     break;
                                 }
                             }
                         }
                         Some(Err(source)) => {
-                            batcher.flush(&self.obs);
                             let _sent = tx.send(self.error_frame_for_unknown_status(&source.to_string())).await;
-                            self.observe_error("upstream_read_failed", &source.to_string());
-                            self.observe_finished(
-                                StatusCode::BAD_GATEWAY,
-                                Some(usage.input_tokens),
-                                Some(usage.output_tokens),
-                                Some(usage.cache_creation_input_tokens),
-                                Some(usage.cache_read_input_tokens),
-                            );
                             break;
                         }
-                        None => {
-                            batcher.flush(&self.obs);
-                            self.observe_finished(
-                                StatusCode::OK,
-                                Some(usage.input_tokens),
-                                Some(usage.output_tokens),
-                                Some(usage.cache_creation_input_tokens),
-                                Some(usage.cache_read_input_tokens),
-                            );
-                            break;
-                        }
+                        None => break,
                     }
                 }
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn drain_complete_events(
         &self,
         buffer: &mut BytesMut,
         tx: &mpsc::Sender<Bytes>,
-        batcher: &mut SseBatcher,
-        deadline: &mut Pin<Box<Sleep>>,
         usage: &mut StreamingUsage,
         prompt_cache_observations_published: &mut bool,
     ) -> Result<(), ()> {
@@ -392,15 +316,11 @@ impl RelayRuntime {
                 Ok(None) => {}
                 Err(source) => {
                     let frame = self.error_frame_for_unknown_status(&source.to_string());
-                    if tx.send(frame).await.is_err() {
-                        return Err(());
-                    }
-                    self.observe_error("malformed_sse", &source.to_string());
+                    let _sent = tx.send(frame).await;
                     return Err(());
                 }
             }
 
-            batcher.record_event(outgoing.len(), &self.obs, deadline);
             if tx.send(outgoing).await.is_err() {
                 return Err(());
             }
@@ -434,91 +354,6 @@ impl RelayRuntime {
             .streaming_usage
             .lock()
             .expect("streaming usage lock poisoned") = usage;
-    }
-
-    fn observe_error(&self, code: &str, message: &str) {
-        let _result = self.obs.observe(ObserveEvent::Error {
-            code: code.to_owned(),
-            message: message.to_owned(),
-            source: "sse_relay".to_owned(),
-        });
-    }
-
-    fn observe_finished(
-        &self,
-        status: StatusCode,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-        cache_read_input_tokens: Option<u64>,
-    ) {
-        let _result = self.obs.observe(ObserveEvent::RequestFinished {
-            status,
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-            duration_ms: self
-                .started
-                .elapsed()
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX),
-        });
-    }
-}
-
-struct SseBatcher {
-    config: SseBatchConfig,
-    batch_index: u64,
-    event_count: usize,
-    total_bytes: usize,
-}
-
-impl SseBatcher {
-    fn new(config: SseBatchConfig) -> Self {
-        Self {
-            config,
-            batch_index: 0,
-            event_count: 0,
-            total_bytes: 0,
-        }
-    }
-
-    fn has_pending(&self) -> bool {
-        self.event_count > 0
-    }
-
-    fn record_event(
-        &mut self,
-        bytes: usize,
-        obs: &Arc<dyn ObservabilityHook>,
-        deadline: &mut Pin<Box<Sleep>>,
-    ) {
-        if self.event_count == 0 {
-            reset_deadline(deadline, self.config.max_age);
-        }
-        self.event_count = self.event_count.saturating_add(1);
-        self.total_bytes = self.total_bytes.saturating_add(bytes);
-        if self.event_count >= self.config.max_events {
-            self.flush(obs);
-            reset_deadline(deadline, self.config.max_age);
-        }
-    }
-
-    fn flush(&mut self, obs: &Arc<dyn ObservabilityHook>) {
-        if self.event_count == 0 {
-            return;
-        }
-        let event = ObserveEvent::Chunk {
-            batch_index: self.batch_index,
-            event_count: self.event_count,
-            total_bytes: self.total_bytes,
-        };
-        let _result = obs.observe(event);
-        self.batch_index = self.batch_index.saturating_add(1);
-        self.event_count = 0;
-        self.total_bytes = 0;
     }
 }
 
@@ -652,16 +487,6 @@ fn update_usage_from_value(value: &Value, usage: &mut StreamingUsage) {
     }
 }
 
-fn reset_deadline(deadline: &mut Pin<Box<Sleep>>, max_age: Duration) {
-    deadline
-        .as_mut()
-        .reset(TokioInstant::now() + max_age.max(Duration::from_millis(1)));
-}
-
-fn client_disconnected_status() -> StatusCode {
-    StatusCode::from_u16(CLIENT_DISCONNECTED_STATUS).unwrap_or(StatusCode::BAD_GATEWAY)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -669,7 +494,6 @@ mod tests {
     use cc_lb_domain::{
         BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, Principal, TtlClass, Upstream,
     };
-    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_storage_api::PromptCacheObservationRecord;
     use cc_lb_upstream::{
         DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
@@ -726,9 +550,7 @@ mod tests {
     fn relay_with_context(sink: Arc<RecordingPromptCacheObservationSink>) -> SseRelay {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
         SseRelay {
-            obs: Arc::new(NoopHook),
             dialect: Arc::new(TestDialect),
-            batch: SseBatchConfig::default(),
             error_normalizer: None,
             upstream_kind: None,
             streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
@@ -793,14 +615,6 @@ mod tests {
             record: PromptCacheObservationRecord,
         ) -> Result<(), PromptCacheObservationEnqueueError> {
             self.records.lock().expect("records lock").push(record);
-            Ok(())
-        }
-    }
-
-    struct NoopHook;
-
-    impl ObservabilityHook for NoopHook {
-        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
             Ok(())
         }
     }

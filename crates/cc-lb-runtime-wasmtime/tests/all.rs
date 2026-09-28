@@ -8,8 +8,6 @@ mod conformance;
 mod filter_service_tier_round_trip;
 #[path = "malicious_plugin.rs"]
 mod malicious_plugin;
-#[path = "observe_drain.rs"]
-mod observe_drain;
 #[path = "on_demand_memory_limit.rs"]
 mod on_demand_memory_limit;
 #[path = "plugin_metrics_emission.rs"]

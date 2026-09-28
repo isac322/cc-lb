@@ -10,8 +10,6 @@ mod attempt_rail_trybuild;
 mod audit_writer_smoke;
 #[path = "authn_rail_trybuild.rs"]
 mod authn_rail_trybuild;
-#[path = "batched_observation_count.rs"]
-mod batched_observation_count;
 #[path = "bulkhead_drops_release_permit.rs"]
 mod bulkhead_drops_release_permit;
 #[path = "byte_equivalent_passthrough.rs"]
