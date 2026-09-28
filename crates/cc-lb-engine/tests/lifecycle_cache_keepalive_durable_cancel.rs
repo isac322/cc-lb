@@ -19,8 +19,7 @@ use http::{Response, StatusCode};
 use uuid::Uuid;
 
 use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts,
-    managed_api_key, settle,
+    TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle,
 };
 
 #[tokio::test]
@@ -207,7 +206,6 @@ async fn handle_keepalive_response(
         Arc::new(FixedSuccessDispatch {
             body: upstream_body,
         }),
-        vec![Arc::new(RecordingHook::default())],
         LifecycleConfig::default(),
     )
     .with_cache_keepalive_enqueuer(enqueuer);

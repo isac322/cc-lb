@@ -255,7 +255,6 @@ fn test_view(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(Vec::new())
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![
             upstream_record(owner_id),

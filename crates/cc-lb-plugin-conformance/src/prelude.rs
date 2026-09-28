@@ -12,13 +12,13 @@
 pub use crate::{
     ConformanceSuite, PluginSession, conformance_engine_config,
     fixtures::{
-        hdr, observe_event_samples, sample_filter_request, sample_shape_request,
-        sample_transform_response_request, sample_transform_sse_event_request, synth_principal,
+        hdr, sample_filter_request, sample_shape_request, sample_transform_response_request,
+        sample_transform_sse_event_request, synth_principal,
     },
 };
 pub use cc_lb_plugin_wire::{
-    FilterRequest, FilterResponse, Header, ObserveEvent, PerCandidateReason, Principal,
-    ShapeRequest, ShapeResponse, SseEvent, TransformResponseRequest, TransformResponseResult,
+    FilterRequest, FilterResponse, Header, PerCandidateReason, Principal, ShapeRequest,
+    ShapeResponse, SseEvent, TransformResponseRequest, TransformResponseResult,
     TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate,
 };
 pub use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind};

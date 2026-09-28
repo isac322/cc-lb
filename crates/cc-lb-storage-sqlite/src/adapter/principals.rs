@@ -46,7 +46,7 @@ impl PrincipalStore for SqliteStorage {
         .await
         .map_err(map_sqlite_error)?;
         sqlx::query(
-            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, 1, 100, 0, unixepoch(), unixepoch())",
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, unixepoch(), unixepoch())",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(id.to_string())

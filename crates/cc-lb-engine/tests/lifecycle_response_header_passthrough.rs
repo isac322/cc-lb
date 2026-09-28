@@ -1,13 +1,11 @@
 use crate::common;
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use http::header::{CONNECTION, CONTENT_ENCODING, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, StatusCode};
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, lifecycle_with,
     messages_request,
 };
 
@@ -15,14 +13,12 @@ use common::{
 async fn protocol_response_headers_pass_through_unchanged() {
     let state = TestState::default();
     let headers = protocol_headers();
-    let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
             state,
             mode: DispatchMode::HeadersOk(headers.clone()),
         },
-        hook,
     );
 
     let request = messages_request(Bytes::from_static(
@@ -58,7 +54,6 @@ async fn upstream_error_response_passes_through_without_body_rewrite() {
     headers.insert("request-id", HeaderValue::from_static("req_error"));
     headers.insert(CONNECTION, HeaderValue::from_static("x-hop"));
     headers.insert("x-hop", HeaderValue::from_static("strip-me"));
-    let hook = Arc::new(RecordingHook::default());
     let lifecycle = lifecycle_with(
         TestAuthn::new(state.clone()),
         MockDispatch {
@@ -69,7 +64,6 @@ async fn upstream_error_response_passes_through_without_body_rewrite() {
                 body: body.clone(),
             },
         },
-        hook,
     );
 
     let request = messages_request(Bytes::from_static(

@@ -761,7 +761,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-lifecycle",
  "cc-lb-oauth-protocol",
- "cc-lb-observability",
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-quota",
@@ -1042,7 +1041,6 @@ dependencies = [
  "regex",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
@@ -1131,7 +1129,6 @@ dependencies = [
  "bytes",
  "cc-lb-domain",
  "cc-lb-engine",
- "cc-lb-observability",
  "cc-lb-routing",
  "cc-lb-upstream",
  "http",
@@ -7431,13 +7428,6 @@ dependencies = [
  "indexmap 2.14.2",
  "wit-component",
  "wit-parser",
-]
-
-[[package]]
-name = "wasmtime-observe-noop"
-version = "0.1.0"
-dependencies = [
- "cc-lb-pdk-wasmtime",
 ]
 
 [[package]]

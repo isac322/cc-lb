@@ -532,10 +532,6 @@ plugin_registry_sqlite_test!(
     shape_singleton_preserved
 );
 plugin_registry_sqlite_test!(
-    plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_sqlite,
-    insert_chain_entry_allows_multi_for_observability_hook
-);
-plugin_registry_sqlite_test!(
     plugin_registry_reorder_chain_rejects_final_chain_gap_sqlite,
     reorder_chain_rejects_final_chain_gap
 );

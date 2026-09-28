@@ -16,14 +16,13 @@ use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState,
-    collect_body, lifecycle_with, lifecycle_with_parts, messages_request,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
+    lifecycle_with, lifecycle_with_parts, messages_request,
 };
 
 #[tokio::test]
 async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let (sink, mut receiver) = UpstreamRateLimitSink::with_capacity(16);
     let test_bus = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_with(
@@ -32,7 +31,6 @@ async fn successful_response_enqueues_records_keyed_by_selected_upstream() {
             state: TestState::default(),
             mode: DispatchMode::HeadersOk(rate_limit_headers(997, 42)),
         },
-        hook,
     )
     .with_event_bus(test_bus.bus_arc());
 
@@ -116,7 +114,6 @@ fn lifecycle_for_response(status: StatusCode, headers: HeaderMap) -> cc_lb_engin
             base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
         Arc::new(StaticResponseDispatch { status, headers }),
-        vec![Arc::new(RecordingHook::default())],
         cc_lb_engine::LifecycleConfig::default(),
     )
 }

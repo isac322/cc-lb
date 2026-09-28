@@ -304,7 +304,6 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: Some(profile.token_base() + 7),
-            observability_post_ms: Some(profile.token_base() + 8),
             proxy_setup_ms: Some(profile.token_base() + 9),
             request_body_read_ms: None,
             request_body_bytes: None,

@@ -1,8 +1,7 @@
 //! Wasmtime-backed plugin runtime.
 //!
 //! Registers slots per hook kind via [`WasmtimeRuntime::register_filter`]
-//! / [`register_shape`][WasmtimeRuntime::register_shape] /
-//! [`register_observe`][WasmtimeRuntime::register_observe], returning
+//! / [`register_shape`][WasmtimeRuntime::register_shape], returning
 //! the `Arc<LoadedPluginSlot>` callers store in their dynamic view.
 //!
 //! See `docs/rfc/0001-plugin-runtime-vnext.md`.
@@ -25,7 +24,7 @@ mod slot;
 mod tests;
 mod wire_dispatch;
 
-pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_observe_hook, call_shape_hook};
+pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_shape_hook};
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{LoadedPluginSlot, PluginCell};
@@ -127,16 +126,6 @@ impl WasmtimeRuntime {
         wasm_bytes: &[u8],
     ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
         self.register(SlotKind::Shape, slot_key, name, wasm_bytes)
-    }
-
-    /// Register (or replace) an observe-hook slot.
-    pub fn register_observe(
-        &self,
-        slot_key: RuntimeSlotKey,
-        name: impl Into<String>,
-        wasm_bytes: &[u8],
-    ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Observe, slot_key, name, wasm_bytes)
     }
 
     fn register(

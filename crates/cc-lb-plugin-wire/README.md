@@ -13,7 +13,7 @@ the common PDK path.
 
 - Hook wire types under `cc_lb_plugin_wire::v1`.
 - `WireVersion::V1`.
-- `HookKind` for `filter`, `shape`, and `observe` hooks.
+- `HookKind` for `filter` and `shape` hooks.
 - `WireSchema`, implemented by the PDK derive macro for layout fingerprints.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
 - `pack_ret` and `unpack_ret` helpers for guest ABI return values.
@@ -23,11 +23,10 @@ the common PDK path.
 `WireVersion` identifies the wire layout line. All hooks use V1, including
 filter hooks that need `FilterRequest::service_tier`.
 
-`HookKind` names the three supported plugin hooks:
+`HookKind` names the supported plugin hooks, including:
 
 - `Filter` maps to the `cc_lb_filter` export.
 - `Shape` maps to the `cc_lb_shape` export.
-- `Observe` maps to the `cc_lb_observe` export.
 
 `WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a type.
 The trait lives in this crate. The derive macro is re-exported by

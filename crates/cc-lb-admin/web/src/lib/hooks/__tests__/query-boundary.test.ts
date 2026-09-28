@@ -143,9 +143,6 @@ describe('query observer boundaries', () => {
       order: 0,
       wasm_registry_id: pluginId,
       config: {},
-      sse_per_event: false,
-      batched_events_per_flush: 100,
-      batched_flush_ms: 1_000,
       revision: 3,
     };
     const oldUpstream: Upstream = {

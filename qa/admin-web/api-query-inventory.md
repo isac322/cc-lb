@@ -17,8 +17,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 | Dimension | Count / Status |
 |---|---|
-| UI parent actions | 208 |
-| UI atomic request occurrences | 146 |
+| UI parent actions | 204 |
+| UI atomic request occurrences | 142 |
 | Registered API method/path rows | 102 |
 | Independent backend route scan | 102 |
 | Production UI source denominator | 97 files |
@@ -201,10 +201,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PR-18** | `ui_action` | — | Principals / ShapeSlotEditor | Select Shape Slot Plugin | `reversible_write` | `available` |
 | **UI-PR-18A** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` | `available` |
 | **UI-PR-18B** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` | `available` |
-| **UI-SRC-4A31DF64FCC2** | `ui_action` | — | Principals / ObservabilityHookEditor | Reorder Observability Hooks via Drag-and-Drop | `reversible_write` | `available` |
-| **UI-PR-19B** | `network_request` | UI-SRC-4A31DF64FCC2 | Principals / ObservabilityHookEditor | POST /admin/v1/principals/{id}/plugin-chain/reorder | `reversible_write` | `available` |
-| **UI-SRC-8AE44ADD2C3E** | `ui_action` | — | Principals / ObservabilityHookEditor | Remove Observability Hook | `destructive_write` | `available` |
-| **UI-PR-19C** | `network_request` | UI-SRC-8AE44ADD2C3E | Principals / ObservabilityHookEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` | `available` |
 | **UI-SRC-5DE97D4F1CFC** | `ui_action` | — | Principals / ApiKeysCard | Load Principal API Keys | `read` | `available` |
 | **UI-PR-20** | `network_request` | UI-SRC-5DE97D4F1CFC | Principals / ApiKeysCard | GET /admin/v1/principals/{id}/keys | `read_with_audit` | `available` |
 | **UI-SRC-911C0971EF03** | `ui_action` | — | Principals / ApiKeysCard | Issue New API Key | `reversible_write` | `available` |
@@ -381,14 +377,10 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-D96DA7353940** | `ui_action` | — | Upstreams / WarmupConfigModal Copy JSON | Copy Warmup Plugin Config JSON | `read` | `available` |
 | **UI-SRC-D61F3782A082** | `ui_action` | — | Plugins / PluginDetail | Load Selected Plugin References | `read` | `available` |
 | **UI-PLUG-06** | `network_request` | UI-SRC-D61F3782A082 | Plugins / PluginDetail | GET /admin/v1/plugins/registry/{id}/references | `read` | `available` |
-| **UI-SRC-7BDECC53787E** | `ui_action` | — | Principals / ObservabilityHookEditor | Add Observability Hook | `reversible_write` | `available` |
-| **UI-PR-19** | `network_request` | UI-SRC-7BDECC53787E | Principals / ObservabilityHookEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` | `available` |
-| **UI-SRC-D64907F28D4C** | `ui_action` | — | Principals / PrincipalDetail | Load Observability Plugin Chain | `read` | `available` |
-| **UI-PR-13D** | `network_request` | UI-SRC-D64907F28D4C | Principals / PrincipalDetail | GET /admin/v1/principals/{id}/plugin-chain | `read` | `available` |
 | **UI-SRC-30AC7206755A** | `ui_action` | — | Principals / PrincipalDetail | Load Shape Plugin Chain | `read` | `available` |
 | **UI-PR-13C** | `network_request` | UI-SRC-30AC7206755A | Principals / PrincipalDetail | GET /admin/v1/principals/{id}/plugin-chain | `read` | `available` |
-| **UI-SRC-2092158E84C1** | `ui_action` | — | Principals / Router, Shape, and Observability Editors | Load Plugin Registry for Principal Editors | `read` | `available` |
-| **UI-PR-13E** | `network_request` | UI-SRC-2092158E84C1 | Principals / Router, Shape, and Observability Editors | GET /admin/v1/plugins/registry | `read` | `available` |
+| **UI-SRC-2092158E84C1** | `ui_action` | — | Principals / Router and Shape Editors | Load Plugin Registry for Principal Editors | `read` | `available` |
+| **UI-PR-13E** | `network_request` | UI-SRC-2092158E84C1 | Principals / Router and Shape Editors | GET /admin/v1/plugins/registry | `read` | `available` |
 | **UI-SRC-18907E842823** | `ui_action` | — | Global / Topbar | Render Authenticated Administrator Identity Badge | `read` | `not_deployed` |
 | **UI-SRC-453C347CE4F4** | `ui_action` | — | Audit / AuditPage | Render Audit Actor Metadata | `read` | `not_deployed` |
 | **UI-SRC-F0FA0033252E** | `ui_action` | — | Shared Request Tables / LatencyCell | Inspect Latency Responsibility Breakdown | `read` | `not_deployed` |
@@ -3183,74 +3175,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Cache / no-query path:** Invalidates TanStack queryKey ['plugin-chain', principal_id]; triggers dynamic rebind headers
 - **Side effects:** Inserts row into plugin_chains_v2; verifies principal exists and singleton slot constraint; records audit event 'plugin_chain_insert'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers; sets Location header QA restore: DELETE /admin/v1/plugin-chain-entries/{id} using returned entry ID and revision.
 - **Expected UI:** Card radio shows spinner, deletes previous entries sequentially, inserts new entry, toasts success
-- **Runtime result:** `PENDING`
-
-### [UI-SRC-4A31DF64FCC2] Principals — Reorder Observability Hooks via Drag-and-Drop
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-PR-19B`
-- **Source:** `crates/cc-lb-admin/web/src/routes/principals.tsx:2154#ObservabilityHookEditor`
-- **Preconditions:** chainBusy === false; entries.length > 1
-- **Steps:** Drag an observability hook item and drop at a new index
-- **Scope:** `each_principal` — Observability hook chain entries
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **Expected UI:** Items reorder visually via SortableContext, header displays 'Saving order...', toast confirms 'Chain reordered'
-- **Runtime result:** `PENDING`
-
-### [UI-PR-19B] Principals — Reorder Observability Hooks via Drag-and-Drop — useReorderChain
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-4A31DF64FCC2`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1535#useReorderChain`
-- **Preconditions:** chainBusy === false; entries.length > 1
-- **Steps:** Drag an observability hook item and drop at a new index
-- **Scope:** `each_principal` — Observability hook chain entries
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain/reorder`
-  - Query: None
-  - Body: `entries`
-  - Headers: `authorization`, `content-type`
-- **Handler:** `reorder_chain`
-- **Storage operations:** `sqlite:PluginRegistryStore::reorder_chain:SqliteStorage::reorder_chain`, `postgres:PluginRegistryStore::reorder_chain:PostgresStorage::reorder_chain`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Invalidates TanStack queryKey ['plugin-chain', principal_id]; triggers dynamic rebind headers
-- **Side effects:** Updates order_value and increments revision for chain entries; checks order gap >= 2; records audit event 'plugin_chain_reorder'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: POST /admin/v1/principals/{principal_id}/plugin-chain/reorder with prior order values and updated revisions.
-- **Expected UI:** Items reorder visually via SortableContext, header displays 'Saving order...', toast confirms 'Chain reordered'
-- **Runtime result:** `PENDING`
-
-### [UI-SRC-8AE44ADD2C3E] Principals — Remove Observability Hook
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-PR-19C`
-- **Source:** `crates/cc-lb-admin/web/src/routes/principals.tsx:2212#ObservabilityHookEditor`
-- **Preconditions:** chainBusy === false
-- **Steps:** Click Trash icon on hook item → Confirm in removal modal
-- **Scope:** `each_principal` — Observability hook chain entries
-- **Risk:** `destructive_write`
-- **Production applicability:** `available`
-- **Expected UI:** Hook item is deleted from chain, list updates, empty dashed CTA shown if count reaches 0
-- **Runtime result:** `PENDING`
-
-### [UI-PR-19C] Principals — Remove Observability Hook — useDeleteChainEntry
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-8AE44ADD2C3E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1550#useDeleteChainEntry`
-- **Preconditions:** chainBusy === false
-- **Steps:** Click Trash icon on hook item → Confirm in removal modal
-- **Scope:** `each_principal` — Observability hook chain entries
-- **Risk:** `destructive_write`
-- **Production applicability:** `available`
-- **HTTP:** `DELETE /admin/v1/plugin-chain-entries/{id}`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`, `if-match`
-- **Handler:** `delete_chain`
-- **Storage operations:** `sqlite:PluginRegistryStore::delete_chain_entry:SqliteStorage::delete_chain_entry`, `postgres:PluginRegistryStore::delete_chain_entry:PostgresStorage::delete_chain_entry`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Invalidates TanStack queryKey ['plugin-chain']; triggers dynamic rebind headers
-- **Side effects:** Deletes row from plugin_chains_v2; records audit event 'plugin_chain_delete'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: POST /admin/v1/principals/{principal_id}/plugin-chain with original parameters to recreate the chain entry.
-- **Expected UI:** Hook item is deleted from chain, list updates, empty dashed CTA shown if count reaches 0
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-5DE97D4F1CFC] Principals — Load Principal API Keys
@@ -6141,74 +6065,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** Used by card renders every returned principal-chain and upstream-warmup reference.
 - **Runtime result:** `PENDING`
 
-### [UI-SRC-7BDECC53787E] Principals — Add Observability Hook
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-PR-19`
-- **Source:** `crates/cc-lb-admin/web/src/routes/principals.tsx:2275#ObservabilityHookEditor`
-- **Preconditions:** Principal selected; Plugin registry loaded; No conflicting write is pending
-- **Steps:** Select an observability-capable plugin → Click Add
-- **Scope:** `each_plugin` — GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **Expected UI:** Selected hook appears in the ordered observability chain after query invalidation.
-- **Runtime result:** `PENDING`
-
-### [UI-PR-19] Principals — Add Observability Hook — useInsertChainEntry
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-7BDECC53787E`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1509#useInsertChainEntry`
-- **Preconditions:** Principal selected; Plugin registry loaded; No conflicting write is pending
-- **Steps:** Select an observability-capable plugin → Click Add
-- **Scope:** `each_plugin` — GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain`
-  - Query: None
-  - Body: `slot`, `wasm_registry_id`
-  - Headers: `authorization`, `content-type`
-- **Handler:** `insert_chain`
-- **Storage operations:** `sqlite:PluginRegistryStore::insert_chain_entry:SqliteStorage::insert_chain_entry`, `postgres:PluginRegistryStore::insert_chain_entry:PostgresStorage::insert_chain_entry`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Invalidates TanStack queryKey ['plugin-chain', principal_id]; triggers dynamic rebind headers
-- **Side effects:** Inserts row into plugin_chains_v2; verifies principal exists and singleton slot constraint; records audit event 'plugin_chain_insert'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers; sets Location header QA restore: DELETE /admin/v1/plugin-chain-entries/{id} using returned entry ID and revision.
-- **Expected UI:** Selected hook appears in the ordered observability chain after query invalidation.
-- **Runtime result:** `PENDING`
-
-### [UI-SRC-D64907F28D4C] Principals — Load Observability Plugin Chain
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-PR-13D`
-- **Source:** `crates/cc-lb-admin/web/src/routes/principals.tsx:480#PrincipalDetail`
-- **Preconditions:** Authenticated admin session; Principal selected
-- **Steps:** Select a principal → PrincipalDetail mounts usePluginChain(principal.id, 'observability_hook')
-- **Scope:** `each_principal` — GET /admin/v1/principals response entries
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** The observability_hook editor and delete-impact count reflect the returned chain entries.
-- **Runtime result:** `PENDING`
-
-### [UI-PR-13D] Principals — Load Observability Plugin Chain — usePluginChain
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-D64907F28D4C`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:454#usePluginChain`
-- **Preconditions:** Authenticated admin session; Principal selected
-- **Steps:** Select a principal → PrincipalDetail mounts usePluginChain(principal.id, 'observability_hook')
-- **Scope:** `each_principal` — GET /admin/v1/principals response entries
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/principals/{id}/plugin-chain`
-  - Query: `slot`
-  - Body: None
-  - Headers: None
-- **Handler:** `list_chain`
-- **Storage operations:** `sqlite:PluginRegistryStore::list_chain_for_principal:SqliteStorage::list_chain_for_principal`, `postgres:PluginRegistryStore::list_chain_for_principal:PostgresStorage::list_chain_for_principal`
-- **Cache / no-query path:** If query.slot is RuntimeOnly, returns empty list immediately without hitting DB
-- **Side effects:** None
-- **Expected UI:** The observability_hook editor and delete-impact count reflect the returned chain entries.
-- **Runtime result:** `PENDING`
-
 ### [UI-SRC-30AC7206755A] Principals — Load Shape Plugin Chain
 
 - **Entry type:** `ui_action`
@@ -6249,7 +6105,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-PR-13E`
 - **Source:** `crates/cc-lb-admin/web/src/routes/principals.tsx:1435#usePluginRegistry`
 - **Preconditions:** Authenticated admin session; Principal selected
-- **Steps:** Select a principal → Router, Shape, and Observability editors mount usePluginRegistry
+- **Steps:** Select a principal → Router and Shape editors mount usePluginRegistry
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -6262,7 +6118,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-SRC-2092158E84C1`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:448#usePluginRegistry`
 - **Preconditions:** Authenticated admin session; Principal selected
-- **Steps:** Select a principal → Router, Shape, and Observability editors mount usePluginRegistry
+- **Steps:** Select a principal → Router and Shape editors mount usePluginRegistry
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -7120,7 +6976,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
   - Headers: None
 - **Handler:** `get_chain`
 - **Storage operations:** `sqlite:PrincipalStore::list:SqliteStorage::list`, `postgres:PrincipalStore::list:PostgresStorage::list`, `sqlite:PluginRegistryStore::list_chain_for_principal:SqliteStorage::list_chain_for_principal`, `postgres:PluginRegistryStore::list_chain_for_principal:PostgresStorage::list_chain_for_principal`
-- **Cache / no-query path:** Paginates principals with include_deleted=true, then scans the three stored plugin-chain slots (Router, ObservabilityHook, Shape) until the entry ID is found; RuntimeOnly slots are not stored or scanned.
+- **Cache / no-query path:** Paginates principals with include_deleted=true, then scans the two stored plugin-chain slots (Router, Shape) until the entry ID is found; RuntimeOnly slots are not stored or scanned.
 - **Side effects:** None
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7396,12 +7252,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/plugin-chain-entries/{id}`
   - Query: None
-  - Body: `config`, `sse_per_event`, `batched_events_per_flush`, `batched_flush_ms`
+  - Body: `config`
   - Headers: `authorization`, `if-match`, `content-type`
 - **Handler:** `update_chain`
 - **Storage operations:** `sqlite:PluginRegistryStore::update_chain_entry:SqliteStorage::update_chain_entry`, `postgres:PluginRegistryStore::update_chain_entry:PostgresStorage::update_chain_entry`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
 - **Cache / no-query path:** Triggers DynamicReview rebind; invalidates TanStack queryKey ['plugin-chain']
-- **Side effects:** Updates config, sse_per_event, batched_events_per_flush, batched_flush_ms; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision.
+- **Side effects:** Updates config; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision.
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
@@ -7731,7 +7587,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PR-15** | `preserved` | UI-PR-15 | Same method/path and source-backed request occurrence. |
 | **UI-PR-16** | `preserved` | UI-PR-16 | Same method/path and source-backed request occurrence. |
 | **UI-PR-18** | `preserved` | UI-PR-18 | Same source-backed UI action. |
-| **UI-PR-19** | `preserved` | UI-PR-19 | Same method/path and source-backed request occurrence. |
 | **UI-PR-20** | `preserved` | UI-PR-20 | Same method/path and source-backed request occurrence. |
 | **UI-PR-21** | `preserved` | UI-PR-21 | Same method/path and source-backed request occurrence. |
 | **UI-PR-22** | `preserved` | UI-PR-22 | Same method/path and source-backed request occurrence. |
@@ -7826,15 +7681,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-PR-13A** | `preserved` | UI-PR-13A | Same method/path and source-backed request occurrence. |
 | **UI-PR-13B** | `preserved` | UI-PR-13B | Same method/path and source-backed request occurrence. |
 | **UI-PR-13C** | `preserved` | UI-PR-13C | Same method/path and source-backed request occurrence. |
-| **UI-PR-13D** | `preserved` | UI-PR-13D | Same method/path and source-backed request occurrence. |
 | **UI-PR-13E** | `preserved` | UI-PR-13E | Same method/path and source-backed request occurrence. |
 | **UI-PR-15B** | `preserved` | UI-PR-15B | Same method/path and source-backed request occurrence. |
 | **UI-PR-16B** | `preserved` | UI-PR-16B | Same method/path and source-backed request occurrence. |
 | **UI-PR-16C** | `preserved` | UI-PR-16C | Same method/path and source-backed request occurrence. |
 | **UI-PR-18A** | `preserved` | UI-PR-18A | Same method/path and source-backed request occurrence. |
 | **UI-PR-18B** | `preserved` | UI-PR-18B | Same method/path and source-backed request occurrence. |
-| **UI-PR-19B** | `preserved` | UI-PR-19B | Same method/path and source-backed request occurrence. |
-| **UI-PR-19C** | `preserved` | UI-PR-19C | Same method/path and source-backed request occurrence. |
 | **UI-PR-24** | `preserved` | UI-PR-24 | Same method/path and source-backed request occurrence. |
 | **UI-LOG-05A** | `preserved` | UI-LOG-05A | Same method/path and source-backed request occurrence. |
 | **UI-LOG-05B** | `preserved` | UI-LOG-05B | Same method/path and source-backed request occurrence. |

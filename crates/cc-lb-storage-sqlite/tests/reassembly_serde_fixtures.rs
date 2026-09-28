@@ -79,7 +79,7 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         .expect("read plugin slot fixture");
     let plugin_slots: Vec<PluginSlotKind> =
         serde_json::from_slice(&plugin_slot_bytes).expect("deserialize plugin slot fixture");
-    assert_eq!(plugin_slots.len(), 3);
+    assert_eq!(plugin_slots.len(), 2);
     assert_eq!(
         serde_json::to_vec(&plugin_slots).expect("re-serialize plugin slot fixture"),
         plugin_slot_bytes
@@ -87,7 +87,6 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
     for slot in plugin_slots {
         match slot {
             PluginSlotKind::Router => assert_eq!(slot.as_str(), "router"),
-            PluginSlotKind::ObservabilityHook => assert_eq!(slot.as_str(), "observability_hook"),
             PluginSlotKind::Shape => assert_eq!(slot.as_str(), "shape"),
         }
     }
@@ -168,12 +167,8 @@ async fn generate_fixtures(output_dir: &Path) {
     .expect("write request event fixture");
     fs::write(
         output_dir.join("plugin_slots.json"),
-        serde_json::to_vec(&[
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ])
-        .expect("serialize plugin slot fixture"),
+        serde_json::to_vec(&[PluginSlotKind::Router, PluginSlotKind::Shape])
+            .expect("serialize plugin slot fixture"),
     )
     .expect("write plugin slot fixture");
     fs::write(

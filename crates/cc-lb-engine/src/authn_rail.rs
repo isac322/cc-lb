@@ -91,9 +91,6 @@ pub fn reject_unauthenticated(
     error: &BuiltinAuthError,
     observer: Option<&LifecycleContext>,
 ) -> Response<Body> {
-    if let Some(o) = observer {
-        o.notify_error_hooks("authentication_error", &error.to_string(), "authn");
-    }
     let status = StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
     let response = match error {
         BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
@@ -151,65 +148,7 @@ fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use cc_lb_clock::{ClockHandle, SystemClock};
-    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-
     use super::*;
-
-    #[derive(Default)]
-    struct RecordingHook {
-        events: Mutex<Vec<ObserveEvent>>,
-    }
-
-    impl ObservabilityHook for RecordingHook {
-        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            self.events
-                .lock()
-                .expect("recording hook mutex poisoned")
-                .push(event);
-            Ok(())
-        }
-    }
-
-    /// Authentication now fails before `Lifecycle::handle` runs, so the global
-    /// observability hooks must still see the rejection from here. This is the
-    /// coverage `global_hook_observes_authentication_error_without_event_bus`
-    /// used to provide through the handler; the boundary moved, the guarantee
-    /// did not. Deliberately built without an event bus: hooks are independent
-    /// of request-log transport.
-    #[test]
-    fn rejection_reports_authentication_error_and_terminal_to_global_hooks() {
-        let clock: ClockHandle = Arc::new(SystemClock);
-        let observer = LifecycleContext::without_bus("req_reject".to_owned(), &clock);
-        let hook = Arc::new(RecordingHook::default());
-        let hooks: Vec<Arc<dyn ObservabilityHook>> = vec![hook.clone()];
-        observer.set_observability_hooks(&hooks);
-
-        let response = reject_unauthenticated(&BuiltinAuthError::NotFound, Some(&observer));
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let events = hook.events.lock().expect("events lock");
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                ObserveEvent::Error { code, source, .. }
-                    if code == "authentication_error" && source == "authn"
-            )),
-            "global hook must observe the authentication error: {events:?}"
-        );
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                ObserveEvent::RequestFinished {
-                    status: StatusCode::UNAUTHORIZED,
-                    ..
-                }
-            )),
-            "global hook must observe the terminal 401: {events:?}"
-        );
-    }
 
     /// A disabled key is a 403, and `Unavailable` degrades to 503 with a
     /// Retry-After rather than looking like a bad credential.

@@ -19,7 +19,6 @@ use cc_lb_control::{
     UpstreamStatusSnapshot,
 };
 use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -153,7 +152,6 @@ fn dynamic_view_holder(principal_view: Arc<PrincipalView>) -> Arc<DynamicViewHol
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),

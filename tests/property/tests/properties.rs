@@ -3,13 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
-use cc_lb_engine::{SseBatchConfig, SseRelay, StreamingUsage, strip_hop_by_hop};
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_engine::{SseRelay, StreamingUsage, strip_hop_by_hop};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
@@ -293,24 +291,11 @@ fn body_from_chunks(chunks: Vec<Bytes>) -> Body {
 
 fn relay() -> SseRelay {
     SseRelay {
-        obs: Arc::new(NoopHook),
         dialect: Arc::new(NoopDialect),
-        batch: SseBatchConfig {
-            max_events: 8,
-            max_age: Duration::from_secs(60),
-        },
         error_normalizer: None,
         upstream_kind: None,
         streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
         prompt_cache_observation_context: None,
-    }
-}
-
-struct NoopHook;
-
-impl ObservabilityHook for NoopHook {
-    fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-        Ok(())
     }
 }
 

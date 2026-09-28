@@ -29,7 +29,6 @@ where
             connect_ms: Some(85),
             connection_reused: Some(false),
             limit_reconcile_ms: Some(15),
-            observability_post_ms: Some(20),
             ..Default::default()
         };
 
@@ -51,7 +50,6 @@ where
             connect_ms: None,
             connection_reused: Some(true),
             limit_reconcile_ms: Some(12),
-            observability_post_ms: Some(18),
             ..Default::default()
         };
 
@@ -73,7 +71,6 @@ where
             connect_ms: None,
             connection_reused: None,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             ..Default::default()
         };
 
@@ -129,11 +126,6 @@ where
             "limit_reconcile_ms mismatch: {:?}",
             got_full.limit_reconcile_ms
         );
-        ensure!(
-            got_full.observability_post_ms == Some(20),
-            "observability_post_ms mismatch: {:?}",
-            got_full.observability_post_ms
-        );
 
         // --- Event 2: warm-pool — reused=true, dns/connect stay None (not Some(0)) ---
         let got_warm = recent
@@ -175,11 +167,6 @@ where
             got_warm.limit_reconcile_ms == Some(12),
             "limit_reconcile_ms mismatch: {:?}",
             got_warm.limit_reconcile_ms
-        );
-        ensure!(
-            got_warm.observability_post_ms == Some(18),
-            "observability_post_ms mismatch: {:?}",
-            got_warm.observability_post_ms
         );
 
         // --- Event 3: all 9 new fields must stay None after round-trip ---
@@ -227,11 +214,6 @@ where
             got_none.limit_reconcile_ms.is_none(),
             "limit_reconcile_ms must be None: {:?}",
             got_none.limit_reconcile_ms
-        );
-        ensure!(
-            got_none.observability_post_ms.is_none(),
-            "observability_post_ms must be None: {:?}",
-            got_none.observability_post_ms
         );
 
         Ok(())

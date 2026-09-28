@@ -10,39 +10,13 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, Upstream};
-use cc_lb_engine::{SseBatchConfig, SseRelay};
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
+use cc_lb_engine::SseRelay;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
 };
 use http::Response;
 use http_body_util::BodyExt;
 use tokio::sync::Notify;
-
-#[derive(Default)]
-pub struct RecordingHook {
-    events: Mutex<Vec<ObserveEvent>>,
-}
-
-impl RecordingHook {
-    pub fn events(&self) -> Vec<ObserveEvent> {
-        self.events.lock().expect("recording hook lock").clone()
-    }
-
-    pub fn chunk_calls(&self) -> usize {
-        self.events()
-            .into_iter()
-            .filter(|event| matches!(event, ObserveEvent::Chunk { .. }))
-            .count()
-    }
-}
-
-impl ObservabilityHook for RecordingHook {
-    fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        self.events.lock().expect("recording hook lock").push(event);
-        Ok(())
-    }
-}
 
 pub struct TestDialect;
 
@@ -95,11 +69,9 @@ impl Drop for DropGuard {
     }
 }
 
-pub fn relay_for(hook: Arc<RecordingHook>, batch: SseBatchConfig) -> SseRelay {
+pub fn relay_for() -> SseRelay {
     SseRelay {
-        obs: hook,
         dialect: Arc::new(TestDialect),
-        batch,
         error_normalizer: None,
         upstream_kind: None,
         streaming_usage: Arc::new(Mutex::new(Default::default())),

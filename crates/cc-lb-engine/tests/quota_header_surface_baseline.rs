@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, lifecycle_with,
     messages_request,
 };
 use bytes::Bytes;
@@ -39,7 +38,6 @@ async fn quota_header_surface_and_sample_remain_byte_stable() {
             state,
             mode: DispatchMode::HeadersOk(headers),
         },
-        Arc::new(RecordingHook::default()),
     );
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,

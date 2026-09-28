@@ -14,7 +14,6 @@ plugins/
 │   └── cache-aware/        # cache-aware router implementation
 ├── dialect/
 ├── signer/
-├── observability/
 └── README.md (this file)
 ```
 

@@ -6,9 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
+use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_routing::{
     FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
@@ -145,7 +143,6 @@ fn lifecycle_with_pipeline(
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(router)
-        .global_observability_hooks(Vec::new())
         .principal_view(principal_view)
         .upstream_records(records)
         .build();
@@ -167,11 +164,7 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::from_db(
         &[PrincipalRecord {

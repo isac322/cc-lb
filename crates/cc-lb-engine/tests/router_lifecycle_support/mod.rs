@@ -10,7 +10,6 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
@@ -22,7 +21,7 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::common::{RecordingHook, TestAuthn, TestState};
+use crate::common::{TestAuthn, TestState};
 
 #[derive(Clone, Default)]
 pub struct RouterLifecycleState {
@@ -38,7 +37,6 @@ pub fn lifecycle_with_records(
     state: RouterLifecycleState,
 ) -> Lifecycle {
     let authn = TestAuthn::new(TestState::default());
-    let hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingHook::default());
     let dispatcher = Arc::new(RecordingDispatch {
         state: state.clone(),
     });
@@ -47,7 +45,6 @@ pub fn lifecycle_with_records(
             choices: state.router_choice_names.clone(),
         }))
         .global_router(router)
-        .global_observability_hooks(vec![hook])
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();

@@ -84,9 +84,6 @@ async fn run_test(url: &str) -> Result<()> {
         order: 100,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
-        sse_per_event: false,
-        batched_events_per_flush: 32,
-        batched_flush_ms: 100,
     };
 
     let entry1 = storage.insert_chain_entry(input1.clone()).await?;
@@ -103,9 +100,6 @@ async fn run_test(url: &str) -> Result<()> {
         order: 200,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
-        sse_per_event: false,
-        batched_events_per_flush: 32,
-        batched_flush_ms: 100,
     };
 
     let entry_router1 = storage.insert_chain_entry(input_router1.clone()).await?;
@@ -118,9 +112,6 @@ async fn run_test(url: &str) -> Result<()> {
         order: 201,
         wasm_registry_id: registry_id,
         config: serde_json::json!({}),
-        sse_per_event: false,
-        batched_events_per_flush: 32,
-        batched_flush_ms: 100,
     };
 
     let entry_router2 = storage.insert_chain_entry(input_router2).await?;

@@ -1034,24 +1034,6 @@
       "type": "Option<Value>",
       "required": false,
       "description": "JSON configuration object (default {})"
-     },
-     {
-      "name": "sse_per_event",
-      "type": "Option<bool>",
-      "required": false,
-      "description": "per-event SSE handling (default false)"
-     },
-     {
-      "name": "batched_events_per_flush",
-      "type": "Option<u32>",
-      "required": false,
-      "description": "flush event threshold (default 1)"
-     },
-     {
-      "name": "batched_flush_ms",
-      "type": "Option<u64>",
-      "required": false,
-      "description": "flush timeout ms (default 0)"
      }
     ]
    }
@@ -1166,7 +1148,7 @@
     "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
    ],
    "cache_or_no_query": "Triggers DynamicReview rebind; invalidates TanStack queryKey ['plugin-chain']",
-   "side_effects": "Updates config, sse_per_event, batched_events_per_flush, batched_flush_ms; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision.",
+   "side_effects": "Updates config; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision.",
    "risk_tier": "reversible_write",
    "parameters": {
     "path": [
@@ -1204,24 +1186,6 @@
       "type": "Option<Value>",
       "required": false,
       "description": "JSON configuration object"
-     },
-     {
-      "name": "sse_per_event",
-      "type": "Option<bool>",
-      "required": false,
-      "description": "per-event SSE handling"
-     },
-     {
-      "name": "batched_events_per_flush",
-      "type": "Option<u32>",
-      "required": false,
-      "description": "flush event threshold"
-     },
-     {
-      "name": "batched_flush_ms",
-      "type": "Option<u64>",
-      "required": false,
-      "description": "flush timeout ms"
      }
     ]
    }
@@ -3332,7 +3296,7 @@
     },
     {
      "kind": "literal",
-     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0) RETURNING *",
+     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1,$2,$3,$4,$5,$6,0) RETURNING *",
      "source": {
       "file": "crates/cc-lb-storage-postgres/src/adapter/plugin_registry.rs",
       "symbol": "PostgresStorage::insert_chain_entry",
@@ -3346,10 +3310,7 @@
       "input.slot.as_str()",
       "input.order",
       "input.wasm_registry_id",
-      "input.config",
-      "input.sse_per_event",
-      "i32::try_from(input.batched_events_per_flush)...",
-      "u64_to_i64(input.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
+      "input.config"
      ]
     },
     {
@@ -3728,21 +3689,18 @@
     },
     {
      "kind": "literal",
-     "text": "UPDATE plugin_chains_v2 SET config=$3, sse_per_event=$4, batched_events_per_flush=$5, batched_flush_ms=$6, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *",
+     "text": "UPDATE plugin_chains_v2 SET config=$3, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *",
      "source": {
       "file": "crates/cc-lb-storage-postgres/src/adapter/plugin_registry.rs",
       "symbol": "PostgresStorage::update_chain_entry",
-      "line_start": 527,
-      "line_end": 527
+      "line_start": 511,
+      "line_end": 511
      },
      "branches": [],
      "bind_parameters": [
       "id",
       "u64_to_i64(expected_revision, \"plugin_chain.revision\")?",
-      "current.config",
-      "current.sse_per_event",
-      "i32::try_from(current.batched_events_per_flush)...",
-      "u64_to_i64(current.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
+      "config"
      ]
     },
     {
@@ -3883,7 +3841,7 @@
     },
     {
      "kind": "literal",
-     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, FALSE, 1, 100, 0)",
+     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, 0)",
      "source": {
       "file": "crates/cc-lb-storage-postgres/src/adapter/principals.rs",
       "symbol": "PostgresStorage::create",
@@ -5511,7 +5469,7 @@
     },
     {
      "kind": "literal",
-     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
+     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
      "source": {
       "file": "crates/cc-lb-storage-sqlite/src/adapter/plugin_registry.rs",
       "symbol": "SqliteStorage::insert_chain_entry",
@@ -5525,10 +5483,7 @@
       "input.slot.as_str()",
       "input.wasm_registry_id.to_string()",
       "input.order",
-      "serde_json::to_string(&input.config)?",
-      "input.sse_per_event",
-      "i64::from(input.batched_events_per_flush)",
-      "u64_to_i64(input.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
+      "serde_json::to_string(&input.config)?"
      ]
     }
    ]
@@ -5866,19 +5821,16 @@
     },
     {
      "kind": "literal",
-     "text": "UPDATE plugin_chains_v2 SET config = ?, sse_per_event = ?, batched_events_per_flush = ?, batched_flush_ms = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
+     "text": "UPDATE plugin_chains_v2 SET config = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
      "source": {
       "file": "crates/cc-lb-storage-sqlite/src/adapter/plugin_registry.rs",
       "symbol": "SqliteStorage::update_chain_entry",
-      "line_start": 575,
-      "line_end": 575
+      "line_start": 556,
+      "line_end": 556
      },
      "branches": [],
      "bind_parameters": [
-      "serde_json::to_string(&current.config)?",
-      "current.sse_per_event",
-      "i64::from(current.batched_events_per_flush)",
-      "u64_to_i64(current.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?",
+      "serde_json::to_string(&config)?",
       "id.to_string()",
       "u64_to_i64(expected_revision, \"plugin_chain.revision\")?"
      ]
@@ -6008,7 +5960,7 @@
     },
     {
      "kind": "literal",
-     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, 1, 100, 0, unixepoch(), unixepoch())",
+     "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, unixepoch(), unixepoch())",
      "source": {
       "file": "crates/cc-lb-storage-sqlite/src/adapter/principals.rs",
       "symbol": "SqliteStorage::create",

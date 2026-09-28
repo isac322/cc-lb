@@ -892,7 +892,7 @@ async fn insert_request_event_in_tx(
         "list_cache_tokenizer_queue_ms, list_cache_serialize_ms, ",
         "list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, ",
         "list_dns_ms, list_connect_ms, list_connection_reused, ",
-        "list_limit_reconcile_ms, list_observability_post_ms, ",
+        "list_limit_reconcile_ms, ",
         "list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, ",
         "list_upstream_body_ms, list_stream_first_content_delta_ms, ",
         "list_stream_last_content_delta_ms, list_inter_token_avg_ms, ",
@@ -917,7 +917,7 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?",
+        "?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -1093,10 +1093,6 @@ async fn insert_request_event_in_tx(
     .bind(option_u64_to_i64(
         event.limit_reconcile_ms,
         "request event list_limit_reconcile_ms",
-    )?)
-    .bind(option_u64_to_i64(
-        event.observability_post_ms,
-        "request event list_observability_post_ms",
     )?)
     .bind(option_u64_to_i64(
         event.proxy_setup_ms,

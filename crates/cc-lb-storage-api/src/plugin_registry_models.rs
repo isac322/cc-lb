@@ -173,9 +173,6 @@ pub struct PluginChainEntryInput {
     pub order: i64,
     pub wasm_registry_id: Uuid,
     pub config: Value,
-    pub sse_per_event: bool,
-    pub batched_events_per_flush: u32,
-    pub batched_flush_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,18 +183,12 @@ pub struct PluginChainEntry {
     pub order: i64,
     pub wasm_registry_id: Uuid,
     pub config: Value,
-    pub sse_per_event: bool,
-    pub batched_events_per_flush: u32,
-    pub batched_flush_ms: u64,
     pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PluginChainEntryUpdate {
     pub config: Option<Value>,
-    pub sse_per_event: Option<bool>,
-    pub batched_events_per_flush: Option<u32>,
-    pub batched_flush_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

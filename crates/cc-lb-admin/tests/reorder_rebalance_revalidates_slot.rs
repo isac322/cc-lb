@@ -170,9 +170,6 @@ async fn seed_chain_with_slot(
             order,
             wasm_registry_id,
             config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 1,
-            batched_flush_ms: 100,
         })
         .await
         .unwrap()

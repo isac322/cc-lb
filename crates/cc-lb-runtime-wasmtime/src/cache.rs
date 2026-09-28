@@ -1,8 +1,9 @@
 //! ABI call wrapper for wasmtime plugin hooks.
 //!
 //! Every wasm call goes through one of [`call_filter_hook`] /
-//! [`call_shape_hook`] / [`call_observe_hook`]. They all share the same
-//! alloc → write → call → read → free flow; only the typed-func name differs.
+//! [`call_shape_hook`] / the response transform hooks. They all share
+//! the same alloc → write → call → read → free flow; only the
+//! typed-func name differs.
 //!
 //! Each call builds a fresh [`Store`] via
 //! [`PluginCell::instance_pre`] and drops it on return — no
@@ -11,10 +12,6 @@
 //! so the state-leak / version-drift complexity of a cached
 //! `WorkerInstance` was never worth its cost (RFC-0001 gap-analysis
 //! item #11).
-//!
-//! Observe hooks return `(0, 0)` from the guest, so the output alloc/free
-//! pair is skipped; only the input buffer is alloc'd and immediately
-//! free'd by the guest helper.
 //!
 //! See RFC §실행 모델 + §Operational invariants (review consensus).
 
@@ -28,8 +25,7 @@ mod hooks;
 mod worker;
 
 pub use hooks::{
-    call_filter_hook, call_observe_hook, call_shape_hook, call_transform_response_hook,
-    call_transform_sse_event_hook,
+    call_filter_hook, call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook,
 };
 pub(crate) use hooks::{
     call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
@@ -62,7 +58,6 @@ pub const DEFAULT_ALIGN: u32 = 16;
 enum HookFn {
     Filter,
     Shape,
-    Observe,
     TransformResponse,
     TransformSseEvent,
 }
@@ -72,7 +67,6 @@ impl HookFn {
         match self {
             HookFn::Filter => "cc_lb_filter",
             HookFn::Shape => "cc_lb_shape",
-            HookFn::Observe => "cc_lb_observe",
             HookFn::TransformResponse => "cc_lb_transform_response",
             HookFn::TransformSseEvent => "cc_lb_transform_sse_event",
         }
@@ -85,7 +79,6 @@ impl HookFn {
         match self {
             HookFn::Filter => "filter",
             HookFn::Shape => "shape",
-            HookFn::Observe => "observe",
             HookFn::TransformResponse => "transform_response",
             HookFn::TransformSseEvent => "transform_sse_event",
         }
@@ -174,7 +167,6 @@ where
         free_fn,
         filter_fn,
         shape_fn,
-        observe_fn,
         transform_response_fn,
         transform_sse_event_fn,
     } = wi;
@@ -182,7 +174,6 @@ where
     let hook_fn = match hook {
         HookFn::Filter => filter_fn.as_ref(),
         HookFn::Shape => shape_fn.as_ref(),
-        HookFn::Observe => observe_fn.as_ref(),
         HookFn::TransformResponse => transform_response_fn.as_ref(),
         HookFn::TransformSseEvent => transform_sse_event_fn.as_ref(),
     }
@@ -240,51 +231,45 @@ where
     let out_ptr = (packed >> 32) as u32;
     let out_len = (packed & 0xFFFF_FFFF) as u32;
 
-    // Only the observe hook is allowed to return (0, 0) — side-effect
-    // only by contract (`cc-lb-pdk-wasmtime/src/lib.rs::run_observe*`).
-    // Filter / shape returning (0, 0) is an ABI
-    // violation; collapsing it into empty bytes here would hide the
-    // bug from downstream rkyv decode.
-    let output = if matches!(hook, HookFn::Observe) && out_ptr == 0 && out_len == 0 {
-        with_output(&[])
-    } else if out_ptr == 0 || out_len == 0 {
+    // Every hook must return a non-empty output buffer. Collapsing
+    // (0, 0) into empty bytes here would hide the ABI violation from
+    // downstream rkyv decode.
+    if out_ptr == 0 || out_len == 0 {
         return Err(WasmtimeRuntimeError::ModuleRejected {
             reason: format!(
-                "{}: guest returned invalid (ptr={out_ptr}, len={out_len}); only observe may return (0, 0)",
+                "{}: guest returned invalid (ptr={out_ptr}, len={out_len})",
                 hook.export_name()
             ),
         });
-    } else {
-        let mem_view = memory.data(&*store);
-        let out_end = (out_ptr as usize)
-            .checked_add(out_len as usize)
-            .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
-                reason: "guest output ptr+len overflows usize".into(),
-            })?;
-        if out_end > mem_view.len() {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "guest output [{}..{}] out of bounds (memory size {})",
-                    out_ptr,
-                    out_end,
-                    mem_view.len()
-                ),
-            });
-        }
-        let output = with_output(&mem_view[out_ptr as usize..out_end]);
+    }
+    let mem_view = memory.data(&*store);
+    let out_end = (out_ptr as usize)
+        .checked_add(out_len as usize)
+        .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
+            reason: "guest output ptr+len overflows usize".into(),
+        })?;
+    if out_end > mem_view.len() {
+        return Err(WasmtimeRuntimeError::ModuleRejected {
+            reason: format!(
+                "guest output [{}..{}] out of bounds (memory size {})",
+                out_ptr,
+                out_end,
+                mem_view.len()
+            ),
+        });
+    }
+    let output = with_output(&mem_view[out_ptr as usize..out_end]);
 
-        // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
-        // buffer: the surrounding pure-mode contract drops the whole
-        // `Store` on function return, so the pool immediately
-        // reclaims every memory page. Calling the guest allocator to
-        // "free" bytes that are about to vanish costs a host↔guest
-        // transition. `cc_lb_free` for the INPUT
-        // buffer is still driven by the guest PDK (see the comment
-        // above `hook_fn.call`) — we're only skipping the OUTPUT
-        // free because it happens AFTER `hook_fn` returns.
-        let _ = free_fn;
-        output
-    };
+    // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
+    // buffer: the surrounding pure-mode contract drops the whole
+    // `Store` on function return, so the pool immediately
+    // reclaims every memory page. Calling the guest allocator to
+    // "free" bytes that are about to vanish costs a host↔guest
+    // transition. `cc_lb_free` for the INPUT
+    // buffer is still driven by the guest PDK (see the comment
+    // above `hook_fn.call`) — we're only skipping the OUTPUT
+    // free because it happens AFTER `hook_fn` returns.
+    let _ = free_fn;
 
     Ok(output)
 }

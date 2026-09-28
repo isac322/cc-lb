@@ -162,9 +162,6 @@ async fn insert_router_chain(
             order,
             wasm_registry_id,
             config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 100,
-            batched_flush_ms: 1_000,
         })
         .await?;
     Ok(entry)

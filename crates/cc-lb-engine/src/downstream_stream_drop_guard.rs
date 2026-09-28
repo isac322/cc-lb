@@ -518,7 +518,7 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_request_body_timing(11, Some(123));
-        observer.set_termination_timings(None, None, Some(17), None, None);
+        observer.set_termination_timings(None, Some(17), None, None);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
@@ -596,7 +596,7 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_request_body_timing(13, Some(456));
-        observer.set_termination_timings(None, None, Some(19), None, None);
+        observer.set_termination_timings(None, Some(19), None, None);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");

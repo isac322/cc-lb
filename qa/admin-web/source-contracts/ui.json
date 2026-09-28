@@ -17,8 +17,8 @@
     ],
     "imported_action_count": 202,
     "imported_request_occurrence_count": 148,
-    "canonical_action_count": 208,
-    "canonical_request_occurrence_count": 146,
+    "canonical_action_count": 204,
+    "canonical_request_occurrence_count": 142,
     "source_reconciled": true,
     "source_reconciliation_status": "source_reconciled_by_current_generator",
     "runtime_status": "runtime_pending",
@@ -746,7 +746,6 @@
       "kind": "finite_enum",
       "values": [
         "router",
-        "observability_hook",
         "shape"
       ],
       "source": {
@@ -1572,13 +1571,6 @@
       "reason": "Same source-backed UI action."
     },
     {
-      "legacy_id": "UI-PR-19",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:add",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
       "legacy_id": "UI-PR-20",
       "status": "preserved",
       "canonical_id": "UI-PR-20",
@@ -2237,13 +2229,6 @@
       "reason": "Same method/path and source-backed request occurrence."
     },
     {
-      "legacy_id": "UI-PR-13D",
-      "status": "preserved",
-      "canonical_id": "UI-PR-13D",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_observability_hook_chain",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
       "legacy_id": "UI-PR-13E",
       "status": "preserved",
       "canonical_id": "UI-PR-13E",
@@ -2283,20 +2268,6 @@
       "status": "preserved",
       "canonical_id": "UI-PR-18B",
       "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ShapeSlotEditor:select_shape",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
-      "legacy_id": "UI-PR-19B",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19B",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
-      "legacy_id": "UI-PR-19C",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19C",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove",
       "reason": "Same method/path and source-backed request occurrence."
     },
     {
@@ -9234,166 +9205,6 @@
       }
     },
     {
-      "id": "UI-SRC-4A31DF64FCC2",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder",
-      "contract_source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder",
-      "contract_area": "principals",
-      "legacy_ids": [
-        "UI-PR-19B"
-      ],
-      "page": "Principals",
-      "component": "ObservabilityHookEditor",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/principals.tsx",
-        "symbol": "ObservabilityHookEditor",
-        "line": 2154
-      },
-      "name": "Reorder Observability Hooks via Drag-and-Drop",
-      "trigger_steps": [
-        "Drag an observability hook item and drop at a new index"
-      ],
-      "preconditions": [
-        "chainBusy === false",
-        "entries.length > 1"
-      ],
-      "variants": [
-        "drag up",
-        "drag down",
-        "drop on same index (noop)"
-      ],
-      "scope": "each_principal",
-      "iteration_source": "Observability hook chain entries",
-      "coverage": {
-        "kind": "runtime_population",
-        "source": "Observability hook chain entries",
-        "variants": [
-          "drag up",
-          "drag down",
-          "drop on same index (noop)"
-        ]
-      },
-      "risk_tier": "reversible_write",
-      "expected_ui": "Items reorder visually via SortableContext, header displays 'Saving order...', toast confirms 'Chain reordered'",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-PR-19B"
-      ],
-      "requests": [
-        {
-          "method": "POST",
-          "path": "/admin/v1/principals/{id}/plugin-chain/reorder",
-          "query_fields": [],
-          "body_fields": [
-            "entries"
-          ],
-          "client_symbol": "useReorderChain",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useReorderChain",
-            "line": 1535
-          },
-          "side_effect_notes": "Submits { id, order: (i + 1) * 100, expected_revision } for each item",
-          "id": "UI-PR-19B",
-          "parent_action_id": "UI-SRC-4A31DF64FCC2",
-          "path_bindings": [
-            {
-              "name": "id",
-              "source": "principal.id",
-              "format": "source_identifier"
-            }
-          ],
-          "risk_tier": "reversible_write",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
-      "id": "UI-SRC-8AE44ADD2C3E",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove",
-      "contract_source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove",
-      "contract_area": "principals",
-      "legacy_ids": [
-        "UI-PR-19C"
-      ],
-      "page": "Principals",
-      "component": "ObservabilityHookEditor",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/principals.tsx",
-        "symbol": "ObservabilityHookEditor",
-        "line": 2212
-      },
-      "name": "Remove Observability Hook",
-      "trigger_steps": [
-        "Click Trash icon on hook item",
-        "Confirm in removal modal"
-      ],
-      "preconditions": [
-        "chainBusy === false"
-      ],
-      "variants": [
-        "confirm remove",
-        "cancel modal"
-      ],
-      "scope": "each_principal",
-      "iteration_source": "Observability hook chain entries",
-      "coverage": {
-        "kind": "runtime_population",
-        "source": "Observability hook chain entries",
-        "variants": [
-          "confirm remove",
-          "cancel modal"
-        ]
-      },
-      "risk_tier": "destructive_write",
-      "expected_ui": "Hook item is deleted from chain, list updates, empty dashed CTA shown if count reaches 0",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-PR-19C"
-      ],
-      "requests": [
-        {
-          "method": "DELETE",
-          "path": "/admin/v1/plugin-chain-entries/{id}",
-          "query_fields": [],
-          "body_fields": [],
-          "client_symbol": "useDeleteChainEntry",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useDeleteChainEntry",
-            "line": 1550
-          },
-          "side_effect_notes": "Sends ifMatch: revision header. Invalidates ['plugin-chain']",
-          "id": "UI-PR-19C",
-          "parent_action_id": "UI-SRC-8AE44ADD2C3E",
-          "path_bindings": [
-            {
-              "name": "id",
-              "source": "principal.id",
-              "format": "source_identifier"
-            }
-          ],
-          "risk_tier": "destructive_write",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-SRC-5DE97D4F1CFC",
       "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ApiKeysCard:mount",
       "contract_source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ApiKeysCard:mount",
@@ -11518,7 +11329,6 @@
       ],
       "variants": [
         "Slot 'router': displays 'Apply to Router (Principals)' linking to /principals",
-        "Slot 'observability_hook': displays 'Apply to Observability (Principals)' linking to /principals",
         "Slot 'shape': displays 'Apply to Shape (Principals)' linking to /principals AND 'Apply to Warmup Dialect (Upstreams)' linking to /upstreams"
       ],
       "scope": "each_plugin",
@@ -11528,7 +11338,6 @@
         "source": "Each applicable target slot",
         "variants": [
           "Slot 'router': displays 'Apply to Router (Principals)' linking to /principals",
-          "Slot 'observability_hook': displays 'Apply to Observability (Principals)' linking to /principals",
           "Slot 'shape': displays 'Apply to Shape (Principals)' linking to /principals AND 'Apply to Warmup Dialect (Upstreams)' linking to /upstreams"
         ]
       },
@@ -16668,174 +16477,6 @@
       }
     },
     {
-      "id": "UI-SRC-7BDECC53787E",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:add",
-      "contract_source_id": "reconciliation:add:observability-hook",
-      "contract_area": "principals",
-      "legacy_ids": [
-        "UI-PR-19"
-      ],
-      "page": "Principals",
-      "component": "ObservabilityHookEditor",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/principals.tsx",
-        "symbol": "ObservabilityHookEditor",
-        "line": 2275
-      },
-      "name": "Add Observability Hook",
-      "trigger_steps": [
-        "Select an observability-capable plugin",
-        "Click Add"
-      ],
-      "preconditions": [
-        "Principal selected",
-        "Plugin registry loaded",
-        "No conflicting write is pending"
-      ],
-      "variants": [
-        "each plugin supporting observability_hook",
-        "mutation success",
-        "mutation conflict/error"
-      ],
-      "scope": "each_plugin",
-      "iteration_source": "GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'",
-      "coverage": {
-        "kind": "runtime_population",
-        "source": "GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'",
-        "variants": [
-          "each plugin supporting observability_hook",
-          "mutation success",
-          "mutation conflict/error"
-        ]
-      },
-      "risk_tier": "reversible_write",
-      "expected_ui": "Selected hook appears in the ordered observability chain after query invalidation.",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-PR-19"
-      ],
-      "requests": [
-        {
-          "method": "POST",
-          "path": "/admin/v1/principals/{id}/plugin-chain",
-          "query_fields": [],
-          "body_fields": [
-            "slot",
-            "wasm_registry_id"
-          ],
-          "client_symbol": "useInsertChainEntry",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useInsertChainEntry",
-            "line": 1509
-          },
-          "side_effect_notes": "slot='observability_hook'; invalidates the principal plugin-chain query.",
-          "id": "UI-PR-19",
-          "parent_action_id": "UI-SRC-7BDECC53787E",
-          "path_bindings": [
-            {
-              "name": "id",
-              "source": "principal.id",
-              "format": "source_identifier"
-            }
-          ],
-          "risk_tier": "reversible_write",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
-      "id": "UI-SRC-D64907F28D4C",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_observability_hook_chain",
-      "contract_source_id": "reconciliation:add:principal-observability_hook-chain",
-      "contract_area": "principals",
-      "legacy_ids": [
-        "UI-PR-13D"
-      ],
-      "page": "Principals",
-      "component": "PrincipalDetail",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/principals.tsx",
-        "symbol": "PrincipalDetail",
-        "line": 480
-      },
-      "name": "Load Observability Plugin Chain",
-      "trigger_steps": [
-        "Select a principal",
-        "PrincipalDetail mounts usePluginChain(principal.id, 'observability_hook')"
-      ],
-      "preconditions": [
-        "Authenticated admin session",
-        "Principal selected"
-      ],
-      "variants": [
-        "loading",
-        "empty chain",
-        "populated chain"
-      ],
-      "scope": "each_principal",
-      "iteration_source": "GET /admin/v1/principals response entries",
-      "coverage": {
-        "kind": "runtime_population",
-        "source": "GET /admin/v1/principals response entries",
-        "variants": [
-          "loading",
-          "empty chain",
-          "populated chain"
-        ]
-      },
-      "risk_tier": "read",
-      "expected_ui": "The observability_hook editor and delete-impact count reflect the returned chain entries.",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-PR-13D"
-      ],
-      "requests": [
-        {
-          "method": "GET",
-          "path": "/admin/v1/principals/{id}/plugin-chain",
-          "query_fields": [
-            "slot"
-          ],
-          "body_fields": [],
-          "client_symbol": "usePluginChain",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "usePluginChain",
-            "line": 454
-          },
-          "side_effect_notes": "Wire query sends slot=observability_hook.",
-          "id": "UI-PR-13D",
-          "parent_action_id": "UI-SRC-D64907F28D4C",
-          "path_bindings": [
-            {
-              "name": "id",
-              "source": "principal.id",
-              "format": "source_identifier"
-            }
-          ],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-SRC-30AC7206755A",
       "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_shape_chain",
       "contract_source_id": "reconciliation:add:principal-shape-chain",
@@ -16927,7 +16568,7 @@
         "UI-PR-13E"
       ],
       "page": "Principals",
-      "component": "Router, Shape, and Observability Editors",
+      "component": "Router and Shape Editors",
       "source": {
         "file": "crates/cc-lb-admin/web/src/routes/principals.tsx",
         "symbol": "usePluginRegistry",
@@ -16936,7 +16577,7 @@
       "name": "Load Plugin Registry for Principal Editors",
       "trigger_steps": [
         "Select a principal",
-        "Router, Shape, and Observability editors mount usePluginRegistry"
+        "Router and Shape editors mount usePluginRegistry"
       ],
       "preconditions": [
         "Authenticated admin session",

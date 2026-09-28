@@ -29,9 +29,9 @@
     - "It does not verify rendered reachability, runtime entity counts, pagination termination, polling cycles, SSE behavior, latency, or the deployed commit."
     - "TanStack Query cache hits and request coalescing can suppress a potential request occurrence at runtime; each item records the condition."
   "counts":
-    "total": 422
-    "ui_action": 218
-    "network_request": 159
+    "total": 414
+    "ui_action": 214
+    "network_request": 155
     "backend_endpoint": 45
 "coverage_dimensions":
   - "id": "theme"
@@ -279,7 +279,6 @@
     "kind": "finite_enum"
     "values":
       - "router"
-      - "observability_hook"
       - "shape"
     "source":
       "file": "crates/cc-lb-admin/web/src/components/plugins/slots/model.ts"
@@ -7888,196 +7887,6 @@
     "production_applicability":
       "status": "available"
       "reason": null
-  - "id": "UI-SRC-4A31DF64FCC2"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Reorder Observability Hooks via Drag-and-Drop"
-    "trigger_steps":
-      - "Drag an observability hook item and drop at a new index"
-    "preconditions":
-      - "chainBusy === false"
-      - "entries.length > 1"
-    "variants":
-      - "drag up"
-      - "drag down"
-      - "drop on same index (noop)"
-    "scope": "each_principal"
-    "iteration_source": "Observability hook chain entries"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "Observability hook chain entries"
-      "variants":
-        - "drag up"
-        - "drag down"
-        - "drop on same index (noop)"
-    "atomic_request_ids":
-      - "UI-PR-19B"
-    "risk_tier": "reversible_write"
-    "expected_ui": "Items reorder visually via SortableContext, header displays 'Saving order...', toast confirms 'Chain reordered'"
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/principals.tsx"
-      "symbol": "ObservabilityHookEditor"
-      "line": 2154
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-PR-19B"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-4A31DF64FCC2"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Reorder Observability Hooks via Drag-and-Drop — useReorderChain"
-    "trigger_steps":
-      - "Drag an observability hook item and drop at a new index"
-    "preconditions":
-      - "chainBusy === false"
-      - "entries.length > 1"
-    "variants":
-      - "drag up"
-      - "drag down"
-      - "drop on same index (noop)"
-    "scope": "each_principal"
-    "iteration_source": "Observability hook chain entries"
-    "risk_tier": "reversible_write"
-    "expected_ui": "Items reorder visually via SortableContext, header displays 'Saving order...', toast confirms 'Chain reordered'"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useReorderChain"
-      "line": 1535
-    "http":
-      "method": "POST"
-      "path": "/admin/v1/principals/{id}/plugin-chain/reorder"
-      "path_bindings":
-        - "name": "id"
-          "source": "principal.id"
-          "format": "source_identifier"
-      "query_fields": []
-      "body_fields":
-        - "entries"
-      "header_fields":
-        - "authorization"
-        - "content-type"
-      "condition": null
-    "client_symbol": "useReorderChain"
-    "api_handler": "reorder_chain"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:PluginRegistryStore::reorder_chain:SqliteStorage::reorder_chain"
-      - "postgres:PluginRegistryStore::reorder_chain:PostgresStorage::reorder_chain"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Invalidates TanStack queryKey ['plugin-chain', principal_id]; triggers dynamic rebind headers"
-    "side_effects": "Updates order_value and increments revision for chain entries; checks order gap >= 2; records audit event 'plugin_chain_reorder'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: POST /admin/v1/principals/{principal_id}/plugin-chain/reorder with prior order values and updated revisions."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SRC-8AE44ADD2C3E"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Remove Observability Hook"
-    "trigger_steps":
-      - "Click Trash icon on hook item"
-      - "Confirm in removal modal"
-    "preconditions":
-      - "chainBusy === false"
-    "variants":
-      - "confirm remove"
-      - "cancel modal"
-    "scope": "each_principal"
-    "iteration_source": "Observability hook chain entries"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "Observability hook chain entries"
-      "variants":
-        - "confirm remove"
-        - "cancel modal"
-    "atomic_request_ids":
-      - "UI-PR-19C"
-    "risk_tier": "destructive_write"
-    "expected_ui": "Hook item is deleted from chain, list updates, empty dashed CTA shown if count reaches 0"
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/principals.tsx"
-      "symbol": "ObservabilityHookEditor"
-      "line": 2212
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-PR-19C"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-8AE44ADD2C3E"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Remove Observability Hook — useDeleteChainEntry"
-    "trigger_steps":
-      - "Click Trash icon on hook item"
-      - "Confirm in removal modal"
-    "preconditions":
-      - "chainBusy === false"
-    "variants":
-      - "confirm remove"
-      - "cancel modal"
-    "scope": "each_principal"
-    "iteration_source": "Observability hook chain entries"
-    "risk_tier": "destructive_write"
-    "expected_ui": "Hook item is deleted from chain, list updates, empty dashed CTA shown if count reaches 0"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useDeleteChainEntry"
-      "line": 1550
-    "http":
-      "method": "DELETE"
-      "path": "/admin/v1/plugin-chain-entries/{id}"
-      "path_bindings":
-        - "name": "id"
-          "source": "principal.id"
-          "format": "source_identifier"
-      "query_fields": []
-      "body_fields": []
-      "header_fields":
-        - "authorization"
-        - "if-match"
-      "condition": null
-    "client_symbol": "useDeleteChainEntry"
-    "api_handler": "delete_chain"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:PluginRegistryStore::delete_chain_entry:SqliteStorage::delete_chain_entry"
-      - "postgres:PluginRegistryStore::delete_chain_entry:PostgresStorage::delete_chain_entry"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Invalidates TanStack queryKey ['plugin-chain']; triggers dynamic rebind headers"
-    "side_effects": "Deletes row from plugin_chains_v2; records audit event 'plugin_chain_delete'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: POST /admin/v1/principals/{principal_id}/plugin-chain with original parameters to recreate the chain entry."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
   - "id": "UI-SRC-5DE97D4F1CFC"
     "aliases": []
     "entry_type": "ui_action"
@@ -10431,7 +10240,6 @@
       - "Plugin has supported_slots declared in metadata"
     "variants":
       - "Slot 'router': displays 'Apply to Router (Principals)' linking to /principals"
-      - "Slot 'observability_hook': displays 'Apply to Observability (Principals)' linking to /principals"
       - "Slot 'shape': displays 'Apply to Shape (Principals)' linking to /principals AND 'Apply to Warmup Dialect (Upstreams)' linking to /upstreams"
     "scope": "each_plugin"
     "iteration_source": "Each applicable target slot"
@@ -10440,7 +10248,6 @@
       "source": "Each applicable target slot"
       "variants":
         - "Slot 'router': displays 'Apply to Router (Principals)' linking to /principals"
-        - "Slot 'observability_hook': displays 'Apply to Observability (Principals)' linking to /principals"
         - "Slot 'shape': displays 'Apply to Shape (Principals)' linking to /principals AND 'Apply to Warmup Dialect (Upstreams)' linking to /upstreams"
     "atomic_request_ids": []
     "risk_tier": "read"
@@ -16252,203 +16059,6 @@
     "production_applicability":
       "status": "available"
       "reason": null
-  - "id": "UI-SRC-7BDECC53787E"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:add"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Add Observability Hook"
-    "trigger_steps":
-      - "Select an observability-capable plugin"
-      - "Click Add"
-    "preconditions":
-      - "Principal selected"
-      - "Plugin registry loaded"
-      - "No conflicting write is pending"
-    "variants":
-      - "each plugin supporting observability_hook"
-      - "mutation success"
-      - "mutation conflict/error"
-    "scope": "each_plugin"
-    "iteration_source": "GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'"
-      "variants":
-        - "each plugin supporting observability_hook"
-        - "mutation success"
-        - "mutation conflict/error"
-    "atomic_request_ids":
-      - "UI-PR-19"
-    "risk_tier": "reversible_write"
-    "expected_ui": "Selected hook appears in the ordered observability chain after query invalidation."
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/principals.tsx"
-      "symbol": "ObservabilityHookEditor"
-      "line": 2275
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-PR-19"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-7BDECC53787E"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:add"
-    "category": "principals"
-    "page": "Principals"
-    "component": "ObservabilityHookEditor"
-    "name": "Add Observability Hook — useInsertChainEntry"
-    "trigger_steps":
-      - "Select an observability-capable plugin"
-      - "Click Add"
-    "preconditions":
-      - "Principal selected"
-      - "Plugin registry loaded"
-      - "No conflicting write is pending"
-    "variants":
-      - "each plugin supporting observability_hook"
-      - "mutation success"
-      - "mutation conflict/error"
-    "scope": "each_plugin"
-    "iteration_source": "GET /admin/v1/plugins/registry entries supporting slot 'observability_hook'"
-    "risk_tier": "reversible_write"
-    "expected_ui": "Selected hook appears in the ordered observability chain after query invalidation."
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useInsertChainEntry"
-      "line": 1509
-    "http":
-      "method": "POST"
-      "path": "/admin/v1/principals/{id}/plugin-chain"
-      "path_bindings":
-        - "name": "id"
-          "source": "principal.id"
-          "format": "source_identifier"
-      "query_fields": []
-      "body_fields":
-        - "slot"
-        - "wasm_registry_id"
-      "header_fields":
-        - "authorization"
-        - "content-type"
-      "condition": null
-    "client_symbol": "useInsertChainEntry"
-    "api_handler": "insert_chain"
-    "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write"
-    "storage_operation_ids":
-      - "sqlite:PluginRegistryStore::insert_chain_entry:SqliteStorage::insert_chain_entry"
-      - "postgres:PluginRegistryStore::insert_chain_entry:PostgresStorage::insert_chain_entry"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Invalidates TanStack queryKey ['plugin-chain', principal_id]; triggers dynamic rebind headers"
-    "side_effects": "Inserts row into plugin_chains_v2; verifies principal exists and singleton slot constraint; records audit event 'plugin_chain_insert'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers; sets Location header QA restore: DELETE /admin/v1/plugin-chain-entries/{id} using returned entry ID and revision."
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-SRC-D64907F28D4C"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_observability_hook_chain"
-    "category": "principals"
-    "page": "Principals"
-    "component": "PrincipalDetail"
-    "name": "Load Observability Plugin Chain"
-    "trigger_steps":
-      - "Select a principal"
-      - "PrincipalDetail mounts usePluginChain(principal.id, 'observability_hook')"
-    "preconditions":
-      - "Authenticated admin session"
-      - "Principal selected"
-    "variants":
-      - "loading"
-      - "empty chain"
-      - "populated chain"
-    "scope": "each_principal"
-    "iteration_source": "GET /admin/v1/principals response entries"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "GET /admin/v1/principals response entries"
-      "variants":
-        - "loading"
-        - "empty chain"
-        - "populated chain"
-    "atomic_request_ids":
-      - "UI-PR-13D"
-    "risk_tier": "read"
-    "expected_ui": "The observability_hook editor and delete-impact count reflect the returned chain entries."
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/principals.tsx"
-      "symbol": "PrincipalDetail"
-      "line": 480
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-PR-13D"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-D64907F28D4C"
-    "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_observability_hook_chain"
-    "category": "principals"
-    "page": "Principals"
-    "component": "PrincipalDetail"
-    "name": "Load Observability Plugin Chain — usePluginChain"
-    "trigger_steps":
-      - "Select a principal"
-      - "PrincipalDetail mounts usePluginChain(principal.id, 'observability_hook')"
-    "preconditions":
-      - "Authenticated admin session"
-      - "Principal selected"
-    "variants":
-      - "loading"
-      - "empty chain"
-      - "populated chain"
-    "scope": "each_principal"
-    "iteration_source": "GET /admin/v1/principals response entries"
-    "risk_tier": "read"
-    "expected_ui": "The observability_hook editor and delete-impact count reflect the returned chain entries."
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "usePluginChain"
-      "line": 454
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/principals/{id}/plugin-chain"
-      "path_bindings":
-        - "name": "id"
-          "source": "principal.id"
-          "format": "source_identifier"
-      "query_fields":
-        - "slot"
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "usePluginChain"
-    "api_handler": "list_chain"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:PluginRegistryStore::list_chain_for_principal:SqliteStorage::list_chain_for_principal"
-      - "postgres:PluginRegistryStore::list_chain_for_principal:PostgresStorage::list_chain_for_principal"
-    "cache_or_no_query": "If query.slot is RuntimeOnly, returns empty list immediately without hitting DB"
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
   - "id": "UI-SRC-30AC7206755A"
     "aliases": []
     "entry_type": "ui_action"
@@ -16550,11 +16160,11 @@
     "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:plugin_registry_query"
     "category": "principals"
     "page": "Principals"
-    "component": "Router, Shape, and Observability Editors"
+    "component": "Router and Shape Editors"
     "name": "Load Plugin Registry for Principal Editors"
     "trigger_steps":
       - "Select a principal"
-      - "Router, Shape, and Observability editors mount usePluginRegistry"
+      - "Router and Shape editors mount usePluginRegistry"
     "preconditions":
       - "Authenticated admin session"
       - "Principal selected"
@@ -16591,11 +16201,11 @@
     "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:plugin_registry_query"
     "category": "principals"
     "page": "Principals"
-    "component": "Router, Shape, and Observability Editors"
+    "component": "Router and Shape Editors"
     "name": "Load Plugin Registry for Principal Editors — usePluginRegistry"
     "trigger_steps":
       - "Select a principal"
-      - "Router, Shape, and Observability editors mount usePluginRegistry"
+      - "Router and Shape editors mount usePluginRegistry"
     "preconditions":
       - "Authenticated admin session"
       - "Principal selected"
@@ -18599,7 +18209,7 @@
       - "postgres:PrincipalStore::list:PostgresStorage::list"
       - "sqlite:PluginRegistryStore::list_chain_for_principal:SqliteStorage::list_chain_for_principal"
       - "postgres:PluginRegistryStore::list_chain_for_principal:PostgresStorage::list_chain_for_principal"
-    "cache_or_no_query": "Paginates principals with include_deleted=true, then scans the three stored plugin-chain slots (Router, ObservabilityHook, Shape) until the entry ID is found; RuntimeOnly slots are not stored or scanned."
+    "cache_or_no_query": "Paginates principals with include_deleted=true, then scans the two stored plugin-chain slots (Router, Shape) until the entry ID is found; RuntimeOnly slots are not stored or scanned."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19199,18 +18809,6 @@
             "type": "Option<Value>"
             "required": false
             "description": "JSON configuration object"
-          - "name": "sse_per_event"
-            "type": "Option<bool>"
-            "required": false
-            "description": "per-event SSE handling"
-          - "name": "batched_events_per_flush"
-            "type": "Option<u32>"
-            "required": false
-            "description": "flush event threshold"
-          - "name": "batched_flush_ms"
-            "type": "Option<u64>"
-            "required": false
-            "description": "flush timeout ms"
     "trigger_steps":
       - "Direct API, operator, scheduler, health probe, or internal service caller"
     "preconditions":
@@ -19229,7 +18827,7 @@
       - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
       - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
     "cache_or_no_query": "Triggers DynamicReview rebind; invalidates TanStack queryKey ['plugin-chain']"
-    "side_effects": "Updates config, sse_per_event, batched_events_per_flush, batched_flush_ms; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision."
+    "side_effects": "Updates config; increments revision; updates updated_at; records audit event 'plugin_chain_update'; sends pg_notify 'cclb_plugin_changed' in Postgres; adds dynamic rebind headers QA restore: PUT /admin/v1/plugin-chain-entries/{id} with original configuration values and updated If-Match revision."
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -19858,10 +19456,6 @@
   - "UI-PR-18"
   - "UI-PR-18A"
   - "UI-PR-18B"
-  - "UI-SRC-4A31DF64FCC2"
-  - "UI-PR-19B"
-  - "UI-SRC-8AE44ADD2C3E"
-  - "UI-PR-19C"
   - "UI-SRC-5DE97D4F1CFC"
   - "UI-PR-20"
   - "UI-SRC-911C0971EF03"
@@ -20032,10 +19626,6 @@
   - "UI-SRC-D96DA7353940"
   - "UI-SRC-D61F3782A082"
   - "UI-PLUG-06"
-  - "UI-SRC-7BDECC53787E"
-  - "UI-PR-19"
-  - "UI-SRC-D64907F28D4C"
-  - "UI-PR-13D"
   - "UI-SRC-30AC7206755A"
   - "UI-PR-13C"
   - "UI-SRC-2092158E84C1"
@@ -22985,7 +22575,7 @@
       "sha256": "5eb8bf3976632c029491303b2ff41142e1727cea3df022d540b8bfca6c83358e"
     "statements":
       - "kind": "literal"
-        "text": "SELECT ts, list_ts_ms AS ts_ms, request_id, event_id, source_kind, principal_id, upstream_id, upstream_name, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, model, reasoning_effort, thinking_budget_tokens, thinking_tokens, service_tier, list_upstream AS upstream, list_status AS status, list_duration_ms AS duration_ms, error_code, upstream_error_type, upstream_error_message, list_auth_ms AS auth_ms, list_route_ms AS route_ms, list_limit_reserve_ms AS limit_reserve_ms, list_request_body_read_ms AS request_body_read_ms, list_request_body_bytes AS request_body_bytes, list_request_body_first_chunk_ms AS request_body_first_chunk_ms, list_request_body_receive_ms AS request_body_receive_ms, list_request_body_wait_ms AS request_body_wait_ms, list_request_body_process_ms AS request_body_process_ms, list_request_body_chunk_count AS request_body_chunk_count, list_response_body_wait_ms AS response_body_wait_ms, list_response_body_process_ms AS response_body_process_ms, list_response_body_downstream_poll_gap_ms AS response_body_downstream_poll_gap_ms, list_retry_overhead_ms AS retry_overhead_ms, list_json_parse_ms AS json_parse_ms, list_cache_structure_ms AS cache_structure_ms, list_cache_token_key_ms AS cache_token_key_ms, list_cache_count_lookup_ms AS cache_count_lookup_ms, list_cache_tokenizer_queue_ms AS cache_tokenizer_queue_ms, list_cache_serialize_ms AS cache_serialize_ms, list_cache_tokenize_ms AS cache_tokenize_ms, list_prepare_signer_ms AS prepare_signer_ms, list_bulkhead_wait_ms AS bulkhead_wait_ms, list_dns_ms AS dns_ms, list_connect_ms AS connect_ms, list_connection_reused AS connection_reused, list_limit_reconcile_ms AS limit_reconcile_ms, list_observability_post_ms AS observability_post_ms, list_finalize_ms AS finalize_ms, list_proxy_setup_ms AS proxy_setup_ms, list_shape_ms AS shape_ms, list_sign_ms AS sign_ms, list_upstream_ttfb_ms AS upstream_ttfb_ms, list_upstream_body_ms AS upstream_body_ms, list_stream_first_content_delta_ms AS stream_first_content_delta_ms, list_stream_last_content_delta_ms AS stream_last_content_delta_ms, list_inter_token_avg_ms AS inter_token_avg_ms, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, list_cost_usd_micros AS cost_usd_micros, list_cost_input_micros AS cost_input_micros, list_cost_output_micros AS cost_output_micros, list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, list_cost_cache_read_micros AS cost_cache_read_micros FROM request_events_v1 WHERE ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR principal_id = ?3) AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\') AND (?5 IS NULL OR upstream_id = ?5) AND (?14 IS NULL OR thread_id = ?14) AND (?6 IS NULL OR list_upstream = ?6) AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) AND ( ?12 = 1 OR (?13 IS NOT NULL AND source_kind = ?13) OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) ) AND ( ?9 IS NULL OR list_ts_ms < ?9 OR (list_ts_ms = ?9 AND ?10 IS NOT NULL AND list_event_key < ?10) ) ORDER BY list_ts_ms DESC, list_event_key DESC, id DESC LIMIT ?11"
+        "text": "SELECT ts, list_ts_ms AS ts_ms, request_id, event_id, source_kind, principal_id, upstream_id, upstream_name, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, model, reasoning_effort, thinking_budget_tokens, thinking_tokens, service_tier, list_upstream AS upstream, list_status AS status, list_duration_ms AS duration_ms, error_code, upstream_error_type, upstream_error_message, list_auth_ms AS auth_ms, list_route_ms AS route_ms, list_limit_reserve_ms AS limit_reserve_ms, list_request_body_read_ms AS request_body_read_ms, list_request_body_bytes AS request_body_bytes, list_request_body_first_chunk_ms AS request_body_first_chunk_ms, list_request_body_receive_ms AS request_body_receive_ms, list_request_body_wait_ms AS request_body_wait_ms, list_request_body_process_ms AS request_body_process_ms, list_request_body_chunk_count AS request_body_chunk_count, list_response_body_wait_ms AS response_body_wait_ms, list_response_body_process_ms AS response_body_process_ms, list_response_body_downstream_poll_gap_ms AS response_body_downstream_poll_gap_ms, list_retry_overhead_ms AS retry_overhead_ms, list_json_parse_ms AS json_parse_ms, list_cache_structure_ms AS cache_structure_ms, list_cache_token_key_ms AS cache_token_key_ms, list_cache_count_lookup_ms AS cache_count_lookup_ms, list_cache_tokenizer_queue_ms AS cache_tokenizer_queue_ms, list_cache_serialize_ms AS cache_serialize_ms, list_cache_tokenize_ms AS cache_tokenize_ms, list_prepare_signer_ms AS prepare_signer_ms, list_bulkhead_wait_ms AS bulkhead_wait_ms, list_dns_ms AS dns_ms, list_connect_ms AS connect_ms, list_connection_reused AS connection_reused, list_limit_reconcile_ms AS limit_reconcile_ms, list_finalize_ms AS finalize_ms, list_proxy_setup_ms AS proxy_setup_ms, list_shape_ms AS shape_ms, list_sign_ms AS sign_ms, list_upstream_ttfb_ms AS upstream_ttfb_ms, list_upstream_body_ms AS upstream_body_ms, list_stream_first_content_delta_ms AS stream_first_content_delta_ms, list_stream_last_content_delta_ms AS stream_last_content_delta_ms, list_inter_token_avg_ms AS inter_token_avg_ms, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, list_cost_usd_micros AS cost_usd_micros, list_cost_input_micros AS cost_input_micros, list_cost_output_micros AS cost_output_micros, list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, list_cost_cache_read_micros AS cost_cache_read_micros FROM request_events_v1 WHERE ts >= ?1 AND ts <= ?2 AND (?3 IS NULL OR principal_id = ?3) AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\') AND (?5 IS NULL OR upstream_id = ?5) AND (?14 IS NULL OR thread_id = ?14) AND (?6 IS NULL OR list_upstream = ?6) AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) AND ( ?12 = 1 OR (?13 IS NOT NULL AND source_kind = ?13) OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) ) AND ( ?9 IS NULL OR list_ts_ms < ?9 OR (list_ts_ms = ?9 AND ?10 IS NOT NULL AND list_event_key < ?10) ) ORDER BY list_ts_ms DESC, list_event_key DESC, id DESC LIMIT ?11"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/request_event_list_sql.rs"
           "symbol": "LIST_REQUEST_EVENTS_SQL"
@@ -24195,7 +23785,7 @@
           - "input.principal_id"
           - "input.slot.as_str()"
       - "kind": "literal"
-        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0) RETURNING *"
+        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1,$2,$3,$4,$5,$6,0) RETURNING *"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/plugin_registry.rs"
           "symbol": "PostgresStorage::insert_chain_entry"
@@ -24209,9 +23799,6 @@
           - "input.order"
           - "input.wasm_registry_id"
           - "input.config"
-          - "input.sse_per_event"
-          - "i32::try_from(input.batched_events_per_flush)..."
-          - "u64_to_i64(input.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
       - "kind": "literal"
         "text": "SELECT pg_notify('cclb_plugin_chain_changed', $1)"
         "source":
@@ -24489,20 +24076,17 @@
         "bind_parameters":
           - "id"
       - "kind": "literal"
-        "text": "UPDATE plugin_chains_v2 SET config=$3, sse_per_event=$4, batched_events_per_flush=$5, batched_flush_ms=$6, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *"
+        "text": "UPDATE plugin_chains_v2 SET config=$3, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/plugin_registry.rs"
           "symbol": "PostgresStorage::update_chain_entry"
-          "line_start": 527
-          "line_end": 527
+          "line_start": 511
+          "line_end": 511
         "branches": []
         "bind_parameters":
           - "id"
           - "u64_to_i64(expected_revision, \"plugin_chain.revision\")?"
-          - "current.config"
-          - "current.sse_per_event"
-          - "i32::try_from(current.batched_events_per_flush)..."
-          - "u64_to_i64(current.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
+          - "config"
       - "kind": "literal"
         "text": "SELECT pg_notify('cclb_plugin_chain_changed', $1)"
         "source":
@@ -24604,7 +24188,7 @@
           - "now"
           - "cache_keepalive"
       - "kind": "literal"
-        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, FALSE, 1, 100, 0)"
+        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1, $2, 'router', $3, $4, '{}'::jsonb, 0)"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/principals.rs"
           "symbol": "PostgresStorage::create"
@@ -25687,7 +25271,7 @@
           - "input.principal_id.to_string()"
           - "input.slot.as_str()"
       - "kind": "literal"
-        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *"
+        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/plugin_registry.rs"
           "symbol": "SqliteStorage::insert_chain_entry"
@@ -25701,9 +25285,6 @@
           - "input.wasm_registry_id.to_string()"
           - "input.order"
           - "serde_json::to_string(&input.config)?"
-          - "input.sse_per_event"
-          - "i64::from(input.batched_events_per_flush)"
-          - "u64_to_i64(input.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
   - "id": "sqlite:PluginRegistryStore::list_orphan_blobs:SqliteStorage::list_orphan_blobs"
     "engine": "sqlite"
     "trait_method": "PluginRegistryStore::list_orphan_blobs"
@@ -25953,18 +25534,15 @@
         "bind_parameters":
           - "id.to_string()"
       - "kind": "literal"
-        "text": "UPDATE plugin_chains_v2 SET config = ?, sse_per_event = ?, batched_events_per_flush = ?, batched_flush_ms = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *"
+        "text": "UPDATE plugin_chains_v2 SET config = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/plugin_registry.rs"
           "symbol": "SqliteStorage::update_chain_entry"
-          "line_start": 575
-          "line_end": 575
+          "line_start": 556
+          "line_end": 556
         "branches": []
         "bind_parameters":
-          - "serde_json::to_string(&current.config)?"
-          - "current.sse_per_event"
-          - "i64::from(current.batched_events_per_flush)"
-          - "u64_to_i64(current.batched_flush_ms, \"plugin_chain.batched_flush_ms\")?"
+          - "serde_json::to_string(&config)?"
           - "id.to_string()"
           - "u64_to_i64(expected_revision, \"plugin_chain.revision\")?"
   - "id": "sqlite:PluginRegistryStore::update_registry_label:SqliteStorage::update_registry_label"
@@ -26059,7 +25637,7 @@
           - "now"
           - "now"
       - "kind": "literal"
-        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, 1, 100, 0, unixepoch(), unixepoch())"
+        "text": "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, revision, created_at, updated_at) VALUES (?, ?, 'router', ?, ?, '{}', 0, unixepoch(), unixepoch())"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/principals.rs"
           "symbol": "SqliteStorage::create"

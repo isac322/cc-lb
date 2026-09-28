@@ -690,11 +690,7 @@ async fn insert_all_slots<S>(storage: &S, principal_id: Uuid, plugin_id: Uuid) -
 where
     S: PluginRegistryStore,
 {
-    for (slot, order) in [
-        (PluginSlotKind::Router, 100),
-        (PluginSlotKind::ObservabilityHook, 200),
-        (PluginSlotKind::Shape, 300),
-    ] {
+    for (slot, order) in [(PluginSlotKind::Router, 100), (PluginSlotKind::Shape, 300)] {
         storage
             .insert_chain_entry(PluginChainEntryInput {
                 principal_id,
@@ -702,9 +698,6 @@ where
                 order,
                 wasm_registry_id: plugin_id,
                 config: json!({}),
-                sse_per_event: false,
-                batched_events_per_flush: 1,
-                batched_flush_ms: 100,
             })
             .await?;
     }
@@ -727,11 +720,7 @@ async fn ensure_all_slots_empty<S>(storage: &S, principal_id: Uuid) -> Result<()
 where
     S: PluginRegistryStore,
 {
-    for slot in [
-        PluginSlotKind::Router,
-        PluginSlotKind::ObservabilityHook,
-        PluginSlotKind::Shape,
-    ] {
+    for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
         ensure!(
             storage
                 .list_chain_for_principal(principal_id, slot)

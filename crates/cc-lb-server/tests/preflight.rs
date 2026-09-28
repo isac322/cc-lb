@@ -93,7 +93,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         enabled.id,
-        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
         registries[1].id,
         1000,
     )
@@ -109,7 +109,7 @@ async fn partial_state() {
     seed_chain(
         &fixture.storage,
         disabled.id,
-        PluginSlotKind::ObservabilityHook,
+        PluginSlotKind::Shape,
         registries[3].id,
         1000,
     )
@@ -299,9 +299,6 @@ async fn seed_chain(
             order,
             wasm_registry_id,
             config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 1,
-            batched_flush_ms: 100,
         })
         .await
         .unwrap();

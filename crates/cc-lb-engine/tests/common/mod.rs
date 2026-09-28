@@ -18,7 +18,6 @@ use cc_lb_engine::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
@@ -310,48 +309,6 @@ impl Signer for TestSigner {
     }
 }
 
-#[derive(Default)]
-pub struct RecordingHook {
-    pub events: Mutex<Vec<ObserveEvent>>,
-    notify: Notify,
-}
-
-impl RecordingHook {
-    pub async fn wait_for_event(&self, matches: impl Fn(&ObserveEvent) -> bool) -> ObserveEvent {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(event) = self
-                .events
-                .lock()
-                .expect("events lock")
-                .iter()
-                .find(|event| matches(event))
-                .cloned()
-            {
-                return event;
-            }
-            notified.await;
-        }
-    }
-}
-
-impl ObservabilityHook for RecordingHook {
-    fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        let mut events = self
-            .events
-            .lock()
-            .map_err(|_| ObservabilityError::Dropped {
-                reason: "lock poisoned".to_owned(),
-            })?;
-        events.push(event);
-        drop(events);
-        self.notify.notify_waiters();
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 pub enum DispatchMode {
     StreamingOk,
@@ -407,18 +364,13 @@ impl UpstreamDispatch for MockDispatch {
     }
 }
 
-pub fn lifecycle_with(
-    authn: TestAuthn,
-    dispatcher: MockDispatch,
-    hook: Arc<RecordingHook>,
-) -> Lifecycle {
+pub fn lifecycle_with(authn: TestAuthn, dispatcher: MockDispatch) -> Lifecycle {
     lifecycle_with_parts(
         authn,
         Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
         Arc::new(dispatcher),
-        vec![hook],
         LifecycleConfig::default(),
     )
 }
@@ -427,13 +379,11 @@ pub fn lifecycle_with_parts(
     authn: TestAuthn,
     global_router: Arc<dyn RouterPlugin>,
     dispatcher: Arc<dyn UpstreamDispatch>,
-    global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     config: LifecycleConfig,
 ) -> Lifecycle {
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(global_router)
-        .global_observability_hooks(global_observability_hooks)
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .build();
@@ -449,7 +399,6 @@ pub fn lifecycle_with_parts(
 pub fn lifecycle_with_cache(
     authn: TestAuthn,
     dispatcher: MockDispatch,
-    hook: Arc<RecordingHook>,
     cache: Arc<parking_lot::RwLock<cc_lb_engine::UpstreamRateLimitCache>>,
 ) -> Lifecycle {
     let dispatcher = Arc::new(dispatcher);
@@ -458,7 +407,6 @@ pub fn lifecycle_with_cache(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(vec![hook])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .upstream_rate_limit_cache(cache)

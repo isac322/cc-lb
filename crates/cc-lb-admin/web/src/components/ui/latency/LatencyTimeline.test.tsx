@@ -480,7 +480,6 @@ describe('LatencyTimeline', () => {
       content_delta_count: 128,
       ping_count: 6,
       inter_token_avg_ms: 28,
-      observability_post_ms: 6,
       limit_reconcile_ms: 4,
     });
     render(<LatencyTimeline event={event} />);
@@ -490,7 +489,6 @@ describe('LatencyTimeline', () => {
     expect(screen.getByText('Body')).toBeTruthy();
     expect(screen.getByText('Internal post')).toBeTruthy();
     expect(screen.getByText('SSE markers')).toBeTruthy();
-    expect(screen.queryByText('Observability post')).toBeNull();
     const stageDetails = screen
       .getByText(/^Stage details \(\d+\)$/)
       .closest('details');

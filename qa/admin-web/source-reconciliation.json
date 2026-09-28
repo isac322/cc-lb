@@ -9,8 +9,8 @@
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
   "source_reconciliation": {
     "status": "source_reconciled",
-    "ui_actions": 208,
-    "ui_request_occurrences": 146,
+    "ui_actions": 204,
+    "ui_request_occurrences": 142,
     "api_endpoints": 102,
     "registered_backend_routes": 102,
     "production_ui_source_files": 97,
@@ -1276,13 +1276,6 @@
       "reason": "Same source-backed UI action."
     },
     {
-      "legacy_id": "UI-PR-19",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:add",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
       "legacy_id": "UI-PR-20",
       "status": "preserved",
       "canonical_id": "UI-PR-20",
@@ -1941,13 +1934,6 @@
       "reason": "Same method/path and source-backed request occurrence."
     },
     {
-      "legacy_id": "UI-PR-13D",
-      "status": "preserved",
-      "canonical_id": "UI-PR-13D",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#PrincipalDetail:mount_observability_hook_chain",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
       "legacy_id": "UI-PR-13E",
       "status": "preserved",
       "canonical_id": "UI-PR-13E",
@@ -1987,20 +1973,6 @@
       "status": "preserved",
       "canonical_id": "UI-PR-18B",
       "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ShapeSlotEditor:select_shape",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
-      "legacy_id": "UI-PR-19B",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19B",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:reorder",
-      "reason": "Same method/path and source-backed request occurrence."
-    },
-    {
-      "legacy_id": "UI-PR-19C",
-      "status": "preserved",
-      "canonical_id": "UI-PR-19C",
-      "source_id": "crates/cc-lb-admin/web/src/routes/principals.tsx#ObservabilityHookEditor:remove",
       "reason": "Same method/path and source-backed request occurrence."
     },
     {

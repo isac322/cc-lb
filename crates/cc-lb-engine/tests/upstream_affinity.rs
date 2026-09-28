@@ -1,6 +1,4 @@
-use crate::common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, messages_request,
-};
+use crate::common::{TestAuthn, TestRouter, TestState, collect_body, messages_request};
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -329,7 +327,6 @@ fn lifecycle_with_config_and_clock(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://unused.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();

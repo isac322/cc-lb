@@ -17,7 +17,7 @@ use http::{HeaderValue, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestState, collect_body, managed_key_id, messages_request};
+use common::{TestAuthn, TestState, collect_body, managed_key_id, messages_request};
 use fixtures::{
     AgentTurnDispatch, FirstRouter, RecordingSignerFactory, principal_with_keepalive, settle,
     upstream_record,
@@ -84,7 +84,6 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
                 calls: Arc::clone(&signer_log),
             }))
             .global_router(Arc::new(FirstRouter))
-            .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
             .principal_view(Arc::clone(&principal_view))
             .upstream_records(vec![upstream.clone()])
             .build(),

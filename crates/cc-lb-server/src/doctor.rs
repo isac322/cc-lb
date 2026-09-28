@@ -61,11 +61,7 @@ pub async fn run_list_abandoned_chain_entries(
         .map_err(DoctorError::StorageQuery)?;
 
     for principal in principals {
-        for slot in [
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ] {
+        for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
             let chain_entries = storage
                 .list_chain_for_principal(principal.id, slot)
                 .await
