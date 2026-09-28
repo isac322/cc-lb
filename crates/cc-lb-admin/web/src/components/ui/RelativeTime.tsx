@@ -109,23 +109,6 @@ export function RelativeTime({
   );
 }
 
-export function RelativeOffsetTime({
-  offsetSeconds,
-  className,
-  compact = false,
-}: {
-  offsetSeconds: number | null | undefined;
-  className?: string;
-  compact?: boolean;
-}) {
-  const ts = useMemo(() => {
-    if (offsetSeconds == null) return null;
-    return Date.now() + offsetSeconds * 1000;
-  }, [offsetSeconds]);
-
-  return <RelativeTime className={className} compact={compact} ts={ts} />;
-}
-
 export function ResetCountdown({
   ts,
   className,

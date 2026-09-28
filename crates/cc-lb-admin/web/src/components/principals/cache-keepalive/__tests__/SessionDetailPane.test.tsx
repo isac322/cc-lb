@@ -48,7 +48,8 @@ describe('SessionDetailPane', () => {
     const header = screen.getByText('Session detail').parentElement;
     expect(header?.className).toContain('sticky');
     expect(header?.className).toContain('px-3');
-    expect(screen.getByText('Close ▶')).toBeDefined();
+    const closeLabel = screen.getByText('Close', { selector: 'span' });
+    expect(closeLabel.querySelector('svg.lucide-chevron-right')).not.toBeNull();
     expect(
       screen.getByRole('button', { name: 'Back to sessions' }),
     ).toBeDefined();
@@ -56,8 +57,9 @@ describe('SessionDetailPane', () => {
       'Loading session detail',
     );
 
-    const overview = screen.getByTestId('session-detail-overview-skeleton');
-    expect(overview.className).toContain('p-3');
+    expect(
+      screen.getByTestId('session-detail-overview-skeleton'),
+    ).toBeDefined();
     expect(screen.getByText('Net P&L')).toBeDefined();
 
     const metadata = screen.getByTestId('session-detail-metadata-skeleton');
@@ -68,12 +70,12 @@ describe('SessionDetailPane', () => {
     const turns = screen.getByTestId('session-detail-turns-skeleton');
     expect(turns.className).toContain('mt-2');
     expect(screen.getByText('Message-by-message')).toBeDefined();
-    const turnCards = screen.getAllByTestId('session-detail-turn-skeleton');
-    expect(turnCards).toHaveLength(3);
-    expect(turnCards[0].className).toContain('px-3');
-    expect(turnCards[0].className).toContain('py-2.5');
-    expect(turnCards[1].className).toContain('px-3');
-    expect(turnCards[1].className).toContain('py-2');
+    const turnRows = screen.getAllByTestId('session-detail-turn-skeleton');
+    expect(turnRows).toHaveLength(3);
+    // Skeleton rows share the loaded turn rows' vertical rhythm.
+    for (const row of turnRows) {
+      expect(row.className).toContain('py-2.5');
+    }
 
     expect(container.querySelector('svg.animate-spin')).toBeNull();
   });
@@ -102,8 +104,12 @@ describe('SessionDetailPane', () => {
       'Failed to load session detail.',
     );
 
-    const mobileBackLabel = screen.getByText('◀ Back');
-    expect(mobileBackLabel.className).toContain('max-[960px]:inline');
+    const mobileBackLabel = screen.getByText('Back', { selector: 'span' });
+    expect(mobileBackLabel.className).toContain('max-[960px]:inline-flex');
+    expect(
+      mobileBackLabel.querySelector('svg.lucide-chevron-left'),
+    ).not.toBeNull();
+    expect(screen.queryByText(/[▶◀]/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Back to sessions' }));
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -188,7 +194,7 @@ describe('SessionDetailPane', () => {
     );
 
     expect(screen.getByText('Session detail')).toBeDefined();
-    expect(screen.getByText('Close ▶')).toBeDefined();
+    expect(screen.getByText('Close', { selector: 'span' })).toBeDefined();
     const pane = screen.getByTestId('session-detail-content');
     expect(pane.getAttribute('role')).toBe('region');
     expect(pane.getAttribute('aria-busy')).toBe('false');

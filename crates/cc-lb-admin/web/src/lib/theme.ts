@@ -7,6 +7,7 @@ type ThemeSnapshot = {
   effective: 'dark' | 'light';
 };
 
+// Also read by the pre-paint inline script in index.html; keep both in sync.
 const STORAGE_KEY = 'cclb.theme';
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: light)';
 const SERVER_SNAPSHOT: ThemeSnapshot = {

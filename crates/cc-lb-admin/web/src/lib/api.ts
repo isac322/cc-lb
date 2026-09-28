@@ -1041,7 +1041,7 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '7d_sonnet': '7d (Sonnet)',
   '7d_opus': '7d (Opus)',
   '7d_fable': '7d (Fable)',
-  overage: 'Extra Usage',
+  overage: 'Extra usage',
   unified: 'Unified',
 };
 
@@ -1107,61 +1107,6 @@ export interface SeriesResponse {
   bucket_secs: number;
   source: string;
   series: SeriesResponseItem[];
-}
-
-export interface BurnResponse {
-  utilization_per_second: number | null;
-  utilization_per_hour: number | null;
-  eta_to_limit_secs: number | null;
-  resets_before_limit: boolean | null;
-  confidence: string;
-  sample_count: number;
-  reason: string | null;
-}
-
-export interface ProxyBurnResponse {
-  proxy_tokens_per_second: number | null;
-  proxy_tokens_per_hour: number | null;
-  effective_limit_tokens_estimate: number | null;
-  utilization_per_hour: number | null;
-  eta_to_limit_secs: number | null;
-  resets_before_limit: boolean | null;
-  confidence: string;
-  sample_count: number;
-  reason: string | null;
-}
-
-export interface DeficitResponse {
-  projected_proxy_tokens_window: number;
-  effective_limit_tokens_estimate: number;
-  shortfall_tokens: number;
-  recommended_multiplier: number;
-  confidence: string;
-}
-
-export interface AnalysisWindowResponse {
-  window: string;
-  current_utilization: number | null;
-  resets_at_unix_secs: number | null;
-  data_state: string;
-  actual_account_burn: BurnResponse;
-  proxy_projected_burn: ProxyBurnResponse;
-  deficit: DeficitResponse | null;
-  caveats: string[];
-}
-
-export interface AnalysisUpstreamResponse {
-  upstream_id: string;
-  upstream_name: string;
-  windows: AnalysisWindowResponse[];
-}
-
-export interface AnalysisResponse {
-  since_unix_secs: number;
-  until_unix_secs: number;
-  now_unix_secs: number;
-  max_staleness_secs: number;
-  upstreams: AnalysisUpstreamResponse[];
 }
 
 export interface AggregateProviderLotResponse {

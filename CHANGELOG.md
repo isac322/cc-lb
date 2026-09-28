@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The admin endpoint `GET /admin/v1/subscription-quotas/analysis` (and its unversioned alias `/admin/subscription-quotas/analysis`) has been removed, along with its burn-rate, projected-burn, deficit, and ETA estimates. The admin dashboard no longer calls it. Scripts that queried it now receive 404; use `/admin/v1/subscription-quotas/series` for quota history and `/admin/v1/subscription-quotas/aggregate` for current pool state.
+
+### Added
+
+- A brand asset kit now lives in `assets/brand/`: the let-gate mark as SVG originals (dark, light, mono and currentColor variants plus a 16px-snapped small-size version), app-icon and maskable tiles with PNG renders, wordmark and lockup compositions, a README hero, a social preview image, and the favicon set (`favicon.svg`, `favicon.ico`, `apple-touch-icon.png`) now wired into the admin dashboard.
+
+### Changed
+
+- The admin dashboard brand mark is now the let-gate — two squared bracket "c" shapes forming a gate with one accent lane through it — replacing the old 240° dial in the sidebar, the top bar and the sign-in frame.
+- The admin dashboard uses a new neutral graphite colour scheme in both Night and Day. Colour now comes from data (charts, meters, session and request-kind chips). Controls such as the primary button, the on switch and the focus ring are neutral silver (Night) or ink (Day), and session chips cycle through nine hues instead of seven.
+- The Docs link at the foot of the dashboard sidebar has been removed until a dedicated documentation page exists.
+
+### Fixed
+
+- Dragging across the Logs histogram to pick a time range no longer leaves trailing afterimages or flickers. The selection, its handles and the time hint now move together with the pointer.
+- Releasing a drag on the Logs histogram no longer blanks the bars for a moment, which left the selection alone on an empty strip. The histogram now keeps its data when a range is selected instead of refetching it.
+
 ## [0.8.1] - 2026-09-26
 
 ### Fixed

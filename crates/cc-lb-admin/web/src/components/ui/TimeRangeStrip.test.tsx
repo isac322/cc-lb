@@ -5,6 +5,7 @@ import {
   render,
   screen,
 } from '@testing-library/react';
+import { Profiler } from 'react';
 import {
   afterEach,
   beforeEach,
@@ -23,6 +24,7 @@ interface CanvasContextMock {
   fillRect: Mock;
   fillText: Mock;
   lineTo: Mock;
+  measureText: Mock;
   moveTo: Mock;
   setTransform: Mock;
   stroke: Mock;
@@ -64,6 +66,7 @@ beforeEach(() => {
     fillRect: vi.fn(),
     fillText: vi.fn(),
     lineTo: vi.fn(),
+    measureText: vi.fn((text: string) => ({ width: text.length * 6 })),
     moveTo: vi.fn(),
     setTransform: vi.fn(),
     stroke: vi.fn(),
@@ -134,13 +137,14 @@ describe('TimeRangeStrip', () => {
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
 
     expect(canvas.width).toBe(400);
-    expect(canvas.height).toBe(104);
+    expect(canvas.height).toBe(88);
     expect(widthSetter).toHaveBeenCalledTimes(1);
     expect(heightSetter).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenLastCalledWith(1, 0, 0, 1, 0, 0);
     expect(context.clearRect).toHaveBeenCalledTimes(1);
-    expect(context.fillRect).toHaveBeenCalledTimes(2);
+    // One bar for the single-request bucket.
+    expect(context.fillRect).toHaveBeenCalledTimes(1);
 
     rerender(<TimeRangeStrip {...props} buckets={nextBuckets} />);
 
@@ -148,18 +152,19 @@ describe('TimeRangeStrip', () => {
     expect(heightSetter).toHaveBeenCalledTimes(1);
     expect(context.setTransform).toHaveBeenCalledTimes(2);
     expect(context.clearRect).toHaveBeenCalledTimes(2);
-    expect(context.fillRect).toHaveBeenCalledTimes(6);
+    // Two more bars plus the danger segment stacked on the erroring bucket.
+    expect(context.fillRect).toHaveBeenCalledTimes(4);
 
     vi.stubGlobal('devicePixelRatio', 2);
     act(() => window.dispatchEvent(new Event('resize')));
 
     expect(canvas.width).toBe(800);
-    expect(canvas.height).toBe(208);
+    expect(canvas.height).toBe(176);
     expect(widthSetter).toHaveBeenCalledTimes(2);
     expect(heightSetter).toHaveBeenCalledTimes(2);
     expect(context.setTransform).toHaveBeenCalledTimes(3);
     expect(context.setTransform).toHaveBeenLastCalledWith(2, 0, 0, 2, 0, 0);
-    expect(context.clearRect).toHaveBeenLastCalledWith(0, 0, 400, 104);
+    expect(context.clearRect).toHaveBeenLastCalledWith(0, 0, 400, 88);
 
     act(() => window.dispatchEvent(new Event('resize')));
     expect(widthSetter).toHaveBeenCalledTimes(2);
@@ -204,7 +209,7 @@ describe('TimeRangeStrip', () => {
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
     const rectSpy = vi
       .spyOn(canvas, 'getBoundingClientRect')
-      .mockImplementation(() => new DOMRect(0, 0, clientWidth, 104));
+      .mockImplementation(() => new DOMRect(0, 0, clientWidth, 88));
 
     expect(
       canvasAdd.mock.calls.filter(([type]) => type === 'mousemove'),
@@ -219,9 +224,9 @@ describe('TimeRangeStrip', () => {
       windowAdd.mock.calls.filter(([type]) => type === 'mouseup'),
     ).toHaveLength(0);
 
-    fireEvent.mouseMove(window, { clientX: 200, clientY: 90 });
+    fireEvent.mouseMove(window, { clientX: 200, clientY: 80 });
     expect(rectSpy).not.toHaveBeenCalled();
-    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 90 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 80 });
     expect(rectSpy).toHaveBeenCalledTimes(1);
     expect(canvas.style.cursor).toBe('grab');
 
@@ -256,7 +261,7 @@ describe('TimeRangeStrip', () => {
     ).toHaveLength(0);
 
     fireEvent.mouseMove(window, { clientX: 450, clientY: 20 });
-    expect(screen.getByText('2m · ~7 requests / ~2 err')).toBeDefined();
+    expect(screen.getByText('2m · ~7 requests · ~2 errors')).toBeDefined();
     fireEvent.mouseUp(window, { clientX: 450, clientY: 20 });
 
     expect(firstSelectionCommit).not.toHaveBeenCalled();
@@ -291,6 +296,59 @@ describe('TimeRangeStrip', () => {
     expect(rectSpy).not.toHaveBeenCalled();
   });
 
+  it('paints a drag once per animation frame, in step with the hint, without re-rendering per mousemove', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const onRender = vi.fn();
+    const { container } = render(
+      <Profiler id="strip" onRender={onRender}>
+        <TimeRangeStrip
+          {...makeProps({
+            buckets: [
+              { bucket_start_unix_secs: 0, total_count: 3, error_count: 0 },
+            ],
+          })}
+        />
+      </Profiler>,
+    );
+    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(
+      () => new DOMRect(0, 0, clientWidth, 88),
+    );
+    const commits = onRender.mock.calls.length;
+    const clears = context.clearRect.mock.calls.length;
+
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 20, button: 0 });
+    for (const clientX of [150, 200, 250, 300]) {
+      fireEvent.mouseMove(window, { clientX, clientY: 20 });
+    }
+
+    // The hint already describes the latest pointer, but nothing re-rendered
+    // and the canvas has not been repainted once per event.
+    const hint = screen.getByText('1m · ~3 requests');
+    expect(hint.style.left).toBe('300px');
+    expect(hint.hidden).toBe(false);
+    expect(onRender).toHaveBeenCalledTimes(commits);
+    expect(context.clearRect).toHaveBeenCalledTimes(clears);
+
+    act(() => {
+      for (const callback of frames.splice(0)) callback(16);
+    });
+
+    // One complete repaint for the frame, showing the draft the hint shows.
+    expect(context.clearRect).toHaveBeenCalledTimes(clears + 1);
+    expect(context.fillRect).toHaveBeenLastCalledWith(298, 22, 4, 20);
+    expect(context.fillRect).toHaveBeenCalledWith(100, 0, 200, 64);
+
+    fireEvent.mouseUp(window, { clientX: 300, clientY: 20 });
+    expect(hint.hidden).toBe(true);
+    expect(onRender).toHaveBeenCalledTimes(commits);
+  });
+
   it('preserves non-passive wheel, zoom, pan, keyboard, and active-drag cleanup contracts', () => {
     const canvasAdd = vi.spyOn(HTMLCanvasElement.prototype, 'addEventListener');
     const canvasRemove = vi.spyOn(
@@ -312,7 +370,7 @@ describe('TimeRangeStrip', () => {
     );
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
     vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(
-      () => new DOMRect(0, 0, clientWidth, 104),
+      () => new DOMRect(0, 0, clientWidth, 88),
     );
 
     expect(
@@ -333,7 +391,7 @@ describe('TimeRangeStrip', () => {
     expect(wheelEvent.defaultPrevented).toBe(true);
     expect(onViewChange).toHaveBeenNthCalledWith(1, { a: 12_000, b: 108_000 });
 
-    fireEvent.doubleClick(canvas, { clientX: 200, clientY: 70 });
+    fireEvent.doubleClick(canvas, { clientX: 200, clientY: 40 });
     expect(onViewChange).toHaveBeenNthCalledWith(2, { a: 12_000, b: 108_000 });
 
     const tabEvent = new KeyboardEvent('keydown', {
@@ -348,9 +406,9 @@ describe('TimeRangeStrip', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onSelectionCommit).toHaveBeenCalledWith(null);
 
-    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 90, button: 0 });
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 80, button: 0 });
     expect(canvas.style.cursor).toBe('grabbing');
-    fireEvent.mouseMove(window, { clientX: 150, clientY: 90 });
+    fireEvent.mouseMove(window, { clientX: 150, clientY: 80 });
     expect(onViewChange).toHaveBeenNthCalledWith(3, {
       a: 15_000,
       b: 135_000,

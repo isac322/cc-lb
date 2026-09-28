@@ -77,7 +77,7 @@ export function InlineNameEditor({ upstream, className }: Props) {
         <BaseInput
           className={cx(
             INPUT_CLASS,
-            'text-xl font-mono w-fit',
+            'text-title-page w-fit',
             updateUpstream.isPending && 'opacity-50 cursor-not-allowed',
           )}
           disabled={updateUpstream.isPending}
@@ -100,7 +100,7 @@ export function InlineNameEditor({ upstream, className }: Props) {
   return (
     <span
       className={cx(
-        'text-xl font-mono cursor-text hover:border-b-dotted hover:border-text-faint border-b border-transparent transition-colors',
+        'text-title-page text-text cursor-text rounded-sm border-b border-transparent hover:border-dotted hover:border-text-faint transition-colors',
         className,
       )}
       onClick={() => {

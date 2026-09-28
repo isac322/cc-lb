@@ -2,24 +2,25 @@ import { AlertDialog as BaseAlertDialog } from '@base-ui/react/alert-dialog';
 import { Button as BaseButton } from '@base-ui/react/button';
 import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
-import { X } from 'lucide-react';
+import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from 'lucide-react';
 import {
   type ButtonHTMLAttributes,
   cloneElement,
+  createContext,
   type FocusEventHandler,
   type HTMLAttributes,
   type InputHTMLAttributes,
   isValidElement,
+  type KeyboardEvent,
   type MouseEventHandler,
   type PointerEventHandler,
   type ReactNode,
+  useContext,
   useEffect,
+  useId,
   useRef,
   useState,
 } from 'react';
-import { Area, AreaChart, ResponsiveContainer } from 'recharts';
-
-import { getWindowColor } from '../../lib/colors';
 
 // ─── classnames helper ───────────────────────────────────────────────────────
 export function cx(...parts: Array<string | false | null | undefined>): string {
@@ -27,8 +28,9 @@ export function cx(...parts: Array<string | false | null | undefined>): string {
 }
 
 // ─── Card ────────────────────────────────────────────────────────────────────
+/** Self-contained object: flat panel on the ground, 1px line, 6px radius. */
 export function Card({ className, ...rest }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cx('glass rounded-sm', className)} {...rest} />;
+  return <div className={cx('glass rounded-md', className)} {...rest} />;
 }
 export function CardHeader({
   title,
@@ -37,6 +39,7 @@ export function CardHeader({
   subtitle,
   className,
   align = 'start',
+  headingLevel = 2,
 }: {
   readonly title: ReactNode;
   readonly titleId?: string;
@@ -44,7 +47,10 @@ export function CardHeader({
   readonly action?: ReactNode;
   readonly className?: string;
   readonly align?: 'start' | 'center';
+  /** Card titles sit under the page `h1`; use 3/4 for cards nested in a titled section. */
+  readonly headingLevel?: 2 | 3 | 4;
 }) {
+  const Heading = `h${headingLevel}` as const;
   return (
     <div
       className={cx(
@@ -54,12 +60,12 @@ export function CardHeader({
       )}
     >
       <div className="min-w-0">
-        <h3 id={titleId} className="text-sm font-medium text-text">
+        <Heading id={titleId} className="text-title-card text-text">
           {title}
-        </h3>
+        </Heading>
         {subtitle ? (
           <div
-            className="mt-0.5 min-h-4 text-xs text-text-faint"
+            className="mt-0.5 min-h-4 text-caption text-text-faint"
             data-slot="card-subtitle"
           >
             {subtitle}
@@ -82,8 +88,21 @@ export function CardBody({
 }
 
 // ─── Button ──────────────────────────────────────────────────────────────────
-type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'accent';
-type ButtonSize = 'sm' | 'md';
+/**
+ * - `primary`: one per view, the commit action (Save, Create, Continue):
+ *   solid accent with accent-ink text.
+ * - `secondary`: the default; 1px outline on transparent. Toolbars, pairs.
+ * - `ghost`: tertiary, in-row links, icon-adjacent actions.
+ * - `danger`: outline; page-level Delete / Revoke.
+ * - `danger-solid`: only the confirm button of a destructive `ConfirmDialog`.
+ */
+export type ButtonVariant =
+  | 'primary'
+  | 'secondary'
+  | 'ghost'
+  | 'danger'
+  | 'danger-solid';
+export type ButtonSize = 'sm' | 'md' | 'lg';
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -94,20 +113,40 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 const BTN_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    'bg-[color:var(--color-text)] text-[color:var(--color-bg)] hover:opacity-90 disabled:opacity-50',
+    'bg-accent border border-accent text-accent-ink hover:bg-accent-hover hover:border-accent-hover disabled:hover:bg-accent disabled:hover:border-accent',
   secondary:
-    'bg-[color:var(--color-panel-strong)] border border-[color:var(--color-border)] text-[color:var(--color-text)] hover:bg-[color:var(--color-hover-bg)]',
-  ghost:
-    'text-[color:var(--color-text-muted)] hover:bg-[color:var(--color-hover-bg)] hover:text-[color:var(--color-text)]',
+    'border border-subtle-strong text-text hover:bg-panel-strong disabled:hover:bg-transparent',
+  ghost: 'text-text-muted hover:bg-overlay-5 hover:text-text',
   danger:
-    'bg-red-500/25 text-[color:var(--color-text)] border border-red-500/50 hover:bg-red-500/40 shadow-[0_0_0_1px_rgba(239,68,68,0.15)]',
-  accent:
-    'bg-[color:var(--color-accent-dim)] text-[color:var(--color-accent)] border border-[color:var(--color-accent)] hover:opacity-90',
+    'border border-danger text-danger-text hover:bg-danger/10 disabled:hover:bg-transparent',
+  'danger-solid':
+    'bg-danger-solid border border-danger-solid text-white hover:bg-danger-solid-hover',
 };
 const BTN_SIZES: Record<ButtonSize, string> = {
-  sm: 'h-7 px-2.5 text-xs gap-1.5',
-  md: 'h-9 px-3 text-sm gap-2',
+  sm: 'h-7 px-2.5 text-xs gap-1.5 [&_svg]:size-3.5',
+  md: 'h-8 px-3 text-[0.8125rem] gap-1.5 [&_svg]:size-3.5',
+  lg: 'h-9 px-3.5 text-sm gap-2 [&_svg]:size-4',
 };
+/**
+ * The Button chrome as a class string, for elements that must stay a real
+ * anchor (never popup-blocked, keeps link semantics) yet look like a Button.
+ */
+export function buttonClassName(
+  variant: ButtonVariant = 'secondary',
+  size: ButtonSize = 'md',
+): string {
+  return cx(
+    'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
+    // Phones: every button is at least a 40px touch target.
+    'max-md:min-h-10',
+    // A loading button keeps its look (spinner, busy cursor); only a
+    // button that is unavailable takes the shared disabled look.
+    'disabled:not-aria-busy:control-disabled aria-busy:cursor-progress',
+    'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+    BTN_VARIANTS[variant],
+    BTN_SIZES[size],
+  );
+}
 export function Button({
   variant = 'secondary',
   size = 'md',
@@ -122,17 +161,17 @@ export function Button({
   'aria-busy': ariaBusy,
   ...rest
 }: ButtonProps) {
+  // A disabled primary is not the commit action yet: it renders as a
+  // disabled secondary so a grey slab never reads as the primary.
+  const look =
+    variant === 'primary' && disabled && !loading ? 'secondary' : variant;
   // `disabled` and `aria-busy` are applied after the prop spread so a loading
   // Button can never be re-enabled or stripped of its busy state by callers.
   return (
     <BaseButton
       type={type ?? 'button'}
       className={cx(
-        'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2',
-        BTN_VARIANTS[variant],
-        BTN_SIZES[size],
+        buttonClassName(look, size),
         fullWidth ? 'w-full' : '',
         className,
       )}
@@ -147,6 +186,11 @@ export function Button({
   );
 }
 
+/**
+ * Icon-only button. `label` is required and becomes the accessible name.
+ * Below `md` the hit area is 44×44 for touch; from `md` up it is 32×32. The
+ * glyph is 16px regardless of the icon's own size classes.
+ */
 export function IconButton({
   className,
   children,
@@ -159,9 +203,10 @@ export function IconButton({
       type={type ?? 'button'}
       aria-label={label}
       className={cx(
-        'inline-flex items-center justify-center text-text-muted hover:text-[color:var(--color-text)] rounded-sm',
-        'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-1',
+        'inline-flex shrink-0 items-center justify-center rounded-sm text-text-muted transition-colors [&_svg]:size-4 [&_svg]:shrink-0',
+        'h-11 w-11 md:h-8 md:w-8 hover:bg-overlay-5 hover:text-text',
+        'disabled:control-disabled',
+        'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
         className,
       )}
       {...rest}
@@ -172,16 +217,26 @@ export function IconButton({
 }
 
 // ─── Badge ───────────────────────────────────────────────────────────────────
-type BadgeTone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'mono';
+/**
+ * 20px sentence-case tag. `accent` is an outlined chip (the mockup's
+ * "binds pool"); tones are tone/12 fills. `mono` is for machine strings
+ * (model IDs, key IDs) only. At most one status badge per object header;
+ * healthy states are shown by omission.
+ */
+export type BadgeTone =
+  | 'neutral'
+  | 'accent'
+  | 'ok'
+  | 'warn'
+  | 'danger'
+  | 'mono';
 const BADGE_TONES: Record<BadgeTone, string> = {
-  neutral: 'bg-overlay-4 text-text border-subtle',
-  accent:
-    'bg-[color:var(--color-accent-dim)] text-[color:var(--color-accent-text)] border-[color:var(--color-accent)]/40',
-  ok: 'bg-[color:var(--color-ok)]/15 text-[color:var(--color-success-text)] border-[color:var(--color-ok)]/40',
-  warn: 'bg-[color:var(--color-warn)]/15 text-[color:var(--color-warn-text)] border-[color:var(--color-warn)]/40',
-  danger:
-    'bg-[color:var(--color-danger)]/15 text-[color:var(--color-danger-text)] border-[color:var(--color-danger)]/40',
-  mono: 'bg-overlay-5 text-text border-subtle font-mono',
+  neutral: 'bg-overlay-5 text-text-muted text-caption font-medium',
+  accent: 'border border-accent text-accent-text text-caption font-medium',
+  ok: 'bg-overlay-5 text-success-text text-caption font-medium',
+  warn: 'bg-warn/12 text-warn-text text-caption font-medium',
+  danger: 'bg-danger/12 text-danger-text text-caption font-medium',
+  mono: 'bg-overlay-4 text-text font-mono text-data',
 };
 export function Badge({
   tone = 'neutral',
@@ -195,7 +250,7 @@ export function Badge({
   return (
     <span
       className={cx(
-        'inline-flex items-center px-2 py-0.5 text-[11px] rounded-sm border',
+        'inline-flex min-h-5 items-center gap-1 rounded-sm px-1.5 tabular-nums',
         BADGE_TONES[tone],
         className,
       )}
@@ -206,6 +261,17 @@ export function Badge({
 }
 
 // ─── StatusBadge (dot + label) ───────────────────────────────────────────────
+const STATUS_TEXT: Record<
+  'ok' | 'warn' | 'danger' | 'neutral' | 'live',
+  string
+> = {
+  ok: 'text-text-muted',
+  neutral: 'text-text-muted',
+  live: 'text-text-muted',
+  warn: 'text-warn-text',
+  danger: 'text-danger-text',
+};
+/** Dot + sentence-case phrase. Exceptions carry their tone; healthy stays muted. */
 export function StatusBadge({
   tone,
   label,
@@ -214,9 +280,14 @@ export function StatusBadge({
   label: ReactNode;
 }) {
   return (
-    <span className="inline-flex items-center gap-2 px-2 py-0.5 text-[11px] rounded-sm bg-overlay-3 border border-subtle text-text-muted">
+    <span
+      className={cx(
+        'inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap text-label',
+        STATUS_TEXT[tone],
+      )}
+    >
       <span className={cx('status-dot', tone)} />
-      <span className="font-mono uppercase tracking-wider">{label}</span>
+      <span>{label}</span>
     </span>
   );
 }
@@ -281,23 +352,47 @@ export function SkeletonRow({
 }
 
 // ─── EmptyState ──────────────────────────────────────────────────────────────
+/**
+ * Quiet, centred empty state with no frame of its own: it sits inside the
+ * card or section that owns the data, and that container shrinks to it.
+ * In-card empties usually need only `title`.
+ */
 export function EmptyState({
   icon,
   title,
   description,
   action,
+  headingLevel = 3,
 }: {
   icon?: ReactNode;
   title: ReactNode;
   description?: ReactNode;
   action?: ReactNode;
+  /**
+   * Outline level of the title. Default 3 suits a state inside a titled
+   * section or card; use 2 directly under a page's h1.
+   */
+  headingLevel?: 2 | 3 | 4;
 }) {
+  const Heading = `h${headingLevel}` as const;
   return (
-    <div className="flex flex-col items-center justify-center text-center py-12 px-6 border border-dashed border-subtle rounded-sm bg-overlay-1">
-      {icon ? <div className="mb-3 text-text-faint">{icon}</div> : null}
-      <h3 className="text-sm font-medium text-text">{title}</h3>
+    <div className="flex flex-col items-center justify-center text-center py-8 px-4">
+      {icon ? (
+        <div className="mb-2 text-text-faint [&_svg]:size-5">{icon}</div>
+      ) : null}
+      <Heading
+        className={cx(
+          description || action
+            ? 'text-title-card text-text'
+            : 'text-body-sm text-text-muted',
+        )}
+      >
+        {title}
+      </Heading>
       {description ? (
-        <p className="mt-1 text-xs text-text-faint max-w-md">{description}</p>
+        <p className="mt-1 text-body-sm text-text-muted max-w-md">
+          {description}
+        </p>
       ) : null}
       {action ? <div className="mt-4">{action}</div> : null}
     </div>
@@ -340,22 +435,22 @@ export function Modal({
       }}
     >
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseDialog.Popup
           className={cx(
             'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] outline-none',
-            'bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl flex flex-col max-h-[85vh]',
+            'bg-bg-sub border border-subtle-strong rounded-md shadow-overlay flex flex-col max-h-[85vh]',
             'transition-[opacity,scale] duration-150 ease-out data-[ending-style]:opacity-0 data-[ending-style]:scale-95 data-[starting-style]:opacity-0 data-[starting-style]:scale-95',
             sizeClass,
           )}
         >
-          <div className="flex items-start justify-between px-4 py-3 border-b border-subtle">
+          <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-subtle">
             <div className="min-w-0">
-              <BaseDialog.Title className="text-sm font-medium text-text">
+              <BaseDialog.Title className="text-title-section text-text">
                 {title}
               </BaseDialog.Title>
               {description ? (
-                <BaseDialog.Description className="mt-0.5 text-xs text-text-faint">
+                <BaseDialog.Description className="mt-0.5 text-body-sm text-text-muted">
                   {description}
                 </BaseDialog.Description>
               ) : null}
@@ -365,10 +460,10 @@ export function Modal({
               disabled={preventDismiss}
               aria-disabled={preventDismiss || undefined}
               className={cx(
-                'inline-flex items-center justify-center text-text-muted hover:text-[color:var(--color-text)] rounded-sm',
-                'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
-                'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-1',
-                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[color:var(--color-text-muted)]',
+                'inline-flex shrink-0 items-center justify-center text-text-muted hover:text-text rounded-sm',
+                'h-11 w-11 -mr-2 md:mr-0 md:h-8 md:w-8 hover:bg-overlay-5',
+                'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+                'disabled:control-disabled',
               )}
             >
               <X className="w-4 h-4" />
@@ -376,7 +471,7 @@ export function Modal({
           </div>
           <div className="flex-1 p-4 overflow-y-auto">{children}</div>
           {footer ? (
-            <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2">
+            <div className="px-4 py-3 border-t border-subtle flex flex-wrap items-center justify-end gap-2">
               {footer}
             </div>
           ) : null}
@@ -426,41 +521,46 @@ export function ConfirmDialog({
       }}
     >
       <BaseAlertDialog.Portal>
-        <BaseAlertDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseAlertDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
         <BaseAlertDialog.Popup
           className={cx(
             'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] outline-none',
-            'bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl flex flex-col max-h-[85vh] max-w-sm',
+            'bg-bg-sub border border-subtle-strong rounded-md shadow-overlay flex flex-col max-h-[85vh] max-w-sm',
             'transition-[opacity,scale] duration-150 ease-out data-[ending-style]:opacity-0 data-[ending-style]:scale-95 data-[starting-style]:opacity-0 data-[starting-style]:scale-95',
           )}
         >
-          <div className="flex items-start justify-between px-4 py-3 border-b border-subtle">
-            <div className="min-w-0">
-              <BaseAlertDialog.Title className="text-sm font-medium text-text">
-                {title}
-              </BaseAlertDialog.Title>
-            </div>
+          <div className="px-4 pt-4">
+            <BaseAlertDialog.Title className="text-title-card text-text">
+              {title}
+            </BaseAlertDialog.Title>
           </div>
-          <div className="flex-1 p-4 overflow-y-auto">
+          <div className="flex-1 px-4 pt-2 pb-4 overflow-y-auto">
             {description ? (
-              <BaseAlertDialog.Description className="text-sm leading-relaxed text-text-muted">
+              <BaseAlertDialog.Description className="text-body text-text-muted">
                 {description}
               </BaseAlertDialog.Description>
             ) : null}
           </div>
-          <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2">
-            <Button variant="ghost" disabled={pending} onClick={requestClose}>
+          <div className="px-4 py-3 border-t border-subtle flex flex-wrap items-center justify-end gap-2">
+            {/* A destructive confirm must not be one stray Enter away: focus
+                lands on Cancel, and on the confirm button otherwise. */}
+            <Button
+              autoFocus={destructive}
+              variant="secondary"
+              disabled={pending}
+              onClick={requestClose}
+            >
               {cancelLabel}
             </Button>
             <Button
-              autoFocus
+              autoFocus={!destructive}
               disabled={confirmDisabled}
               loading={pending}
               onClick={() => {
                 onConfirm();
                 if (closeOnConfirm) onOpenChange(false);
               }}
-              variant={destructive ? 'danger' : 'primary'}
+              variant={destructive ? 'danger-solid' : 'primary'}
             >
               {confirmLabel}
             </Button>
@@ -483,11 +583,14 @@ export function Hint({
   children,
   side = 'top',
   stopClickPropagation = true,
+  openOnFocus = true,
 }: {
   label: ReactNode;
   children: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
   stopClickPropagation?: boolean;
+  /** When false, keyboard focus does not open the hint; click/Enter/Space does. */
+  openOnFocus?: boolean;
 }) {
   const [engaged, setEngaged] = useState(false);
   const [open, setOpen] = useState(false);
@@ -517,12 +620,17 @@ export function Hint({
         },
         onFocus: (e) => {
           childElement.props.onFocus?.(e);
+          if (!openOnFocus) return;
           setEngaged(true);
           setOpen(true);
         },
         onClick: (e) => {
           if (stopClickPropagation) e.stopPropagation();
           childElement.props.onClick?.(e);
+          if (!openOnFocus) {
+            setEngaged(true);
+            setOpen(true);
+          }
         },
       });
     }
@@ -538,11 +646,16 @@ export function Hint({
           if (timerRef.current) clearTimeout(timerRef.current);
         }}
         onFocus={() => {
+          if (!openOnFocus) return;
           setEngaged(true);
           setOpen(true);
         }}
         onClick={(e) => {
           if (stopClickPropagation) e.stopPropagation();
+          if (!openOnFocus) {
+            setEngaged(true);
+            setOpen(true);
+          }
         }}
       >
         {children}
@@ -563,8 +676,9 @@ export function Hint({
         {!isValidElement(children) ? children : null}
       </BasePopover.Trigger>
       <BasePopover.Portal>
-        <BasePopover.Positioner side={side} sideOffset={4}>
-          <BasePopover.Popup className="z-50 px-2 py-1 text-[11px] rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-lg">
+        <BasePopover.Positioner className="z-50" side={side} sideOffset={4}>
+          {/* Tall breakdowns scroll inside the popup instead of running past the viewport edge. */}
+          <BasePopover.Popup className="max-h-[var(--available-height)] max-w-xs overflow-y-auto px-2 py-1 text-caption rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-overlay">
             {label}
           </BasePopover.Popup>
         </BasePopover.Positioner>
@@ -573,147 +687,68 @@ export function Hint({
   );
 }
 
-// ─── KpiTile ─────────────────────────────────────────────────────────────────
-interface KpiTileProps {
-  label: string;
-  value: ReactNode;
-  delta?: {
-    value: ReactNode;
-    direction: 'up' | 'down' | 'flat';
-    isPositive: boolean | null;
-  };
-  hint?: string;
-}
-export function KpiTile({ label, value, delta, hint }: KpiTileProps) {
-  const deltaColor =
-    !delta || delta.isPositive === null
-      ? 'text-text-faint'
-      : delta.isPositive
-        ? 'text-green-400'
-        : 'text-red-400';
-  const arrow =
-    delta?.direction === 'up' ? '↑' : delta?.direction === 'down' ? '↓' : '·';
+// ─── PageHeader (the page's single h1) ───────────────────────────────────────
+/**
+ * The shell's top bar shows the current page's name. `AppShell` publishes
+ * it here so a `PageHeader` whose string title matches keeps its h1 for
+ * assistive tech but does not print the same words twice.
+ */
+const ShellPageTitleContext = createContext<string | null>(null);
+export const ShellPageTitleProvider = ShellPageTitleContext.Provider;
+
+/**
+ * `text-title-page` h1 with an optional one-line description and actions.
+ * When the title equals the top bar's page name the h1 is visually hidden
+ * and only the description and actions show.
+ */
+export function PageHeader({
+  title,
+  description,
+  actions,
+}: {
+  title: ReactNode;
+  description?: ReactNode;
+  actions?: ReactNode;
+}) {
+  const shellTitle = useContext(ShellPageTitleContext);
+  const titleInShell = typeof title === 'string' && title === shellTitle;
+  if (titleInShell && !description && !actions) {
+    return (
+      <header className="sr-only">
+        <h1>{title}</h1>
+      </header>
+    );
+  }
   return (
-    <div className="glass rounded-sm p-3 flex flex-col gap-1.5 min-h-[80px]">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] uppercase tracking-wider text-text-faint truncate">
-          {label}
-        </span>
-        {hint ? (
-          <Hint label={hint}>
-            <span className="text-text-faint text-[10px] cursor-help shrink-0">
-              i
-            </span>
-          </Hint>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="text-2xl font-medium tabular-nums leading-none">
-          {value}
-        </span>
-        {delta ? (
-          <span
+    <header className="mb-8 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="min-w-0">
+        <h1 className={titleInShell ? 'sr-only' : 'text-title-page text-text'}>
+          {title}
+        </h1>
+        {description ? (
+          <div
             className={cx(
-              'text-[11px] font-mono tabular-nums whitespace-nowrap',
-              deltaColor,
+              'max-w-[70ch] text-body text-text-muted',
+              titleInShell ? undefined : 'mt-1',
             )}
           >
-            {arrow} {delta.value}
-          </span>
+            {description}
+          </div>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-// ─── Sparkline ───────────────────────────────────────────────────────────────
-export function Sparkline({
-  data,
-  color = 'var(--color-accent)',
-}: {
-  data: number[];
-  color?: string;
-}) {
-  const chartData = data.map((value, i) => ({ i, value }));
-  const gid = `spark-${color.replace(/[^a-z0-9]/gi, '')}`;
-  return (
-    <div className="w-full" style={{ minWidth: 60, height: 28 }}>
-      <ResponsiveContainer
-        width="100%"
-        height="100%"
-        minWidth={60}
-        minHeight={28}
-      >
-        <AreaChart
-          data={chartData}
-          margin={{ top: 1, right: 0, bottom: 1, left: 0 }}
-        >
-          <defs>
-            <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={color} stopOpacity={0.45} />
-              <stop offset="100%" stopColor={color} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <Area
-            type="monotone"
-            dataKey="value"
-            stroke={color}
-            strokeWidth={1.4}
-            fill={`url(#${gid})`}
-            isAnimationActive={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-// ─── QuotaMiniChart ──────────────────────────────────────────────────────────
-export function QuotaMiniChart({
-  data,
-}: {
-  data: { i: number; val5h: number | null; val7d: number | null }[];
-}) {
-  const c5h = getWindowColor('5h');
-  const c7d = getWindowColor('7d');
-
-  return (
-    <div className="w-full" style={{ minWidth: 60, height: 28 }}>
-      <ResponsiveContainer
-        width="100%"
-        height="100%"
-        minWidth={60}
-        minHeight={28}
-      >
-        <AreaChart
-          data={data}
-          margin={{ top: 1, right: 0, bottom: 1, left: 0 }}
-        >
-          <Area
-            type="stepAfter"
-            dataKey="val7d"
-            stroke={c7d.stroke}
-            strokeWidth={1.4}
-            fill="none"
-            isAnimationActive={false}
-            connectNulls={false}
-          />
-          <Area
-            type="stepAfter"
-            dataKey="val5h"
-            stroke={c5h.stroke}
-            strokeWidth={1.4}
-            fill="none"
-            isAnimationActive={false}
-            connectNulls={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
+      {actions ? (
+        <div className="flex flex-wrap items-center gap-2">{actions}</div>
+      ) : null}
+    </header>
   );
 }
 
 // ─── Section (used in pages) ─────────────────────────────────────────────────
+/**
+ * A flat, titled page region: sentence-case `text-title-section` h2 on the
+ * ground, 16px to its content, no box. Sections are separated by space,
+ * not rules. The page title comes from `PageHeader`.
+ */
 export function Section({
   title,
   subtitle,
@@ -728,16 +763,18 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section className={cx('flex flex-col gap-3', className)}>
+    <section className={cx('flex flex-col gap-4', className)}>
       {title || action ? (
-        <header className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
+        <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+          {/* Phones: content-sized basis, so a long action wraps under the
+              title instead of squeezing it. */}
+          <div className="min-w-0 flex-1 max-md:basis-auto">
             {title ? (
-              <h2 className="text-sm font-medium text-text">{title}</h2>
+              <h2 className="text-title-section text-text">{title}</h2>
             ) : null}
             {subtitle ? (
               <div
-                className="text-xs text-text-faint mt-0.5 min-h-4"
+                className="mt-0.5 min-h-4 text-body-sm text-text-muted"
                 data-slot="section-subtitle"
               >
                 {subtitle}
@@ -763,7 +800,7 @@ export function PageContainer({
   return (
     <div
       className={cx(
-        'p-4 md:p-6 pb-8 md:pb-12 w-full max-w-[90rem] mx-auto space-y-6',
+        'px-4 pt-5 pb-10 md:px-8 md:pt-8 lg:px-10 lg:pt-10 lg:pb-16 w-full max-w-[90rem] mx-auto space-y-12 lg:space-y-16',
         className,
       )}
     >
@@ -782,7 +819,10 @@ export function FullPage({
   return (
     <div
       className={cx(
-        'flex flex-col h-[calc(100dvh-3rem)] min-h-0 px-4 md:px-6 pt-4 md:pt-6 pb-4 w-full max-w-[120rem] mx-auto',
+        // Viewport-fit console with an inner scroller from `md` (`h-shell`:
+        // viewport minus top bar and, below `lg`, the tab bar); below `md`
+        // the page scrolls normally so open filters never squeeze the rows away.
+        'flex flex-col md:h-shell min-h-0 px-4 md:px-8 pt-4 md:pt-6 pb-4 w-full max-w-[120rem] mx-auto',
         className,
       )}
     >
@@ -818,11 +858,31 @@ export function Spinner({ className }: { className?: string }) {
 }
 
 // ─── Field (label + control container) ───────────────────────────────────────
+const NATIVE_FORM_CONTROLS: Record<string, true> = {
+  input: true,
+  select: true,
+  textarea: true,
+};
+type NativeControlProps = {
+  required?: boolean;
+  'aria-required'?: boolean;
+  'aria-invalid'?: boolean;
+  'aria-describedby'?: string;
+};
+
+/**
+ * Label + control. When the only child is a native `input`/`select`/`textarea`
+ * it receives `required`/`aria-required`, `aria-invalid`, and
+ * `aria-describedby` pointing at the hint or error, which render outside the
+ * `<label>` so they describe the control instead of joining its name. Custom
+ * controls wire `errorId`/`hintId` themselves.
+ */
 export function Field({
   label,
   hint,
   error,
   errorId,
+  hintId,
   children,
   required,
 }: {
@@ -830,67 +890,114 @@ export function Field({
   hint?: string;
   error?: string;
   errorId?: string;
+  hintId?: string;
   children: ReactNode;
   required?: boolean;
 }) {
+  const generatedId = useId();
+  const resolvedErrorId = errorId ?? `${generatedId}-error`;
+  const resolvedHintId = hintId ?? `${generatedId}-hint`;
+  const describedBy = error ? resolvedErrorId : hint ? resolvedHintId : null;
+
+  let control = children;
+  if (
+    isValidElement<NativeControlProps>(children) &&
+    typeof children.type === 'string' &&
+    NATIVE_FORM_CONTROLS[children.type]
+  ) {
+    const only = children;
+    const own = only.props['aria-describedby'];
+    const merged = [own, describedBy].filter(Boolean).join(' ');
+    control = cloneElement(only, {
+      ...(required ? { required: true, 'aria-required': true } : {}),
+      ...(error ? { 'aria-invalid': true } : {}),
+      ...(merged ? { 'aria-describedby': merged } : {}),
+    });
+  }
+
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-[11px] uppercase tracking-wider text-text-faint">
-        {label}
-        {required ? <span className="text-red-400 ml-1">*</span> : null}
-      </span>
-      {children}
+    <div className="flex flex-col gap-1">
+      <label className="flex flex-col gap-1.5">
+        <span className="text-label text-text-muted">
+          {label}
+          {required ? (
+            <span aria-hidden="true" className="text-danger-text ml-1">
+              *
+            </span>
+          ) : null}
+        </span>
+        {control}
+      </label>
       {hint && !error ? (
-        <span className="text-[11px] text-text-faint">{hint}</span>
+        <span id={resolvedHintId} className="text-caption text-text-faint">
+          {hint}
+        </span>
       ) : null}
       {error ? (
-        <span id={errorId} className="text-[11px] text-red-400">
+        <span id={resolvedErrorId} className="text-caption text-danger-text">
           {error}
         </span>
       ) : null}
-    </label>
+    </div>
   );
 }
 
+// ─── ToggleSwitch ────────────────────────────────────────────────────────────
+type ToggleSwitchName =
+  | { label: ReactNode; 'aria-label'?: string }
+  | { label?: undefined; 'aria-label': string };
+
+/**
+ * 36×20 accent switch over a native checkbox. Needs an accessible name: a
+ * visible `label`, or `aria-label` when the surrounding row already shows one.
+ */
 export function ToggleSwitch({
   label,
   description,
   className,
   variant = 'card',
   ...rest
-}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & {
-  label: ReactNode;
-  description?: ReactNode;
-  /**
-   * 'card' renders the bordered panel used for standalone toggles.
-   * 'compact' drops the border/background/padding so the switch can sit
-   * inline inside a denser header row.
-   */
-  variant?: 'card' | 'compact';
-}) {
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type' | 'aria-label'> &
+  ToggleSwitchName & {
+    description?: ReactNode;
+    /**
+     * 'card' renders the toggle as an in-card well (fill, no border) for
+     * standalone settings rows. 'compact' drops the well so the switch can
+     * sit inline inside a denser header row.
+     */
+    variant?: 'card' | 'compact';
+  }) {
   const compact = variant === 'compact';
+  const hasText = label != null || description != null;
   return (
     <label
       className={cx(
         compact
           ? 'flex min-h-[44px] min-w-0 cursor-pointer items-center gap-2'
-          : 'flex min-w-0 cursor-pointer items-start justify-between gap-4 rounded-sm border border-subtle bg-panel-strong px-3 py-2.5',
-        rest.disabled ? 'cursor-not-allowed opacity-60' : undefined,
+          : 'well flex min-w-0 cursor-pointer items-start justify-between gap-4 px-3 py-2.5',
+        rest.disabled ? 'cursor-not-allowed' : undefined,
         className,
       )}
     >
-      <span className="min-w-0">
-        <span
-          className={cx('block text-text', compact ? 'text-xs' : 'text-sm')}
-        >
-          {label}
+      {hasText ? (
+        <span className="min-w-0">
+          {label != null ? (
+            <span
+              className={cx(
+                'block text-body-sm',
+                rest.disabled ? 'text-text-disabled' : 'text-text',
+              )}
+            >
+              {label}
+            </span>
+          ) : null}
+          {description ? (
+            <span className="mt-0.5 block text-caption text-text-faint">
+              {description}
+            </span>
+          ) : null}
         </span>
-        {description ? (
-          <span className="mt-0.5 block text-xs leading-relaxed text-text-faint">
-            {description}
-          </span>
-        ) : null}
-      </span>
+      ) : null}
       <span
         className={cx(
           'relative inline-flex h-5 w-9 shrink-0',
@@ -898,27 +1005,235 @@ export function ToggleSwitch({
         )}
       >
         <input {...rest} type="checkbox" className="peer sr-only" />
-        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-overlay-6 transition-colors peer-checked:border-[color:var(--color-accent)] peer-checked:bg-[color:var(--color-accent)]/35 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-[color:var(--color-accent)] peer-focus-visible:outline-offset-2" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[color:var(--color-text-muted)] shadow-sm transition-transform peer-checked:translate-x-4 peer-checked:bg-[color:var(--color-accent)]" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-disabled:border-dashed peer-disabled:border-border-disabled peer-disabled:bg-transparent peer-checked:peer-disabled:border-border-disabled peer-checked:peer-disabled:bg-progress-track peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink peer-disabled:bg-text-disabled peer-checked:peer-disabled:bg-text-disabled" />
       </span>
     </label>
   );
 }
 
-type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
+// ─── SegmentedControl ────────────────────────────────────────────────────────
+export interface SegmentedOption<T extends string | number> {
+  value: T;
+  label: ReactNode;
+}
 
-const NOTICE_TONE_CLASS: Record<NoticeTone, string> = {
-  info: 'border-blue-500/30 bg-blue-500/10 text-[color:var(--color-info-text)]',
-  success:
-    'border-emerald-500/30 bg-emerald-500/10 text-[color:var(--color-success-text)]',
-  warning:
-    'border-amber-500/35 bg-amber-500/10 text-[color:var(--color-warn-text)]',
-  danger:
-    'border-red-500/35 bg-red-500/10 text-[color:var(--color-danger-text)]',
+/** Desktop outer height 32 (md) / 28 (sm); 40px segments below `md` for touch. */
+const SEGMENT_SIZES = {
+  sm: 'h-10 md:h-[1.375rem] px-2 text-xs',
+  md: 'h-10 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
+} as const;
+
+/**
+ * Single-choice segmented control (ARIA radiogroup). Arrow keys move and
+ * select, Home/End jump to the ends; only the selected segment is tabbable.
+ */
+export function SegmentedControl<T extends string | number>({
+  value,
+  onChange,
+  options,
+  ariaLabel,
+  size = 'md',
+  className,
+}: {
+  value: T;
+  onChange: (value: T) => void;
+  options: readonly SegmentedOption<T>[];
+  ariaLabel: string;
+  size?: 'sm' | 'md';
+  className?: string;
+}) {
+  const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
+  const selectedIndex = options.findIndex((option) => option.value === value);
+  const tabbableIndex = selectedIndex === -1 ? 0 : selectedIndex;
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const last = options.length - 1;
+    const from = selectedIndex === -1 ? 0 : selectedIndex;
+    let next: number;
+    switch (event.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = from >= last ? 0 : from + 1;
+        break;
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = from <= 0 ? last : from - 1;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = last;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    const option = options[next];
+    if (!option) return;
+    buttonsRef.current[next]?.focus();
+    if (option.value !== value) onChange(option.value);
+  };
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label={ariaLabel}
+      className={cx(
+        'inline-flex items-center gap-0.5 rounded-sm border border-subtle-strong p-0.5',
+        className,
+      )}
+    >
+      {options.map((option, index) => {
+        const selected = index === selectedIndex;
+        return (
+          <button
+            key={String(option.value)}
+            ref={(node) => {
+              buttonsRef.current[index] = node;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            tabIndex={index === tabbableIndex ? 0 : -1}
+            onClick={() => {
+              if (!selected) onChange(option.value);
+            }}
+            onKeyDown={handleKeyDown}
+            className={cx(
+              'inline-flex items-center justify-center whitespace-nowrap rounded-sm font-medium transition-colors',
+              'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+              SEGMENT_SIZES[size],
+              selected
+                ? 'bg-panel-strong text-text shadow-[inset_0_0_0_1px_var(--color-border)]'
+                : 'text-text-muted hover:bg-hover-bg hover:text-text',
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Drawer (right-hand sheet) ───────────────────────────────────────────────
+const DRAWER_WIDTHS = {
+  md: 'sm:max-w-md',
+  lg: 'sm:max-w-lg',
+  xl: 'sm:max-w-[60rem]',
+} as const;
+
+/**
+ * Right-hand sheet on Base UI Dialog: full width on mobile, `width` from `sm`.
+ * Slides in; with reduced motion it fades instead.
+ */
+export function Drawer({
+  open,
+  onOpenChange,
+  title,
+  description,
+  width,
+  children,
+  footer,
+}: {
+  open: boolean;
+  onOpenChange: (
+    open: boolean,
+    eventDetails: BaseDialog.Root.ChangeEventDetails,
+  ) => void;
+  title: ReactNode;
+  description?: ReactNode;
+  width: 'md' | 'lg' | 'xl';
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  return (
+    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseDialog.Popup
+          className={cx(
+            'fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-x-hidden bg-bg-sub border-l border-subtle-strong shadow-overlay outline-none',
+            'duration-200 ease-out',
+            'motion-safe:transition-transform motion-safe:data-[ending-style]:translate-x-full motion-safe:data-[starting-style]:translate-x-full',
+            'motion-reduce:transition-opacity motion-reduce:data-[ending-style]:opacity-0 motion-reduce:data-[starting-style]:opacity-0',
+            DRAWER_WIDTHS[width],
+          )}
+        >
+          <div className="flex items-start justify-between gap-3 px-4 py-3 border-b border-subtle">
+            <div className="min-w-0">
+              <BaseDialog.Title className="text-title-section text-text">
+                {title}
+              </BaseDialog.Title>
+              {description ? (
+                <BaseDialog.Description className="mt-0.5 text-body-sm text-text-muted">
+                  {description}
+                </BaseDialog.Description>
+              ) : null}
+            </div>
+            <BaseDialog.Close
+              aria-label="Close"
+              className={cx(
+                'inline-flex shrink-0 items-center justify-center rounded-sm text-text-muted transition-colors',
+                'h-11 w-11 md:h-8 md:w-8 -mr-2 md:mr-0 hover:bg-overlay-5 hover:text-text',
+                'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+              )}
+            >
+              <X className="w-4 h-4" aria-hidden="true" />
+            </BaseDialog.Close>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
+          {footer ? (
+            <div className="px-4 py-3 border-t border-subtle flex flex-wrap items-center justify-end gap-2">
+              {footer}
+            </div>
+          ) : null}
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
+  );
+}
+
+// ─── Notice ──────────────────────────────────────────────────────────────────
+export type NoticeTone = 'info' | 'success' | 'warning' | 'danger';
+/**
+ * - `inline` (default): a well inside a card — tone/8 fill, no border, 14px
+ *   icon. Use it inside the object that owns the problem.
+ * - `banner`: the page-level incident line (at most one per page) — tone/8
+ *   fill, a uniform 1px tone/45 line, 16px icon, title + short summary and
+ *   at most one action. Collapse lists
+ *   into a sentence.
+ */
+export type NoticeVariant = 'inline' | 'banner';
+
+const NOTICE_FILL: Record<NoticeTone, string> = {
+  info: 'bg-overlay-3',
+  success: 'bg-overlay-3',
+  warning: 'bg-warn/8',
+  danger: 'bg-danger/8',
+};
+const NOTICE_BORDER: Record<NoticeTone, string> = {
+  info: 'border-subtle',
+  success: 'border-subtle',
+  warning: 'border-warn/45',
+  danger: 'border-danger/45',
+};
+// `info` is neutral: there is no blue in the system.
+const NOTICE_ICON: Record<
+  NoticeTone,
+  { Icon: typeof Info; className: string }
+> = {
+  info: { Icon: Info, className: 'text-text-muted' },
+  success: { Icon: CircleCheck, className: 'text-success-text' },
+  warning: { Icon: TriangleAlert, className: 'text-warn-text' },
+  danger: { Icon: CircleAlert, className: 'text-danger-text' },
 };
 
 export function Notice({
   tone = 'info',
+  variant = 'inline',
   title,
   children,
   action,
@@ -926,26 +1241,66 @@ export function Notice({
   role,
 }: {
   tone?: NoticeTone;
+  variant?: NoticeVariant;
   title?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
   action?: ReactNode;
   className?: string;
   role?: 'alert' | 'status';
 }) {
+  const banner = variant === 'banner';
+  const { Icon, className: iconClass } = NOTICE_ICON[tone];
   return (
     <div
       className={cx(
-        'flex flex-col gap-3 rounded-sm border px-3 py-2.5 text-xs sm:flex-row sm:items-start sm:justify-between',
-        NOTICE_TONE_CLASS[tone],
+        'flex gap-2.5 text-body text-text-muted',
+        banner
+          ? cx(
+              'flex-wrap items-center rounded-md border px-4 py-3 sm:flex-nowrap',
+              NOTICE_BORDER[tone],
+            )
+          : 'flex-col rounded-sm p-3 sm:flex-row sm:items-start',
+        NOTICE_FILL[tone],
         className,
       )}
+      data-tone={tone}
       role={role ?? (tone === 'danger' ? 'alert' : 'status')}
     >
-      <div className="min-w-0 leading-relaxed">
-        {title ? (
-          <div className="mb-0.5 font-medium text-text">{title}</div>
-        ) : null}
-        <div>{children}</div>
+      <div
+        className={cx(
+          // Phones: the text takes the full row and the action drops under it.
+          'flex min-w-0 flex-1 gap-2.5',
+          banner ? 'items-center max-sm:basis-full' : 'items-start',
+        )}
+      >
+        <Icon
+          aria-hidden="true"
+          strokeWidth={1.75}
+          className={cx(
+            'shrink-0',
+            banner ? 'size-4' : 'mt-0.5 size-3.5',
+            iconClass,
+          )}
+        />
+        <div className={cx('min-w-0', banner && 'sm:truncate')}>
+          {title ? (
+            <span
+              className={cx(
+                'font-semibold text-text',
+                banner ? 'mr-1.5' : 'block mb-0.5',
+              )}
+            >
+              {title}
+            </span>
+          ) : null}
+          {children ? (
+            banner ? (
+              <span>{children}</span>
+            ) : (
+              <div>{children}</div>
+            )
+          ) : null}
+        </div>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
     </div>
@@ -953,6 +1308,11 @@ export function Notice({
 }
 
 // ─── Input + Select base classes ─────────────────────────────────────────────
-export const INPUT_CLASS =
-  'w-full h-9 px-2.5 text-sm bg-bg border border-subtle rounded-sm text-text placeholder:text-[color:var(--color-text-faint)] ' +
-  'focus:border-[color:var(--color-accent)] focus:outline-none transition-colors';
+// Phones: every field is at least a 40px touch target, like every Button.
+const INPUT_BASE_CLASS =
+  'w-full px-2.5 text-sm bg-input-bg border border-subtle-strong rounded-sm text-text placeholder:text-text-faint transition-colors max-md:min-h-10 ' +
+  'focus:border-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:control-disabled disabled:placeholder:text-text-disabled';
+/** 36px (md) text input / select trigger. */
+export const INPUT_CLASS = `${INPUT_BASE_CLASS} h-9`;
+/** 32px (sm) text input / select trigger for toolbars and dense forms. */
+export const INPUT_SM_CLASS = `${INPUT_BASE_CLASS} h-8`;

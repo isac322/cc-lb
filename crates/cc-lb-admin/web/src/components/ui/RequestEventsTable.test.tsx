@@ -11,7 +11,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as FormatModule from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { RequestEventsTable } from './RequestEventsTable';
-import { Sparkline } from './Sparkline';
 
 type GetRequestOutcome = typeof FormatModule.getRequestOutcome;
 
@@ -136,26 +135,27 @@ describe('RequestEventsTable', () => {
     const headerCells = container.querySelectorAll('thead th');
     const body = container.querySelector('tbody');
     const rows = container.querySelectorAll('tbody > tr');
+    // Session is off; kind stays even with no rows yet.
     const expectedSkeletonWidths = [
       'max-w-24',
       'max-w-24',
       'max-w-28',
       'max-w-12',
-      'max-w-40',
+      'max-w-24',
       'max-w-12',
       'max-w-16',
-      'max-w-36',
       'max-w-20',
+      'max-w-16',
     ];
 
     expect(headerCells).toHaveLength(9);
     expect(rows).toHaveLength(3);
-    expect(body?.style.height).toBe('7.59375rem');
+    expect(body?.style.height).toBe('7.5rem');
 
     for (const row of rows) {
       expect(row.className).toContain('border-b');
       expect(row.className).toContain('border-row');
-      expect((row as HTMLTableRowElement).style.height).toBe('2.53125rem');
+      expect((row as HTMLTableRowElement).style.height).toBe('2.5rem');
       const cells = row.querySelectorAll('td');
       expect(cells).toHaveLength(headerCells.length);
 
@@ -196,7 +196,7 @@ describe('RequestEventsTable', () => {
     ) as HTMLTableRowElement;
     const loadingRowHeight = loadingRow.style.height;
 
-    expect(loadingRowHeight).toBe('2.53125rem');
+    expect(loadingRowHeight).toBe('2.5rem');
 
     rerender(
       <RequestEventsTable
@@ -224,7 +224,7 @@ describe('RequestEventsTable', () => {
     );
 
     const loadingHeight = container.querySelector('tbody')?.style.height;
-    expect(loadingHeight).toBe('10.125rem');
+    expect(loadingHeight).toBe('10rem');
 
     rerender(
       <RequestEventsTable
@@ -239,6 +239,7 @@ describe('RequestEventsTable', () => {
     const emptyRow = emptyBody?.querySelector('tr');
     expect(emptyBody?.style.height).toBe(loadingHeight);
     expect(emptyRow?.className).toContain('h-full');
+    // Every column, session and kind included, is present with no rows.
     expect(emptyRow?.querySelector('td')?.getAttribute('colspan')).toBe('10');
     expect(screen.getByText('No requests')).toBeDefined();
   });
@@ -318,15 +319,13 @@ describe('RequestEventsTable', () => {
     const sessionChip = screen.getByTitle('session-advisor');
     const requestKindBadge = screen.getByText('adv');
     expect(sessionChip.closest('td')).not.toBe(requestKindBadge.closest('td'));
-    expect(
-      screen.getByRole('columnheader', { name: 'Request kind' }),
-    ).toBeDefined();
+    expect(screen.getByRole('columnheader', { name: 'Kind' })).toBeDefined();
     expect(screen.queryByText('advisor')).toBeNull();
     expect(screen.queryByText('main')).toBeNull();
 
     const kindColumnIndex = [
       ...container.querySelectorAll('thead th'),
-    ].findIndex((th) => th.textContent === 'Request kind');
+    ].findIndex((th) => th.textContent === 'Kind');
     const unclassifiedRow = container.querySelectorAll('tbody > tr')[1];
     expect(
       unclassifiedRow.querySelectorAll('td')[kindColumnIndex].textContent,
@@ -403,6 +402,33 @@ describe('RequestEventsTable', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('leaves Enter on a control inside the row to that control', async () => {
+    const user = userEvent.setup();
+    render(
+      <RequestEventsTable
+        events={[
+          {
+            event_id: 'evt_nested',
+            request_id: 'req_nested',
+            ts: 1718553120,
+            ts_ms: 1718553120000,
+            status: 200,
+            duration_ms: 100,
+            _phase: 'final',
+          } satisfies RequestEventWithPhase,
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    screen.getByRole('button', { name: /^Latency .* show breakdown$/ }).focus();
+    await user.keyboard('{Enter}');
+
+    expect(screen.queryByRole('dialog', { name: 'Request detail' })).toBeNull();
+    expect(screen.getByText('Latency by responsibility')).toBeDefined();
+  });
+
   it('handles JS int overflow gracefully', () => {
     const events: RequestEventWithPhase[] = [
       {
@@ -437,6 +463,160 @@ describe('RequestEventsTable', () => {
     const dashes = screen.getAllByText('—');
     expect(dashes.length).toBeGreaterThan(0);
   });
+
+  it('keeps the session and kind columns when every row is null', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    const { container } = render(
+      <RequestEventsTable
+        events={[
+          { ...base, event_id: 'evt_a', request_id: 'req_a', input_tokens: 10 },
+          { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+    const headers = Array.from(
+      container.querySelectorAll('thead th'),
+      (th) => th.textContent,
+    );
+
+    expect(headers).toEqual(expect.arrayContaining(['Session', 'Kind']));
+    for (const column of ['Session', 'Kind']) {
+      const index = headers.indexOf(column);
+      for (const row of container.querySelectorAll('tbody > tr')) {
+        expect(row.querySelectorAll('td')[index].textContent).toBe('—');
+      }
+    }
+  });
+
+  it('shows the cache hit for every row with prompt tokens, including 0%', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    render(
+      <RequestEventsTable
+        events={[
+          {
+            ...base,
+            event_id: 'evt_a',
+            request_id: 'req_a',
+            input_tokens: 10,
+            cache_read_input_tokens: 30,
+          },
+          { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
+          {
+            ...base,
+            event_id: 'evt_c',
+            request_id: 'req_c',
+            input_tokens: 1,
+            cache_read_input_tokens: 999,
+          },
+          { ...base, event_id: 'evt_d', request_id: 'req_d' },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    const tokens = (name: string) => screen.getByRole('button', { name });
+    expect(
+      tokens('Tokens 40 in, 0 out, cache hit 75%, show breakdown').textContent,
+    ).toContain('75%');
+    expect(
+      tokens('Tokens 20 in, 0 out, cache hit 0%, show breakdown').textContent,
+    ).toContain('0%');
+    // A partial hit never rounds up to a full one.
+    expect(
+      tokens('Tokens 1.0k in, 0 out, cache hit 99%, show breakdown')
+        .textContent,
+    ).toContain('99%');
+    // No prompt tokens: nothing to hit, so no percentage.
+    expect(
+      tokens('Tokens 0 in, 0 out, show breakdown').textContent,
+    ).not.toContain('%');
+  });
+
+  it('gives rows of one session the same chip color and other sessions another', () => {
+    const base = {
+      ts: 1718553120,
+      status: 200,
+      duration_ms: 100,
+      _phase: 'final',
+    } as const;
+    render(
+      <RequestEventsTable
+        events={[
+          { ...base, event_id: 'a1', request_id: 'a1', thread_id: 'sess-a-1' },
+          { ...base, event_id: 'b1', request_id: 'b1', thread_id: 'sess-b-2' },
+          { ...base, event_id: 'a2', request_id: 'a2', thread_id: 'sess-a-1' },
+        ]}
+        principalNameMap={principalNameMap}
+        upstreamNameMap={upstreamNameMap}
+      />,
+    );
+
+    const [a1, a2] = screen.getAllByTitle('sess-a-1');
+    const [b1] = screen.getAllByTitle('sess-b-2');
+    expect(a1.getAttribute('style')).toBe(a2.getAttribute('style'));
+    expect(a1.getAttribute('style')).not.toBe(b1.getAttribute('style'));
+  });
+
+  it.each([
+    ['fit', undefined],
+    ['scroll', 'min-w-[1080px]'],
+  ])(
+    'drops a leading claude- from model ids in %s tables, keeping the full id',
+    (_mode, minWidthClass) => {
+      const events = [
+        {
+          event_id: 'evt_m',
+          request_id: 'req_m',
+          ts: 1718553120,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-sonnet-4-6',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+        {
+          event_id: 'evt_other',
+          request_id: 'req_other',
+          ts: 1718553121,
+          status: 200,
+          duration_ms: 100,
+          model: 'my-claude-proxy',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
+
+      const { container } = render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+          minWidthClass={minWidthClass}
+        />,
+      );
+      const model = container.querySelector(
+        'tbody span[title="claude-sonnet-4-6"]',
+      );
+      expect(model?.textContent).toBe('sonnet-4-6');
+      expect(model?.getAttribute('aria-label')).toBe('claude-sonnet-4-6');
+      // Only a leading prefix goes.
+      expect(
+        container.querySelector('tbody span[title="my-claude-proxy"]')
+          ?.textContent,
+      ).toBe('my-claude-proxy');
+    },
+  );
 
   describe('Cost Tooltip', () => {
     it('renders 5 rows with $0.0000 formatting for each sub-cost and sums correctly', async () => {
@@ -552,7 +732,7 @@ describe('RequestEventsTable', () => {
       expect(inputLabel.length).toBeGreaterThan(0);
 
       // Check tooltip contents
-      const tooltips = await screen.findAllByText('Estimated Cost');
+      const tooltips = await screen.findAllByText('Estimated cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
       // Check all 5 rows are present
@@ -759,85 +939,6 @@ describe('RequestEventsTable', () => {
       expect(screen.queryByText('priority')).toBeNull();
       expect(screen.queryByText('standard')).toBeNull();
       expect(screen.queryByText('batch')).toBeNull();
-    });
-  });
-
-  describe('Sparkline', () => {
-    it('applies Tailwind bg-* utility colors through className', () => {
-      const { container } = render(
-        <Sparkline segments={[{ value: 10, color: 'bg-sky-400' }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).toContain('bg-sky-400');
-      expect(segments[0]?.style.backgroundColor).toBe('');
-    });
-
-    it('applies raw CSS colors through inline style', () => {
-      const { container } = render(
-        <Sparkline segments={[{ value: 20, color: '#ff0000' }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).not.toContain('#ff0000');
-      expect(segments[0]?.style.backgroundColor).toBe('rgb(255, 0, 0)');
-    });
-
-    it('keeps compound Tailwind bg-* utility colors in className', () => {
-      const compoundColor =
-        'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]';
-      const { container } = render(
-        <Sparkline segments={[{ value: 30, color: compoundColor }]} />,
-      );
-
-      const segments = Array.from(container.querySelectorAll('span'));
-
-      expect(segments).toHaveLength(1);
-      expect(segments[0]?.className).toContain('bg-slate-700/30');
-      expect(segments[0]?.className).toContain(
-        'bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
-      );
-      expect(segments[0]?.style.backgroundColor).toBe('');
-    });
-
-    it('leaves explicit unobserved total as empty track space', () => {
-      const { container } = render(
-        <Sparkline
-          segments={[
-            { value: 10, color: 'bg-sky-400' },
-            { value: 20, color: 'bg-violet-400' },
-          ]}
-          total={100}
-        />,
-      );
-
-      expect(
-        Array.from(
-          container.querySelectorAll<HTMLElement>('span'),
-          (segment) => segment.style.width,
-        ),
-      ).toEqual(['10%', '20%']);
-    });
-
-    it('renders empty track when total is zero or negative', () => {
-      const { container } = render(
-        <Sparkline
-          segments={[
-            { value: 0, color: 'bg-sky-400' },
-            { value: -10, color: '#ff0000' },
-          ]}
-        />,
-      );
-
-      const segments = container.querySelectorAll('span');
-      expect(segments).toHaveLength(0);
-
-      const track = container.querySelector('div');
-      expect(track?.className).toContain('bg-overlay-1');
     });
   });
 });

@@ -21,8 +21,7 @@ use cc_lb_storage_api::{
     StorageError, SubscriptionQuotaBucket, SubscriptionQuotaProviderLot,
     SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
     SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, UsageTokenInterval,
-    upstream::UpstreamKind,
+    UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -36,16 +35,9 @@ const DEFAULT_SERIES_BUCKET_SECS: u64 = 300;
 const DEFAULT_SERIES_MAX_POINTS: u32 = 1_000;
 const MAX_SERIES_MAX_POINTS: u32 = 10_000;
 const MAX_SERIES_UPSTREAMS: usize = 50;
-const ANALYSIS_BUCKET_SECS: u64 = 60;
-const ANALYSIS_MAX_POINTS: u32 = 10_000;
 const RESET_DROP_THRESHOLD: f64 = 0.5;
 const GAP_MARKER_MULTIPLIER: u64 = 2;
-const PROXY_RATE_LOOKBACK_SECS: u64 = 3_600;
 const CAPACITY_CAVEAT: &str = "capacity is inferred from proxy tokens and quota utilization; Anthropic quota units are not directly exposed";
-const OUTSIDE_TRAFFIC_CAVEAT: &str =
-    "actual_account_burn includes traffic outside this cc-lb instance";
-const HEADER_ONLY_CAVEAT: &str =
-    "analysis is limited to header-derived observations; API polling data is sparse";
 const HEADER_FALLBACK_CAVEAT: &str = "utilization is the arithmetic mean of header observations; capacity-weighted estimate is unavailable because cc-lb has not proxied enough traffic to back-solve provider capacity";
 const PLAN_RATIO_CAVEAT: &str = "utilization is weighted by subscription plan ratios from Anthropic metadata; 5h and 7d use the same documented plan ratios";
 const STALE_DATA_CAVEAT: &str =
@@ -65,11 +57,6 @@ pub fn router() -> Router<AdminState> {
             "/admin/subscription-quotas/aggregate",
             get(handle_aggregate),
         )
-        .route(
-            "/admin/v1/subscription-quotas/analysis",
-            get(handle_analysis),
-        )
-        .route("/admin/subscription-quotas/analysis", get(handle_analysis))
         .route(
             "/admin/v1/subscription-quotas/pool-history",
             get(handle_pool_history),
@@ -157,8 +144,7 @@ struct SeriesResponseItem {
     markers: Vec<SeriesMarkerResponse>,
 }
 
-// Slim wire shape: dashboard plots only these two; internal analysis paths
-// read SubscriptionQuotaBucket directly from cc-lb-storage-api, not this.
+// Slim wire shape: the dashboard plots only these two fields.
 #[derive(Debug, Serialize, Deserialize)]
 struct SeriesBucketResponse {
     bucket_start_unix_secs: u64,
@@ -174,15 +160,6 @@ struct SeriesMarkerResponse {
     from_unix_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     to_unix_secs: Option<u64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AnalysisQuery {
-    upstream_ids: Option<String>,
-    windows: Option<String>,
-    since_unix_secs: u64,
-    until_unix_secs: u64,
-    source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -289,89 +266,6 @@ pub struct AggregateProviderLotResponse {
     capacity_ratio: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct AnalysisResponse {
-    since_unix_secs: u64,
-    until_unix_secs: u64,
-    now_unix_secs: u64,
-    max_staleness_secs: u64,
-    upstreams: Vec<AnalysisUpstreamResponse>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AnalysisUpstreamResponse {
-    upstream_id: String,
-    upstream_name: String,
-    windows: Vec<AnalysisWindowResponse>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AnalysisWindowResponse {
-    window: String,
-    current_utilization: Option<f64>,
-    resets_at_unix_secs: Option<u64>,
-    data_state: String,
-    actual_account_burn: BurnResponse,
-    proxy_projected_burn: ProxyBurnResponse,
-    deficit: Option<DeficitResponse>,
-    caveats: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BurnResponse {
-    utilization_per_second: Option<f64>,
-    utilization_per_hour: Option<f64>,
-    eta_to_limit_secs: Option<u64>,
-    resets_before_limit: Option<bool>,
-    confidence: String,
-    interval_count: usize,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ProxyBurnResponse {
-    proxy_tokens_per_second: Option<f64>,
-    proxy_tokens_per_hour: Option<f64>,
-    effective_limit_tokens_estimate: Option<f64>,
-    utilization_per_hour: Option<f64>,
-    eta_to_limit_secs: Option<u64>,
-    resets_before_limit: Option<bool>,
-    confidence: String,
-    interval_count: usize,
-    reason: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct DeficitResponse {
-    projected_proxy_tokens_window: f64,
-    effective_limit_tokens_estimate: f64,
-    shortfall_tokens: f64,
-    recommended_multiplier: f64,
-    confidence: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnalysisObservation {
-    bucket_start_unix_secs: u64,
-    utilization_last: f64,
-    resets_at_unix_secs_last: Option<u64>,
-    observed_at_unix_millis_last: u64,
-    sources_seen: Vec<SubscriptionQuotaSource>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ObservationCycle<'a> {
-    observations: &'a [AnalysisObservation],
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UtilizationInterval {
-    start_unix_secs: u64,
-    end_unix_secs: u64,
-    delta_utilization: f64,
-    slope_per_second: f64,
-}
-
 async fn handle_latest(
     State(state): State<AdminState>,
     Query(query): Query<LatestQuery>,
@@ -387,16 +281,6 @@ async fn handle_series(
     Query(query): Query<SeriesQuery>,
 ) -> Response {
     match build_series_response(&state, query).await {
-        Ok(response) => Json(response).into_response(),
-        Err(response) => response,
-    }
-}
-
-async fn handle_analysis(
-    State(state): State<AdminState>,
-    Query(query): Query<AnalysisQuery>,
-) -> Response {
-    match build_analysis_response(&state, query).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
@@ -802,110 +686,6 @@ async fn build_series_response(
         bucket_secs,
         source: source.as_str().to_owned(),
         series,
-    })
-}
-
-async fn build_analysis_response(
-    state: &AdminState,
-    query: AnalysisQuery,
-) -> Result<AnalysisResponse, Response> {
-    let storage = storage(state)?;
-    let source = parse_source_merge(query.source.as_deref())?;
-    let windows = parse_windows_or_default(query.windows.as_deref())?;
-    validate_time_range(query.since_unix_secs, query.until_unix_secs)?;
-    validate_series_guardrails(
-        query.since_unix_secs,
-        query.until_unix_secs,
-        ANALYSIS_BUCKET_SECS,
-        ANALYSIS_MAX_POINTS,
-        "narrow the requested time range; analysis supports at most 20000 one-minute buckets",
-    )?;
-    let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
-    validate_upstream_count(upstreams.len())?;
-    let requested_upstream_ids: Vec<Uuid> = upstreams.iter().map(|u| u.id).collect();
-    let upstream_names = upstream_name_map(&upstreams);
-    let rollups = storage
-        .query_usage_rollups_for_upstreams_in_range(
-            &requested_upstream_ids,
-            UsageRollupResolution::Minute,
-            query.since_unix_secs,
-            query.until_unix_secs,
-        )
-        .await
-        .map_err(storage_error)?;
-    let mut rollups_by_upstream = BTreeMap::<Uuid, Vec<UsageRollup>>::new();
-    for rollup in rollups {
-        rollups_by_upstream
-            .entry(rollup.upstream_id)
-            .or_default()
-            .push(rollup);
-    }
-    let quota_series = list_subscription_quota_series(
-        storage,
-        SubscriptionQuotaSeriesQuery {
-            upstream_ids: requested_upstream_ids.clone(),
-            windows: windows.clone(),
-            sources: sources_for_merge(source),
-            since_unix_millis: query.since_unix_secs.saturating_mul(1_000),
-            until_unix_millis: query.until_unix_secs.saturating_mul(1_000),
-            bucket_secs: ANALYSIS_BUCKET_SECS,
-            max_points_per_series: ANALYSIS_MAX_POINTS,
-            source_merge: source,
-        },
-    )
-    .await
-    .map_err(storage_error)?;
-    let max_staleness_secs = state
-        .dynamic_view
-        .load()
-        .subscription_quota_routing_max_staleness_secs;
-    let latest_by_upstream_window = latest_cache_by_upstream_window(
-        state,
-        &requested_upstream_ids,
-        query.until_unix_secs.saturating_mul(1_000),
-        max_staleness_secs,
-    );
-
-    let mut windows_by_upstream: BTreeMap<Uuid, Vec<AnalysisWindowResponse>> = BTreeMap::new();
-    for series in quota_series {
-        let observations = checkpoint_observations(&series.buckets);
-        let latest = latest_by_upstream_window.get(&(series.upstream_id, series.window));
-        let rollups_for_upstream = rollups_by_upstream
-            .get(&series.upstream_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let response = build_analysis_window(
-            series.window,
-            latest,
-            &observations,
-            rollups_for_upstream,
-            query.since_unix_secs,
-            query.until_unix_secs,
-        );
-        windows_by_upstream
-            .entry(series.upstream_id)
-            .or_default()
-            .push(response);
-    }
-
-    let upstreams = requested_upstream_ids
-        .into_iter()
-        .map(|upstream_id| AnalysisUpstreamResponse {
-            upstream_id: upstream_id.to_string(),
-            upstream_name: upstream_names
-                .get(&upstream_id)
-                .cloned()
-                .unwrap_or_default(),
-            windows: windows_by_upstream.remove(&upstream_id).unwrap_or_default(),
-        })
-        .collect();
-
-    Ok(AnalysisResponse {
-        since_unix_secs: query.since_unix_secs,
-        until_unix_secs: query.until_unix_secs,
-        now_unix_secs: query.until_unix_secs,
-        max_staleness_secs,
-        upstreams,
     })
 }
 
@@ -1740,258 +1520,6 @@ fn aggregate_confidence(
     "low".to_owned()
 }
 
-fn build_analysis_window(
-    window: SubscriptionQuotaWindow,
-    latest: Option<&SubscriptionQuotaCandidateSnapshot>,
-    observations: &[AnalysisObservation],
-    rollups: &[UsageRollup],
-    since_unix_secs: u64,
-    until_unix_secs: u64,
-) -> AnalysisWindowResponse {
-    let current_utilization = latest
-        .and_then(|snapshot| snapshot.utilization)
-        .or_else(|| {
-            observations
-                .last()
-                .map(|observation| observation.utilization_last)
-        });
-    let resets_at_unix_secs = latest
-        .and_then(|snapshot| snapshot.resets_at_unix_secs)
-        .or_else(|| {
-            observations
-                .last()
-                .and_then(|observation| observation.resets_at_unix_secs_last)
-        });
-    let data_state = latest
-        .map(|snapshot| data_state_str(snapshot.state).to_owned())
-        .unwrap_or_else(|| "unobserved".to_owned());
-    let cycles = split_reset_cycles(observations);
-    let intervals = valid_utilization_intervals(&cycles);
-    let actual_account_burn = infer_actual_account_burn(
-        &intervals,
-        current_utilization,
-        resets_at_unix_secs,
-        until_unix_secs,
-    );
-    let proxy_projected_burn = infer_proxy_projected_burn(
-        &intervals,
-        rollups,
-        current_utilization,
-        resets_at_unix_secs,
-        since_unix_secs,
-        until_unix_secs,
-    );
-    let deficit = deficit_for_window(window, &proxy_projected_burn);
-    let caveats = analysis_caveats(
-        &actual_account_burn,
-        &proxy_projected_burn,
-        observations,
-        &data_state,
-    );
-
-    AnalysisWindowResponse {
-        window: window.as_str().to_owned(),
-        current_utilization,
-        resets_at_unix_secs,
-        data_state,
-        actual_account_burn,
-        proxy_projected_burn,
-        deficit,
-        caveats,
-    }
-}
-
-fn infer_actual_account_burn(
-    intervals: &[UtilizationInterval],
-    current_utilization: Option<f64>,
-    resets_at_unix_secs: Option<u64>,
-    now_unix_secs: u64,
-) -> BurnResponse {
-    let slopes = intervals
-        .iter()
-        .map(|interval| interval.slope_per_second)
-        .collect::<Vec<_>>();
-    let Some(slope) = median(slopes) else {
-        return BurnResponse {
-            utilization_per_second: None,
-            utilization_per_hour: None,
-            eta_to_limit_secs: None,
-            resets_before_limit: None,
-            confidence: "low".to_owned(),
-            interval_count: 0,
-            reason: Some("insufficient_growth_intervals".to_owned()),
-        };
-    };
-    let eta_to_limit_secs =
-        current_utilization.and_then(|utilization| eta_to_limit(utilization, slope));
-    BurnResponse {
-        utilization_per_second: Some(slope),
-        utilization_per_hour: Some(slope * 3_600.0),
-        eta_to_limit_secs,
-        resets_before_limit: eta_to_limit_secs
-            .map(|eta| resets_before_limit(eta, resets_at_unix_secs, now_unix_secs)),
-        confidence: confidence_for_interval_count(intervals.len()).to_owned(),
-        interval_count: intervals.len(),
-        reason: None,
-    }
-}
-
-fn infer_proxy_projected_burn(
-    intervals: &[UtilizationInterval],
-    rollups: &[UsageRollup],
-    current_utilization: Option<f64>,
-    resets_at_unix_secs: Option<u64>,
-    since_unix_secs: u64,
-    until_unix_secs: u64,
-) -> ProxyBurnResponse {
-    let capacities = intervals
-        .iter()
-        .filter_map(|interval| {
-            let tokens =
-                tokens_in_interval(rollups, interval.start_unix_secs, interval.end_unix_secs);
-            if tokens == 0 || interval.delta_utilization <= 0.0 {
-                None
-            } else {
-                Some(tokens as f64 / interval.delta_utilization)
-            }
-        })
-        .collect::<Vec<_>>();
-    let Some(effective_capacity) = median(capacities) else {
-        return ProxyBurnResponse {
-            proxy_tokens_per_second: None,
-            proxy_tokens_per_hour: None,
-            effective_limit_tokens_estimate: None,
-            utilization_per_hour: None,
-            eta_to_limit_secs: None,
-            resets_before_limit: None,
-            confidence: "low".to_owned(),
-            interval_count: 0,
-            reason: Some("insufficient_growth_intervals".to_owned()),
-        };
-    };
-    let lookback_secs = until_unix_secs
-        .saturating_sub(since_unix_secs)
-        .min(PROXY_RATE_LOOKBACK_SECS)
-        .max(1);
-    let lookback_start = until_unix_secs.saturating_sub(lookback_secs);
-    let lookback_tokens = tokens_in_interval(rollups, lookback_start, until_unix_secs);
-    let proxy_tokens_per_second = lookback_tokens as f64 / lookback_secs as f64;
-    let utilization_per_second_projected = if effective_capacity > 0.0 {
-        proxy_tokens_per_second / effective_capacity
-    } else {
-        0.0
-    };
-    let eta_to_limit_secs = current_utilization
-        .and_then(|utilization| eta_to_limit(utilization, utilization_per_second_projected));
-    ProxyBurnResponse {
-        proxy_tokens_per_second: Some(proxy_tokens_per_second),
-        proxy_tokens_per_hour: Some(proxy_tokens_per_second * 3_600.0),
-        effective_limit_tokens_estimate: Some(effective_capacity),
-        utilization_per_hour: Some(utilization_per_second_projected * 3_600.0),
-        eta_to_limit_secs,
-        resets_before_limit: eta_to_limit_secs
-            .map(|eta| resets_before_limit(eta, resets_at_unix_secs, until_unix_secs)),
-        confidence: confidence_for_interval_count(intervals.len()).to_owned(),
-        interval_count: intervals.len(),
-        reason: None,
-    }
-}
-
-fn deficit_for_window(
-    window: SubscriptionQuotaWindow,
-    proxy_burn: &ProxyBurnResponse,
-) -> Option<DeficitResponse> {
-    let window_secs = match window {
-        SubscriptionQuotaWindow::FiveHour => 5 * 3_600,
-        SubscriptionQuotaWindow::SevenDay
-        | SubscriptionQuotaWindow::SevenDaySonnet
-        | SubscriptionQuotaWindow::SevenDayOpus
-        | SubscriptionQuotaWindow::SevenDayFable => 7 * 24 * 3_600,
-        SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => return None,
-    };
-    let proxy_tokens_per_second = proxy_burn.proxy_tokens_per_second?;
-    let effective_limit_tokens_estimate = proxy_burn.effective_limit_tokens_estimate?;
-    if effective_limit_tokens_estimate <= 0.0 {
-        return None;
-    }
-    let projected_proxy_tokens_window = proxy_tokens_per_second * window_secs as f64;
-    let shortfall_tokens =
-        (projected_proxy_tokens_window - effective_limit_tokens_estimate).max(0.0);
-    let recommended_multiplier =
-        round_to_one_decimal(projected_proxy_tokens_window / effective_limit_tokens_estimate);
-    Some(DeficitResponse {
-        projected_proxy_tokens_window,
-        effective_limit_tokens_estimate,
-        shortfall_tokens,
-        recommended_multiplier,
-        confidence: proxy_burn.confidence.clone(),
-    })
-}
-
-fn split_reset_cycles(observations: &[AnalysisObservation]) -> Vec<ObservationCycle<'_>> {
-    debug_assert!(observations.windows(2).all(|pair| {
-        pair[0].observed_at_unix_millis_last <= pair[1].observed_at_unix_millis_last
-    }));
-    if observations.is_empty() {
-        return Vec::new();
-    }
-
-    let mut cycles = Vec::new();
-    let mut cycle_start = 0;
-    for current in 1..observations.len() {
-        if starts_new_cycle(&observations[current - 1], &observations[current]) {
-            cycles.push(ObservationCycle {
-                observations: &observations[cycle_start..current],
-            });
-            cycle_start = current;
-        }
-    }
-    cycles.push(ObservationCycle {
-        observations: &observations[cycle_start..],
-    });
-    cycles
-}
-
-fn starts_new_cycle(previous: &AnalysisObservation, current: &AnalysisObservation) -> bool {
-    let reset_changed = match (
-        previous.resets_at_unix_secs_last,
-        current.resets_at_unix_secs_last,
-    ) {
-        (Some(left), Some(right)) => left.abs_diff(right) > 60,
-        (Some(_), None) | (None, Some(_)) => true,
-        (None, None) => false,
-    };
-    let synthetic_reset =
-        previous.utilization_last - current.utilization_last >= RESET_DROP_THRESHOLD;
-    reset_changed || synthetic_reset
-}
-
-fn valid_utilization_intervals(cycles: &[ObservationCycle<'_>]) -> Vec<UtilizationInterval> {
-    let mut intervals = Vec::new();
-    for cycle in cycles {
-        for pair in cycle.observations.windows(2) {
-            let [previous, current] = pair else {
-                continue;
-            };
-            let delta_time_secs = current
-                .observed_at_unix_millis_last
-                .saturating_sub(previous.observed_at_unix_millis_last)
-                / 1_000;
-            let delta_utilization = current.utilization_last - previous.utilization_last;
-            if delta_utilization < 0.0 || delta_time_secs == 0 {
-                continue;
-            }
-            intervals.push(UtilizationInterval {
-                start_unix_secs: previous.observed_at_unix_millis_last / 1_000,
-                end_unix_secs: current.observed_at_unix_millis_last / 1_000,
-                delta_utilization,
-                slope_per_second: delta_utilization / delta_time_secs as f64,
-            });
-        }
-    }
-    intervals
-}
-
 fn build_markers(
     buckets: &[SubscriptionQuotaBucket],
     bucket_secs: u64,
@@ -2041,68 +1569,6 @@ fn build_markers(
         }
     }
     markers
-}
-
-fn checkpoint_observations(buckets: &[SubscriptionQuotaBucket]) -> Vec<AnalysisObservation> {
-    buckets
-        .iter()
-        .filter(|bucket| bucket.observed && bucket.sample_count > 0)
-        .filter_map(analysis_observation_from_bucket)
-        .collect()
-}
-
-fn analysis_observation_from_bucket(
-    bucket: &SubscriptionQuotaBucket,
-) -> Option<AnalysisObservation> {
-    Some(AnalysisObservation {
-        bucket_start_unix_secs: bucket.bucket_start_unix_secs,
-        utilization_last: bucket.utilization_last?,
-        resets_at_unix_secs_last: bucket.resets_at_unix_secs_last,
-        observed_at_unix_millis_last: bucket.observed_at_unix_millis_last?,
-        sources_seen: bucket.sources_seen.clone(),
-    })
-}
-
-fn analysis_caveats(
-    actual_account_burn: &BurnResponse,
-    proxy_projected_burn: &ProxyBurnResponse,
-    observations: &[AnalysisObservation],
-    data_state: &str,
-) -> Vec<String> {
-    let mut caveats = vec![CAPACITY_CAVEAT.to_owned()];
-    if let (Some(actual), Some(proxy)) = (
-        actual_account_burn.utilization_per_second,
-        proxy_projected_burn
-            .utilization_per_hour
-            .map(|value| value / 3_600.0),
-    ) && proxy > 0.0
-        && actual > 1.5 * proxy
-    {
-        caveats.push(OUTSIDE_TRAFFIC_CAVEAT.to_owned());
-    }
-    let header_count = observations
-        .iter()
-        .filter(|observation| {
-            observation
-                .sources_seen
-                .contains(&SubscriptionQuotaSource::Header)
-        })
-        .count();
-    let api_count = observations
-        .iter()
-        .filter(|observation| {
-            observation
-                .sources_seen
-                .contains(&SubscriptionQuotaSource::Api)
-        })
-        .count();
-    if header_count > 0 && api_count == 0 {
-        caveats.push(HEADER_ONLY_CAVEAT.to_owned());
-    }
-    if data_state == "stale" {
-        caveats.push(STALE_DATA_CAVEAT.to_owned());
-    }
-    caveats
 }
 
 async fn upstreams_for_optional_query(
@@ -2160,28 +1626,6 @@ async fn list_all_upstreams_storage(
         }
     }
     Ok(all)
-}
-
-fn latest_cache_by_upstream_window(
-    state: &AdminState,
-    upstream_ids: &[Uuid],
-    now_unix_millis: u64,
-    max_staleness_secs: u64,
-) -> HashMap<(Uuid, SubscriptionQuotaWindow), SubscriptionQuotaCandidateSnapshot> {
-    let dynamic_view = state.dynamic_view.load();
-    let mut latest = HashMap::new();
-    for upstream_id in upstream_ids {
-        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
-            *upstream_id,
-            now_unix_millis,
-            max_staleness_secs,
-        ) {
-            if let Some(window) = SubscriptionQuotaWindow::from_str(&snapshot.window) {
-                latest.insert((*upstream_id, window), snapshot);
-            }
-        }
-    }
-    latest
 }
 
 fn latest_window_response(
@@ -2359,69 +1803,6 @@ fn upstream_name_map(upstreams: &[UpstreamRecord]) -> HashMap<Uuid, String> {
         .collect()
 }
 
-fn tokens_in_interval(rollups: &[UsageRollup], start_unix_secs: u64, end_unix_secs: u64) -> u64 {
-    rollups
-        .iter()
-        .filter(|rollup| {
-            rollup.bucket_start >= start_unix_secs && rollup.bucket_start <= end_unix_secs
-        })
-        .map(proxy_tokens)
-        .sum()
-}
-
-fn proxy_tokens(rollup: &UsageRollup) -> u64 {
-    rollup
-        .input_tokens
-        .saturating_add(rollup.output_tokens)
-        .saturating_add(rollup.cache_creation_input_tokens)
-        .saturating_add(rollup.cache_read_input_tokens)
-}
-
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    values.retain(|value| value.is_finite());
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(f64::total_cmp);
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        Some((values[middle - 1] + values[middle]) / 2.0)
-    } else {
-        Some(values[middle])
-    }
-}
-
-fn eta_to_limit(current_utilization: f64, slope: f64) -> Option<u64> {
-    if slope <= 0.0 || current_utilization >= 1.0 {
-        return None;
-    }
-    Some(((1.0 - current_utilization) / slope).ceil() as u64)
-}
-
-fn resets_before_limit(
-    eta_to_limit_secs: u64,
-    resets_at_unix_secs: Option<u64>,
-    now_unix_secs: u64,
-) -> bool {
-    resets_at_unix_secs
-        .map(|reset| eta_to_limit_secs > reset.saturating_sub(now_unix_secs))
-        .unwrap_or(false)
-}
-
-fn confidence_for_interval_count(count: usize) -> &'static str {
-    if count >= 8 {
-        "high"
-    } else if count >= 3 {
-        "medium"
-    } else {
-        "low"
-    }
-}
-
-fn round_to_one_decimal(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
-}
-
 fn data_state_str(state: SubscriptionQuotaDataState) -> &'static str {
     match state {
         SubscriptionQuotaDataState::Fresh => "fresh",
@@ -2475,99 +1856,6 @@ mod tests {
             data_state_str(SubscriptionQuotaDataState::Unobserved),
             "unobserved"
         );
-    }
-
-    #[test]
-    fn proxy_tokens_includes_cache_creation_and_read_tokens() {
-        let rollup = UsageRollup {
-            resolution: UsageRollupResolution::Minute,
-            bucket_start: 0,
-            principal: String::new(),
-            upstream_id: Uuid::new_v4(),
-            upstream_name: String::new(),
-            model: String::new(),
-            request_count: 1,
-            input_tokens: 50,
-            output_tokens: 200,
-            cache_creation_input_tokens: 1_000,
-            cache_read_input_tokens: 40_000,
-            error_count: 0,
-            latency_count: 0,
-            latency_ms_sum: 0,
-            latency_ms_min: None,
-            latency_ms_max: None,
-            proxy_setup_ms_count: 0,
-            proxy_setup_ms_sum: 0,
-            shape_ms_count: 0,
-            shape_ms_sum: 0,
-            sign_ms_count: 0,
-            sign_ms_sum: 0,
-            upstream_ttfb_ms_count: 0,
-            upstream_ttfb_ms_sum: 0,
-            upstream_body_ms_count: 0,
-            upstream_body_ms_sum: 0,
-            virtual_cost_micros: 0,
-        };
-
-        assert_eq!(proxy_tokens(&rollup), 41_250);
-    }
-
-    #[test]
-    fn reset_cycle_splitter_detects_resets_at_change() {
-        let observations = vec![
-            observation(0, 0.10, Some(1_000)),
-            observation(60, 0.20, Some(1_000)),
-            observation(120, 0.30, Some(1_120)),
-            observation(180, 0.40, Some(1_120)),
-        ];
-
-        let cycles = split_reset_cycles(&observations);
-
-        assert_eq!(cycles.len(), 2);
-        assert_eq!(cycles[0].observations.len(), 2);
-        assert_eq!(cycles[1].observations.len(), 2);
-        assert!(std::ptr::eq(
-            cycles[0].observations.as_ptr(),
-            observations.as_ptr()
-        ));
-    }
-
-    #[test]
-    fn slope_inference_returns_medium_confidence_with_five_valid_intervals() {
-        let observations = (0..=5)
-            .map(|idx| observation(idx * 60, 0.10 + idx as f64 * 0.05, Some(1_000)))
-            .collect::<Vec<_>>();
-        let cycles = split_reset_cycles(&observations);
-        let intervals = valid_utilization_intervals(&cycles);
-
-        let burn = infer_actual_account_burn(&intervals, Some(0.35), Some(3_600), 0);
-
-        assert_eq!(burn.confidence, "medium");
-        assert_eq!(burn.interval_count, 5);
-        assert!(burn.utilization_per_hour.unwrap() > 2.9);
-        assert!(burn.reason.is_none());
-    }
-
-    #[test]
-    fn recommended_multiplier_calculates_from_synthetic_proxy_capacity() {
-        let proxy_burn = ProxyBurnResponse {
-            proxy_tokens_per_second: Some(200.0),
-            proxy_tokens_per_hour: Some(720_000.0),
-            effective_limit_tokens_estimate: Some(1_500_000.0),
-            utilization_per_hour: Some(0.48),
-            eta_to_limit_secs: Some(1_000),
-            resets_before_limit: Some(false),
-            confidence: "medium".to_owned(),
-            interval_count: 5,
-            reason: None,
-        };
-
-        let deficit = deficit_for_window(SubscriptionQuotaWindow::FiveHour, &proxy_burn).unwrap();
-
-        assert_eq!(deficit.projected_proxy_tokens_window, 3_600_000.0);
-        assert_eq!(deficit.shortfall_tokens, 2_100_000.0);
-        assert_eq!(deficit.recommended_multiplier, 2.4);
-        assert_eq!(deficit.confidence, "medium");
     }
 
     #[test]
@@ -2810,20 +2098,6 @@ mod tests {
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
             ..UpstreamRecord::default()
-        }
-    }
-
-    fn observation(
-        at_unix_secs: u64,
-        utilization: f64,
-        resets_at_unix_secs: Option<u64>,
-    ) -> AnalysisObservation {
-        AnalysisObservation {
-            bucket_start_unix_secs: at_unix_secs,
-            utilization_last: utilization,
-            resets_at_unix_secs_last: resets_at_unix_secs,
-            observed_at_unix_millis_last: at_unix_secs * 1_000,
-            sources_seen: vec![SubscriptionQuotaSource::Header],
         }
     }
 

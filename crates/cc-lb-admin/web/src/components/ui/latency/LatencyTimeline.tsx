@@ -1,4 +1,5 @@
 import { Popover as BasePopover } from '@base-ui/react/popover';
+import { ChevronRight, Star, Triangle } from 'lucide-react';
 import {
   type ReactElement,
   type ReactNode,
@@ -35,34 +36,18 @@ type StageGroup =
 
 const GROUP_META: Record<
   StageGroup,
-  { label: string; text: string; hue: number; sat: number }
+  { label: string; hue: number; chroma: number }
 > = {
-  renewal: {
-    label: 'Renewal',
-    text: 'text-cyan-300',
-    hue: 185,
-    sat: 70,
-  },
-  internal_pre: {
-    label: 'Internal pre',
-    text: 'text-sky-300',
-    hue: 200,
-    sat: 82,
-  },
-  wait: { label: 'Wait', text: 'text-amber-300', hue: 40, sat: 88 },
-  upstream: {
-    label: 'Upstream',
-    text: 'text-violet-300',
-    hue: 265,
-    sat: 65,
-  },
-  body: { label: 'Body', text: 'text-emerald-300', hue: 155, sat: 60 },
-  internal_post: {
-    label: 'Internal post',
-    text: 'text-slate-300',
-    hue: 215,
-    sat: 15,
-  },
+  // OKLCH hues from the series family (sky, teal, green, magenta, neutral).
+  // Across the whole lightness ramp every shade stays more than OKLab ΔE 0.1
+  // from the accent, warn and danger tokens: brand and severity keep their
+  // meaning inside the timeline.
+  renewal: { label: 'Renewal', hue: 235, chroma: 0.1 },
+  internal_pre: { label: 'Internal pre', hue: 235, chroma: 0.1 },
+  wait: { label: 'Wait', hue: 190, chroma: 0.09 },
+  upstream: { label: 'Upstream', hue: 150, chroma: 0.11 },
+  body: { label: 'Body', hue: 335, chroma: 0.11 },
+  internal_post: { label: 'Internal post', hue: 260, chroma: 0.012 },
 };
 
 function getGroupLabel(group: StageGroup, hasFinalizeTiming: boolean): string {
@@ -81,7 +66,7 @@ const PROXY_GROUP_ORDER: StageGroup[] = [
 const RENEWAL_GROUP_ORDER: StageGroup[] = ['renewal'];
 
 const UNACCOUNTED_BG =
-  'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.06)_4px_8px)]';
+  'bg-overlay-6 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_var(--color-border-strong)_4px_8px)]';
 
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   request_body_read:
@@ -167,15 +152,13 @@ interface StageDetail extends Stage {
   fill: string;
 }
 
-function stageShadeHsl(
-  group: StageGroup,
-  index: number,
-  count: number,
-): string {
-  const { hue, sat } = GROUP_META[group];
-  const lightness =
-    count <= 1 ? 55 : Math.round(38 + (index / (count - 1)) * 38);
-  return `hsl(${hue}deg ${sat}% ${lightness}%)`;
+/** Night ramps 0.58→0.86 lightness, day 0.40→0.72: each shade holds its contrast on the ground. */
+function stageShade(group: StageGroup, index: number, count: number): string {
+  const { hue, chroma } = GROUP_META[group];
+  const t = count <= 1 ? 0.5 : index / (count - 1);
+  const night = (0.58 + t * 0.28).toFixed(3);
+  const day = (0.4 + t * 0.32).toFixed(3);
+  return `light-dark(oklch(${day} ${chroma} ${hue}), oklch(${night} ${chroma} ${hue}))`;
 }
 
 function formatStageMs(stage: Stage): string {
@@ -352,7 +335,7 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
       ...s,
       index,
       groupCount,
-      fill: stageShadeHsl(s.group, index, groupCount),
+      fill: stageShade(s.group, index, groupCount),
     };
   });
 }
@@ -390,38 +373,38 @@ export function buildSseMarkers(e: RequestEventWithPhase): SseMarker[] {
       key: 'message_start',
       label: 'Message start',
       ms: e._phase === 'final' ? e.stream_message_start_ms : undefined,
-      color: 'text-cyan-300',
+      color: 'text-text-muted',
     },
     {
       key: 'content_block_start',
       label: 'Content block start',
       ms: e._phase === 'final' ? e.stream_content_block_start_ms : undefined,
-      color: 'text-sky-300',
+      color: 'text-text-muted',
     },
     {
       key: 'first_delta',
       label: 'First content delta (TTFT)',
       ms: e._phase === 'final' ? e.stream_first_content_delta_ms : undefined,
-      color: 'text-amber-300',
+      color: 'text-text',
       starred: true,
     },
     {
       key: 'last_delta',
       label: 'Last content delta',
       ms: e._phase === 'final' ? e.stream_last_content_delta_ms : undefined,
-      color: 'text-emerald-300',
+      color: 'text-text-muted',
     },
     {
       key: 'message_stop',
       label: 'Message stop',
       ms: e._phase === 'final' ? e.stream_message_stop_ms : undefined,
-      color: 'text-fuchsia-300',
+      color: 'text-text-muted',
     },
     {
       key: 'last_chunk',
       label: 'Last chunk',
       ms: e._phase === 'final' ? e.stream_last_chunk_ms : undefined,
-      color: 'text-slate-300',
+      color: 'text-text-faint',
     },
   ];
 
@@ -536,7 +519,7 @@ function InfoPopover({
           align="center"
           className="z-[60]"
         >
-          <BasePopover.Popup className="z-[60] px-2.5 py-1.5 text-[11px] rounded-md bg-bg-sub border border-subtle-strong text-text shadow-lg max-w-[280px]">
+          <BasePopover.Popup className="z-[60] px-2.5 py-1.5 text-caption rounded-md bg-bg-sub border border-subtle-strong text-text shadow-overlay max-w-[280px]">
             {content}
           </BasePopover.Popup>
         </BasePopover.Positioner>
@@ -567,22 +550,23 @@ function ResponsibilityOverview({
   const barTotal = Math.max(barSum, attribution.totalMs);
 
   return (
-    <section aria-label="Latency by responsibility" className="space-y-1.5">
-      <div className="flex items-center justify-between text-[10px]">
-        <span className="uppercase tracking-wider text-text-faint">
-          Responsibility
-        </span>
-        <span className="text-text-faint">share of total</span>
+    <section
+      aria-label="Latency by responsibility"
+      className="@container space-y-1.5"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-label text-text-muted">Responsibility</span>
+        <span className="text-caption text-text-faint">Share of total</span>
       </div>
       <div
         aria-label="Responsibility distribution"
-        className="flex h-4 w-full overflow-hidden rounded-sm bg-overlay-5"
+        className="flex h-2 w-full gap-px overflow-hidden rounded-xs bg-progress-track"
         role="img"
       >
         {barGroups.map((group) => (
           <span
             aria-hidden
-            className={cx('h-full min-w-px', group.color)}
+            className={cx('h-full min-w-[2px]', group.color)}
             data-ms={group.valueMs}
             data-responsibility={group.key}
             key={group.key}
@@ -592,7 +576,7 @@ function ResponsibilityOverview({
           />
         ))}
       </div>
-      <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-1 @lg:grid-cols-2">
         {visibleGroups.map((group) => (
           <InfoPopover
             content={
@@ -621,25 +605,20 @@ function ResponsibilityOverview({
                   ? `${pct(group.valueMs, attribution.totalMs)}% of total`
                   : 'no timing recorded'
               }`}
-              className="flex min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-[10px] transition hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent"
+              className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 max-md:min-h-10 text-left text-caption transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
               data-ms={group.observed ? group.valueMs : undefined}
               data-responsibility={group.key}
               type="button"
             >
               <span
                 aria-hidden
-                className={cx('h-2 w-2 shrink-0 rounded-sm', group.color)}
+                className={cx('h-2 w-2 shrink-0 rounded-xs', group.color)}
               />
-              <span
-                className={cx(
-                  'min-w-0 flex-1 truncate border-b border-dashed border-text-faint/50',
-                  group.textColor,
-                )}
-              >
+              <span className="min-w-0 flex-1 truncate border-b border-dashed border-text-faint/50 text-text">
                 {group.label}
                 {group.key === 'upstream-net' &&
                 event.connection_reused === true ? (
-                  <span className="ml-1 rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] leading-none text-emerald-400">
+                  <span className="ml-1 rounded-sm bg-ok/12 px-1 py-0.5 text-caption leading-none text-success-text">
                     Warm pool
                   </span>
                 ) : null}
@@ -681,22 +660,22 @@ function StageInfo({
 
   return (
     <div className="flex flex-col gap-1.5 min-w-[240px]">
-      <div className="text-[10px] uppercase tracking-wider text-text-faint">
+      <div className="text-label text-text-muted">
         {groupLabel}
         {overview.length > 1 ? ` · ${overview.length} stages` : ''}
       </div>
       {multi ? (
         <>
-          <div className="flex h-3 rounded-sm overflow-hidden bg-overlay-5 border border-subtle/60">
+          <div className="flex h-2 gap-px rounded-xs overflow-hidden bg-progress-track">
             {overview.map((s) => {
               const isActive = s.key === stage.key;
               return (
                 <div
                   key={s.key}
                   className={cx(
-                    'h-full transition-all',
+                    'h-full transition-opacity',
                     isActive
-                      ? 'ring-2 ring-inset ring-white z-10'
+                      ? 'z-10 outline-2 -outline-offset-2 outline-text/70'
                       : 'opacity-60',
                   )}
                   style={{
@@ -716,9 +695,9 @@ function StageInfo({
                 <div
                   key={s.key}
                   className={cx(
-                    'flex items-center gap-1.5 text-[10px] px-1 py-0.5 rounded transition',
+                    'flex items-center gap-1.5 text-caption px-1 py-0.5 rounded-sm transition',
                     isActive
-                      ? 'bg-overlay-10 text-text font-medium'
+                      ? 'bg-overlay-6 text-text font-medium'
                       : 'text-text-muted',
                   )}
                 >
@@ -796,13 +775,26 @@ function UnaccountedInfo({ ms, total }: { ms: number; total: number }) {
   );
 }
 
+/** Starred markers are the headline SSE moments; the rest are plain triangles. */
+function MarkerIcon({ starred }: { starred?: boolean }) {
+  const Icon = starred ? Star : Triangle;
+  return (
+    <Icon size={12} strokeWidth={1.75} fill="currentColor" aria-hidden="true" />
+  );
+}
+
 function MarkerInfo({ marker }: { marker: SseMarker }) {
   const description = MARKER_DESCRIPTIONS[marker.key];
   return (
     <div className="flex flex-col gap-1 min-w-[220px]">
       <div className="flex items-center gap-1.5">
-        <span className={cx(marker.color, 'w-3 text-center leading-none')}>
-          {marker.starred ? '★' : '▲'}
+        <span
+          className={cx(
+            marker.color,
+            'inline-flex w-3 shrink-0 items-center justify-center',
+          )}
+        >
+          <MarkerIcon starred={marker.starred} />
         </span>
         <span className="text-text font-medium">{marker.label}</span>
       </div>
@@ -869,11 +861,12 @@ function SegmentButton({
         data-testid={`latency-segment-${stage.key}`}
         aria-label={`${stage.label} ${formatStageMs(stage)}${stage.detail ? `, ${stage.detail}` : ''}`}
         className={cx(
-          'absolute top-0 h-full rounded-sm outline-none transition-all cursor-pointer',
-          isActive
-            ? 'ring-2 ring-inset ring-white/80 z-10 brightness-110'
-            : 'hover:brightness-110',
-          isSticky ? 'shadow-[0_0_0_1px_rgba(255,255,255,0.35)]' : '',
+          'absolute top-0 h-full rounded-sm transition-colors cursor-pointer -outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent',
+          isSticky
+            ? 'z-10 outline-2 outline-text'
+            : isActive
+              ? 'z-10 outline-2 outline-text/70'
+              : 'hover:outline-2 hover:outline-text/40',
         )}
         style={style}
       />
@@ -895,7 +888,7 @@ function UnaccountedRow({
   const isActive = active.isActive('unaccounted');
   return (
     <div>
-      <div className="flex items-center justify-between text-[10px] mb-0.5">
+      <div className="flex items-center justify-between text-caption mb-0.5">
         <span
           className={cx('text-text-muted', isActive && 'text-text font-medium')}
         >
@@ -905,17 +898,17 @@ function UnaccountedRow({
           {fmtMs(ms)} · {pct(ms, total)}%
         </span>
       </div>
-      <div className="relative h-4 w-full rounded-sm bg-overlay-5">
+      <div className="relative h-3 w-full overflow-hidden rounded-xs bg-progress-track">
         <InfoPopover content={<UnaccountedInfo ms={ms} total={total} />}>
           <button
             type="button"
             {...active.bind('unaccounted')}
             className={cx(
               UNACCOUNTED_BG,
-              'absolute top-0 h-full rounded-sm outline-none transition cursor-pointer',
+              'absolute top-0 h-full rounded-sm transition-colors cursor-pointer -outline-offset-2 focus-visible:outline-2 focus-visible:outline-accent',
               isActive
-                ? 'ring-2 ring-inset ring-white/70 z-10'
-                : 'hover:brightness-110',
+                ? 'z-10 outline-2 outline-text/70'
+                : 'hover:outline-2 hover:outline-text/40',
             )}
             style={{
               left: `${(startMs / total) * 100}%`,
@@ -971,14 +964,8 @@ function MarkerDot({
           )}
           style={{ left: `${leftPct}%`, top: `${dotTop}px` }}
         >
-          <span
-            aria-hidden
-            className={cx(
-              marker.color,
-              'text-[13px] leading-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.7)]',
-            )}
-          >
-            {marker.starred ? '★' : '▲'}
+          <span aria-hidden className={cx(marker.color, 'inline-flex')}>
+            <MarkerIcon starred={marker.starred} />
           </span>
         </button>
       </InfoPopover>
@@ -1060,7 +1047,7 @@ function TimeAxisTicks({
   if (ticks.length === 0) return null;
   const last = ticks.length - 1;
   return (
-    <div className="relative h-3 mt-1" aria-hidden>
+    <div className="relative h-3 mt-1 mx-1.5" aria-hidden>
       {ticks.map((t, i) => {
         const isFirst = i === 0;
         const isLast = i === last;
@@ -1074,7 +1061,7 @@ function TimeAxisTicks({
           <span
             key={`${t.leftPct}-${i}`}
             className={cx(
-              'absolute top-0 text-[9px] text-text-faint tabular-nums whitespace-nowrap',
+              'absolute top-0 text-caption text-text-faint tabular-nums whitespace-nowrap',
               anchor,
             )}
             style={style}
@@ -1110,13 +1097,13 @@ function SseLane({
 
   return (
     <div>
-      <div className="flex items-center justify-between text-[10px] mb-1">
-        <span className="uppercase tracking-wider text-text-faint">
-          SSE markers
-        </span>
-        <span className="text-text-faint">request axis</span>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-label text-text-muted">SSE markers</span>
+        <span className="text-caption text-text-faint">Request axis</span>
       </div>
-      <div className="relative w-full" style={{ height: `${laneHeight}px` }}>
+      {/* Inset by half a marker so one at 0% or 100% is never clipped by the
+      drawer edge; the tick row below shares the inset. */}
+      <div className="relative mx-1.5" style={{ height: `${laneHeight}px` }}>
         <div
           className="absolute inset-x-0 h-px bg-[color:var(--color-text-faint)]/40"
           style={{ top: `${axisTop}px` }}
@@ -1140,7 +1127,7 @@ function SseLane({
 
 function StreamCounters({ event }: { event: RequestEventWithPhase }) {
   return (
-    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-text-muted">
+    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-caption text-text-muted">
       <CounterPill
         label="SSE"
         value={event._phase === 'final' ? event.sse_event_count : undefined}
@@ -1194,10 +1181,13 @@ function CounterPill({
         </div>
       }
     >
-      <span className="cursor-help border-b border-dashed border-text-faint/60">
+      <button
+        type="button"
+        className="cursor-help rounded-xs border-b border-dashed border-text-faint/60 bg-transparent p-0 text-inherit focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+      >
         <span className="text-text-faint">{label}: </span>
         <span className="text-text tabular-nums">{rendered}</span>
-      </span>
+      </button>
     </InfoPopover>
   );
 }
@@ -1212,16 +1202,18 @@ function CollapsibleSummary({
   return (
     <summary
       className={cx(
-        'text-[10px] uppercase tracking-wider cursor-pointer select-none flex items-center gap-2 px-1.5 py-1 rounded transition',
-        suggested
-          ? 'bg-[color:var(--color-warn)]/10 ring-1 ring-[color:var(--color-warn)]/40 text-[color:var(--color-warn)]'
-          : 'text-text-faint',
+        'text-label cursor-pointer select-none flex items-center gap-2 px-1.5 py-1 max-md:min-h-10 rounded-sm transition [&::-webkit-details-marker]:hidden list-none',
+        suggested ? 'bg-warn/8 text-warn-text' : 'text-text-muted',
       )}
     >
+      <ChevronRight
+        aria-hidden
+        className="h-3 w-3 shrink-0 transition-transform group-open/details:rotate-90"
+      />
       {children}
       {suggested ? (
-        <span className="ml-auto normal-case tracking-normal text-[10px] text-[color:var(--color-warn)]/90">
-          ← click to expand
+        <span className="ml-auto text-caption text-warn-text">
+          Click to expand
         </span>
       ) : null}
     </summary>
@@ -1254,8 +1246,8 @@ function StageDetailsList({
       open={open}
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
       className={cx(
-        'border-t border-subtle pt-1.5 transition',
-        suggested ? 'rounded' : '',
+        'group/details border-t border-row pt-1.5 transition',
+        suggested ? 'rounded-sm' : '',
       )}
     >
       <CollapsibleSummary suggested={suggested}>
@@ -1325,8 +1317,8 @@ function SseDetailsList({
       open={open}
       onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
       className={cx(
-        'border-t border-subtle pt-1.5 transition',
-        suggested ? 'rounded' : '',
+        'group/details border-t border-row pt-1.5 transition',
+        suggested ? 'rounded-sm' : '',
       )}
     >
       <CollapsibleSummary suggested={suggested}>
@@ -1342,19 +1334,21 @@ function SseDetailsList({
               type="button"
               {...active.bind(m.key)}
               className={cx(
-                'flex items-center gap-2 text-[10px] w-full px-1.5 py-1 rounded transition text-left cursor-pointer',
-                isActive
-                  ? 'bg-overlay-10 text-text'
-                  : 'text-text-muted hover:bg-overlay-5',
+                'flex items-center gap-2 text-caption w-full px-1.5 py-1 max-md:min-h-10 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
                 isSticky
-                  ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+                  ? 'bg-selected text-text'
                   : isActive
-                    ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
-                    : '',
+                    ? 'bg-overlay-2 text-text'
+                    : 'text-text-muted hover:bg-overlay-2 hover:text-text',
               )}
             >
-              <span className={cx(m.color, 'shrink-0 w-3 text-center')}>
-                {m.starred ? '★' : '▲'}
+              <span
+                className={cx(
+                  m.color,
+                  'inline-flex w-3 shrink-0 items-center justify-center',
+                )}
+              >
+                <MarkerIcon starred={m.starred} />
               </span>
               <span className="flex-1 truncate">{m.label}</span>
               <span className="tabular-nums shrink-0 w-16 text-right">
@@ -1411,15 +1405,12 @@ function DetailRow({
       type="button"
       {...active.bind(stateKey)}
       className={cx(
-        'flex items-center gap-2 text-[10px] w-full px-1.5 py-1 rounded transition text-left cursor-pointer',
-        isActive
-          ? 'bg-overlay-10 text-text'
-          : 'text-text-muted hover:bg-overlay-5',
+        'flex items-center gap-2 text-caption w-full px-1.5 py-1 max-md:min-h-10 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         isSticky
-          ? 'ring-2 ring-inset ring-[color:var(--color-accent)]/70'
+          ? 'bg-selected text-text'
           : isActive
-            ? 'ring-1 ring-inset ring-[color:var(--color-accent)]/45'
-            : '',
+            ? 'bg-overlay-2 text-text'
+            : 'text-text-muted hover:bg-overlay-2 hover:text-text',
       )}
     >
       {leading}
@@ -1445,7 +1436,7 @@ function DetailRow({
           <div className="flex items-center gap-1.5">
             <span className="text-text font-medium">{label}</span>
             {hint ? (
-              <span className="text-text-faint text-[10px]">· {hint}</span>
+              <span className="text-text-faint text-caption">· {hint}</span>
             ) : null}
           </div>
           <div className="flex items-center gap-2 tabular-nums text-text-muted">
@@ -1484,6 +1475,9 @@ function clampPct(v: number): number {
 // -----------------------------------------------------------------------------
 
 const LATENCY_LAYOUT_CLASS = 'space-y-3 min-h-80';
+
+/** Below this total the responsibility and timeline bars are not drawn. */
+export const MIN_CHARTABLE_LATENCY_MS = 5;
 
 export function LatencyTimeline({
   event,
@@ -1561,7 +1555,7 @@ export function LatencyTimeline({
   if (total <= 0 && !hasMeasuredRenewalCycle) {
     return (
       <div
-        className="min-h-80 text-text-faint text-xs"
+        className="min-h-80 text-body text-text-muted"
         data-testid="latency-timeline-region"
       >
         No latency data recorded.
@@ -1571,6 +1565,10 @@ export function LatencyTimeline({
 
   const unaccounted = groups.unaccounted;
   const showStreamLane = markers.length > 0 && !isPartial;
+  // Under a few milliseconds the proportional bars are noise: every stage
+  // rounds to a sliver, so only the itemized stage list stays.
+  const tooFastToChart =
+    !isPartial && total > 0 && total < MIN_CHARTABLE_LATENCY_MS;
 
   return (
     <div
@@ -1584,77 +1582,103 @@ export function LatencyTimeline({
       data-upstream-wait-ms={attribution.upstreamWaitMs}
       data-unattributed-ms={attribution.unattributedMs}
     >
-      <ResponsibilityOverview attribution={attribution} event={event} />
-      <section aria-label="Chronological request stages" className="space-y-2">
-        <div className="flex items-center justify-between text-[10px]">
-          <span className="uppercase tracking-wider text-text-faint">
-            Request timeline
-          </span>
-          <span className="text-text-faint">chronological stages</span>
-        </div>
-        <div className="space-y-2" data-testid="latency-stage-groups">
-          {groupOrder.map((g) => {
-            const items = positioned.positioned.filter((p) => p.group === g);
-            if (items.length === 0) return null;
-            const groupSum = items.reduce((a, s) => a + s.ms, 0);
-            const groupTotal =
-              g === 'internal_pre' ? groups.internalPre : groupSum;
-            const interactiveItems = items.filter(
-              (item) =>
-                item.ms > 0 && (!item.setupTiming || item.ms / total >= 0.001),
-            );
-            const anyActive = items.some((it) => active.isActive(it.key));
-            const groupItems = stages.filter((s) => s.group === g);
-            const groupLabel = getGroupLabel(g, hasFinalizeTiming);
-            return (
-              <div key={g}>
-                <div className="flex items-center justify-between text-[10px] mb-0.5">
-                  <span
-                    className={cx(
-                      GROUP_META[g].text,
-                      anyActive ? 'font-medium' : '',
-                    )}
-                  >
-                    {groupLabel}
-                  </span>
-                  <span className="text-text-muted tabular-nums">
-                    {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
-                  </span>
-                </div>
-                <div className="relative h-4 w-full rounded-sm bg-overlay-5">
-                  {interactiveItems.map((it) => (
-                    <SegmentButton
-                      key={it.key}
-                      stage={it}
-                      startMs={it.startMs}
-                      total={total}
-                      active={active}
-                      overview={groupItems}
-                      groupLabel={groupLabel}
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-          {unaccounted > 0 && (
-            <UnaccountedRow
-              ms={unaccounted}
-              startMs={positioned.unaccountedStartMs}
+      {tooFastToChart ? (
+        <p className="text-text-faint" data-testid="latency-too-fast">
+          Finished in under {MIN_CHARTABLE_LATENCY_MS} ms — too fast for a
+          meaningful breakdown.
+        </p>
+      ) : (
+        <>
+          <ResponsibilityOverview attribution={attribution} event={event} />
+          <section
+            aria-label="Chronological request stages"
+            className="space-y-2"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-label text-text-muted">
+                Request timeline
+              </span>
+              <span className="text-caption text-text-faint">
+                Chronological stages
+              </span>
+            </div>
+            <div className="space-y-2" data-testid="latency-stage-groups">
+              {groupOrder.map((g) => {
+                const items = positioned.positioned.filter(
+                  (p) => p.group === g,
+                );
+                if (items.length === 0) return null;
+                const groupSum = items.reduce((a, s) => a + s.ms, 0);
+                const groupTotal =
+                  g === 'internal_pre' ? groups.internalPre : groupSum;
+                const interactiveItems = items.filter(
+                  (item) =>
+                    item.ms > 0 &&
+                    (!item.setupTiming || item.ms / total >= 0.001),
+                );
+                const anyActive = items.some((it) => active.isActive(it.key));
+                const groupItems = stages.filter((s) => s.group === g);
+                const groupLabel = getGroupLabel(g, hasFinalizeTiming);
+                return (
+                  <div key={g}>
+                    <div className="flex items-center justify-between text-caption mb-0.5">
+                      <span
+                        className={cx(
+                          'flex items-center gap-1.5',
+                          anyActive
+                            ? 'font-medium text-text'
+                            : 'text-text-muted',
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className="h-2 w-2 shrink-0 rounded-sm"
+                          style={{
+                            backgroundColor: stageShade(g, 0, 1),
+                          }}
+                        />
+                        {groupLabel}
+                      </span>
+                      <span className="text-text-muted tabular-nums">
+                        {fmtMs(groupTotal)} · {pct(groupTotal, total)}%
+                      </span>
+                    </div>
+                    <div className="relative h-3 w-full overflow-hidden rounded-xs bg-progress-track">
+                      {interactiveItems.map((it) => (
+                        <SegmentButton
+                          key={it.key}
+                          stage={it}
+                          startMs={it.startMs}
+                          total={total}
+                          active={active}
+                          overview={groupItems}
+                          groupLabel={groupLabel}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {unaccounted > 0 && (
+                <UnaccountedRow
+                  ms={unaccounted}
+                  startMs={positioned.unaccountedStartMs}
+                  total={total}
+                  active={active}
+                />
+              )}
+            </div>
+          </section>
+
+          {showStreamLane && (
+            <SseLane
+              markers={markers}
               total={total}
               active={active}
+              event={event}
             />
           )}
-        </div>
-      </section>
-
-      {showStreamLane && (
-        <SseLane
-          markers={markers}
-          total={total}
-          active={active}
-          event={event}
-        />
+        </>
       )}
 
       <StageDetailsList

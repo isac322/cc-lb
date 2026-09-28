@@ -123,6 +123,36 @@ describe('AuthRequiredGate', () => {
     expect(screen.queryByText('Protected content')).toBeNull();
   });
 
+  it('explains a rejected saved token instead of the first-visit prompt', async () => {
+    localStorage.setItem(AUTH_TOKEN_KEY, 'rotated-token');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => unauthorizedResponse('static_token')),
+    );
+
+    render(
+      <AuthRequiredGate>
+        <div>Protected content</div>
+      </AuthRequiredGate>,
+    );
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Saved admin token was rejected',
+      }),
+    ).toBeDefined();
+    expect(screen.getByText(/may have been rotated/)).toBeDefined();
+    expect(screen.getByText('Saved token no longer works')).toBeDefined();
+    const input = screen.getByLabelText('Bearer token');
+    expect(input).toBeInstanceOf(HTMLInputElement);
+    expect((input as HTMLInputElement).value).toBe('');
+    expect(document.activeElement).toBe(input);
+    expect(
+      screen.queryByRole('heading', { name: 'Admin token required' }),
+    ).toBeNull();
+    expect(localStorage.getItem(AUTH_TOKEN_KEY)).toBeNull();
+  });
+
   it('recovers a mixed-mode session by removing a stale local token and retrying once', async () => {
     localStorage.setItem(AUTH_TOKEN_KEY, 'stale-token');
     const fetchMock = vi

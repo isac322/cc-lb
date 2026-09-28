@@ -84,15 +84,13 @@ describe('WarmupHistoryDrawer loading geometry', () => {
       />,
     );
 
+    expect(
+      screen.getByRole('dialog', { name: 'Warm-up history' }),
+    ).toBeDefined();
     const drawer = screen.getByTestId('warmup-history-drawer');
-    expect(drawer.className).toContain('fixed');
-    expect(drawer.className).toContain('right-0');
-    expect(drawer.className).toContain('top-0');
-    expect(drawer.className).toContain('bottom-0');
-    expect(drawer.className).toContain('w-full');
-    expect(drawer.className).toContain('max-w-3xl');
-    expect(screen.getByRole('button', { name: '24h' })).toBeDefined();
-    expect(screen.getAllByRole('button', { name: 'All' })).toHaveLength(2);
+    expect(screen.getByRole('radio', { name: '24h' })).toBeDefined();
+    expect(screen.getByRole('radio', { name: 'All' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'All' })).toBeDefined();
 
     const overviewSlot = screen.getByTestId(
       'warmup-history-dominant-failure-slot',

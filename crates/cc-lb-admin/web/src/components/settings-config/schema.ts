@@ -18,12 +18,6 @@ export function isSameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-export function titleForKey(key: string): string {
-  return key
-    .replaceAll('_', ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
 export function objectProperties(
   root: ConfigSchema,
   input: unknown,

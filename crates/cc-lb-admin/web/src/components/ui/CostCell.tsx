@@ -1,15 +1,12 @@
 import { formatCostMicros } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover } from './BreakdownPopover';
-import { cx, Hint } from './primitives';
-import { Sparkline } from './Sparkline';
+import { EmptyMetricCell, MetricCell } from './MetricCell';
 import {
   type CostComponentMicros,
   costCategorySegments,
   sumCostMicros,
 } from './usage/costCategories';
-
-const DASH = '—';
 
 type CostBreakdownT = {
   components: CostComponentMicros;
@@ -35,27 +32,31 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
   return { components, total, hasComponents };
 }
 
+/**
+ * Request cost over a bar of what it paid for, in the token bar's categories
+ * and order (`USAGE_CATEGORIES`). Cost no category accounts for is left as
+ * bare track. The figure is right-aligned in the cell, so every row's cost
+ * ends on the same edge.
+ */
 export function CostCell({
   event,
   isPartial,
+  className,
 }: {
   event: RequestEventWithPhase;
   isPartial?: boolean;
+  className?: string;
 }) {
   const c = costBreakdown(event);
   const segments = costCategorySegments(c.components);
 
   if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
-    return (
-      <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap text-text-faint">
-        {DASH}
-      </td>
-    );
+    return <EmptyMetricCell className={className} />;
   }
 
   const popover = (
     <BreakdownPopover
-      title={isPartial ? 'Estimated Cost' : 'Cost'}
+      title={isPartial ? 'Estimated cost' : 'Cost'}
       showZeroRows={true}
       isPartial={isPartial}
       rows={segments.map((segment) => ({
@@ -67,31 +68,22 @@ export function CostCell({
       footer={{ label: 'Total', value: c.total, fmt: formatCostMicros }}
     />
   );
+  const text = isPartial
+    ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
+    : formatCostMicros(c.total);
 
   return (
-    <td
-      className="p-0 text-right whitespace-nowrap"
-      onClick={(e) => e.stopPropagation()}
+    <MetricCell
+      className={className}
+      label={`Cost ${text}, show breakdown`}
+      popover={popover}
+      segments={segments}
+      total={c.total}
+      pulse={isPartial}
     >
-      <Hint label={popover}>
-        <div
-          className={cx(
-            'px-3 py-2 cursor-help block',
-            isPartial ? 'animate-pulse' : '',
-          )}
-        >
-          <div className="text-right tabular-nums leading-tight">
-            {isPartial
-              ? `Est. ${c.total > 0 ? formatCostMicros(c.total) : '—'}`
-              : formatCostMicros(c.total)}
-          </div>
-          {c.hasComponents ? (
-            <Sparkline segments={segments} />
-          ) : (
-            <div className="mt-1 h-1" />
-          )}
-        </div>
-      </Hint>
-    </td>
+      <span data-slot="cost" className="text-text">
+        {text}
+      </span>
+    </MetricCell>
   );
 }
