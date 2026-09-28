@@ -48,7 +48,7 @@ cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-confor
 # External wasmtime/rkyv ecosystem — wired up by cc-lb-runtime-wasmtime in Phase 1+.
 # Phase 0 declares them here so member crates can opt in via `<name>.workspace = true`
 # without churning the manifest.
-wasmtime  = "48"
+wasmtime  = "49"
 rkyv      = { version = "0.8", default-features = false }
 bytecheck = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
@@ -122,7 +122,7 @@ tower = "0.5"
 tower-service = "0.3"
 tower-http = "0.7"
 tracing = "0.1"
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
