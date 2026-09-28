@@ -83,7 +83,10 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
 }
 
 /**
- * The mark: an open 240° dial with an accent sweep. `size` in px.
+ * The mark: the let-gate — two squared bracket "c" shapes facing each other
+ * so they form a gate, with one accent lane passing through it. Master
+ * geometry from `assets/brand/tools/brand.py` on a 64-unit grid; brackets in
+ * `text` ink, the lane in `accent`. `size` in px.
  */
 export function BrandMark({ size = 24 }: { size?: number }) {
   return (
@@ -91,22 +94,12 @@ export function BrandMark({ size = 24 }: { size?: number }) {
       aria-hidden="true"
       className="shrink-0"
       height={size}
-      viewBox="0 0 24 24"
+      viewBox="0 0 64 64"
       width={size}
     >
-      <path
-        d="M4.21 16.5A9 9 0 1 1 19.79 16.5"
-        fill="none"
-        stroke="var(--color-border-strong)"
-        strokeWidth={1}
-        vectorEffect="non-scaling-stroke"
-      />
-      <path
-        d="M4.21 16.5A9 9 0 0 1 16.34 4.11"
-        fill="none"
-        stroke="var(--color-accent)"
-        strokeWidth={3}
-      />
+      <path d="M11 14H27V20.5H18V43.5H27V50H11Z" fill="var(--color-text)" />
+      <path d="M53 14H37V20.5H46V43.5H37V50H53Z" fill="var(--color-text)" />
+      <rect fill="var(--color-accent)" height={50} width={5} x={29.5} y={7} />
     </svg>
   );
 }

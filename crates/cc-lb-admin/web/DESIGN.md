@@ -11,6 +11,14 @@ cc-lb admin is an instrument cluster for a quota pool. The question it answers f
 - Hanken Grotesk is the voice of the product, including every number. Geist Mono is only for strings an operator copies or compares character by character.
 - Show exceptions; let healthy states speak by omission.
 
+### Brand
+
+The brand mark is the let-gate: two squared bracket "c" shapes facing each other so they form a gate, with one lane passing straight through it. It replaces the old open dial and is drawn by `BrandMark` (`components/layout/Sidebar.tsx`) in the rail, the top bar and the sign-in frame. The repository brand kit lives in `assets/brand/` (master marks, favicon set, app icons, lockups, README hero, social preview) with geometry and palette in `assets/brand/tools/brand.py`; the usage rules are in `assets/brand/README.md`.
+
+- The brackets draw in `text` ink; only the lane draws in `accent` — it is the one place the accent appears as part of identity.
+- Flat graphite always: no gradients, glows, shadows or decorative noise, in any asset.
+- Below 24px the mark uses the 16-grid snapped variant (`mark/cc-lb-mark-16-*.svg`), which is what the favicon ships; 16px is the minimum rendered size.
+
 ## 2. Color
 
 ### Palette
@@ -183,7 +191,7 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 ### Shell
 
-- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B or the header toggle (the width snaps, labels fade). The brand row at the top is 48px so it lines up with the top bar: brand mark (a small 240° dial with an accent sweep) and "cc-lb", with the collapse/expand `IconButton` (`PanelLeft`; "Collapse sidebar" / "Expand sidebar", `aria-expanded`, ⌘B in the tooltip) right-aligned beside the wordmark when expanded and directly under the mark when collapsed. Then nav groups with `text-overline` headings, then the footer: the 11px version line. The phone "More" sheet omits the toggle.
+- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B or the header toggle (the width snaps, labels fade). The brand row at the top is 48px so it lines up with the top bar: brand mark (the let-gate — two squared bracket "c" shapes forming a gate, one accent lane through it) and "cc-lb", with the collapse/expand `IconButton` (`PanelLeft`; "Collapse sidebar" / "Expand sidebar", `aria-expanded`, ⌘B in the tooltip) right-aligned beside the wordmark when expanded and directly under the mark when collapsed. Then nav groups with `text-overline` headings, then the footer: the 11px version line. The phone "More" sheet omits the toggle.
 - **Nav item**: 36px, 14/500 `text-muted`; hover `overlay-2` fill and full ink. Active (`data-status="active"`, `aria-current="page"`) is the `selected` fill with full ink, and stays filled on hover; no edge rule. The Upstreams item carries the reconnect count pill (`warn` / `danger` at 15% with `*-text` numerals; a 6px dot when collapsed).
 - **Top bar**: 48px, sticky, on the ground with a 1px bottom line. Left: the page name in `text-title-section`, joined by the brand mark below `lg`. Right: Search (⌘K) field, identity (name and kind from `xl`, a popover below), API connection status (dot + word; the healthy "Live" word hides on phones, other states always show their word), and the Night / Day theme pill. The rail toggle lives in the rail's brand row, not here.
 - **Bottom tab bar** (below `lg`): fixed, 56px plus the safe-area inset, on the ground with a 1px top line. Overview, Upstreams, Principals, Logs and More; 16px icons over 12px labels. The active tab (and More while one of its pages is open) takes the `selected` fill and full ink; no edge rule. More opens the full navigation as a left sheet. Page titles stay in the top bar only; `main` pads by `--shell-bottom` and toasts sit above the bar.
