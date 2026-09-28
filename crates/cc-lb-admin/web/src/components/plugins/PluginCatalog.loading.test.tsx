@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PluginEntry } from '../../lib/queries';
 import { PluginCatalog } from './PluginCatalog';
@@ -192,7 +198,8 @@ describe('plugin loading geometry', () => {
 
     const countSlot = screen.getByTestId('plugin-count-slot');
     expect(countSlot.className).toContain('min-h-5');
-    expect(countSlot.className).toContain('min-w-56');
+    // Fixed from `sm`; phones let the count wrap beside the cleanup action.
+    expect(countSlot.className).toContain('sm:min-w-56');
     const countSkeleton =
       countSlot.querySelector<HTMLSpanElement>('span.skeleton');
     expect(countSkeleton?.tagName).toBe('SPAN');
@@ -265,7 +272,7 @@ describe('plugin loading geometry', () => {
     }
     expect(loadedTable.parentElement).toBe(catalogViewport);
     expect(
-      screen.getByTestId('plugin-count-slot').classList.contains('min-w-56'),
+      screen.getByTestId('plugin-count-slot').classList.contains('sm:min-w-56'),
     ).toBe(true);
     expect(screen.getByTestId('plugin-count-slot').textContent).toContain(
       '2 available · 0 not used anywhere',
@@ -280,6 +287,8 @@ describe('plugin loading geometry', () => {
     expect(screen.getByTestId('plugin-count-slot').textContent).toContain(
       '0 available · 0 not used anywhere',
     );
-    expect(screen.getByText('No plugins uploaded.')).toBeDefined();
+    expect(
+      within(screen.getByRole('table')).getByText('No plugins uploaded.'),
+    ).toBeDefined();
   });
 });

@@ -137,7 +137,11 @@ export function buttonClassName(
 ): string {
   return cx(
     'inline-flex items-center justify-center rounded-sm font-medium whitespace-nowrap transition-colors select-none [&_svg]:shrink-0',
-    'disabled:cursor-not-allowed disabled:opacity-40',
+    // Phones: every button is at least a 40px touch target.
+    'max-md:min-h-10',
+    // A loading button keeps its look (spinner, busy cursor); only a
+    // button that is unavailable takes the shared disabled look.
+    'disabled:not-aria-busy:control-disabled aria-busy:cursor-progress',
     'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
     BTN_VARIANTS[variant],
     BTN_SIZES[size],
@@ -201,7 +205,7 @@ export function IconButton({
       className={cx(
         'inline-flex shrink-0 items-center justify-center rounded-sm text-text-muted transition-colors [&_svg]:size-4 [&_svg]:shrink-0',
         'h-11 w-11 md:h-8 md:w-8 hover:bg-overlay-5 hover:text-text',
-        'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-muted',
+        'disabled:control-disabled',
         'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
         className,
       )}
@@ -459,7 +463,7 @@ export function Modal({
                 'inline-flex shrink-0 items-center justify-center text-text-muted hover:text-text rounded-sm',
                 'h-11 w-11 -mr-2 md:mr-0 md:h-8 md:w-8 hover:bg-overlay-5',
                 'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
-                'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-muted',
+                'disabled:control-disabled',
               )}
             >
               <X className="w-4 h-4" />
@@ -762,7 +766,9 @@ export function Section({
     <section className={cx('flex flex-col gap-4', className)}>
       {title || action ? (
         <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
-          <div className="min-w-0 flex-1">
+          {/* Phones: content-sized basis, so a long action wraps under the
+              title instead of squeezing it. */}
+          <div className="min-w-0 flex-1 max-md:basis-auto">
             {title ? (
               <h2 className="text-title-section text-text">{title}</h2>
             ) : null}
@@ -969,14 +975,21 @@ export function ToggleSwitch({
         compact
           ? 'flex min-h-[44px] min-w-0 cursor-pointer items-center gap-2'
           : 'well flex min-w-0 cursor-pointer items-start justify-between gap-4 px-3 py-2.5',
-        rest.disabled ? 'cursor-not-allowed opacity-40' : undefined,
+        rest.disabled ? 'cursor-not-allowed' : undefined,
         className,
       )}
     >
       {hasText ? (
         <span className="min-w-0">
           {label != null ? (
-            <span className="block text-body-sm text-text">{label}</span>
+            <span
+              className={cx(
+                'block text-body-sm',
+                rest.disabled ? 'text-text-faint' : 'text-text',
+              )}
+            >
+              {label}
+            </span>
           ) : null}
           {description ? (
             <span className="mt-0.5 block text-caption text-text-faint">
@@ -992,8 +1005,8 @@ export function ToggleSwitch({
         )}
       >
         <input {...rest} type="checkbox" className="peer sr-only" />
-        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-disabled:border-subtle peer-checked:peer-disabled:border-transparent peer-checked:peer-disabled:bg-accent-dim peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink peer-disabled:bg-text-faint peer-checked:peer-disabled:bg-accent" />
       </span>
     </label>
   );
@@ -1005,10 +1018,10 @@ export interface SegmentedOption<T extends string | number> {
   label: ReactNode;
 }
 
-/** Desktop outer height 32 (md) / 28 (sm); taller segments below `md` for touch. */
+/** Desktop outer height 32 (md) / 28 (sm); 40px segments below `md` for touch. */
 const SEGMENT_SIZES = {
-  sm: 'h-8 md:h-[1.375rem] px-2 text-xs',
-  md: 'h-9 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
+  sm: 'h-10 md:h-[1.375rem] px-2 text-xs',
+  md: 'h-10 md:h-[1.625rem] px-2.5 text-[0.8125rem]',
 } as const;
 
 /**
@@ -1255,8 +1268,9 @@ export function Notice({
     >
       <div
         className={cx(
+          // Phones: the text takes the full row and the action drops under it.
           'flex min-w-0 flex-1 gap-2.5',
-          banner ? 'items-center' : 'items-start',
+          banner ? 'items-center max-sm:basis-full' : 'items-start',
         )}
       >
         <Icon
@@ -1294,9 +1308,10 @@ export function Notice({
 }
 
 // ─── Input + Select base classes ─────────────────────────────────────────────
+// Phones: every field is at least a 40px touch target, like every Button.
 const INPUT_BASE_CLASS =
-  'w-full px-2.5 text-sm bg-input-bg border border-subtle-strong rounded-sm text-text placeholder:text-text-faint transition-colors ' +
-  'focus:border-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40';
+  'w-full px-2.5 text-sm bg-input-bg border border-subtle-strong rounded-sm text-text placeholder:text-text-faint transition-colors max-md:min-h-10 ' +
+  'focus:border-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
 /** 36px (md) text input / select trigger. */
 export const INPUT_CLASS = `${INPUT_BASE_CLASS} h-9`;
 /** 32px (sm) text input / select trigger for toolbars and dense forms. */

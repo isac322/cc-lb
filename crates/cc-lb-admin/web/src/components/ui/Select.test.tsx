@@ -1,30 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Select } from './Select';
 
 describe('Select', () => {
   afterEach(cleanup);
-
-  it('sizes the popup from the measured trigger width', () => {
-    render(
-      <Select
-        value=""
-        options={[{ value: '1', label: 'One' }]}
-        onChange={() => {}}
-        allLabel="All"
-        className="w-44"
-      />,
-    );
-
-    const trigger = screen.getByRole('combobox');
-    expect(trigger.className).toContain('w-44');
-
-    fireEvent.click(trigger);
-
-    const popup = screen.getByTestId('select-popup');
-    expect(popup.style.width).toBe('var(--anchor-width)');
-  });
 
   it('keeps a long selected label on one truncated line', () => {
     render(

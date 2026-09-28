@@ -121,8 +121,8 @@ export function useCouponNudge(
 }
 
 const ACTION_BASE =
-  'inline-flex h-8 items-center rounded-sm border text-xs font-medium transition-colors select-none ' +
-  'disabled:cursor-not-allowed disabled:opacity-40 ' +
+  'inline-flex h-8 max-md:h-10 items-center rounded-sm border text-xs font-medium transition-colors select-none ' +
+  'disabled:control-disabled ' +
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
 
 /** Ticket-outline path for the header button: rounded corners plus a

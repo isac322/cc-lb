@@ -39,9 +39,7 @@ const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
  * Under 46rem each row becomes a three-line card instead of a wide table
  * row: time, kind, session and status; principal, upstream and model;
  * latency, tokens and cost, each with its composition bar. Cells keep their
- * DOM order and are only placed on the four-track grid. 46rem is the
- * narrowest table that fits the columns that never drop (≈ 41rem) plus a
- * 5rem model.
+ * DOM order and are only placed on the four-track grid.
  */
 const MOBILE_ROW =
   '@max-[46rem]/events:grid @max-[46rem]/events:h-auto! @max-[46rem]/events:grid-cols-[auto_auto_minmax(0,1fr)_auto] @max-[46rem]/events:items-center @max-[46rem]/events:gap-x-2 @max-[46rem]/events:gap-y-1 @max-[46rem]/events:px-4 @max-[46rem]/events:py-2.5';
@@ -54,6 +52,12 @@ const MOBILE_ROW =
 // the upstream out of the flexible track.
 const MOBILE_CELL =
   '@max-[46rem]/events:p-0! @max-[46rem]/events:*:p-0 @max-[46rem]/events:*:min-w-0 @max-[46rem]/events:max-w-none';
+/*
+ * A card's metric button is only its figure and bar (27px); padding pulled
+ * back by a negative margin makes the touch target 43px without moving the
+ * card's lines.
+ */
+const MOBILE_METRIC = '@max-[46rem]/events:*:-my-2 @max-[46rem]/events:*:py-2';
 const MOBILE_AT = {
   time: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-1 @max-[46rem]/events:min-w-14',
   kind: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-2 @max-[46rem]/events:justify-self-start',
@@ -73,40 +77,118 @@ const MOBILE_AT = {
     '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-1 @max-[46rem]/events:text-left',
   tokens:
     '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-2 @max-[46rem]/events:col-span-2 @max-[46rem]/events:justify-self-start @max-[46rem]/events:text-left',
-  cost: '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-4',
+  // The inset keeps the cost bar from reading as the end of the tokens bar.
+  cost: '@max-[46rem]/events:row-start-3 @max-[46rem]/events:col-start-4 @max-[46rem]/events:ml-3',
 } as const;
 
-/** Per-column classes for the columns that give way when space runs out. */
+/*
+ * Latency and cost are single figures, but their composition bars need room
+ * to read, so from 46rem their cells hold 7.5rem, and 9rem once the table is
+ * 80rem wide (full pages on wide screens): a little narrower than the tokens
+ * cell (≈ 11.7rem). The class reaches the metric button (or the empty cell's
+ * placeholder).
+ */
+const WIDE_METRIC_CELL =
+  '@min-[46rem]/events:*:min-w-30 @min-[80rem]/events:*:min-w-36';
+
+/** Classes that differ between a table that fits its pane and one that scrolls. */
 interface ColumnFit {
-  /** Principal and upstream. */
-  entity: string;
+  /** Principal and upstream when both are shown. */
+  bothEntities: string;
   model: string;
-  /** True when the table may shorten the model id to fit the pane. */
-  compactModel: boolean;
+  /** The pane band's two-line row (fit mode, 46–60rem); empty when scrolling. */
+  band: {
+    table: string;
+    head: string;
+    row: string;
+    cell: string;
+    skeletonRow: string;
+    skeletonCell: string;
+    skeletonHiddenCell: string;
+    time: string;
+    timeDot: string;
+    timeAnchors: string;
+    kind: string;
+    session: string;
+    entity: string;
+    model: string;
+    status: string;
+    latency: string;
+    tokens: string;
+    cost: string;
+  };
 }
 
 /*
- * Without a `minWidthClass` floor the table fits its container: between the
- * card layout and 60rem principal and upstream are hidden (with them a model
- * would get under 13rem), and model absorbs whatever is left, truncated (the
- * full name stays in its title). Time, session, kind, status, latency, tokens
- * and cost never drop. In this mode the model cell drops a leading
- * 'claude-' prefix; the full id stays in the title and accessible name.
+ * Without a `minWidthClass` floor the table fits its container. A detail
+ * pane between the card layout and 60rem (≈ 47rem on 1440px screens) cannot
+ * hold every column as a table row next to readable latency and cost cells,
+ * so there each row takes two lines on fixed tracks, lined up from row to row
+ * and headed by the cells themselves: time, kind, session, the principal or
+ * upstream, model and status; then latency under time and kind, tokens under
+ * session and cost at the right edge. When both principal and upstream are
+ * shown they sit out that band. From 60rem the pane gets the table, model
+ * absorbing the slack, truncated.
  */
 const FIT_COLUMNS: ColumnFit = {
-  entity: '@min-[46rem]/events:@max-[60rem]/events:hidden',
-  model: '@min-[46rem]/events:w-full @min-[46rem]/events:max-w-0',
-  compactModel: true,
+  bothEntities: '@min-[46rem]/events:@max-[60rem]/events:hidden',
+  model: '@min-[60rem]/events:w-full @min-[60rem]/events:max-w-0',
+  band: {
+    table: '@min-[46rem]/events:@max-[60rem]/events:block',
+    head: '@min-[46rem]/events:@max-[60rem]/events:hidden',
+    row: '@min-[46rem]/events:@max-[60rem]/events:grid @min-[46rem]/events:@max-[60rem]/events:h-auto! @min-[46rem]/events:@max-[60rem]/events:grid-cols-[4rem_3.25rem_6rem_minmax(0,1fr)_auto_auto] @min-[46rem]/events:@max-[60rem]/events:items-center @min-[46rem]/events:@max-[60rem]/events:gap-x-3 @min-[46rem]/events:@max-[60rem]/events:gap-y-1 @min-[46rem]/events:@max-[60rem]/events:px-4 @min-[46rem]/events:@max-[60rem]/events:py-2',
+    cell: '@min-[46rem]/events:@max-[60rem]/events:p-0! @min-[46rem]/events:@max-[60rem]/events:*:p-0 @min-[46rem]/events:@max-[60rem]/events:min-w-0',
+    skeletonRow:
+      '@min-[46rem]/events:@max-[60rem]/events:flex @min-[46rem]/events:@max-[60rem]/events:items-center @min-[46rem]/events:@max-[60rem]/events:px-1',
+    skeletonCell: '@min-[46rem]/events:@max-[60rem]/events:flex-1',
+    skeletonHiddenCell: '@min-[46rem]/events:@max-[60rem]/events:hidden',
+    time: '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-1',
+    timeDot: '@min-[46rem]/events:@max-[60rem]/events:-left-3',
+    timeAnchors: '@min-[46rem]/events:@max-[60rem]/events:hidden',
+    kind: '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-2 @min-[46rem]/events:@max-[60rem]/events:justify-self-start',
+    session:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-3 @min-[46rem]/events:@max-[60rem]/events:justify-self-start',
+    entity:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-4',
+    model:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-5 @min-[46rem]/events:@max-[60rem]/events:max-w-[16rem] @min-[46rem]/events:@max-[60rem]/events:text-right',
+    status:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-6',
+    latency:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-2 @min-[46rem]/events:@max-[60rem]/events:col-start-1 @min-[46rem]/events:@max-[60rem]/events:col-span-2 @min-[46rem]/events:@max-[60rem]/events:text-left',
+    tokens:
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-2 @min-[46rem]/events:@max-[60rem]/events:col-start-3 @min-[46rem]/events:@max-[60rem]/events:col-span-2 @min-[46rem]/events:@max-[60rem]/events:justify-self-start @min-[46rem]/events:@max-[60rem]/events:text-left',
+    cost: '@min-[46rem]/events:@max-[60rem]/events:row-start-2 @min-[46rem]/events:@max-[60rem]/events:col-start-5 @min-[46rem]/events:@max-[60rem]/events:col-span-2 @min-[46rem]/events:@max-[60rem]/events:justify-self-end',
+  },
 };
 /*
- * With a floor the table keeps every column and the full model id; model
- * still absorbs the slack and truncates, so the wrapper scrolls only once
- * the floor is reached.
+ * With a floor the table keeps every column at every width from 46rem; model
+ * still absorbs the slack and truncates, so the wrapper scrolls only once the
+ * floor is reached. Its 6rem minimum fits a family and version ("sonnet-4-6").
  */
 const SCROLL_COLUMNS: ColumnFit = {
-  entity: '',
-  model: 'w-full max-w-0 @min-[46rem]/events:min-w-40',
-  compactModel: false,
+  bothEntities: '',
+  model: 'w-full max-w-0 @min-[46rem]/events:min-w-24',
+  band: {
+    table: '',
+    head: '',
+    row: '',
+    cell: '',
+    skeletonRow: '',
+    skeletonCell: '',
+    skeletonHiddenCell: '',
+    time: '',
+    timeDot: '',
+    timeAnchors: '',
+    kind: '',
+    session: '',
+    entity: '',
+    model: '',
+    status: '',
+    latency: '',
+    tokens: '',
+    cost: '',
+  },
 };
 
 /** Radii offered by the per-row time anchor, as [label, seconds either side]. */
@@ -202,6 +284,7 @@ const RequestEventRow = memo(function RequestEventRow({
         'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         flash ? 'flash-in' : '',
         MOBILE_ROW,
+        fit.band.row,
       )}
       style={REQUEST_EVENT_ROW_STYLE}
       onClick={() => selectEvent(eventKey)}
@@ -223,6 +306,8 @@ const RequestEventRow = memo(function RequestEventRow({
           'group/ts relative px-3 py-2 text-text-muted tabular-nums whitespace-nowrap',
           MOBILE_CELL,
           MOBILE_AT.time,
+          fit.band.cell,
+          fit.band.time,
         )}
       >
         {/* Errors and in-flight rows get a dot in the cell's leading inset, so
@@ -232,13 +317,19 @@ const RequestEventRow = memo(function RequestEventRow({
           <span
             className={cx(
               'status-dot absolute top-1/2 left-1.5 -translate-y-1/2 @max-[46rem]/events:-left-3',
+              fit.band.timeDot,
               outcome.type === 'partial' ? 'neutral animate-pulse' : tone,
             )}
           />
         )}
         <RelativeTime compact ts={at} />
         {onAnchorRange != null && at != null ? (
-          <span className="absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 @max-[46rem]/events:hidden">
+          <span
+            className={cx(
+              'absolute inset-y-0 right-0 flex items-center gap-0.5 bg-bg-sub pl-2 pr-1 opacity-0 transition-opacity group-hover/ts:opacity-100 group-focus-within/ts:opacity-100 @max-[46rem]/events:hidden',
+              fit.band.timeAnchors,
+            )}
+          >
             {ANCHOR_RADII_SECS.map(([label, radius]) => (
               <button
                 key={label}
@@ -263,7 +354,8 @@ const RequestEventRow = memo(function RequestEventRow({
             'px-3 py-2 whitespace-nowrap truncate max-w-[160px]',
             MOBILE_CELL,
             MOBILE_AT.principal,
-            fit.entity,
+            fit.band.cell,
+            showUpstream ? fit.bothEntities : fit.band.entity,
           )}
         >
           {principalName}
@@ -272,12 +364,13 @@ const RequestEventRow = memo(function RequestEventRow({
       {showUpstream && (
         <td
           className={cx(
-            'px-3 py-2 whitespace-nowrap truncate max-w-[180px]',
+            'px-3 py-2 whitespace-nowrap truncate max-w-[160px]',
             MOBILE_CELL,
             showPrincipal
               ? MOBILE_AT.upstreamAfterPrincipal
               : MOBILE_AT.upstream,
-            fit.entity,
+            fit.band.cell,
+            showPrincipal ? fit.bothEntities : fit.band.entity,
           )}
         >
           {upstreamName}
@@ -289,6 +382,8 @@ const RequestEventRow = memo(function RequestEventRow({
             'px-3 py-2 whitespace-nowrap',
             MOBILE_CELL,
             MOBILE_AT.session,
+            fit.band.cell,
+            fit.band.session,
           )}
         >
           <SessionChip sessionId={event.thread_id ?? null} />
@@ -299,6 +394,8 @@ const RequestEventRow = memo(function RequestEventRow({
           'px-3 py-2 whitespace-nowrap',
           MOBILE_CELL,
           MOBILE_AT.kind,
+          fit.band.cell,
+          fit.band.kind,
         )}
       >
         <RequestKindBadge requestKind={event.request_kind} />
@@ -309,10 +406,12 @@ const RequestEventRow = memo(function RequestEventRow({
           MOBILE_CELL,
           MOBILE_AT.model,
           fit.model,
+          fit.band.cell,
+          fit.band.model,
         )}
       >
         <span className="flex items-center gap-2 min-w-0 @max-[46rem]/events:justify-end">
-          {event.model != null && fit.compactModel ? (
+          {event.model != null ? (
             <span
               className="truncate font-mono text-data"
               title={event.model}
@@ -321,12 +420,7 @@ const RequestEventRow = memo(function RequestEventRow({
               {event.model.replace(/^claude-/, '')}
             </span>
           ) : (
-            <span
-              className="truncate font-mono text-data"
-              title={event.model ?? undefined}
-            >
-              {event.model ?? DASH}
-            </span>
+            <span className="font-mono text-data">{DASH}</span>
           )}
           {tierBadge != null && (
             <Badge tone="neutral" className="shrink-0">
@@ -340,6 +434,8 @@ const RequestEventRow = memo(function RequestEventRow({
           'px-3 py-2 text-right tabular-nums whitespace-nowrap',
           MOBILE_CELL,
           MOBILE_AT.status,
+          fit.band.cell,
+          fit.band.status,
           outcome.type === 'partial'
             ? 'text-text-faint'
             : STATUS_TONE_TEXT[tone],
@@ -349,20 +445,40 @@ const RequestEventRow = memo(function RequestEventRow({
       </td>
       <LatencyCell
         event={event}
-        className={cx(MOBILE_CELL, MOBILE_AT.latency)}
+        className={cx(
+          MOBILE_CELL,
+          MOBILE_METRIC,
+          MOBILE_AT.latency,
+          WIDE_METRIC_CELL,
+          fit.band.cell,
+          fit.band.latency,
+        )}
       />
       {showTokens && (
         <TokenCell
           event={event}
           isPartial={isPartial}
-          className={cx(MOBILE_CELL, MOBILE_AT.tokens)}
+          className={cx(
+            MOBILE_CELL,
+            MOBILE_METRIC,
+            MOBILE_AT.tokens,
+            fit.band.cell,
+            fit.band.tokens,
+          )}
         />
       )}
       {showCost && (
         <CostCell
           event={event}
           isPartial={isPartial}
-          className={cx(MOBILE_CELL, MOBILE_AT.cost)}
+          className={cx(
+            MOBILE_CELL,
+            MOBILE_METRIC,
+            MOBILE_AT.cost,
+            WIDE_METRIC_CELL,
+            fit.band.cell,
+            fit.band.cost,
+          )}
         />
       )}
     </TableRow>
@@ -408,14 +524,15 @@ export const RequestEventsTable = memo(function RequestEventsTable({
   // requests carried none, and the columns do not jump as rows stream in.
   const showSession = columns?.session ?? true;
   const fit = minWidthClass == null ? FIT_COLUMNS : SCROLL_COLUMNS;
+  const entityFit = showPrincipal && showUpstream ? fit.bothEntities : '';
 
   const columnSpecs: ColumnSpec[] = [
     { label: 'Timestamp', skeleton: 'max-w-24' },
     ...(showPrincipal
-      ? [{ label: 'Principal', skeleton: 'max-w-24', className: fit.entity }]
+      ? [{ label: 'Principal', skeleton: 'max-w-24', className: entityFit }]
       : []),
     ...(showUpstream
-      ? [{ label: 'Upstream', skeleton: 'max-w-28', className: fit.entity }]
+      ? [{ label: 'Upstream', skeleton: 'max-w-28', className: entityFit }]
       : []),
     ...(showSession ? [{ label: 'Session', skeleton: 'max-w-24' }] : []),
     { label: 'Kind', skeleton: 'max-w-12' },
@@ -445,10 +562,13 @@ export const RequestEventsTable = memo(function RequestEventsTable({
             // LatencyCell sr-only descriptions) inside the scroll wrapper;
             // without it they resolve against <body> and widen the page.
             'relative @max-[46rem]/events:block @max-[46rem]/events:min-w-0',
+            fit.band.table,
             className,
           )}
         >
-          <TableHead className="@max-[46rem]/events:hidden">
+          <TableHead
+            className={cx('@max-[46rem]/events:hidden', fit.band.head)}
+          >
             <tr>
               {columnSpecs.map((column) => (
                 <TableHeadCell
@@ -463,7 +583,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
           </TableHead>
           <tbody
             style={reservedBodyStyle}
-            className="@max-[46rem]/events:block"
+            className={cx('@max-[46rem]/events:block', fit.band.table)}
           >
             {loading ? (
               Array.from({ length: reservedRowCount }).map((_, i) => (
@@ -471,16 +591,26 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                   key={i}
                   cols={colCount}
                   style={REQUEST_EVENT_ROW_STYLE}
-                  // In the card layout the body is a list of cards, so the
-                  // placeholder is one line of the first three cells.
-                  className="@max-[46rem]/events:flex @max-[46rem]/events:items-center @max-[46rem]/events:px-1"
+                  // In the card and pane-band layouts the body is a list of
+                  // cards, so the placeholder is one line of the first three
+                  // cells.
+                  className={cx(
+                    '@max-[46rem]/events:flex @max-[46rem]/events:items-center @max-[46rem]/events:px-1',
+                    fit.band.skeletonRow,
+                  )}
                   cellClassNames={columnSpecs.map((column, index) =>
                     cx(
                       column.numeric ? 'text-right tabular-nums' : '',
                       column.className,
                       index < 3
-                        ? '@max-[46rem]/events:flex-1'
-                        : '@max-[46rem]/events:hidden',
+                        ? cx(
+                            '@max-[46rem]/events:flex-1',
+                            fit.band.skeletonCell,
+                          )
+                        : cx(
+                            '@max-[46rem]/events:hidden',
+                            fit.band.skeletonHiddenCell,
+                          ),
                     ),
                   )}
                   skeletonClassNames={columnSpecs.map(

@@ -24,7 +24,16 @@ import {
 } from '../lib/auth';
 import { AuthSessionProvider } from '../lib/authSession';
 import { BrandMark } from './layout/Sidebar';
-import { Button, Card, cx, INPUT_CLASS, Spinner } from './ui/primitives';
+import { Button, cx, INPUT_CLASS, Spinner } from './ui/primitives';
+
+/**
+ * The signed-out panel: a flat card from `sm`; phones drop the frame and its
+ * padding so the copy and the token field use the full width.
+ */
+const GATE_PANEL_CLASS = 'rounded-md sm:glass sm:p-6';
+
+/** Phones: the one action spans the panel width. */
+const GATE_ACTION_CLASS = 'max-sm:w-full';
 
 type SessionState =
   | { status: 'loading' }
@@ -149,14 +158,17 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'loading') {
     return (
       <AuthGateFrame>
-        <Card
+        <div
           aria-label="Checking admin session"
-          className="p-6 flex items-center gap-3 text-body text-text-muted"
+          className={cx(
+            GATE_PANEL_CLASS,
+            'flex items-center gap-3 text-body text-text-muted',
+          )}
           role="status"
         >
           <Spinner />
           Checking admin session…
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -164,7 +176,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'error') {
     return (
       <AuthGateFrame>
-        <Card className="p-6">
+        <div className={GATE_PANEL_CLASS}>
           <h1 className="text-title-section text-text">
             Unable to verify admin session
           </h1>
@@ -172,11 +184,15 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
             Check the admin service connection, then try again.
           </p>
           <div className="mt-5 flex justify-end">
-            <Button variant="primary" onClick={() => void loadSession(true)}>
+            <Button
+              variant="primary"
+              className={GATE_ACTION_CLASS}
+              onClick={() => void loadSession(true)}
+            >
               Retry
             </Button>
           </div>
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -184,7 +200,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'external_required') {
     return (
       <AuthGateFrame>
-        <Card className="p-6">
+        <div className={GATE_PANEL_CLASS}>
           <h1 className="text-title-section text-text">
             External authentication required
           </h1>
@@ -192,11 +208,15 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
             Sign in with the configured identity provider, then try again.
           </p>
           <div className="mt-5 flex justify-end">
-            <Button variant="primary" onClick={() => void loadSession(true)}>
+            <Button
+              variant="primary"
+              className={GATE_ACTION_CLASS}
+              onClick={() => void loadSession(true)}
+            >
               Retry
             </Button>
           </div>
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -227,7 +247,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   const rejected = sessionState.storedTokenRejected;
   return (
     <AuthGateFrame>
-      <Card className="p-6">
+      <div className={GATE_PANEL_CLASS}>
         <h1 className="text-title-section text-text">
           {rejected ? 'Saved admin token was rejected' : 'Admin token required'}
         </h1>
@@ -248,7 +268,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
             <BaseField.Control
               autoComplete="current-password"
               autoFocus
-              className={cx(INPUT_CLASS, 'font-mono')}
+              className={cx(INPUT_CLASS, 'font-mono max-sm:h-11')}
               onChange={(event) => setValue(event.target.value)}
               placeholder="paste token"
               render={<BaseInput />}
@@ -262,6 +282,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
             <Button
               disabled={submitting || !value.trim()}
               loading={submitting}
+              className={GATE_ACTION_CLASS}
               type="submit"
               variant="primary"
             >
@@ -269,7 +290,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
             </Button>
           </div>
         </BaseForm>
-      </Card>
+      </div>
     </AuthGateFrame>
   );
 }

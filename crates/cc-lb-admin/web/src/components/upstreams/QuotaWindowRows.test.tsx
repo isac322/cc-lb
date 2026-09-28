@@ -32,12 +32,7 @@ function snap(overrides: Partial<QuotaSnapshot>): QuotaSnapshot {
 function renderRow(s: QuotaSnapshot) {
   render(
     <QuotaWindowRows>
-      <QuotaWindowRow
-        snap={s}
-        analysis={undefined}
-        analysisPending={false}
-        nowUnixSecs={NOW}
-      />
+      <QuotaWindowRow snap={s} nowUnixSecs={NOW} />
     </QuotaWindowRows>,
   );
   return screen.getByRole('listitem');
@@ -82,11 +77,5 @@ describe('QuotaWindowRow', () => {
     const row = renderRow(snap({ utilization: 0, resets_at_unix_secs: null }));
     expect(row.textContent).toContain('Not started');
     expect(row.textContent).not.toContain('Resets in');
-  });
-
-  it('keeps a rejected limit status visible', () => {
-    const row = renderRow(snap({ utilization: 1, status: 'rejected' }));
-    expect(row.textContent).toContain('100% used');
-    expect(row.textContent).toContain('Rejected');
   });
 });

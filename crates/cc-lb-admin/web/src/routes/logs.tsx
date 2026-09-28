@@ -26,6 +26,7 @@ import { LOGS_EMPTY_COPY } from '../components/onboarding/logsEmptyCopy';
 import { LogsPagination } from '../components/ui/LogsPagination';
 import {
   Button,
+  buttonClassName,
   Card,
   cx,
   Field,
@@ -776,7 +777,11 @@ function LogsPage() {
   const panelFilterCount = filterChips.length + (hasCustomRange ? 1 : 0);
 
   return (
-    <FullPage className="gap-3">
+    // Same content width and side padding as PageContainer pages (plugins,
+    // settings, audit); FullPage keeps the viewport-fit console with the rows
+    // scrolling inside the card. The overrides are `lg:` variants so they win
+    // over FullPage's base classes; below `lg` the viewport is narrower anyway.
+    <FullPage className="gap-3 lg:max-w-[90rem] lg:px-10">
       <LiveTailFailureBanner
         permanentFailure={live.permanentFailure}
         permanentFailureSince={live.permanentFailureSince}
@@ -818,9 +823,12 @@ function LogsPage() {
           <>
             <BaseToggle
               aria-label="Live tail logs"
-              // Same look as the neighbouring md secondary `Button`s; only the
-              // pressed state adds a fill.
-              className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-sm border border-subtle-strong text-[0.8125rem] font-medium text-text whitespace-nowrap transition-colors select-none hover:bg-panel-strong data-[pressed]:bg-panel-strong disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+              // The neighbouring md secondary `Button` chrome (sizes, phone
+              // touch height, disabled look); only the pressed state adds a fill.
+              className={cx(
+                buttonClassName('secondary', 'md'),
+                'data-[pressed]:bg-panel-strong',
+              )}
               onPressedChange={setUserRequestedTailing}
               pressed={effectiveTailing}
               disabled={filters.until_unix_secs != null}
@@ -974,10 +982,12 @@ function LogsPage() {
               className={FILTER_CONTROL_WIDTH}
             />
           </Field>
+          {/* Phones stack From, To and Apply at full width: two 12rem fields
+              and a button beside them wrap into a ragged staircase. */}
           <div
             role="group"
             aria-label="Custom range"
-            className="col-span-full flex flex-wrap items-end gap-3 md:basis-full"
+            className="col-span-full flex flex-wrap items-end gap-3 md:basis-full max-md:flex-col max-md:items-stretch"
           >
             <TimeRangeBounds
               since={filters.since_unix_secs}

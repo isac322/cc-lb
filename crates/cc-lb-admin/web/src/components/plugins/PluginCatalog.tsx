@@ -8,6 +8,7 @@ import {
   Button,
   Card,
   ConfirmDialog,
+  cx,
   Hint,
   IconButton,
   Section,
@@ -99,8 +100,11 @@ export function PluginCatalog({
       <Section
         title="Plugin library"
         subtitle={
+          // The fixed width keeps the action from shifting as the count
+          // loads; phones let the count wrap beside the action instead of
+          // running under it.
           <span
-            className="flex min-h-5 min-w-56 items-center"
+            className="flex min-h-5 items-center sm:min-w-56"
             data-testid="plugin-count-slot"
           >
             {reg.isLoading ? (
@@ -139,7 +143,73 @@ export function PluginCatalog({
           </div>
         }
       >
-        <Card className="overflow-x-auto">
+        {/* Phones: one two-line row per plugin, edge to edge. Line 1 is the
+            name and how many places use it; line 2 where it runs and what it
+            is. The hash, size, upload time and delete live in its detail. */}
+        <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
+          {reg.isLoading ? (
+            PLUGIN_LOADING_ROWS.map((row) => (
+              <li key={row} className="px-4 py-3" aria-hidden="true">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="mt-2 h-3 w-56 max-w-full" />
+              </li>
+            ))
+          ) : entries.length ? (
+            entries.map((p) => {
+              const caption = [
+                (p.supported_slots ?? [])
+                  .map(
+                    (slot) => SLOTS.find((s) => s.id === slot)?.label ?? slot,
+                  )
+                  .join(', ') || 'Unknown slot',
+                p.version ? `v${p.version}` : null,
+                p.description ?? p.label,
+              ]
+                .filter(Boolean)
+                .join(' · ');
+              return (
+                <li key={p.id}>
+                  <button
+                    type="button"
+                    className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                    onClick={() => onSelectPlugin(p.id)}
+                  >
+                    <span className="flex w-full items-center justify-between gap-3">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-body font-medium text-text">
+                          {p.name}
+                        </span>
+                        {p.is_builtin && (
+                          <Badge className="shrink-0" tone="neutral">
+                            Built-in
+                          </Badge>
+                        )}
+                      </span>
+                      <span
+                        className={cx(
+                          'shrink-0 text-body-sm tabular-nums',
+                          p.refcount > 0
+                            ? 'text-text-muted'
+                            : 'text-text-faint',
+                        )}
+                      >
+                        Used by {p.refcount}
+                      </span>
+                    </span>
+                    <span className="line-clamp-2 text-caption text-text-faint">
+                      {caption}
+                    </span>
+                  </button>
+                </li>
+              );
+            })
+          ) : (
+            <li className="px-4 py-8 text-center text-body-sm text-text-muted">
+              No plugins uploaded.
+            </li>
+          )}
+        </ul>
+        <Card className="hidden overflow-x-auto md:block">
           <Table className="min-w-[960px] table-fixed">
             <colgroup>
               {PLUGIN_COLUMN_WIDTHS.map((className, index) => (

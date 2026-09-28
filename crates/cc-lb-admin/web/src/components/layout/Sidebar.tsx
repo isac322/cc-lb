@@ -179,10 +179,11 @@ const LABEL_FADE =
 /**
  * Nav item chrome. TanStack `Link` marks the current route with
  * `data-status="active"` and `aria-current="page"`: the neutral selection
- * fill and full ink. No edge rule.
+ * fill and full ink. No edge rule. Below `lg` the only nav list is the
+ * "More" sheet, so rows are 44px touch targets there.
  */
 const NAV_ITEM =
-  'relative flex items-center gap-2.5 h-9 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-overlay-2 hover:text-text ' +
+  'relative flex items-center gap-2.5 h-9 max-lg:h-11 rounded-sm text-sm font-medium text-text-muted transition-colors hover:bg-overlay-2 hover:text-text ' +
   'data-[status=active]:bg-selected data-[status=active]:text-text data-[status=active]:hover:bg-selected ' +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2';
 
@@ -294,7 +295,7 @@ export function SidebarFooter({
         rel="noopener noreferrer"
         aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
         title={collapsed ? 'Docs' : undefined}
-        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
       >
         <BookOpen
           size={14}
@@ -309,7 +310,7 @@ export function SidebarFooter({
         )}
       </a>
       <div
-        className="text-2xs text-text-faint truncate"
+        className="text-2xs max-md:text-caption text-text-faint truncate"
         title={collapsed ? label : undefined}
       >
         {collapsed ? 'cc' : label}

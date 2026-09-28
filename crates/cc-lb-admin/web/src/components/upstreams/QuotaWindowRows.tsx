@@ -1,33 +1,37 @@
 // The detail pane's Quota list: one compact row per window the API reports.
-// Rows share one grid (CSS subgrid), so the name, meter, `N% used` and facts
-// columns line up across windows:
-//   [swatch + name] [meter, flexible] [N% used] [reset · ETA · burn]
-// From a 40rem wide section every window is one line; narrower, the facts
-// drop to a second line under the meter.
+// Rows share one grid (CSS subgrid), so the columns line up across windows.
+// From a 40rem wide section every window is one line:
+//   [swatch + name] [meter, flexible] [N% used] [reset]
+// Narrower (phones), each row reads in two lines:
+//   [swatch + name]              [N% used]
+//   [meter, flexible]            [reset]
 import type { ReactNode } from 'react';
-import type { AnalysisWindowResponse, QuotaSnapshot } from '../../lib/api';
+import type { QuotaSnapshot } from '../../lib/api';
 import { WINDOW_LABELS } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
   quotaSeverity,
-  quotaStatusLabel,
-  quotaStatusTone,
 } from '../../lib/quotaSeverity';
 import { cx, Hint, Skeleton } from '../ui/primitives';
-import { RelativeOffsetTime, ResetCountdown } from '../ui/RelativeTime';
+import { ResetCountdown } from '../ui/RelativeTime';
 import { UsageMeter } from '../ui/UsageMeter';
 
 const ROWS_CLASS =
-  'grid grid-cols-[auto_minmax(0,1fr)_auto] gap-x-4 divide-y divide-border-row @[40rem]:grid-cols-[auto_minmax(0,1fr)_auto_auto] @[40rem]:gap-x-6';
+  'grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 divide-y divide-border-row @[40rem]:grid-cols-[auto_minmax(0,1fr)_auto_auto] @[40rem]:gap-x-6';
 const ROW_CLASS =
-  'col-span-full grid grid-cols-subgrid items-center gap-y-1 py-2 first:pt-0 last:pb-0';
-const NAME_CELL_CLASS = 'flex min-w-0 items-center gap-2';
-const USED_CELL_CLASS = 'text-right text-body tabular-nums';
-// Narrow: the facts sit on the second line under the meter and `N% used`.
+  'col-span-full grid grid-cols-subgrid items-center gap-y-1.5 py-2.5 first:pt-0 last:pb-0 @[40rem]:gap-y-1 @[40rem]:py-2';
+// Narrow placement is explicit (name/used on line 1, meter/facts on line 2);
+// from 40rem every cell takes its own column on one line.
+const NAME_CELL_CLASS =
+  'col-start-1 row-start-1 flex min-w-0 items-center gap-2';
+const METER_CELL_CLASS =
+  'col-start-1 row-start-2 @[40rem]:col-start-2 @[40rem]:row-start-1';
+const USED_CELL_CLASS =
+  'col-start-2 row-start-1 text-right text-body tabular-nums @[40rem]:col-start-3';
 const FACTS_CELL_CLASS =
-  'col-start-2 col-span-2 flex min-w-0 flex-wrap items-center gap-x-2 text-body-sm tabular-nums text-text-muted @[40rem]:col-span-1 @[40rem]:col-start-4';
+  'col-start-2 row-start-2 flex min-w-0 flex-wrap items-center justify-end gap-x-2 text-right text-body-sm tabular-nums text-text-muted @[40rem]:col-start-4 @[40rem]:row-start-1 @[40rem]:justify-start @[40rem]:text-left';
 const HINT_TRIGGER_CLASS =
   'cursor-help border-b border-dashed border-text-faint/60';
 
@@ -61,44 +65,17 @@ function usd(minorUnits: number): string {
   })}`;
 }
 
-/** A limit status other than plain `allowed`, in sentence case. */
-function StatusText({ status }: { status: string }) {
-  const tone = quotaStatusTone(status);
-  return (
-    <span
-      className={
-        tone === 'danger'
-          ? 'text-danger-text'
-          : tone === 'warn'
-            ? 'text-warn-text'
-            : undefined
-      }
-    >
-      {quotaStatusLabel(status)}
-    </span>
-  );
-}
-
-function perMinute(utilizationPerMinute: number): string {
-  return `${(utilizationPerMinute * 100).toFixed(2)}%/min`;
-}
-
 export function QuotaWindowRow({
   snap,
-  analysis,
-  analysisPending,
   nowUnixSecs,
 }: {
   snap: QuotaSnapshot;
-  analysis: AnalysisWindowResponse | undefined;
-  analysisPending: boolean;
   nowUnixSecs: number;
 }) {
   const isOverage = snap.window === 'overage';
   const isUnified = snap.window === 'unified';
   const timed = !isOverage && !isUnified;
   const unobserved = snap.state === 'unobserved';
-  const status = snap.status && snap.status !== 'allowed' ? snap.status : null;
 
   // Extra usage: the meter is the share of the monthly budget spent.
   const overageOn =
@@ -130,13 +107,6 @@ export function QuotaWindowRow({
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
   const started = timed && !unobserved && !notStarted;
-  const eta = analysis?.actual_account_burn.eta_to_limit_secs;
-  const actualBurn = analysis?.actual_account_burn.utilization_per_second;
-  const projectedBurn = analysis?.proxy_projected_burn.utilization_per_hour;
-  const waitingForGrowth =
-    started &&
-    (!analysis ||
-      analysis.actual_account_burn.reason === 'insufficient_growth_intervals');
 
   let used: ReactNode;
   if (isOverage && !overageOn) {
@@ -162,7 +132,6 @@ export function QuotaWindowRow({
   }
 
   const facts: ReactNode[] = [];
-  if (status) facts.push(<StatusText key="status" status={status} />);
   if (unobserved) facts.push(<span key="none">No reading</span>);
   if (notStarted)
     facts.push(
@@ -189,56 +158,13 @@ export function QuotaWindowRow({
     );
   if (isOverage && overageOn && overageLimit == null)
     facts.push(<span key="no-limit">No limit set</span>);
-  if (started) {
-    if (analysisPending) {
-      facts.push(
-        <Skeleton key="analysis" as="span" className="inline-block h-3 w-28" />,
-      );
-    } else {
-      if (eta != null)
-        facts.push(
-          eta <= 0 ? (
-            <span key="eta" className="text-danger-text">
-              At limit
-            </span>
-          ) : (
-            <span key="eta">
-              Limit <RelativeOffsetTime compact offsetSeconds={eta} />
-            </span>
-          ),
-        );
-      if (waitingForGrowth) {
-        facts.push(
-          <Hint
-            key="burn"
-            label="Burn appears once utilization is seen rising."
-          >
-            <span tabIndex={0} className={HINT_TRIGGER_CLASS}>
-              Burn pending
-            </span>
-          </Hint>,
-        );
-      } else if (actualBurn != null || projectedBurn != null) {
-        facts.push(
-          <Hint
-            key="burn"
-            label={`Measured burn; projected from proxy traffic: ${
-              projectedBurn == null ? '—' : perMinute(projectedBurn / 60)
-            }`}
-          >
-            <span tabIndex={0} className={HINT_TRIGGER_CLASS}>
-              {actualBurn == null ? '—' : perMinute(actualBurn * 60)}
-            </span>
-          </Hint>,
-        );
-      }
-    }
-  }
 
   return (
     <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
       <WindowName window={snap.window} />
-      <UsageMeter label={windowLabel(snap.window)} usedPct={usedPct} />
+      <div className={METER_CELL_CLASS}>
+        <UsageMeter label={windowLabel(snap.window)} usedPct={usedPct} />
+      </div>
       <span className={USED_CELL_CLASS}>{used}</span>
       {facts.length ? (
         <span data-slot="window-facts" className={FACTS_CELL_CLASS}>
@@ -284,7 +210,10 @@ export function QuotaWindowRowSkeleton() {
           />
         </span>
       </span>
-      <Skeleton as="span" className="block h-1 w-full" />
+      <Skeleton
+        as="span"
+        className={cx(METER_CELL_CLASS, 'block h-1 w-full')}
+      />
       <span className={cx(USED_CELL_CLASS, 'block')}>
         <Skeleton
           as="span"
@@ -294,7 +223,7 @@ export function QuotaWindowRowSkeleton() {
       <span className={cx(FACTS_CELL_CLASS, 'block')}>
         <Skeleton
           as="span"
-          className="inline-block h-[0.75em] w-40 align-middle"
+          className="inline-block h-[0.75em] w-20 align-middle"
         />
       </span>
     </div>

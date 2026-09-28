@@ -37,26 +37,3 @@ export const QUOTA_SEVERITY_TEXT_CLASS: Record<QuotaSeverity, string> = {
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 };
-
-/**
- * The one human label for a quota limit status: `allowed_warning` reads
- * "Allowed warning". Every surface that prints a status goes through this
- * (and `quotaStatusTone`) so the table caption and the detail pane's quota
- * rows can never drift.
- */
-export function quotaStatusLabel(status: string): string {
-  const text = status.replaceAll('_', ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-export type QuotaStatusTone = 'danger' | 'warn' | 'default';
-
-/**
- * The severity a limit status earns: `rejected` is danger, any `*_warning`
- * is warn, anything else (including `allowed`) is plain text.
- */
-export function quotaStatusTone(status: string): QuotaStatusTone {
-  if (status === 'rejected') return 'danger';
-  if (status.endsWith('warning')) return 'warn';
-  return 'default';
-}

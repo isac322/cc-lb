@@ -81,17 +81,8 @@ vi.mock('@tanstack/react-router', async () => {
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
 
-const loadedStatus = {
-  version: '1.2.3',
-  git_sha: 'abc1234',
-  uptime_secs: 120,
-  build: {
-    rust_version: '1.90.0',
-    profile: 'release',
-    target: 'aarch64-unknown-linux-gnu',
-  },
-  generation: 7,
-};
+// The editor reads only the process uptime (restart drift) from status.
+const loadedStatus = { uptime_secs: 120 };
 
 const configSchema = {
   type: 'object',
@@ -656,13 +647,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('settings cold load shows skeletons for version, editor, and history', () => {
+test('settings cold load shows skeletons for the editor and history', () => {
   render(<SettingsComponent />);
 
-  const versionCard = screen.getByTestId('version-card');
-  expect(versionCard.querySelectorAll('.skeleton')).toHaveLength(6);
   // The status zone sits above the editor card; its facts strip is a
-  // borderless, low-emphasis pair of lists — no panel chrome or divider.
+  // borderless, low-emphasis list — no panel chrome or divider.
   const statusZone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -671,8 +660,7 @@ test('settings cold load shows skeletons for version, editor, and history', () =
       0,
   ).toBe(true);
   const metadata = within(statusZone).getByTestId('config-editor-metadata');
-  const factsStrip = metadata.parentElement as HTMLElement;
-  expect(factsStrip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
+  expect(metadata.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
   // Until categories load, one placeholder per category stands in the tab
   // row — no real navigation that could be clicked before data arrives.
   const tabsSkeleton = within(editorCard).getByTestId(
@@ -704,7 +692,7 @@ test('settings cold load shows skeletons for version, editor, and history', () =
   ).toBeNull();
 });
 
-test('settings preserves version, localization, metadata history, and database backups', () => {
+test('settings keeps localization, metadata history, and database backups without a version card or visible page header', () => {
   setSettingsLoaded();
   queryMocks.useConfigHistory.mockReturnValue(
     loadedResult({
@@ -714,7 +702,16 @@ test('settings preserves version, localization, metadata history, and database b
 
   render(<SettingsComponent />);
 
-  expect(screen.getByText('Version')).toBeDefined();
+  // The page's one h1 stays for assistive tech; no description line or
+  // Version section repeats what the top bar and sidebar already show.
+  expect(
+    screen.getByRole('heading', { level: 1, name: 'Settings' }),
+  ).toBeDefined();
+  expect(
+    screen.queryByText(/configuration drafts, and data backups/),
+  ).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Version' })).toBeNull();
+  expect(screen.queryByText(/not embedded in this binary/)).toBeNull();
   expect(screen.getByText('Localization')).toBeDefined();
   expect(screen.getByText('Saved config history')).toBeDefined();
   expect(screen.getByText('Data & backups')).toBeDefined();
@@ -1537,13 +1534,13 @@ test('history load failures stay distinct from empty history and offer retry', (
   expect(history.refetch).toHaveBeenCalledTimes(1);
 });
 
-test('status zone gathers metadata, running facts, and only abnormal alerts', () => {
+test('status zone gathers draft metadata and only abnormal alerts, without repeating running values', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
   // One compact zone above the editor card carries a single borderless
-  // low-emphasis facts strip — metadata and running facts as inline
-  // label/value pairs — plus the alerts that actually apply.
+  // low-emphasis facts list — the draft metadata — plus the alerts that
+  // actually apply.
   const zone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -1554,18 +1551,17 @@ test('status zone gathers metadata, running facts, and only abnormal alerts', ()
   const metadata = within(zone).getByTestId('config-editor-metadata');
   expect(metadata.textContent).toContain('/etc/cc-lb/cc-lb.toml');
   expect(metadata.textContent).toContain('Revision');
-  const summary = within(zone).getByTestId('config-running-summary');
-  expect(summary.textContent).toContain('127.0.0.1:9090');
-  expect(summary.textContent).toMatch(/postgres/i);
-  // Metadata and running facts share one strip element directly inside the
-  // zone — no panel chrome, no metadata/run divider, no reserved height,
-  // no uppercase label styling.
-  const strip = metadata.parentElement as HTMLElement;
-  expect(strip.parentElement).toBe(zone);
-  expect(strip.contains(summary)).toBe(true);
-  expect(strip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
-  expect(strip.querySelector('.border-t')).toBeNull();
-  expect(strip.querySelector('.uppercase')).toBeNull();
+  expect(metadata.parentElement).toBe(zone);
+  expect(metadata.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
+  expect(metadata.querySelector('.uppercase')).toBeNull();
+  // Listener addresses and the storage backend are edited (with their
+  // effective values) in the editor below; the zone does not repeat them.
+  expect(zone.textContent).not.toContain('127.0.0.1:9090');
+  expect(zone.textContent).not.toMatch(/postgres/i);
+  expect(within(zone).queryByText('Running')).toBeNull();
+  expect(
+    within(editorCard).getAllByDisplayValue(/127\.0\.0\.1:9090/).length,
+  ).toBeGreaterThan(0);
   // The fixture saved after process start, so the pending-restart drift
   // banner is a real abnormal alert and lives in the zone. It is announced
   // once by that timestamped notice — there is no separate

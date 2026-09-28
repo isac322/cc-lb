@@ -570,43 +570,53 @@ describe('RequestEventsTable', () => {
     expect(a1.getAttribute('style')).not.toBe(b1.getAttribute('style'));
   });
 
-  it('shortens the model id only in fit tables, keeping the full id in the title', () => {
-    const events = [
-      {
-        event_id: 'evt_m',
-        request_id: 'req_m',
-        ts: 1718553120,
-        status: 200,
-        duration_ms: 100,
-        model: 'claude-sonnet-4-6',
-        _phase: 'final',
-      } satisfies RequestEventWithPhase,
-    ];
+  it.each([
+    ['fit', undefined],
+    ['scroll', 'min-w-[1080px]'],
+  ])(
+    'drops a leading claude- from model ids in %s tables, keeping the full id',
+    (_mode, minWidthClass) => {
+      const events = [
+        {
+          event_id: 'evt_m',
+          request_id: 'req_m',
+          ts: 1718553120,
+          status: 200,
+          duration_ms: 100,
+          model: 'claude-sonnet-4-6',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+        {
+          event_id: 'evt_other',
+          request_id: 'req_other',
+          ts: 1718553121,
+          status: 200,
+          duration_ms: 100,
+          model: 'my-claude-proxy',
+          _phase: 'final',
+        } satisfies RequestEventWithPhase,
+      ];
 
-    const { container: fit } = render(
-      <RequestEventsTable
-        events={events}
-        principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
-      />,
-    );
-    expect(
-      fit.querySelector('tbody span[title="claude-sonnet-4-6"]')?.textContent,
-    ).toBe('sonnet-4-6');
-
-    const { container: scroll } = render(
-      <RequestEventsTable
-        events={events}
-        principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
-        minWidthClass="min-w-[1080px]"
-      />,
-    );
-    expect(
-      scroll.querySelector('tbody span[title="claude-sonnet-4-6"]')
-        ?.textContent,
-    ).toBe('claude-sonnet-4-6');
-  });
+      const { container } = render(
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+          minWidthClass={minWidthClass}
+        />,
+      );
+      const model = container.querySelector(
+        'tbody span[title="claude-sonnet-4-6"]',
+      );
+      expect(model?.textContent).toBe('sonnet-4-6');
+      expect(model?.getAttribute('aria-label')).toBe('claude-sonnet-4-6');
+      // Only a leading prefix goes.
+      expect(
+        container.querySelector('tbody span[title="my-claude-proxy"]')
+          ?.textContent,
+      ).toBe('my-claude-proxy');
+    },
+  );
 
   describe('Cost Tooltip', () => {
     it('renders 5 rows with $0.0000 formatting for each sub-cost and sums correctly', async () => {

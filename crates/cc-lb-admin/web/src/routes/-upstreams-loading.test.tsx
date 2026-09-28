@@ -43,7 +43,6 @@ vi.mock('../lib/queries', async () => {
     useRecentEvents: vi.fn(),
     useStartOauthDraft: vi.fn(),
     useStatus: vi.fn(),
-    useSubscriptionQuotaAnalysis: vi.fn(),
     useSubscriptionQuotaLatest: vi.fn(),
     useSubscriptionQuotaSeries: vi.fn(),
     useTriggerSubscriptionMetadataRefresh: vi.fn(),
@@ -204,52 +203,6 @@ function quotaSeriesData(
           },
         ],
         markers: [],
-      },
-    ],
-  };
-}
-
-function quotaAnalysisData(target: Upstream, utilization: number) {
-  const burn = {
-    utilization_per_second: 0.0001,
-    utilization_per_hour: 0.36,
-    eta_to_limit_secs: 3_600,
-    resets_before_limit: false,
-    confidence: 'high',
-    sample_count: 2,
-    reason: null,
-  };
-  return {
-    since_unix_secs: NOW_UNIX_SECS - 604_800,
-    until_unix_secs: NOW_UNIX_SECS,
-    now_unix_secs: NOW_UNIX_SECS,
-    max_staleness_secs: 300,
-    upstreams: [
-      {
-        upstream_id: target.id,
-        upstream_name: target.name,
-        windows: [
-          {
-            window: '5h',
-            current_utilization: utilization,
-            resets_at_unix_secs: NOW_UNIX_SECS + 3_600,
-            data_state: 'fresh',
-            actual_account_burn: burn,
-            proxy_projected_burn: {
-              proxy_tokens_per_second: 10,
-              proxy_tokens_per_hour: 36_000,
-              effective_limit_tokens_estimate: 100_000,
-              utilization_per_hour: 0.36,
-              eta_to_limit_secs: 3_600,
-              resets_before_limit: false,
-              confidence: 'high',
-              sample_count: 2,
-              reason: null,
-            },
-            deficit: null,
-            caveats: [],
-          },
-        ],
       },
     ],
   };
@@ -486,12 +439,6 @@ beforeEach(() => {
     isPending: true,
     isPlaceholderData: false,
   } as never);
-  vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
-    data: undefined,
-    isLoading: true,
-    isPending: true,
-    isPlaceholderData: false,
-  } as never);
   vi.mocked(queries.useUsage).mockReturnValue({
     data: undefined,
     isLoading: true,
@@ -569,15 +516,12 @@ afterEach(() => {
 });
 
 describe('/upstreams quota request cadence', () => {
-  test('keeps stable series and analysis range identities across wall-clock ticks', () => {
+  test('keeps a stable series range identity across wall-clock ticks', () => {
     vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
     renderRoute();
 
     const firstSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
-      .mock.calls.at(-1)?.[0];
-    const firstAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
       .mock.calls.at(-1)?.[0];
 
     cleanup();
@@ -588,20 +532,15 @@ describe('/upstreams quota request cadence', () => {
     const secondSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
       .mock.calls.at(-1)?.[0];
-    const secondAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
-      .mock.calls.at(-1)?.[0];
 
     expect(firstSeriesParams).toMatchObject({
       rangeSecs: 604800,
       bucketSecs: 1800,
     });
-    expect(firstAnalysisParams).toMatchObject({ rangeSecs: 604800 });
     expect(secondSeriesParams).toEqual(firstSeriesParams);
-    expect(secondAnalysisParams).toEqual(firstAnalysisParams);
   });
 
-  test('updates both stable range identities when the visible range changes', () => {
+  test('updates the series range identity when the visible range changes', () => {
     renderRoute();
 
     fireEvent.click(screen.getByRole('radio', { name: '1h' }));
@@ -609,15 +548,11 @@ describe('/upstreams quota request cadence', () => {
     const seriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
       .mock.calls.at(-1)?.[0];
-    const analysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
-      .mock.calls.at(-1)?.[0];
 
     expect(seriesParams).toMatchObject({
       rangeSecs: 3600,
       bucketSecs: 60,
     });
-    expect(analysisParams).toMatchObject({ rangeSecs: 3600 });
   });
 });
 
@@ -723,12 +658,6 @@ describe('/upstreams cold-load geometry', () => {
     } as never);
     vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue({
       data: { series: [] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
-      data: { upstreams: [] },
       isLoading: false,
       isPending: false,
       isPlaceholderData: false,
@@ -877,11 +806,6 @@ describe('/upstreams refresh retention', () => {
         ),
         { isPlaceholderData },
       ),
-    );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(() =>
-      queryResult(quotaAnalysisData(upstream, phaseData[phase].utilization), {
-        isPlaceholderData,
-      }),
     );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(() =>
       queryResult(
@@ -1088,12 +1012,6 @@ describe('/upstreams refresh retention', () => {
       (options) =>
         options.upstreamIds === upstream.id
           ? queryResult(quotaSeriesData(upstream, 0.42))
-          : queryResult(undefined, { isLoading: true, isPending: true }),
-    );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(
-      (options) =>
-        options.upstreamIds === upstream.id
-          ? queryResult(quotaAnalysisData(upstream, 0.42))
           : queryResult(undefined, { isLoading: true, isPending: true }),
     );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(

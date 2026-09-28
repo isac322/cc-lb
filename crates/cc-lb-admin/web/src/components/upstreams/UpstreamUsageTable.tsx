@@ -29,8 +29,6 @@ import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
   quotaSeverity,
-  quotaStatusLabel,
-  quotaStatusTone,
 } from '../../lib/quotaSeverity';
 import { cx, Skeleton } from '../ui/primitives';
 import { UsageMeter } from '../ui/UsageMeter';
@@ -323,13 +321,16 @@ function WindowCell({
       ? null
       : snap.utilization * 100;
   const severity = quotaSeverity(used);
-  const status = snap?.status && snap.status !== 'allowed' ? snap.status : null;
   const reset = snap
     ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
     : { text: 'No reading' };
+  // Narrow containers (phones) read one line per window above its meter:
+  //   [label] [N% used]            [resets in …]
+  //   [meter ─────────────────────────────────]
+  // From @xl the three windows sit side by side, each a small column.
   return (
     <div
-      className="flex min-w-0 flex-col gap-1.5"
+      className={WINDOW_CELL_CLASS}
       data-testid="usage-cell"
       data-window={windowName}
     >
@@ -338,8 +339,8 @@ function WindowCell({
       {pending ? (
         <>
           <Skeleton className="h-5 w-16" />
-          <Skeleton className="h-1 w-full" />
-          <Skeleton className="h-3 w-24" />
+          <Skeleton className={cx(CAPTION_CELL_CLASS, 'h-3 w-24')} />
+          <Skeleton className={cx(METER_CELL_CLASS, 'h-1 w-full')} />
         </>
       ) : (
         <>
@@ -362,31 +363,30 @@ function WindowCell({
               <span className="text-caption text-text-muted">used</span>
             )}
           </span>
-          <UsageMeter label={`${label} window used`} usedPct={used} />
           <span
             className={cx(
-              'text-caption tabular-nums',
-              status && quotaStatusTone(status) === 'danger'
-                ? 'text-danger-text'
-                : status && quotaStatusTone(status) === 'warn'
-                  ? 'text-warn-text'
-                  : 'text-text-muted',
+              CAPTION_CELL_CLASS,
+              'text-caption tabular-nums text-text-muted',
             )}
-            title={
-              status
-                ? `${quotaStatusLabel(status)} · ${reset.title ?? reset.text}`
-                : (reset.title ?? reset.text)
-            }
+            title={reset.title ?? reset.text}
           >
-            {status
-              ? `${quotaStatusLabel(status)} · ${reset.text}`
-              : reset.text}
+            {reset.text}
           </span>
+          <div className={METER_CELL_CLASS}>
+            <UsageMeter label={`${label} window used`} usedPct={used} />
+          </div>
         </>
       )}
     </div>
   );
 }
+
+const WINDOW_CELL_CLASS =
+  'grid min-w-0 grid-cols-[4.5rem_minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1.5 ' +
+  '@xl:flex @xl:flex-col @xl:items-stretch @xl:gap-1.5';
+// Narrow: right of the figure; from @xl: last, under the meter.
+const CAPTION_CELL_CLASS = 'truncate text-right @xl:order-last @xl:text-left';
+const METER_CELL_CLASS = 'col-span-full';
 
 function NameCell({ row }: { row: UpstreamUsageRow }) {
   const { health, nudge, upstream } = row;
@@ -429,12 +429,16 @@ function NameCell({ row }: { row: UpstreamUsageRow }) {
   );
 }
 
+// Narrow: the name, then one line per window. @xl: the three windows side
+// by side under the name. @4xl: one table row with a header above.
 const ROW_GRID =
-  'grid gap-x-6 gap-y-3 grid-cols-3 ' +
+  'grid gap-x-6 gap-y-3 grid-cols-1 @xl:grid-cols-3 ' +
   '@4xl:grid-cols-[minmax(12rem,1.4fr)_repeat(3,minmax(0,1fr))] @4xl:items-center @4xl:gap-y-0';
 
+// Stacked rows keep the section's own edge so names align with its heading;
+// the table row insets its cells like other tables.
 const ROW_CLASS =
-  'rounded-sm px-3 py-3 text-left text-text transition-colors ' +
+  'rounded-sm px-0 py-3 text-left text-text transition-colors @4xl:px-3 ' +
   'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
 
 function RowBody({
@@ -450,7 +454,7 @@ function RowBody({
 }) {
   return (
     <>
-      <div className="col-span-3 min-w-0 @4xl:col-span-1">
+      <div className="col-span-full min-w-0 @4xl:col-span-1">
         <NameCell row={row} />
       </div>
       {row.upstream.kind === 'anthropic_oauth' ? (
@@ -466,7 +470,7 @@ function RowBody({
         ))
       ) : (
         <span
-          className="col-span-3 text-body-sm text-text-muted"
+          className="col-span-full text-body-sm text-text-muted @4xl:col-span-3"
           data-testid="usage-no-quota"
         >
           No subscription quota
@@ -520,7 +524,7 @@ export function UpstreamUsageTable({
             )}
             data-testid="upstream-list-loading-row"
           >
-            <div className="col-span-3 flex flex-col gap-1.5 @4xl:col-span-1">
+            <div className="col-span-full flex flex-col gap-1.5 @4xl:col-span-1">
               <Skeleton className="h-5 w-32" />
             </div>
             {USAGE_WINDOWS.map((w) => (
@@ -578,7 +582,7 @@ export function UpstreamUsageTable({
         ))}
       </ul>
       {collapsible ? (
-        <div className="border-t border-row px-3 pt-3">
+        <div className="border-t border-row pt-3 @4xl:px-3">
           <button
             aria-controls={listId}
             aria-expanded={expanded}

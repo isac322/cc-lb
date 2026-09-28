@@ -12,6 +12,7 @@ import {
 import { useEffect } from 'react';
 import { usePrincipals, useUpstreams } from '../lib/queries';
 import { NAV_ITEMS } from './layout/navItems';
+import { UpstreamPlanCaption } from './upstreams/UpstreamPlanCaption';
 
 export interface CommandPaletteProps {
   open: boolean;
@@ -43,10 +44,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     <BaseDialog.Root onOpenChange={onOpenChange} open={open}>
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop" />
-        <BaseDialog.Popup
-          className="fixed top-[5vh] left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-xl outline-none"
-          style={{ maxHeight: 'min(700px, 80vh)' }}
-        >
+        {/* Phones: a full-screen sheet (input on top, results to the bottom
+            edge) so the keyboard never hides the list under a floating card.
+            From `md`: a centred 36rem panel near the top. */}
+        <BaseDialog.Popup className="fixed inset-x-0 top-0 z-50 h-dvh outline-none md:inset-x-auto md:top-[5vh] md:left-1/2 md:h-auto md:w-[calc(100%-2rem)] md:max-w-xl md:-translate-x-1/2">
           <BaseDialog.Title className="sr-only">
             Command palette
           </BaseDialog.Title>
@@ -55,13 +56,13 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           </BaseDialog.Description>
           <Command
             label="Command palette"
-            className="glass-strong rounded-md grid grid-rows-[auto_minmax(0,1fr)_auto] max-h-full overflow-hidden"
+            className="glass-strong grid h-full grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden max-md:rounded-none max-md:border-0 md:h-auto md:max-h-[min(700px,80vh)] md:rounded-md"
           >
             <div className="flex items-center gap-2 px-4 h-12 border-b border-subtle">
               <Command.Input
                 placeholder="Search resources or run commands…"
                 autoFocus
-                className="flex-1 bg-transparent text-body text-text placeholder:text-text-faint outline-none"
+                className="flex-1 self-stretch bg-transparent text-body text-text placeholder:text-text-faint outline-none"
               />
               <kbd className="hidden md:inline font-sans text-caption text-text-faint border border-subtle px-1.5 rounded-sm">
                 Esc
@@ -114,9 +115,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       onSelect={() => go(`/upstreams?selectedId=${u.id}`)}
                     >
                       <Server className="w-4 h-4 text-text-faint" />
-                      <span>{u.name}</span>
-                      <span className="ml-auto font-mono text-data text-text-faint">
-                        {u.kind}
+                      <span className="min-w-0 truncate">{u.name}</span>
+                      <span className="ml-auto shrink-0 text-caption text-text-faint">
+                        <UpstreamPlanCaption upstream={u} />
                       </span>
                     </Command.Item>
                   ))
@@ -133,8 +134,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       onSelect={() => go(`/principals?selectedId=${p.id}`)}
                     >
                       <Users className="w-4 h-4 text-text-faint" />
-                      <span>{p.name}</span>
-                      <span className="ml-auto font-mono text-data text-text-faint">
+                      <span className="min-w-0 truncate">{p.name}</span>
+                      <span className="ml-auto shrink-0 font-mono text-data text-text-faint">
                         {p.kind}
                       </span>
                     </Command.Item>

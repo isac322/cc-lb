@@ -108,8 +108,38 @@ export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
         </div>
       </Section>
       {hooks.length > 0 && (
-        <Section title="Hooks">
-          <Card className="overflow-x-auto">
+        // Below `lg` the detail is one column; hooks are the most technical
+        // part, so they follow "Used by" and "Use this plugin" there.
+        <Section title="Hooks" className="max-lg:order-last">
+          {/* Phones: one stacked block per hook instead of a sideways-
+              scrolling three-column table. */}
+          <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
+            {hooks.map(([hookName, meta]) => (
+              <li key={hookName} className="px-4 py-3">
+                <div className="font-mono text-data text-text break-all">
+                  {hookName}
+                </div>
+                <div className="mt-0.5 text-caption text-text-faint">
+                  {getSlotForHook(hookName)} · wire v{meta.wire_version}
+                  {meta.mode === 'noop' ? ' · No-op' : null}
+                </div>
+                {meta.description ? (
+                  <p className="mt-2 text-body text-text-muted">
+                    {meta.description}
+                  </p>
+                ) : null}
+                {meta.usage ? (
+                  <div className="mt-2">
+                    <div className="text-label text-text-faint">Usage</div>
+                    <p className="mt-0.5 text-body text-text-muted">
+                      {meta.usage}
+                    </p>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <Card className="hidden overflow-x-auto md:block">
             <Table className="min-w-[640px] table-fixed">
               <colgroup>
                 <col className="w-[22%]" />

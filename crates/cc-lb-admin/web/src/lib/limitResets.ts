@@ -134,7 +134,7 @@ export function useClaimLimitReset() {
         body,
       ),
     // Whatever the outcome, the quota picture may have moved: refetch the real
-    // latest/series/analysis data (never optimistic zeros) plus the sidebar
+    // latest/series data (never optimistic zeros) plus the sidebar
     // sources so a consumed reset is visible everywhere.
     onSettled: (_data, _error, vars) => {
       qc.invalidateQueries({

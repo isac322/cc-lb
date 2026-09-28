@@ -121,8 +121,11 @@ export function PluginUploadCard({
       aria-disabled={uploading || undefined}
       aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
       aria-busy={uploading}
+      // Phones get a compact one-line picker (icon beside the copy, no drag
+      // hint: touch has no drag and drop); from `md` it is the centered
+      // drop zone.
       className={cx(
-        'flex flex-col items-center justify-center rounded-sm border border-dashed border-subtle-strong px-4 py-8 text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+        'flex items-center gap-3 rounded-sm border border-dashed border-subtle-strong px-4 py-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 md:flex-col md:justify-center md:gap-0 md:py-8 md:text-center',
         uploading
           ? 'cursor-wait opacity-70'
           : 'cursor-pointer hover:border-text-faint hover:bg-hover-bg',
@@ -148,17 +151,22 @@ export function PluginUploadCard({
         strokeWidth={1.75}
         aria-hidden="true"
         className={cx(
-          'mb-2 size-6',
+          'size-6 shrink-0 md:mb-2',
           uploading
             ? 'text-text-muted motion-safe:animate-pulse'
             : 'text-text-faint',
         )}
       />
-      <div className="text-body font-medium text-text">
-        {uploading ? 'Uploading…' : 'Choose .wasm file'}
-      </div>
-      <div className="mt-1 text-body-sm text-text-muted">
-        Drag and drop or click to browse. Max 32 MiB.
+      <div className="min-w-0">
+        <div className="text-body font-medium text-text">
+          {uploading ? 'Uploading…' : 'Choose .wasm file'}
+        </div>
+        <div className="mt-0.5 text-body-sm text-text-muted md:mt-1">
+          <span className="md:hidden">Tap to browse. Max 32 MiB.</span>
+          <span className="max-md:hidden">
+            Drag and drop or click to browse. Max 32 MiB.
+          </span>
+        </div>
       </div>
       <input
         ref={fileRef}

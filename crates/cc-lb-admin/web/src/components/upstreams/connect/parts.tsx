@@ -67,7 +67,7 @@ export function SignInLink({
         aria-disabled="true"
         className={cx(
           buttonClassName('secondary', size),
-          'cursor-not-allowed opacity-40 hover:bg-transparent',
+          'control-disabled',
           className,
         )}
       >
@@ -144,7 +144,7 @@ export function CopyLinkButton({
     <button
       type="button"
       title="Open it in the browser profile where the right Claude account is signed in"
-      className="inline-flex items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
+      className="inline-flex items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text max-md:min-h-10"
       onClick={() => {
         void copyText(authorizeUrl).then((ok) => {
           if (ok) setCopied(true);

@@ -142,9 +142,7 @@ test('audit sends principal and time filters and reset clears them together', ()
     since: '1718665200',
     until: '1718668800',
   });
-  expect(
-    screen.getByRole('button', { name: 'More filters (2)' }),
-  ).toBeDefined();
+  expect(screen.getByRole('button', { name: 'Filters (2)' })).toBeDefined();
 
   fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(routerMocks.navigate).toHaveBeenCalledWith({ search: {} });

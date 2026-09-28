@@ -201,7 +201,8 @@ const EMPTY_PRINCIPAL_DETAIL_NAME_MAP = new Map<string, string>();
 
 // INPUT_CLASS carries no disabled affordance of its own; blocking mutations
 // need every locked control to read as unavailable, not merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-40 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS =
+  'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
 
 function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
   const slots = plugin.supported_slots;
@@ -476,7 +477,6 @@ function PrincipalsPage() {
           <Button
             id="btn-new-principal"
             size="sm"
-            className="max-md:h-11"
             variant="primary"
             iconLeft={<Plus />}
             onClick={() => setCreateOpen(true)}
@@ -1227,9 +1227,10 @@ function DefaultLimitsRow({ principal }: { principal: Principal }) {
 const PLUGIN_DRAWER_HEADING_CLASS =
   'mb-1.5 flex items-center gap-1.5 text-label text-text-muted';
 
-// Matches the shared underline tabs: 14/500, 36px tall, 2px accent rule.
+// Matches the shared underline tabs: 14/500, 36px tall (40px on phones),
+// 2px accent rule.
 const ROUTER_TAB_CLASS =
-  'h-9 px-3 text-body font-medium border-b-2 -mb-px transition-colors border-transparent text-text-muted hover:text-text data-[active]:border-accent data-[active]:text-text';
+  'h-9 max-md:h-10 px-3 text-body font-medium border-b-2 -mb-px transition-colors border-transparent text-text-muted hover:text-text data-[active]:border-accent data-[active]:text-text';
 
 /** Radio ring shared by the slot and terminal-strategy option cards. */
 function RadioMark({ isMutating }: { isMutating: boolean }) {
@@ -1265,7 +1266,7 @@ function SlotRadioCard({
           isActive
             ? 'border-accent/60 bg-accent-dim'
             : 'border-subtle hover:bg-overlay-2',
-          disabled ? 'pointer-events-none opacity-40 cursor-not-allowed' : '',
+          disabled ? 'pointer-events-none control-disabled' : '',
         )}
       >
         <BaseRadio.Root
@@ -1276,8 +1277,22 @@ function SlotRadioCard({
           <RadioMark isMutating={isMutating} />
         </BaseRadio.Root>
         <div className="flex-1 min-w-0">
-          <div className="text-body font-medium text-text truncate">{name}</div>
-          <div className="text-body text-text-muted mt-0.5">{desc}</div>
+          <div
+            className={cx(
+              'text-body font-medium truncate',
+              disabled ? 'text-text-faint' : 'text-text',
+            )}
+          >
+            {name}
+          </div>
+          <div
+            className={cx(
+              'text-body mt-0.5',
+              disabled ? 'text-text-faint' : 'text-text-muted',
+            )}
+          >
+            {desc}
+          </div>
         </div>
       </label>
     </li>
@@ -1513,7 +1528,9 @@ function TerminalStrategyRadioGroup({
                     : disabled
                       ? 'cursor-not-allowed'
                       : 'cursor-pointer',
-                  disabled && !isMutating && 'pointer-events-none opacity-40',
+                  disabled &&
+                    !isMutating &&
+                    'pointer-events-none control-disabled',
                 )}
               >
                 <BaseRadio.Root
@@ -1524,10 +1541,22 @@ function TerminalStrategyRadioGroup({
                   <RadioMark isMutating={isMutating} />
                 </BaseRadio.Root>
                 <div className="flex-1 min-w-0">
-                  <div className="text-body font-medium text-text truncate">
+                  <div
+                    className={cx(
+                      'text-body font-medium truncate',
+                      disabled && !isMutating ? 'text-text-faint' : 'text-text',
+                    )}
+                  >
                     {opt.name}
                   </div>
-                  <div className="text-body text-text-muted mt-0.5">
+                  <div
+                    className={cx(
+                      'text-body mt-0.5',
+                      disabled && !isMutating
+                        ? 'text-text-faint'
+                        : 'text-text-muted',
+                    )}
+                  >
                     {opt.desc}
                   </div>
                 </div>
@@ -1818,7 +1847,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                 className={cx(
                   ROUTER_TAB_CLASS,
                   'pl-0',
-                  isComplex && 'opacity-40 cursor-not-allowed',
+                  isComplex && 'control-disabled',
                 )}
                 value="basic"
               >
@@ -1947,30 +1976,32 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                     (r) => r.id === e.wasm_registry_id,
                   );
                   return (
+                    // Narrow sections stack "Step N" over the name so the
+                    // name and purpose get the width the step column held.
                     <li
                       key={e.id}
-                      className="flex items-center gap-3 py-3 border-b border-row"
+                      className="flex items-center gap-3 py-3 border-b border-row @max-md:grid @max-md:grid-cols-[minmax(0,1fr)_auto] @max-md:gap-x-2 @max-md:gap-y-0.5"
                       data-key={e.id}
                     >
-                      <div className="text-caption tabular-nums text-text-faint w-12 shrink-0">
+                      <div className="text-caption tabular-nums text-text-faint w-12 shrink-0 @max-md:col-start-1 @max-md:row-start-1 @max-md:w-auto">
                         Step {idx + 1}
                       </div>
-                      <div className="flex-1 min-w-0">
+                      <div className="flex-1 min-w-0 @max-md:col-start-1 @max-md:row-start-2">
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
-                            className="truncate rounded-sm text-body font-medium text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                            className="truncate rounded-sm text-body font-medium text-text underline decoration-border-strong underline-offset-2 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:-my-2.5 max-md:py-2.5"
                             onClick={() => setDetailPlugin(reg ?? null)}
                           >
                             {reg?.name ?? e.wasm_registry_id}
                           </button>
                         </div>
-                        <div className="text-body text-text-muted truncate mt-0.5">
+                        <div className="text-body text-text-muted truncate mt-0.5 @max-md:line-clamp-2 @max-md:whitespace-normal">
                           {reg?.metadata?.purpose ??
                             'User-uploaded filter (no description supplied).'}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0 @max-md:col-start-2 @max-md:row-span-2 @max-md:row-start-1">
                         <IconButton
                           label="Move filter up"
                           onClick={() => moveUp(idx)}
@@ -2012,9 +2043,9 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                       className={cx(
                         'mt-3 flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm transition-colors',
                         isChainBusy
-                          ? 'opacity-40 cursor-progress'
+                          ? 'control-disabled cursor-progress'
                           : principalWritePending
-                            ? 'opacity-40 cursor-not-allowed'
+                            ? 'control-disabled'
                             : 'hover:bg-overlay-2 cursor-pointer',
                       )}
                       data-key="add-filter-placeholder"
@@ -2023,12 +2054,18 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                   }
                 >
                   {insert.isPending ? (
-                    <div className="flex items-center gap-2 text-text-muted">
+                    <div className="flex items-center gap-2">
                       <Spinner className="w-4 h-4" />
                       <span className="text-body font-medium">Adding...</span>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-text-muted hover:text-text">
+                    <div
+                      className={cx(
+                        'flex items-center gap-2',
+                        !routerWriteBlocked &&
+                          'text-text-muted hover:text-text',
+                      )}
+                    >
                       <Plus className="w-4 h-4" />
                       <span className="text-body font-medium">Add filter</span>
                     </div>
@@ -2037,8 +2074,8 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
               </ul>
 
               <div className="flex flex-col gap-3 mt-8">
-                <div className="flex items-center gap-3">
-                  <div className="text-caption text-text-faint w-12 shrink-0 flex items-center gap-1">
+                <div className="flex items-center gap-3 @max-md:flex-col @max-md:items-start @max-md:gap-0.5">
+                  <div className="text-caption text-text-faint w-12 shrink-0 flex items-center gap-1 @max-md:w-auto">
                     <ChevronDown className="w-3 h-3" aria-hidden="true" />
                     Final
                   </div>
@@ -2046,7 +2083,7 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                     <div className="text-body font-medium text-text truncate">
                       Terminal step
                     </div>
-                    <div className="text-body text-text-muted truncate mt-0.5">
+                    <div className="text-body text-text-muted truncate mt-0.5 @max-md:whitespace-normal">
                       Picks the upstream that will serve the request.
                     </div>
                   </div>
@@ -2086,14 +2123,19 @@ export function RouterSlotEditor({ principal }: { principal: Principal }) {
                             key={p.id}
                             className={cx(
                               'w-full text-left px-2 py-1.5 rounded-sm text-body flex flex-col gap-0.5',
-                              'hover:bg-overlay-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
+                              'hover:bg-overlay-2 disabled:control-disabled',
                               isInserting && 'cursor-progress',
                             )}
                             disabled={disabled}
                             onClick={() => addFilter(p.id)}
                           >
                             <div className="flex items-center justify-between">
-                              <span className="font-medium text-text">
+                              <span
+                                className={cx(
+                                  'font-medium',
+                                  disabled ? 'text-text-faint' : 'text-text',
+                                )}
+                              >
                                 {p.name}
                               </span>
                               {isInserting ? (
@@ -2528,7 +2570,7 @@ function SortableChainItem({
         {...listeners}
         aria-label="Drag to reorder"
         disabled={disabled}
-        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-text-faint"
+        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing rounded-sm focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:control-disabled"
       >
         <GripVertical className="w-3.5 h-3.5" />
       </button>
@@ -2550,14 +2592,32 @@ function SortableChainItem({
   );
 }
 
+// Below a 42rem section the key table reflows into one card per key, the same
+// DOM restyled: checkbox, label and revoke on the first line, the key ID under
+// the label, then last 4 · issued · last used (and "Revoked") as a caption.
+// `!` beats the Table's `[&_td:first-child]` / `[&_td:last-child]` insets.
+const API_KEY_PHONE_HIDE = '@max-2xl:hidden';
+const API_KEY_PHONE_ROW =
+  '@max-2xl:flex @max-2xl:h-auto @max-2xl:flex-wrap @max-2xl:items-center @max-2xl:gap-x-3 @max-2xl:gap-y-0.5 @max-2xl:py-2 @max-2xl:pl-4 @max-2xl:pr-1';
+const API_KEY_PHONE_CELL = {
+  select: '@max-2xl:order-1 @max-2xl:w-4 @max-2xl:p-0!',
+  label:
+    '@max-2xl:order-2 @max-2xl:min-w-0 @max-2xl:flex-1 @max-2xl:truncate @max-2xl:p-0! @max-2xl:font-medium',
+  action: '@max-2xl:order-3 @max-2xl:-my-2 @max-2xl:p-0!',
+  keyId:
+    '@max-2xl:order-4 @max-2xl:basis-full @max-2xl:truncate @max-2xl:p-0! @max-2xl:pl-7!',
+  last4: '@max-2xl:order-5 @max-2xl:p-0! @max-2xl:pl-7!',
+  fact: '@max-2xl:order-5 @max-2xl:p-0! @max-2xl:text-caption @max-2xl:text-text-muted',
+} as const;
+
 const API_KEY_SKELETON_CELL_CLASSES = [
   'px-3 w-10',
   'px-3',
-  'px-3',
-  'px-3',
-  'px-3',
-  'px-3',
-  'px-3',
+  `px-3 ${API_KEY_PHONE_HIDE}`,
+  `px-3 ${API_KEY_PHONE_HIDE}`,
+  `px-3 ${API_KEY_PHONE_HIDE}`,
+  `px-3 ${API_KEY_PHONE_HIDE}`,
+  `px-3 ${API_KEY_PHONE_HIDE}`,
   'px-2 w-10',
 ] as const;
 
@@ -2573,7 +2633,9 @@ const API_KEY_SKELETON_CLASSES = [
 ] as const;
 
 const API_KEY_CHECKBOX_CLASS =
-  'size-4 cursor-pointer align-middle accent-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1';
+  'size-4 cursor-pointer align-middle accent-[var(--color-accent)] disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1';
+const API_KEY_CHECKBOX_HIT_CLASS =
+  'inline-flex cursor-pointer @max-2xl:-m-3 @max-2xl:p-3';
 
 /** How a key is named in bulk confirm copy: its last 4, else its ID. */
 function apiKeyTail(key: { key_id: string; last_4: string }): string {
@@ -2751,34 +2813,48 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
         className="glass rounded-md overflow-x-auto min-h-32"
         data-testid="api-keys-table-slot"
       >
-        <Table className="min-w-[760px] whitespace-nowrap">
-          <TableHead>
-            <tr>
-              <TableHeadCell className="w-10">
-                <input
-                  type="checkbox"
-                  aria-label="Select all active keys"
-                  className={API_KEY_CHECKBOX_CLASS}
-                  checked={allActiveSelected}
-                  ref={(el) => {
-                    if (el) el.indeterminate = someActiveSelected;
-                  }}
-                  disabled={activeKeys.length === 0 || revokePending}
-                  onChange={toggleAllActive}
-                />
+        <Table className="@max-2xl:block @2xl:whitespace-nowrap">
+          <TableHead className="@max-2xl:block">
+            <tr className="@max-2xl:flex">
+              <TableHeadCell className="w-10 @max-2xl:flex @max-2xl:h-10 @max-2xl:w-full @max-2xl:items-center @max-2xl:gap-3 @max-2xl:after:content-['Select_all']">
+                <label className={API_KEY_CHECKBOX_HIT_CLASS}>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all active keys"
+                    className={API_KEY_CHECKBOX_CLASS}
+                    checked={allActiveSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someActiveSelected;
+                    }}
+                    disabled={activeKeys.length === 0 || revokePending}
+                    onChange={toggleAllActive}
+                  />
+                </label>
               </TableHeadCell>
-              <TableHeadCell>Label</TableHeadCell>
-              <TableHeadCell>Key ID</TableHeadCell>
-              <TableHeadCell>Last 4</TableHeadCell>
-              <TableHeadCell>Issued</TableHeadCell>
-              <TableHeadCell>Last used</TableHeadCell>
-              <TableHeadCell>Status</TableHeadCell>
-              <TableHeadCell className="w-10">
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Label
+              </TableHeadCell>
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Key ID
+              </TableHeadCell>
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Last 4
+              </TableHeadCell>
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Issued
+              </TableHeadCell>
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Last used
+              </TableHeadCell>
+              <TableHeadCell className={API_KEY_PHONE_HIDE}>
+                Status
+              </TableHeadCell>
+              <TableHeadCell className={cx('w-10', API_KEY_PHONE_HIDE)}>
                 <span className="sr-only">Actions</span>
               </TableHeadCell>
             </tr>
           </TableHead>
-          <tbody>
+          <tbody className="@max-2xl:block">
             {keys.isLoading ? (
               Array.from({ length: 3 }).map((_, i) => (
                 <SkeletonRow
@@ -2794,38 +2870,65 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                 return (
                   <TableRow
                     key={k.key_id}
-                    className={revoked ? 'text-text-faint' : undefined}
+                    className={cx(
+                      API_KEY_PHONE_ROW,
+                      revoked && 'text-text-faint',
+                    )}
                   >
-                    <TableCell className="w-10">
+                    <TableCell
+                      className={cx('w-10', API_KEY_PHONE_CELL.select)}
+                    >
                       {!revoked ? (
-                        <input
-                          type="checkbox"
-                          aria-label={`Select key ${k.label ? `${k.label} (${k.key_id})` : k.key_id}`}
-                          className={API_KEY_CHECKBOX_CLASS}
-                          checked={selectedKeyIds.has(k.key_id)}
-                          disabled={revokePending}
-                          onChange={() => toggleKeySelected(k.key_id)}
-                        />
+                        // Phone cards: the label pads the 16px box out to a
+                        // 40px target without moving it.
+                        <label className={API_KEY_CHECKBOX_HIT_CLASS}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select key ${k.label ? `${k.label} (${k.key_id})` : k.key_id}`}
+                            className={API_KEY_CHECKBOX_CLASS}
+                            checked={selectedKeyIds.has(k.key_id)}
+                            disabled={revokePending}
+                            onChange={() => toggleKeySelected(k.key_id)}
+                          />
+                        </label>
                       ) : null}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className={API_KEY_PHONE_CELL.label}>
                       {k.label ?? <EmptyValue label="No label" />}
                     </TableCell>
-                    <TableCell mono>{k.key_id}</TableCell>
-                    <TableCell mono className="text-text-muted">
+                    <TableCell mono className={API_KEY_PHONE_CELL.keyId}>
+                      {k.key_id}
+                    </TableCell>
+                    <TableCell
+                      mono
+                      className={cx(
+                        'text-text-muted',
+                        API_KEY_PHONE_CELL.last4,
+                      )}
+                    >
                       {k.last_4 ? (
                         `···${k.last_4}`
                       ) : (
                         <EmptyValue label="Unknown" />
                       )}
                     </TableCell>
-                    <TableCell>
+                    <TableCell
+                      className={cx(
+                        API_KEY_PHONE_CELL.fact,
+                        "@max-2xl:before:content-['Issued_']",
+                      )}
+                    >
                       <RelativeTime
                         compact
                         ts={new Date(k.issued_at_unix_secs * 1000)}
                       />
                     </TableCell>
-                    <TableCell>
+                    <TableCell
+                      className={cx(
+                        API_KEY_PHONE_CELL.fact,
+                        "@max-2xl:before:content-['Used_']",
+                      )}
+                    >
                       <RelativeTime
                         compact
                         ts={
@@ -2835,14 +2938,23 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                         }
                       />
                     </TableCell>
-                    <TableCell>
+                    <TableCell
+                      className={
+                        revoked ? API_KEY_PHONE_CELL.fact : API_KEY_PHONE_HIDE
+                      }
+                    >
                       {revoked ? (
                         <StatusBadge tone="neutral" label="Revoked" />
                       ) : (
                         <EmptyValue label="Active" />
                       )}
                     </TableCell>
-                    <TableCell className="py-1 text-right">
+                    <TableCell
+                      className={cx(
+                        'py-1 text-right',
+                        API_KEY_PHONE_CELL.action,
+                      )}
+                    >
                       {!revoked ? (
                         <IconButton
                           className="hover:text-danger-text"
@@ -2863,8 +2975,11 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                 );
               })
             ) : (
-              <tr>
-                <td colSpan={8} className="px-4 py-8 text-center">
+              <tr className="@max-2xl:block">
+                <td
+                  colSpan={8}
+                  className="px-4 py-8 text-center @max-2xl:block"
+                >
                   <p className="text-body text-text-muted">
                     No API keys issued.
                   </p>

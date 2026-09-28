@@ -519,11 +519,11 @@ function WarmupCardMinimalInner({
           )}
 
           <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-1">
                 <span className="text-label text-text-faint">Next run</span>
                 <div
-                  className="flex min-h-5 items-center text-body-sm text-text"
+                  className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
                   data-testid="warmup-next-value"
                 >
                   {summaryPending ? (
@@ -542,7 +542,7 @@ function WarmupCardMinimalInner({
               <div className="flex flex-col gap-1">
                 <span className="text-label text-text-faint">Last run</span>
                 <div
-                  className="flex min-h-5 items-center text-body-sm text-text"
+                  className="flex min-h-5 max-md:min-h-10 items-center text-body-sm text-text"
                   data-testid="warmup-last"
                 >
                   {summaryPending ? (
@@ -551,7 +551,7 @@ function WarmupCardMinimalInner({
                     <button
                       type="button"
                       onClick={openHistory}
-                      className="-mx-1 rounded-sm px-1 text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                      className="-mx-1 rounded-sm px-1 text-left transition-colors hover:bg-overlay-2 max-md:min-h-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
                       aria-label="Open last warm-up attempt detail"
                     >
                       <span className="flex flex-wrap items-center gap-2">
@@ -577,8 +577,10 @@ function WarmupCardMinimalInner({
               </div>
             </div>
 
+            {/* Phones stack the label over a full-width picker; beside it the
+                picker would squeeze to a truncated sliver at 360px. */}
             <div
-              className="flex min-h-7 items-center justify-between gap-3"
+              className="flex min-h-7 items-center justify-between gap-3 max-md:flex-col max-md:items-stretch max-md:gap-1.5"
               data-testid="warmup-plugin-row"
             >
               <span className="inline-flex shrink-0 items-center gap-1.5 text-body-sm text-text-muted">
@@ -599,7 +601,7 @@ function WarmupCardMinimalInner({
                   </a>
                 </div>
               ) : (
-                <div className="w-56 max-w-full min-w-0">
+                <div className="w-56 max-w-full min-w-0 max-md:w-full">
                   <Select
                     id="dialect-plugin-select"
                     data-testid="warmup-plugin-select"
@@ -657,7 +659,7 @@ function WarmupCardMinimalInner({
                       : null}
                   </p>
                   <details className="group mt-1">
-                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
                       <ChevronRight
                         aria-hidden="true"
                         strokeWidth={1.75}

@@ -438,6 +438,21 @@
   background-color: var(--color-overlay-3);
   border-radius: var(--radius-sm);
 }
+/* Disabled control: `text-faint` ink (at least 4.9:1 on every surface, so
+   the label stays readable) on no fill with the quiet 1px line, and no hover
+   response. Use as `disabled:control-disabled` on native controls, or as a
+   plain class on elements that carry `aria-disabled`. Never dim with opacity. */
+@utility control-disabled {
+  cursor: not-allowed;
+  color: var(--color-text-faint);
+  background-color: transparent;
+  border-color: var(--color-border);
+  &:hover {
+    color: var(--color-text-faint);
+    background-color: transparent;
+    border-color: var(--color-border);
+  }
+}
 /* Sticky table header (`thead`): opaque panel so rows scrolling underneath
    never show through; 12px/500 `text-faint`, sentence case, 1px line. */
 @utility table-header {
@@ -529,6 +544,14 @@
 [cmdk-item][data-selected='true'] {
   background: var(--color-selected);
   color: var(--color-text);
+}
+[cmdk-item][data-disabled='true'] {
+  color: var(--color-text-faint);
+  cursor: not-allowed;
+}
+/* Phones: 44px rows so every command is a comfortable touch target. */
+@media (max-width: 47.99rem) {
+  [cmdk-item] { min-height: 44px; }
 }
 [cmdk-empty] { padding: 16px; color: var(--color-text-muted); font-size: 14px; }
 

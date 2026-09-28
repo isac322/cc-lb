@@ -119,7 +119,9 @@ export function FirstRunChecklist({
                   aria-hidden="true"
                 />
               )}
-              <div className="min-w-0 flex-1 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+              {/* Phones: the 44px link box already gives the step's action
+                  its air, so no extra gap sits between copy and link. */}
+              <div className="min-w-0 flex-1 flex flex-col sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                 <div className="min-w-0">
                   <p
                     className={cx(

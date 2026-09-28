@@ -20,6 +20,10 @@ export const ENTITY_LIST_TOOLBAR_MIN_ITEMS = 8;
 
 const MD_QUERY = '(min-width: 768px)';
 
+/** Phones: filter and sort as quiet inline selects sized to their label. */
+const PHONE_INLINE_SELECT_CLASS =
+  'max-md:h-10 max-md:w-auto max-md:border-transparent max-md:bg-transparent max-md:px-1.5 max-md:text-body-sm max-md:text-text-muted';
+
 export interface EntityListView<F extends string, S extends string> {
   q: string;
   filter: F;
@@ -191,17 +195,20 @@ function Toolbar<F extends string, S extends string>({
               onViewChange({ q: '' });
             }
           }}
-          className={cx(INPUT_SM_CLASS, 'w-full pl-8 max-md:h-11')}
+          className={cx(INPUT_SM_CLASS, 'w-full pl-8 max-md:h-10')}
           data-testid="entity-list-search"
         />
       </label>
-      {/* Auto tracks: each select starts at its label's width and the two
-      share what is left, so "Needs attention first" fits a 360px pane. */}
-      <div className="grid grid-cols-[minmax(0,auto)_minmax(0,auto)] gap-2">
+      {/* From md, auto tracks: each select starts at its label's width and
+      the two share what is left, so "Needs attention first" fits a 360px
+      pane. On phones they read as one quiet line under the search, filter
+      on the left and sort on the right: borderless, 40px tall and sized to
+      their label, so the view controls never outweigh the list. */}
+      <div className="flex items-center justify-between gap-2 md:grid md:grid-cols-[minmax(0,auto)_minmax(0,auto)] md:justify-normal">
         <Select
           size="sm"
           aria-label={`Filter ${noun}`}
-          className="min-w-0 max-md:h-11"
+          className={cx('min-w-0', PHONE_INLINE_SELECT_CLASS)}
           value={view.filter}
           options={filterOptions as readonly SelectOption[]}
           onChange={(value) => {
@@ -212,7 +219,7 @@ function Toolbar<F extends string, S extends string>({
         <Select
           size="sm"
           aria-label={`Sort ${noun}`}
-          className="min-w-0 max-md:h-11"
+          className={cx('min-w-0', PHONE_INLINE_SELECT_CLASS)}
           value={view.sort}
           options={sortOptions as readonly SelectOption[]}
           onChange={(value) => {
@@ -299,7 +306,11 @@ export function EntityList<T, F extends string, S extends string>({
 
   return (
     <aside className={cx('flex min-h-0 flex-col', className)}>
-      <div className="flex shrink-0 flex-col gap-3 border-b border-subtle px-4 py-3 [&>header]:mb-0">
+      {/* The pane's outer edge follows PageContainer's gutter (16 / 32 / 40)
+      so list content lines up with every other page's content edge. The
+      pane title sits in the top bar, so the header is the count line with
+      the action on the same row. */}
+      <div className="flex shrink-0 flex-col gap-3 border-b border-subtle py-3 pl-4 pr-4 md:pl-8 lg:pl-10 [&>header]:mb-0 [&>header]:flex-row [&>header]:items-center [&>header]:justify-between">
         <PageHeader
           title={title}
           description={
@@ -321,7 +332,7 @@ export function EntityList<T, F extends string, S extends string>({
       </div>
       {showToolbar && narrowed ? (
         <div
-          className="flex shrink-0 items-center justify-between gap-2 px-4 pt-2 text-caption text-text-muted"
+          className="flex shrink-0 items-center justify-between gap-2 pt-2 pl-4 pr-4 md:pl-8 lg:pl-10 text-caption text-text-muted"
           data-testid="entity-list-result-line"
         >
           <span role="status" className="tabular-nums">
@@ -330,14 +341,14 @@ export function EntityList<T, F extends string, S extends string>({
           <Button
             size="sm"
             variant="ghost"
-            className="max-md:h-11"
+            className="max-md:h-10"
             onClick={clear}
           >
             Clear
           </Button>
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-y-auto p-2 pb-8">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2 pb-8 md:pl-8 lg:pl-10">
         {loading ? (
           <div className="flex flex-col gap-0.5">
             {Array.from({ length: 4 }).map((_, i) => (
@@ -356,7 +367,7 @@ export function EntityList<T, F extends string, S extends string>({
                 ? `No ${noun} match "${query}"`
                 : `No ${noun} match this filter`}
             </p>
-            <Button size="sm" className="max-md:h-11" onClick={clear}>
+            <Button size="sm" onClick={clear}>
               Clear filters
             </Button>
           </div>

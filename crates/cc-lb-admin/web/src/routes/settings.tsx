@@ -6,17 +6,13 @@ import { ConfigEditorSection } from '../components/settings-config';
 import {
   Button,
   Card,
-  cx,
   Field,
   PageContainer,
   PageHeader,
   Section,
   Skeleton,
 } from '../components/ui/primitives';
-import {
-  RelativeOffsetTime,
-  RelativeTime,
-} from '../components/ui/RelativeTime';
+import { RelativeTime } from '../components/ui/RelativeTime';
 import { Select } from '../components/ui/Select';
 import {
   Table,
@@ -27,7 +23,7 @@ import {
 } from '../components/ui/Table';
 import { type ConfigHistoryResponse, downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
-import { useConfigHistory, useStatus } from '../lib/queries';
+import { useConfigHistory } from '../lib/queries';
 
 const ALL_BCP47_LOCALES = [
   'af-ZA',
@@ -205,7 +201,6 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsPage() {
-  const status = useStatus();
   const configHistory = useConfigHistory();
   const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
     useState(false);
@@ -254,12 +249,9 @@ function SettingsPage() {
 
   return (
     <PageContainer>
-      <PageHeader
-        title="Settings"
-        description="Version, localization, configuration drafts, and data backups."
-      />
-
-      <VersionCard status={status} />
+      {/* The top bar already names the page: the h1 stays for assistive
+      tech only, with no visible header block above the first section. */}
+      <PageHeader title="Settings" />
 
       <Section
         title="Localization"
@@ -269,6 +261,7 @@ function SettingsPage() {
           <div className="grid max-w-3xl gap-4 md:grid-cols-2">
             <Field label="Locale">
               <Select
+                className="max-md:h-10"
                 value={locale}
                 onChange={setLocale}
                 options={[
@@ -282,6 +275,7 @@ function SettingsPage() {
             </Field>
             <Field label="Timezone">
               <Select
+                className="max-md:h-10"
                 value={timezone}
                 onChange={setTimezone}
                 options={[
@@ -321,7 +315,7 @@ function SettingsPage() {
             chains stored in the database.
           </p>
           <Button
-            className="mt-4"
+            className="mt-4 max-md:h-11 max-md:w-full"
             iconLeft={<Download className="w-4 h-4" />}
             loading={downloadingDatabaseSnapshot}
             onClick={handleDownloadDatabaseSnapshot}
@@ -362,18 +356,6 @@ const LivePreviewClock = memo(function LivePreviewClock({
   );
 });
 
-/** The backend reports build metadata it could not embed at build time as "unknown". */
-const UNKNOWN_BUILD_VALUE = 'unknown';
-
-/** The status fields the Version card reads. */
-interface VersionStatus {
-  version: string;
-  git_sha: string;
-  uptime_secs: number;
-  build: { rust_version: string; profile: string; target: string };
-  generation: number;
-}
-
 /** Used when the runtime cannot enumerate IANA zones. */
 const FALLBACK_TIMEZONES = [
   'UTC',
@@ -385,122 +367,6 @@ const FALLBACK_TIMEZONES = [
   'America/New_York',
   'America/Los_Angeles',
 ];
-
-function VersionCard({
-  status,
-}: {
-  status: { data?: VersionStatus; isLoading: boolean };
-}) {
-  const data = status.data;
-  const buildFacts = data
-    ? [
-        { label: 'Commit', value: data.git_sha, mono: true },
-        { label: 'Rust', value: data.build.rust_version, mono: false },
-        { label: 'Profile', value: data.build.profile, mono: false },
-        {
-          label: 'Build target',
-          value: data.build.target,
-          mono: true,
-          wide: true,
-        },
-      ]
-    : [];
-  const buildUnavailable =
-    data !== undefined &&
-    buildFacts.every((fact) => fact.value === UNKNOWN_BUILD_VALUE);
-  return (
-    <div data-testid="version-card">
-      <Section
-        title="Version"
-        subtitle={
-          status.isLoading ? (
-            <Skeleton as="span" className="block h-4 w-56 max-w-full" />
-          ) : data ? (
-            <>
-              cc-lb v{data.version.replace(/^v/, '')} · started{' '}
-              <RelativeOffsetTime offsetSeconds={-data.uptime_secs} />
-            </>
-          ) : (
-            'Version info unavailable'
-          )
-        }
-      >
-        <div data-testid="version-metadata">
-          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
-            {status.isLoading ? (
-              VERSION_LOADING_FACTS.map((fact) => (
-                <VersionFact
-                  key={fact.label}
-                  label={fact.label}
-                  wide={fact.wide}
-                >
-                  <Skeleton className={cx('h-4 max-w-full', fact.width)} />
-                </VersionFact>
-              ))
-            ) : buildUnavailable ? (
-              <VersionFact label="Build" wide>
-                <span className="text-text-muted">
-                  Unavailable — not embedded in this binary
-                </span>
-              </VersionFact>
-            ) : (
-              buildFacts.map((fact) => (
-                <VersionFact
-                  key={fact.label}
-                  label={fact.label}
-                  wide={fact.wide}
-                >
-                  {fact.value === UNKNOWN_BUILD_VALUE ? (
-                    <span className="text-text-faint">Unknown</span>
-                  ) : (
-                    <span
-                      className={cx(
-                        'break-all',
-                        fact.mono && 'font-mono text-data',
-                      )}
-                    >
-                      {fact.value}
-                    </span>
-                  )}
-                </VersionFact>
-              ))
-            )}
-            {status.isLoading ? null : (
-              <VersionFact label="Generation">
-                <span className="tabular-nums">{data?.generation ?? '—'}</span>
-              </VersionFact>
-            )}
-          </dl>
-        </div>
-      </Section>
-    </div>
-  );
-}
-
-const VERSION_LOADING_FACTS = [
-  { label: 'Commit', width: 'w-20', wide: false },
-  { label: 'Rust', width: 'w-16', wide: false },
-  { label: 'Profile', width: 'w-14', wide: false },
-  { label: 'Build target', width: 'w-48', wide: true },
-  { label: 'Generation', width: 'w-8', wide: false },
-] as const;
-
-function VersionFact({
-  label,
-  wide = false,
-  children,
-}: {
-  label: string;
-  wide?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={cx('min-w-0', wide && 'col-span-2')}>
-      <dt className="text-label text-text-muted">{label}</dt>
-      <dd className="mt-0.5 min-h-5 text-body text-text">{children}</dd>
-    </div>
-  );
-}
 
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
 

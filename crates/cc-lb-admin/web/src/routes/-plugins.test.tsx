@@ -531,11 +531,13 @@ test('shows catalog and opens detail view', async () => {
 
   renderWithProviders();
 
-  expect(screen.getByText('My Plugin')).toBeDefined();
+  // Phones get their own two-line rows, so the desktop table is scoped.
+  const catalog = within(screen.getByRole('table'));
+  expect(catalog.getByText('My Plugin')).toBeDefined();
   // The badge, plus the Added column: built-ins have no upload time.
-  expect(screen.getAllByText('Built-in')).toHaveLength(2);
-  expect(screen.getByText('Router')).toBeDefined();
-  expect(screen.getByText('Test description')).toBeDefined();
+  expect(catalog.getAllByText('Built-in')).toHaveLength(2);
+  expect(catalog.getByText('Router')).toBeDefined();
+  expect(catalog.getByText('Test description')).toBeDefined();
 
   fireEvent.click(screen.getByRole('button', { name: 'Inspect My Plugin' }));
 
@@ -547,8 +549,9 @@ test('shows catalog and opens detail view', async () => {
   expect(headings[0]?.textContent).toContain('My Plugin');
   expect(screen.getByText('What this plugin does')).toBeDefined();
   expect(screen.getByText('Test usage')).toBeDefined();
-  expect(screen.getByText('test_hook')).toBeDefined();
-  expect(screen.getByText('Test hook description')).toBeDefined();
+  const hooks = within(screen.getByRole('table'));
+  expect(hooks.getByText('test_hook')).toBeDefined();
+  expect(hooks.getByText('Test hook description')).toBeDefined();
   expect(screen.getByText('File details')).toBeDefined();
   expect(screen.getByText('Used by')).toBeDefined();
   expect(screen.getByText('Use this plugin')).toBeDefined();

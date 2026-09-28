@@ -149,7 +149,7 @@ function AttemptListSkeleton() {
     >
       {ATTEMPT_SKELETON_ROWS.map((row) => (
         <li data-testid="warmup-attempt-skeleton-row" key={row}>
-          <div className="w-full rounded-sm px-2.5 py-1.5">
+          <div className="w-full rounded-sm px-2.5 py-1.5 max-md:py-2.5">
             <div className="flex min-h-5 items-center gap-2 flex-wrap leading-tight">
               <Skeleton className="h-1.5 w-1.5 shrink-0 rounded-full" />
               <Skeleton className="h-3 w-16" />
@@ -222,7 +222,7 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
               aria-pressed={filter === f.key}
               onClick={() => setFilter(f.key)}
               className={cx(
-                'inline-flex items-center gap-1.5 px-2 h-8 md:h-7 rounded-sm text-xs font-medium transition-colors',
+                'inline-flex items-center gap-1.5 px-2 h-10 md:h-7 rounded-sm text-xs font-medium transition-colors',
                 'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                 filter === f.key
                   ? 'bg-selected text-text'
@@ -242,11 +242,15 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
           ))}
         </div>
 
+        {/* Phones show the attempt list or one attempt, never both side by
+            side: a 44% list column is too narrow to read at 390px. */}
         <div className="flex-1 flex min-h-0">
           <div
             className={cx(
               'overflow-y-auto p-2',
-              selected ? 'w-[44%] shrink-0 border-r border-subtle' : 'flex-1',
+              selected
+                ? 'max-md:hidden md:w-[44%] md:shrink-0 md:border-r md:border-subtle'
+                : 'flex-1',
             )}
           >
             {attemptsPending ? (
@@ -313,7 +317,7 @@ function AttemptListRow({
         type="button"
         onClick={onSelect}
         className={cx(
-          'w-full text-left rounded-sm px-2.5 py-1.5 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+          'w-full text-left rounded-sm px-2.5 py-1.5 max-md:py-2.5 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
           isSelected ? 'bg-selected' : 'hover:bg-overlay-2',
         )}
         aria-current={isSelected ? 'true' : undefined}
@@ -469,7 +473,7 @@ function AttemptDetail({
             type="button"
             onClick={() => setPluginOpen((v) => !v)}
             aria-expanded={pluginOpen}
-            className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <ChevronRight
               className={cx(
@@ -493,7 +497,7 @@ function AttemptDetail({
           type="button"
           onClick={() => setRawOpen((v) => !v)}
           aria-expanded={rawOpen}
-          className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+          className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <ChevronRight
             className={cx(

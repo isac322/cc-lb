@@ -176,3 +176,33 @@ export function formatAgo(unixSecs: number, nowUnixSecs: number): string {
   if (secs < 60) return 'just now';
   return `${formatDuration(secs)} ago`;
 }
+
+/** Rank of a series key in legend order (5h, 7d, Fable); unknown keys last. */
+function legendOrder(key: string): number {
+  const index = (POOL_QUOTA_WINDOWS as readonly string[]).indexOf(key);
+  return index === -1 ? POOL_QUOTA_WINDOWS.length : index;
+}
+
+/**
+ * The pool chart's tooltip rows: one per window, in legend order. Each
+ * window draws as two Areas (a fill pass, then a stroke pass) and Recharts
+ * hands custom tooltip content an entry for both; the fill pass is marked
+ * `type: 'none'` and only the default content skips it, so drop it here and
+ * keep the first entry per series key.
+ */
+export function poolTooltipRows<
+  T extends { readonly dataKey?: unknown; readonly type?: unknown },
+>(payload: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return payload
+    .filter((entry) => {
+      if (entry.type === 'none') return false;
+      const key = String(entry.dataKey);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort(
+      (a, b) => legendOrder(String(a.dataKey)) - legendOrder(String(b.dataKey)),
+    );
+}

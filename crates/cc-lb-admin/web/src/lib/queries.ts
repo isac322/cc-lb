@@ -16,7 +16,6 @@ import {
 import { useMemo } from 'react';
 import {
   type AggregateResponse,
-  type AnalysisResponse,
   ApiError,
   type Upstream as ApiUpstream,
   type AuditQueryResponse,
@@ -71,7 +70,6 @@ export const POLLING_INTERVALS = {
   USAGE_MS: 5_000,
   QUOTA_LATEST_MS: 5_000,
   QUOTA_AGGREGATE_MS: 30_000,
-  QUOTA_ANALYSIS_MS: 120_000,
   QUOTA_SERIES_MS: 30_000,
   QUOTA_POOL_HISTORY_MS: 30_000,
   STATUS_MS: 15_000,
@@ -213,7 +211,7 @@ interface QuotaQueryIdentity {
 
 function hasSameQuotaIdentity(
   previousQueryKey: readonly unknown[] | undefined,
-  resource: 'latest' | 'series' | 'analysis' | 'aggregate' | 'pool-history',
+  resource: 'latest' | 'series' | 'aggregate' | 'pool-history',
   currentParams: QuotaQueryIdentity,
 ): boolean {
   const previousParams = previousQueryKey?.[2];
@@ -316,8 +314,6 @@ export const qk = {
     ['subscription-quota', 'latest', params] as const,
   subscriptionQuotaSeries: (params: Record<string, any>) =>
     ['subscription-quota', 'series', params] as const,
-  subscriptionQuotaAnalysis: (params: Record<string, any>) =>
-    ['subscription-quota', 'analysis', params] as const,
   subscriptionQuotaAggregate: (params: Record<string, any>) =>
     ['subscription-quota', 'aggregate', params] as const,
   subscriptionQuotaPoolHistory: (params: Record<string, any>) =>
@@ -871,41 +867,6 @@ export function useSubscriptionQuotaSeries(params: {
           : undefined,
     },
     POLLING_INTERVALS.QUOTA_SERIES_MS,
-  );
-}
-
-export function useSubscriptionQuotaAnalysis(params: {
-  upstreamIds?: string;
-  windows?: string;
-  source?: string;
-  rangeSecs: number;
-}) {
-  return usePolledData(
-    {
-      queryKey: qk.subscriptionQuotaAnalysis(params),
-      queryFn: ({ signal }) => {
-        const untilUnixSecs = Math.floor(Date.now() / 1000);
-        const searchParams = new URLSearchParams();
-        if (params.upstreamIds)
-          searchParams.set('upstream_ids', params.upstreamIds);
-        if (params.windows) searchParams.set('windows', params.windows);
-        if (params.source) searchParams.set('source', params.source);
-        searchParams.set(
-          'since_unix_secs',
-          String(untilUnixSecs - params.rangeSecs),
-        );
-        searchParams.set('until_unix_secs', String(untilUnixSecs));
-        return getJson<AnalysisResponse>(
-          `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
-          { signal },
-        );
-      },
-      placeholderData: (previousData, previousQuery) =>
-        hasSameQuotaIdentity(previousQuery?.queryKey, 'analysis', params)
-          ? previousData
-          : undefined,
-    },
-    POLLING_INTERVALS.QUOTA_ANALYSIS_MS,
   );
 }
 

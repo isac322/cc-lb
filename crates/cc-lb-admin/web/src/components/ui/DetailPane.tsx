@@ -20,18 +20,23 @@ import {
 /**
  * The selected-item detail pane shared by Upstreams and Principals.
  *
- * `DetailPane` is the pane's scroll container. Its `header` (a
+ * `DetailPane` is the pane's scroll container. From `md` its `header` (a
  * `DetailHeader`) stays pinned at the top and gains a 1px bottom line once
- * the body scrolls under it. The body is the `detail` size container; it
- * stacks optional `notices` and then `DetailSection`s, each opened by a
- * full-width rule. Wrap settings-like sections in a `DetailSectionGrid` so
- * they pair up in two columns when the pane is wide.
+ * the body scrolls under it; on phones it scrolls away with the body. The
+ * body is the `detail` size container; it stacks optional `notices` and then
+ * `DetailSection`s, each opened by a full-width rule. Wrap settings-like
+ * sections in a `DetailSectionGrid` so they pair up in two columns when the
+ * pane is wide.
  */
 
 const DetailScrolledContext = createContext(false);
 
-/** Horizontal inset shared by the header and the body. */
-const PANE_INSET_CLASS = 'px-4 md:px-8';
+/**
+ * Horizontal inset shared by the header and the body. From `lg` the right
+ * inset is PageContainer's 40px gutter, so the pane's content ends on the
+ * same edge as every other page's content.
+ */
+const PANE_INSET_CLASS = 'px-4 md:px-8 lg:pr-10';
 /**
  * Space between one section's content and the next section's rule. The body
  * stack and `DetailSectionGrid` rows share it so the rhythm never changes.
@@ -83,10 +88,13 @@ export function DetailPane({
 }
 
 /**
- * Sticky pane header, identical for every entity: a phone-only back button,
- * then the name (the one `h2`) with its kind/plan badge on the left and the
- * enabled switch and Delete on the right, then one muted meta line ending in
- * the mono ID with a copy button.
+ * Pane header, identical for every entity. Narrow panes (phones, and
+ * split panes under 42rem): the back button (phones only) shares the first
+ * row with the enabled switch and Delete, then the name (the one `h2`) with
+ * its kind/plan badge gets a full-width line. Wide panes: name and badge on
+ * the left, switch and Delete on the right. Then one muted meta line ending
+ * in the mono ID with a copy button. Sticky from `md` only: on phones a
+ * pinned header would hold a quarter of the screen.
  */
 export function DetailHeader({
   backLabel,
@@ -138,7 +146,7 @@ export function DetailHeader({
       data-detail-header=""
       data-scrolled={scrolled ? 'true' : undefined}
       className={cx(
-        'sticky top-0 z-20 shrink-0 border-b bg-bg pt-4 pb-4 transition-colors md:pt-8',
+        'z-20 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-6 border-b bg-bg pt-2 pb-4 transition-colors md:sticky md:top-0 md:pt-8',
         scrolled ? 'border-subtle' : 'border-transparent',
         PANE_INSET_CLASS,
       )}
@@ -146,60 +154,62 @@ export function DetailHeader({
       <button
         type="button"
         onClick={onBack}
-        className="-ml-1 mb-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 md:hidden"
+        className="col-start-1 row-start-1 -ml-1 inline-flex min-h-11 w-fit items-center gap-1 rounded-sm px-1 text-body text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 md:hidden"
       >
         <ChevronLeft className="size-4" strokeWidth={1.75} /> {backLabel}
       </button>
-      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-          <h2
-            id={titleId}
-            className="min-w-0 break-words text-title-page text-text"
+      <div className="col-start-2 row-start-1 flex shrink-0 items-center justify-self-end gap-3">
+        {pendingLabel ? (
+          <span
+            role="status"
+            aria-live="polite"
+            data-testid="detail-enabled-pending"
+            className="inline-flex items-center gap-1.5 text-body-sm text-text-muted"
           >
-            {title}
-          </h2>
-          {badge}
-          {status}
-        </div>
-        <div className="flex shrink-0 items-center gap-3">
-          {pendingLabel ? (
+            <Spinner className="size-3 text-text-muted" />
+            {pendingLabel}
+          </span>
+        ) : null}
+        <ToggleSwitch
+          variant="compact"
+          role="switch"
+          aria-label="Enabled"
+          label={
             <span
-              role="status"
-              aria-live="polite"
-              data-testid="detail-enabled-pending"
-              className="inline-flex items-center gap-1.5 text-body-sm text-text-muted"
+              className={
+                enabledDisabled ? 'text-text-faint' : 'text-text-muted'
+              }
             >
-              <Spinner className="size-3 text-text-muted" />
-              {pendingLabel}
+              {enabled ? 'Enabled' : 'Disabled'}
             </span>
-          ) : null}
-          <ToggleSwitch
-            variant="compact"
-            role="switch"
-            aria-label="Enabled"
-            label={
-              <span className="text-text-muted">
-                {enabled ? 'Enabled' : 'Disabled'}
-              </span>
-            }
-            checked={enabled}
-            disabled={enabledDisabled}
-            onChange={(event) => onEnabledChange(event.target.checked)}
-            className="flex-row-reverse"
-          />
-          <Button
-            size="sm"
-            variant="danger"
-            iconLeft={<Trash2 />}
-            loading={deleting}
-            disabled={deleteDisabled}
-            onClick={onDelete}
-          >
-            Delete
-          </Button>
-        </div>
+          }
+          checked={enabled}
+          disabled={enabledDisabled}
+          onChange={(event) => onEnabledChange(event.target.checked)}
+          className="flex-row-reverse"
+        />
+        <Button
+          size="sm"
+          variant="danger"
+          iconLeft={<Trash2 />}
+          loading={deleting}
+          disabled={deleteDisabled}
+          onClick={onDelete}
+        >
+          Delete
+        </Button>
       </div>
-      <p className="mt-1 flex min-h-5 min-w-0 flex-wrap items-center gap-x-1.5 text-body-sm text-text-muted">
+      <div className="col-span-2 row-start-2 mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 @2xl:col-span-1 @2xl:col-start-1 @2xl:row-start-1 @2xl:mt-0">
+        <h2
+          id={titleId}
+          className="min-w-0 break-words text-title-page text-text"
+        >
+          {title}
+        </h2>
+        {badge}
+        {status}
+      </div>
+      <p className="col-span-2 mt-1 flex min-h-5 min-w-0 flex-wrap items-center gap-x-1.5 text-body-sm text-text-muted">
         {facts.map((fact, index) => (
           <span key={index} className="inline-flex min-w-0 items-center">
             {fact}
@@ -233,19 +243,23 @@ export function DetailHeaderSkeleton() {
     <header
       data-detail-header=""
       className={cx(
-        'sticky top-0 z-20 shrink-0 border-b border-transparent bg-bg pt-4 pb-4 md:pt-8',
+        'z-20 shrink-0 border-b border-transparent bg-bg pt-2 pb-4 md:sticky md:top-0 md:pt-8',
         PANE_INSET_CLASS,
       )}
     >
-      <div className="mb-1 flex min-h-11 items-center md:hidden">
-        <Skeleton className="h-4 w-28" />
+      <div className="flex min-h-11 items-center justify-between gap-3 @2xl:hidden">
+        <Skeleton className="h-4 w-28 md:invisible" />
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-5 w-24" />
+          <Skeleton className="h-7 w-20" />
+        </div>
       </div>
-      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-x-6 gap-y-2 @2xl:mt-0">
         <div className="flex min-h-8 items-center gap-3">
           <Skeleton className="h-7 w-48" />
           <Skeleton className="h-5 w-20" />
         </div>
-        <div className="flex min-h-11 items-center gap-3">
+        <div className="hidden min-h-11 items-center gap-3 @2xl:flex">
           <Skeleton className="h-5 w-24" />
           <Skeleton className="h-7 w-20" />
         </div>

@@ -41,9 +41,11 @@ export function PluginDetailOperate({
               Built-in plugins cannot be edited or deleted.
             </p>
           ) : isEditingLabel ? (
+            // Phones: the input takes its own full-width row with Save and
+            // Cancel under it; from `sm` all three share one row.
             <div
               aria-busy={patch.isPending}
-              className="mt-2 flex gap-2"
+              className="mt-2 flex flex-wrap gap-2 sm:flex-nowrap"
               data-testid="plugin-label-edit-form"
             >
               <input
@@ -52,7 +54,10 @@ export function PluginDetailOperate({
                 value={editLabelValue}
                 onChange={(e) => setEditLabelValue(e.target.value)}
                 disabled={patch.isPending}
-                className={cx(INPUT_SM_CLASS, 'min-w-0 flex-1')}
+                className={cx(
+                  INPUT_SM_CLASS,
+                  'min-w-0 flex-1 max-sm:h-10 max-sm:basis-full',
+                )}
                 placeholder="Optional label"
               />
               <Button

@@ -13,7 +13,9 @@ import { cx } from './primitives';
  * right-align with tabular figures.
  *
  * Tables inside a card drop the card's body padding; the first and last
- * cells keep a 16px inset so the header aligns with the card title.
+ * cells keep a 16px inset so the header aligns with the card title. On
+ * phones the gutters between columns tighten from 24 to 16px so the text
+ * columns keep their width.
  */
 export function Table({
   className,
@@ -22,7 +24,7 @@ export function Table({
   return (
     <table
       className={cx(
-        'relative w-full border-collapse text-body text-text [&_th:first-child]:pl-4 [&_th:last-child]:pr-4 [&_td:first-child]:pl-4 [&_td:last-child]:pr-4',
+        'relative w-full border-collapse text-body text-text max-md:[&_th]:px-2 [&_th:first-child]:pl-4 [&_th:last-child]:pr-4 [&_td:first-child]:pl-4 [&_td:last-child]:pr-4',
         className,
       )}
       {...rest}
@@ -106,7 +108,7 @@ export function TableCell({
   return (
     <td
       className={cx(
-        'px-3 py-2 align-middle',
+        'px-3 max-md:px-2 py-2 align-middle',
         numeric && 'text-right tabular-nums whitespace-nowrap',
         mono && 'font-mono text-data',
         className,

@@ -81,6 +81,7 @@ import {
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
+import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption';
 import {
   formatQuotaStamp,
   subscriptionPlanLabel,
@@ -116,7 +117,6 @@ import {
   usePrincipalNameMap,
   useRecentEvents,
   useStatus,
-  useSubscriptionQuotaAnalysis,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
   useTriggerSubscriptionMetadataRefresh,
@@ -268,21 +268,6 @@ function upstreamRowId(row: UpstreamUsageRow): string {
   return row.upstream.id;
 }
 
-/** Caption for a healthy row: the Claude plan, or the upstream kind. */
-function UpstreamPlanCaption({ upstream }: { upstream: Upstream }) {
-  const oauth = upstream.kind === 'anthropic_oauth';
-  const meta = useUpstreamSubscriptionMetadata(oauth ? upstream.id : '');
-  if (!oauth) return <span className="truncate">API key</span>;
-  if (meta.data === undefined && meta.isPending)
-    return <Skeleton as="span" className="inline-block h-3 w-24" />;
-  return (
-    <span className="truncate">
-      {subscriptionPlanLabel(meta.data?.organization_metadata) ??
-        'Subscription'}
-    </span>
-  );
-}
-
 function UpstreamsPage() {
   const search = Route.useSearch();
   const { selectedId, action } = search;
@@ -426,7 +411,6 @@ function UpstreamsPage() {
         action={
           <Button
             size="sm"
-            className="max-md:h-11"
             variant="primary"
             iconLeft={<Plus />}
             onClick={openCreate}
@@ -872,9 +856,9 @@ function DetailView({
     if (isOauth) onConnect();
   }, [action, isOauth, onConnect, navigate]);
 
-  // Keep a separate wall clock for snapshot freshness/countdowns. Series and
-  // analysis requests use stable range keys and resolve their own absolute
-  // bounds when each request starts.
+  // Keep a separate wall clock for snapshot freshness/countdowns. Series
+  // requests use stable range keys and resolve their own absolute bounds
+  // when each request starts.
   const [nowUnixSecs, setNowUnixSecs] = useState(() =>
     Math.floor(Date.now() / 1000),
   );
@@ -947,12 +931,6 @@ function DetailView({
     source: 'merged',
     rangeSecs,
     bucketSecs: bucketSecsForRange,
-  });
-  const quotaAnalysis = useSubscriptionQuotaAnalysis({
-    upstreamIds: upstream.id,
-    windows: '5h,7d,7d_sonnet,7d_opus,7d_fable,overage',
-    source: 'merged',
-    rangeSecs,
   });
   const seriesSinceUnixSecs =
     quotaSeries.data?.since_unix_secs ?? nowUnixSecs - rangeSecs;
@@ -1037,9 +1015,6 @@ function DetailView({
   const quotaHistoryPending =
     quotaLatestPending ||
     (quotaSeries.data === undefined && quotaSeries.isPending);
-  const quotaAnalysisPending =
-    quotaAnalysis.data === undefined && quotaAnalysis.isPending;
-  const analysis = quotaAnalysis.data?.upstreams[0];
   const oauthStatusPending =
     isOauth && upstreamOAuthQ.data === undefined && upstreamOAuthQ.isPending;
   const recentPending = recent.data === undefined && recent.isPending;
@@ -1216,8 +1191,6 @@ function DetailView({
             <QuotaWindowRow
               key={snap.window}
               snap={snap}
-              analysis={analysis?.windows.find((w) => w.window === snap.window)}
-              analysisPending={quotaAnalysisPending}
               nowUnixSecs={nowUnixSecs}
             />
           ))}
@@ -1245,7 +1218,7 @@ function DetailView({
       <div>
         <div
           data-testid="quota-history-legend-slot"
-          className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1"
+          className="mb-3 flex min-h-5 flex-wrap items-center gap-x-5 gap-y-1 max-md:gap-y-0"
         >
           {quotaHistoryPending ? (
             <>
@@ -1271,7 +1244,7 @@ function DetailView({
                       )
                     }
                     aria-pressed={effectiveIsolatedWindow === windowName}
-                    className="-mx-1.5 flex min-h-6 cursor-pointer items-center gap-1.5 rounded-sm px-1.5 text-body-sm transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                    className="-mx-1.5 flex min-h-6 max-md:min-h-10 cursor-pointer items-center gap-1.5 rounded-sm px-1.5 text-body-sm transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
                   >
                     <span
                       aria-hidden="true"

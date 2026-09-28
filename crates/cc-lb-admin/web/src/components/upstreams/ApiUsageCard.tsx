@@ -149,7 +149,7 @@ export function ApiUsageCard({
       <div className="flex flex-col gap-3">
         <div
           data-testid="api-usage-legend-slot"
-          className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-caption min-h-[28px]"
+          className="flex flex-wrap items-center justify-start gap-x-4 gap-y-1 text-caption min-h-[28px] sm:justify-end"
         >
           {!showLoading && chartData.length > 0
             ? models.map((model, index) => {
@@ -196,7 +196,7 @@ export function ApiUsageCard({
                     {...CHART_AXIS}
                     tickFormatter={formatYAxis}
                     tickCount={3}
-                    width={60}
+                    width={48}
                   />
                   <Tooltip
                     labelFormatter={(label) => formatXAxis(label as number)}

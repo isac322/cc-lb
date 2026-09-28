@@ -7,6 +7,7 @@ import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
 import { Badge, Drawer, Skeleton } from './primitives';
 import {
+  COPY_BUTTON_CLASS,
   DetailSection,
   KvRow,
   RequestEventIdentity,
@@ -119,7 +120,7 @@ function RequestDetail({
           <button
             type="button"
             aria-label="Copy request id"
-            className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+            className={COPY_BUTTON_CLASS}
             onClick={() => copy(merged.request_id, 'Request ID')}
           >
             <Copy className="w-3 h-3" />

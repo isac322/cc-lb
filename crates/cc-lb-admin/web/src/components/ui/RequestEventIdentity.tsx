@@ -25,6 +25,14 @@ import { SessionChip } from './SessionChip';
 
 const DASH = '—';
 
+/**
+ * A 12px copy glyph whose padding is pulled back by a matching negative
+ * margin, so the hit area grows without moving the row: 24px on desktop,
+ * 40px tall on phones (touch).
+ */
+export const COPY_BUTTON_CLASS =
+  'shrink-0 -m-1.5 p-1.5 max-md:-my-3.5 max-md:py-3.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent';
+
 const PRINCIPAL_KIND_LABEL: Record<string, string> = {
   human: 'Human',
   machine: 'Machine',
@@ -195,7 +203,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy key id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.key_id ?? '', 'Key ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -230,7 +238,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy session id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.thread_id ?? '', 'Session ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -267,7 +275,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy observed session id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.observed_session_id ?? '', 'Observed session ID')
                   }
@@ -299,7 +307,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy parent session id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.parent_session_id ?? '', 'Parent session ID')
                   }
@@ -321,7 +329,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy agent id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.claude_agent_id ?? '', 'Agent ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -341,7 +349,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy parent agent id"
-                  className="shrink-0 -m-1.5 p-1.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.claude_parent_agent_id ?? '', 'Parent agent ID')
                   }

@@ -178,8 +178,11 @@ export function PluginsPage() {
       ) : selectedPlugin ? (
         <PluginDetail plugin={selectedPlugin} onBack={backToCatalog} />
       ) : (
-        <div className="space-y-12 lg:space-y-16">
-          <div hidden={uploadOpen}>
+        // Phones lead with the library (what is installed and where it runs);
+        // uploading is the rarer task there, so its card follows. From `md`
+        // the upload card leads.
+        <div className="flex flex-col gap-12 lg:gap-16">
+          <div hidden={uploadOpen} className="max-md:order-last">
             <PluginUploadCard
               upload={upload}
               onUploaded={setSelectedPluginId}

@@ -128,7 +128,11 @@ interface ConfigEditorSectionProps {
   onNavigate: (next: ConfigEditorNavigateTarget) => void;
 }
 
-const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} aria-[invalid=true]:border-danger`;
+/** Phones: in-field controls and inline actions reach a 40px touch target. */
+const PHONE_TARGET_CLASS = 'max-md:h-10';
+/** Phones: the editor toolbar matches the list toolbars' 44px controls. */
+const PHONE_TOOLBAR_CLASS = 'max-md:h-11';
+const INPUT_WITH_ERROR_CLASS = `${INPUT_CLASS} ${PHONE_TARGET_CLASS} aria-[invalid=true]:border-danger`;
 const OPAQUE_STORAGE_URL_PATH = 'storage.url';
 const ADMIN_PROVIDERS_PATH = 'admin.auth.providers';
 const RECURRING_JOBS_PATH = 'scheduler.recurring_jobs';
@@ -1255,6 +1259,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
             action={
               <Button
                 size="sm"
+                className={PHONE_TARGET_CLASS}
                 loading={editorQuery.isFetching || draftQuery.isFetching}
                 onClick={() => {
                   if (!editorData) void editorQuery.refetch();
@@ -1326,6 +1331,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
               <div className="flex gap-2">
                 <Button
                   size="sm"
+                  className={PHONE_TARGET_CLASS}
                   iconLeft={<Copy className="h-3.5 w-3.5" />}
                   onClick={() => {
                     if (!state) return;
@@ -1337,7 +1343,11 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
                 >
                   Copy draft JSON
                 </Button>
-                <Button size="sm" onClick={() => void handleDownload()}>
+                <Button
+                  size="sm"
+                  className={PHONE_TARGET_CLASS}
+                  onClick={() => void handleDownload()}
+                >
                   Retry
                 </Button>
               </div>
@@ -1377,6 +1387,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
             className="flex flex-wrap items-center gap-2"
           >
             <Button
+              className={cx(PHONE_TOOLBAR_CLASS, 'max-md:flex-1')}
               loading={saveDraft.isPending}
               disabled={!canSaveDraft}
               onClick={handleSaveDraft}
@@ -1384,6 +1395,7 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
               Save draft
             </Button>
             <Button
+              className={cx(PHONE_TOOLBAR_CLASS, 'max-md:flex-1')}
               loading={validate.isPending}
               disabled={!canValidate}
               onClick={handleValidate}
@@ -1396,7 +1408,10 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
             />
             <Button
               variant="primary"
-              className="order-last w-full md:order-none md:w-auto"
+              className={cx(
+                PHONE_TOOLBAR_CLASS,
+                'order-last w-full md:order-none md:w-auto',
+              )}
               loading={saveFile.isPending}
               disabled={!canSaveFile}
               onClick={handleSaveFileRequest}
@@ -1624,9 +1639,10 @@ export const ConfigEditorSection = memo(function ConfigEditorSection({
 });
 
 /**
- * The facts strip above the editor: two definition lists, *Draft* (what this
- * editor will save) and *Running* (what cc-lb started with). No panel chrome;
- * mono only for addresses and paths.
+ * The facts strip above the editor: what this editor will save (draft
+ * revision, validation, save time, target file). Running values are not
+ * repeated here — the editor fields below already show each one's
+ * effective value. No panel chrome; mono only for the path.
  */
 function ConfigStatusFacts({
   loading,
@@ -1642,69 +1658,25 @@ function ConfigStatusFacts({
   data?: ConfigEditorResponse;
 }) {
   return (
-    <div className="grid gap-x-12 gap-y-5 sm:grid-cols-2">
-      <FactGroup testId="config-editor-metadata" title="Draft">
-        <Fact label="Revision" loading={loading}>
-          <span className="tabular-nums">{revision ?? '—'}</span>
-        </Fact>
-        <Fact label="Validated revision" loading={loading}>
-          <span className="tabular-nums">{validatedRevision ?? '—'}</span>
-        </Fact>
-        <Fact label="Saved" loading={loading}>
-          {savedAtUnixSecs ? (
-            <RelativeTime ts={new Date(savedAtUnixSecs * 1000)} />
-          ) : (
-            '—'
-          )}
-        </Fact>
-        <Fact label="Config file" loading={loading}>
-          <span className="break-all font-mono text-data">
-            {data?.file.path ?? '—'}
-          </span>
-          {data ? <ConfigFileState file={data.file} /> : null}
-        </Fact>
-      </FactGroup>
-      {data ? (
-        <RunningFacts data={data} />
-      ) : loading ? (
-        <FactGroup testId="config-running-summary-loading" title="Running">
-          {['Proxy', 'Admin', 'Storage', 'Admin providers'].map((label) => (
-            <Fact key={label} label={label} loading>
-              {null}
-            </Fact>
-          ))}
-        </FactGroup>
-      ) : null}
-    </div>
-  );
-}
-
-function RunningFacts({ data }: { data: ConfigEditorResponse }) {
-  const effective = data.effective_config;
-  const proxyAddr = getConfigValue(effective, 'listener.proxy_addr');
-  const adminAddr = getConfigValue(effective, 'listener.admin_addr');
-  const storageKind = getConfigValue(effective, 'storage.kind');
-  const providers = getConfigValue(effective, ADMIN_PROVIDERS_PATH);
-  const providerCount = Array.isArray(providers) ? providers.length : 0;
-  return (
-    <FactGroup testId="config-running-summary" title="Running">
-      <Fact label="Proxy">
+    <FactGroup testId="config-editor-metadata" title="Draft">
+      <Fact label="Revision" loading={loading}>
+        <span className="tabular-nums">{revision ?? '—'}</span>
+      </Fact>
+      <Fact label="Validated revision" loading={loading}>
+        <span className="tabular-nums">{validatedRevision ?? '—'}</span>
+      </Fact>
+      <Fact label="Saved" loading={loading}>
+        {savedAtUnixSecs ? (
+          <RelativeTime ts={new Date(savedAtUnixSecs * 1000)} />
+        ) : (
+          '—'
+        )}
+      </Fact>
+      <Fact label="Config file" loading={loading}>
         <span className="break-all font-mono text-data">
-          {typeof proxyAddr === 'string' ? proxyAddr : '—'}
+          {data?.file.path ?? '—'}
         </span>
-      </Fact>
-      <Fact label="Admin">
-        <span className="break-all font-mono text-data">
-          {typeof adminAddr === 'string' ? adminAddr : '—'}
-        </span>
-      </Fact>
-      <Fact label="Storage">
-        {typeof storageKind === 'string'
-          ? (STORAGE_KIND_LABELS[storageKind] ?? storageKind)
-          : '—'}
-      </Fact>
-      <Fact label="Admin providers">
-        <span className="tabular-nums">{providerCount}</span>
+        {data ? <ConfigFileState file={data.file} /> : null}
       </Fact>
     </FactGroup>
   );
@@ -1739,6 +1711,10 @@ function ConfigFileState({ file }: { file: ConfigEditorResponse['file'] }) {
   return null;
 }
 
+/**
+ * Phones: label/value rows under the title. From `md`: one row of facts,
+ * label over value, the last (the file path) taking the remaining width.
+ */
 function FactGroup({
   testId,
   title,
@@ -1751,7 +1727,7 @@ function FactGroup({
   return (
     <div data-testid={testId} className="min-w-0">
       <p className="text-label text-text-muted">{title}</p>
-      <dl className="mt-2 grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+      <dl className="mt-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-4 gap-y-1.5 md:grid-flow-col md:grid-cols-[repeat(3,max-content)_minmax(0,1fr)] md:grid-rows-[auto_auto] md:gap-x-10 md:gap-y-0.5">
         {children}
       </dl>
     </div>
@@ -2143,7 +2119,8 @@ function ConfigSearch({
         data-testid="config-search"
         className={cx(
           INPUT_SM_CLASS,
-          'pl-8 pr-9 [&::-webkit-search-cancel-button]:appearance-none',
+          PHONE_TOOLBAR_CLASS,
+          'pl-8 pr-9 max-md:pr-11 [&::-webkit-search-cancel-button]:appearance-none',
         )}
         placeholder="Search settings"
         value={searchText}
@@ -2181,7 +2158,7 @@ function ConfigSearch({
         <button
           type="button"
           aria-label="Clear search"
-          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+          className="absolute right-0.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-sm text-text-muted transition-colors hover:bg-overlay-5 hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent max-md:h-10 max-md:w-10"
           onClick={() => {
             onSearchTextChange('');
             onOpenChange(false);
@@ -3065,6 +3042,7 @@ function ScalarField({
                 {replacingOpaque || storageUrlReplacement.value !== null ? (
                   <Button
                     size="sm"
+                    className={PHONE_TARGET_CLASS}
                     variant="ghost"
                     iconLeft={<X className="h-3 w-3" />}
                     onClick={() => {
@@ -3078,6 +3056,7 @@ function ScalarField({
                 {configured ? (
                   <Button
                     size="sm"
+                    className={PHONE_TARGET_CLASS}
                     variant="ghost"
                     iconLeft={<X className="h-3 w-3" />}
                     onClick={() => {
@@ -3095,6 +3074,7 @@ function ScalarField({
                 {draftDiffers ? (
                   <Button
                     size="sm"
+                    className={PHONE_TARGET_CLASS}
                     variant="ghost"
                     iconLeft={<RotateCcw className="h-3 w-3" />}
                     onClick={reset}
@@ -3105,6 +3085,7 @@ function ScalarField({
                 {configured ? (
                   <Button
                     size="sm"
+                    className={PHONE_TARGET_CLASS}
                     variant="ghost"
                     iconLeft={<X className="h-3 w-3" />}
                     onClick={() => onChange(unsetConfigValue(value, path))}
@@ -3122,6 +3103,7 @@ function ScalarField({
         {nullable && !configured && !(numeric && clearedWhileEditing) ? (
           <Button
             size="sm"
+            className={PHONE_TARGET_CLASS}
             iconLeft={<Plus className="h-3 w-3" />}
             onClick={() => {
               const initial =
@@ -3152,7 +3134,11 @@ function ScalarField({
                   ? `Supplied by ${override.name}; not stored in file`
                   : 'No stored URL'}
             </Badge>
-            <Button size="sm" onClick={() => setReplacingOpaque(true)}>
+            <Button
+              size="sm"
+              className={PHONE_TARGET_CLASS}
+              onClick={() => setReplacingOpaque(true)}
+            >
               Replace URL
             </Button>
           </div>
@@ -3188,7 +3174,10 @@ function ScalarField({
           <Select
             id={inputId}
             data-field-control
-            className="aria-[invalid=true]:border-danger"
+            className={cx(
+              PHONE_TARGET_CLASS,
+              'aria-[invalid=true]:border-danger',
+            )}
             aria-invalid={Boolean(error)}
             placeholder="Inherited / not set"
             value={
@@ -3378,6 +3367,7 @@ function StringArrayControl({
       ))}
       <Button
         size="sm"
+        className={PHONE_TARGET_CLASS}
         iconLeft={<Plus />}
         onClick={() => onChange([...values, ''])}
       >
@@ -3491,7 +3481,7 @@ function TaggedUnionEditor({
                   aria-label="Storage backend"
                   data-config-path={`${path}.${selected.property}`}
                   required
-                  className="inline-flex w-fit items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5"
+                  className="inline-flex w-fit items-center gap-0.5 rounded-sm border border-subtle bg-overlay-2 p-0.5 max-md:w-full"
                   value={selected.kind}
                   onValueChange={(kind) => selectKind(kind)}
                 >
@@ -3499,7 +3489,7 @@ function TaggedUnionEditor({
                     <BaseRadio.Root
                       key={variant.kind}
                       value={variant.kind}
-                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-label text-text-muted transition-colors hover:bg-hover-bg hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-panel-strong data-[checked]:text-text data-[checked]:shadow-[inset_0_0_0_1px_var(--color-border)] data-[checked]:hover:bg-panel-strong"
+                      className="inline-flex h-7 cursor-pointer items-center rounded-sm px-2.5 text-label text-text-muted transition-colors hover:bg-hover-bg hover:text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent data-[checked]:bg-panel-strong data-[checked]:text-text data-[checked]:shadow-[inset_0_0_0_1px_var(--color-border)] data-[checked]:hover:bg-panel-strong max-md:h-10 max-md:flex-1 max-md:justify-center max-md:px-4"
                     >
                       {STORAGE_KIND_LABELS[variant.kind] ??
                         configKeyLabel(variant.kind)}
@@ -3520,6 +3510,7 @@ function TaggedUnionEditor({
                   data-config-path={`${path}.${selected.property}`}
                   data-field-control
                   size="sm"
+                  className={PHONE_TARGET_CLASS}
                   value={selected.kind}
                   options={variants.map((variant) => ({
                     value: variant.kind,
@@ -3617,6 +3608,7 @@ function AdminProvidersEditor({
         </div>
         <Button
           size="sm"
+          className={PHONE_TARGET_CLASS}
           iconLeft={<Plus className="h-3 w-3" />}
           onClick={() => {
             const variant = variants[0];
@@ -3665,6 +3657,7 @@ function AdminProvidersEditor({
                       data-config-path={`${providerRoot}.${variant?.property ?? 'kind'}`}
                       data-field-control
                       size="sm"
+                      className={PHONE_TARGET_CLASS}
                       value={kind ?? ''}
                       options={variants.map((candidate) => ({
                         value: candidate.kind,
@@ -3732,6 +3725,7 @@ function AdminProvidersEditor({
                     </IconButton>
                     <Button
                       size="sm"
+                      className={PHONE_TARGET_CLASS}
                       variant="ghost"
                       iconLeft={<Trash2 />}
                       onClick={() => {
@@ -3958,6 +3952,7 @@ function RecurringJobRow({
           {jobDraftDiffers ? (
             <Button
               size="sm"
+              className={PHONE_TARGET_CLASS}
               variant="ghost"
               iconLeft={<RotateCcw />}
               onClick={() =>
@@ -3974,6 +3969,7 @@ function RecurringJobRow({
           {jobConfigured ? (
             <Button
               size="sm"
+              className={PHONE_TARGET_CLASS}
               variant="ghost"
               iconLeft={<X />}
               onClick={() => onChange(unsetConfigValue(value, jobPath))}

@@ -18,7 +18,8 @@ import {
 
 // INPUT_CLASS carries no disabled affordance of its own; a control locked by an
 // in-flight write must read as unavailable, not merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-40 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS =
+  'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
 
 interface Props {
   open: boolean;
@@ -200,6 +201,15 @@ export function CacheKeepaliveSettingsDrawer({
     setExtraTools(extraTools.filter((t) => t !== tool));
   };
 
+  // The tool field is a framed token box: a tap anywhere inside the frame —
+  // padding, gaps, a chip's text — should put the caret in the input, so the
+  // whole frame is the touch target. Buttons inside keep their own behavior.
+  const focusToolInput = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('input, button')) return;
+    e.preventDefault();
+    e.currentTarget.querySelector('input')?.focus();
+  };
+
   return (
     <Drawer
       open={open}
@@ -317,7 +327,10 @@ export function CacheKeepaliveSettingsDrawer({
             <label htmlFor={toolInputId} className="text-label text-text-muted">
               Extra wait-for-user tools
             </label>
-            <div className="flex flex-wrap gap-1.5 p-1.5 min-h-9 bg-input-bg border border-subtle-strong rounded-sm focus-within:outline-2 focus-within:outline-accent focus-within:outline-offset-1">
+            <div
+              onPointerDown={focusToolInput}
+              className="flex flex-wrap gap-1.5 p-1.5 min-h-9 max-md:min-h-10 cursor-text bg-input-bg border border-subtle-strong rounded-sm focus-within:outline-2 focus-within:outline-accent focus-within:outline-offset-1"
+            >
               {extraTools.map((tool) => (
                 <span
                   key={tool}
@@ -330,7 +343,10 @@ export function CacheKeepaliveSettingsDrawer({
                     aria-label={`Remove ${tool}`}
                     disabled={busy}
                     className={cx(
-                      'inline-flex h-6 w-6 items-center justify-center rounded-xs text-text-muted transition-colors hover:bg-overlay-5 hover:text-text disabled:hover:bg-transparent disabled:hover:text-text-muted',
+                      'relative inline-flex h-6 w-6 items-center justify-center rounded-xs text-text-muted transition-colors hover:bg-overlay-5 hover:text-text disabled:hover:bg-transparent disabled:hover:text-text-muted',
+                      // Phones: a ::before pad extends the 24px glyph button to a
+                      // 40px tap target without growing the chip's layout.
+                      'max-md:before:absolute max-md:before:-inset-2 max-md:before:content-[""]',
                       'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                       PENDING_INPUT_CLASS,
                     )}
@@ -349,6 +365,9 @@ export function CacheKeepaliveSettingsDrawer({
                 aria-describedby={toolHintId}
                 className={cx(
                   'flex-1 min-w-[100px] px-1 bg-transparent outline-none text-body text-text placeholder:text-text-faint',
+                  // Phones: fill the field frame's 40px so the input's box is
+                  // the tap target, matching the frame's 6px padding top/bottom.
+                  'max-md:h-10 max-md:-my-1.5',
                   PENDING_INPUT_CLASS,
                 )}
                 placeholder="Add tool..."

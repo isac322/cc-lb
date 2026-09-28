@@ -32,7 +32,8 @@ export function LogsPagination({
     <nav
       aria-label="Log pagination"
       aria-busy={loading || showNextPending}
-      className="h-12 shrink-0 flex items-center justify-between gap-4 px-4 border-t border-row"
+      // Phones get 40px buttons (Button's touch height), so the bar grows too.
+      className="h-12 max-md:h-14 shrink-0 flex items-center justify-between gap-4 px-4 border-t border-row"
     >
       <div
         aria-live="polite"

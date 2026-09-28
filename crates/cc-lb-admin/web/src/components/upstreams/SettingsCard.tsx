@@ -132,7 +132,7 @@ export function SettingsCard({ upstream }: Props) {
                     }
                     value={useLiteral ? 'literal' : 'env'}
                   >
-                    <label className="flex items-center gap-1.5 text-body-sm text-text">
+                    <label className="flex items-center gap-1.5 text-body-sm text-text max-md:min-h-10">
                       <BaseRadio.Root
                         className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle-strong bg-input-bg data-[checked]:border-accent"
                         value="env"
@@ -141,7 +141,7 @@ export function SettingsCard({ upstream }: Props) {
                       </BaseRadio.Root>
                       Environment variable
                     </label>
-                    <label className="flex items-center gap-1.5 text-body-sm text-text">
+                    <label className="flex items-center gap-1.5 text-body-sm text-text max-md:min-h-10">
                       <BaseRadio.Root
                         className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle-strong bg-input-bg data-[checked]:border-accent"
                         value="literal"

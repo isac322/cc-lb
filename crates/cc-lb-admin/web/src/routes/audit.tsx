@@ -34,7 +34,6 @@ import {
 } from '../components/audit/auditEntry';
 import {
   Button,
-  Card,
   cx,
   EmptyState,
   Field,
@@ -214,6 +213,10 @@ function TargetName({ target, maps }: { target: AuditTarget; maps: NameMaps }) {
 
 const GROUP_LABEL_CLASS = 'text-label text-text-muted';
 
+/** Below `md` a segmented control spans the width with equal segments. */
+const PHONE_FULL_SEGMENTS =
+  'max-md:flex max-md:w-full max-md:[&>button]:flex-1';
+
 interface AuditRow {
   entry: AuditEntryLike;
   key: string;
@@ -254,6 +257,19 @@ function AuditPage() {
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
+        timeZone: timezone,
+      }),
+    [locale, timezone],
+  );
+  // Phone rows lead with the time on the action's line, so it drops seconds;
+  // the drawer keeps the full timestamp.
+  const shortTimeFormat = useMemo(
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
         timeZone: timezone,
       }),
     [locale, timezone],
@@ -442,6 +458,7 @@ function AuditPage() {
         actions={
           <Button
             data-testid="audit-refresh"
+            className="max-md:hidden"
             iconLeft={<RefreshCw aria-hidden="true" />}
             loading={refreshing}
             onClick={refreshAudit}
@@ -451,11 +468,18 @@ function AuditPage() {
         }
       />
 
-      {/* Filters sit on the ground; only the entries keep a flat surface. */}
+      {/* Filters sit on the ground; only the entries keep a flat surface.
+          Phones lead with the action type across the full width, then one
+          toolbar row (Filters disclosure, Refresh); the time range joins the
+          principal and custom bounds inside the disclosure. From `md` the
+          disclosure is `display: contents`, so every group sits in one row. */}
       <div className="flex shrink-0 flex-col gap-3">
         <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
-          <div className="flex flex-col gap-1.5">
-            <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+          <div className="flex w-full flex-col gap-1.5 md:w-auto">
+            <span
+              className={cx(GROUP_LABEL_CLASS, 'max-md:hidden')}
+              aria-hidden="true"
+            >
               Action type
             </span>
             <SegmentedControl
@@ -463,72 +487,88 @@ function AuditPage() {
               value={typeFilter}
               onChange={setType}
               options={TYPE_OPTIONS}
+              className={PHONE_FULL_SEGMENTS}
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <span className={GROUP_LABEL_CLASS} aria-hidden="true">
-              Time range
-            </span>
-            <SegmentedControl
-              ariaLabel="Time range"
-              value={rangeValue}
-              onChange={(value) => {
-                if (value !== 'custom') setRange(value);
-              }}
-              options={RANGE_OPTIONS}
-            />
+          <div className="flex w-full items-center justify-between gap-2 md:hidden">
+            <Button
+              aria-expanded={mobileFiltersOpen}
+              aria-controls="audit-more-filters"
+              iconLeft={<SlidersHorizontal aria-hidden="true" />}
+              onClick={() => setMobileFiltersOpen((open) => !open)}
+            >
+              {serverFilterCount ? `Filters (${serverFilterCount})` : 'Filters'}
+            </Button>
+            <IconButton
+              label={
+                refreshing ? 'Refreshing audit trail' : 'Refresh audit trail'
+              }
+              disabled={refreshing}
+              aria-busy={refreshing || undefined}
+              onClick={refreshAudit}
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={refreshing ? 'animate-spin' : undefined}
+              />
+            </IconButton>
           </div>
-          <Button
-            className="md:hidden"
-            aria-expanded={mobileFiltersOpen}
-            aria-controls="audit-more-filters"
-            iconLeft={<SlidersHorizontal aria-hidden="true" />}
-            onClick={() => setMobileFiltersOpen((open) => !open)}
-          >
-            {serverFilterCount
-              ? `More filters (${serverFilterCount})`
-              : 'More filters'}
-          </Button>
           <div
             id="audit-more-filters"
             className={cx(
-              'w-full flex-wrap items-end gap-3 md:flex md:w-auto',
+              'w-full flex-col gap-4 md:contents',
               mobileFiltersOpen ? 'flex' : 'hidden',
             )}
           >
-            <div className="w-full min-w-0 sm:w-48">
-              <Field label="Principal">
-                <Select
-                  size="sm"
-                  value={filters.principal_id ?? ''}
-                  options={principalOptions}
-                  onChange={(value) =>
-                    navigate({
-                      search: (prev) => ({
-                        ...prev,
-                        principal_id: value || undefined,
-                      }),
-                    })
-                  }
-                  allLabel="All principals"
-                  className="w-full"
-                />
-              </Field>
+            <div className="flex flex-col gap-1.5">
+              <span className={GROUP_LABEL_CLASS} aria-hidden="true">
+                Time range
+              </span>
+              <SegmentedControl
+                ariaLabel="Time range"
+                value={rangeValue}
+                onChange={(value) => {
+                  if (value !== 'custom') setRange(value);
+                }}
+                options={RANGE_OPTIONS}
+                className={PHONE_FULL_SEGMENTS}
+              />
             </div>
-            <TimeRangeBounds
-              since={filters.since}
-              until={filters.until}
-              onCommit={({ since, until }) => {
-                navigate({
-                  search: (prev) => ({
-                    ...prev,
-                    since,
-                    until,
-                    range: undefined,
-                  }),
-                });
-              }}
-            />
+            <div className="flex w-full flex-wrap items-end gap-3 md:w-auto">
+              <div className="w-full min-w-0 sm:w-48">
+                <Field label="Principal">
+                  <Select
+                    size="sm"
+                    value={filters.principal_id ?? ''}
+                    options={principalOptions}
+                    onChange={(value) =>
+                      navigate({
+                        search: (prev) => ({
+                          ...prev,
+                          principal_id: value || undefined,
+                        }),
+                      })
+                    }
+                    allLabel="All principals"
+                    className="w-full"
+                  />
+                </Field>
+              </div>
+              <TimeRangeBounds
+                since={filters.since}
+                until={filters.until}
+                onCommit={({ since, until }) => {
+                  navigate({
+                    search: (prev) => ({
+                      ...prev,
+                      since,
+                      until,
+                      range: undefined,
+                    }),
+                  });
+                }}
+              />
+            </div>
           </div>
         </div>
         <div className="flex min-h-7 flex-wrap items-center justify-between gap-2">
@@ -545,8 +585,9 @@ function AuditPage() {
         </div>
       </div>
 
-      {/* The card is as tall as its rows; past the viewport the list scrolls. */}
-      <Card className="flex min-h-0 flex-col">
+      {/* The card is as tall as its rows; past the viewport the list scrolls.
+          Phones drop the frame: the rows run edge to edge between two rules. */}
+      <div className="flex min-h-0 flex-col max-md:-mx-4 max-md:border-y max-md:border-row md:glass md:rounded-md">
         {/* Desktop table */}
         <div className="@container hidden min-h-0 overflow-auto md:block">
           <Table className="table-fixed min-w-[45rem]">
@@ -758,17 +799,52 @@ function AuditPage() {
               {visibleRows.map(({ entry, key, parsed }) => {
                 const target = auditTarget(entry, parsed, maps);
                 const changed = changedFieldsSummary(parsed);
+                const category = auditCategory(parsed.name);
+                const date = eventTime(entry);
                 return (
                   <li key={key}>
+                    {/* Phone row: what happened and when, then what it hit,
+                        then who and how it ended. The machine action name and
+                        full timestamp live in the drawer. */}
                     <button
                       type="button"
-                      className="flex w-full flex-col gap-0.5 px-4 py-3 text-left text-body hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                      className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
                       onClick={() => setSelected(entry)}
                     >
                       <span className="flex w-full items-baseline justify-between gap-3">
-                        <span className="truncate text-text">
+                        <span className="min-w-0 truncate text-body font-medium text-text">
                           {humanizeAuditAction(parsed.name)}
+                          {typeFilter === 'all' && category !== 'write' ? (
+                            <span className="ml-2 text-caption font-normal text-text-faint">
+                              {AUDIT_CATEGORY_LABEL[category]}
+                            </span>
+                          ) : null}
                         </span>
+                        <span
+                          className="shrink-0 text-caption text-text-faint tabular-nums"
+                          title={formatTime(entry)}
+                        >
+                          {date ? shortTimeFormat.format(date) : '—'}
+                        </span>
+                      </span>
+                      {target ? (
+                        <span className="truncate text-body-sm text-text-muted">
+                          <span className="text-text-faint">
+                            {target.kind}{' '}
+                          </span>
+                          {target.name}
+                        </span>
+                      ) : null}
+                      {changed ? (
+                        <span className="line-clamp-2 break-words text-caption text-text-faint">
+                          {changed}
+                        </span>
+                      ) : null}
+                      <span className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
+                        <span className="min-w-0 truncate">
+                          {auditActorLabel(entry)}
+                        </span>
+                        <span aria-hidden="true">·</span>
                         <span
                           className={cx(
                             'shrink-0 tabular-nums',
@@ -778,33 +854,6 @@ function AuditPage() {
                           {entry.status}
                         </span>
                       </span>
-                      <span className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
-                        <span className="shrink-0 font-mono text-data">
-                          {parsed.name}
-                        </span>
-                        {changed ? (
-                          <span
-                            className="min-w-0 line-clamp-2 break-words"
-                            title={changed}
-                          >
-                            · {changed}
-                          </span>
-                        ) : null}
-                      </span>
-                      {target ? (
-                        <span className="truncate text-text-muted">
-                          <span className="text-text-faint">
-                            {target.kind}{' '}
-                          </span>
-                          {target.name}
-                        </span>
-                      ) : null}
-                      <span className="flex w-full justify-between gap-3 text-caption text-text-faint">
-                        <span className="truncate">
-                          {auditActorLabel(entry)}
-                        </span>
-                        <span className="shrink-0">{formatTime(entry)}</span>
-                      </span>
                     </button>
                   </li>
                 );
@@ -812,7 +861,7 @@ function AuditPage() {
             </ul>
           )}
         </div>
-      </Card>
+      </div>
 
       <AuditEntryDrawer
         entry={selected}

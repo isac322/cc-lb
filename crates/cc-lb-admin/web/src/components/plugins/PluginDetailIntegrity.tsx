@@ -66,7 +66,7 @@ export function PluginDetailIntegrity({ plugin }: { plugin: PluginEntry }) {
           </Row>
           <Row label="Filename">
             <span
-              className="block max-w-[12rem] truncate font-mono text-data"
+              className="block max-w-[12rem] truncate font-mono text-data max-md:max-w-none max-md:whitespace-normal max-md:break-all"
               title={plugin.original_filename}
             >
               {plugin.original_filename}

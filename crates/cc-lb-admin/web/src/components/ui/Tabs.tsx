@@ -19,9 +19,9 @@ export interface TabItem<T extends string> {
 }
 
 /**
- * Underline tabs: 14/500 labels, 36px row, a square 2px accent rule under
- * the active item, one horizontally scrolling line with an edge fade —
- * never a grid of bordered cells and never wrapping.
+ * Underline tabs: 14/500 labels, 36px row (40px on phones, for touch), a
+ * square 2px accent rule under the active item, one horizontally scrolling
+ * line with an edge fade — never a grid of bordered cells and never wrapping.
  *
  * - `mode="tabs"` (default): an ARIA tablist with roving focus (arrows,
  *   Home/End). With `idPrefix`, tab `i` is `${idPrefix}-tab-${value}` and
@@ -136,7 +136,7 @@ export function Tabs<T extends string>({
       role={isTabs ? 'tablist' : undefined}
       aria-label={isTabs ? ariaLabel : undefined}
       aria-orientation={isTabs ? 'horizontal' : undefined}
-      className="flex h-9 items-stretch gap-4 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      className="flex h-10 md:h-9 items-stretch gap-4 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
     >
       {items.map((item, index) => {
@@ -167,7 +167,7 @@ export function Tabs<T extends string>({
             className={cx(
               'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
               'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-              'disabled:cursor-not-allowed disabled:opacity-40',
+              'disabled:cursor-not-allowed disabled:text-text-faint disabled:hover:text-text-faint',
               "after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:content-['']",
               active
                 ? 'text-text after:bg-accent'

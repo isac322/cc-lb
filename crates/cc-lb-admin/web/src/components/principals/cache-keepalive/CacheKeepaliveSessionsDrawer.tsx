@@ -110,7 +110,7 @@ function OverviewStrip({
   const label = horizon === 'all' ? 'All time:' : `Last ${horizon}:`;
   return (
     <div className="px-4 pt-3 pb-2 shrink-0 flex items-center justify-between gap-3 flex-wrap">
-      <div className="flex items-baseline gap-2 flex-wrap min-w-0">
+      <div className="flex items-baseline gap-x-2 gap-y-0.5 flex-wrap min-w-0">
         <span className="text-caption text-text-muted">{label}</span>
         {isLoading ? (
           <>
@@ -123,8 +123,13 @@ function OverviewStrip({
               {(summary?.renewals_fired ?? 0).toLocaleString('en-US')} renewals
               fired
             </span>
-            <span className="text-caption text-text-faint tabular-nums">
-              · {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
+            {/* Phones put the secondary facts on their own line, so the
+                separator that joins them to the headline drops too. */}
+            <span className="text-caption text-text-faint tabular-nums max-sm:basis-full">
+              <span aria-hidden="true" className="max-sm:hidden">
+                ·{' '}
+              </span>
+              {summary ? formatMoney(summary.cost_saved) : '$0.00'} saved ·{' '}
               {(summary?.sessions_last_5m ?? 0).toLocaleString('en-US')}{' '}
               sessions tracked
             </span>
@@ -182,8 +187,10 @@ function SessionListRow({
               : 'border-subtle hover:bg-overlay-2',
         )}
       >
-        <div className="flex items-center justify-between gap-2 flex-wrap leading-tight">
-          <div className="flex items-center gap-2 min-w-0">
+        {/* Phones: ID and P&L lead the first line, state badges and time the
+            second. From sm the four sit on one line as before. */}
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 leading-tight sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]">
+          <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
             {isError && (
               <AlertCircle
                 className="w-3.5 h-3.5 shrink-0 text-danger-text"
@@ -192,37 +199,36 @@ function SessionListRow({
             )}
             <span
               className={cx(
-                'font-mono text-data text-text',
+                'truncate font-mono text-data text-text',
                 isSelected && 'font-medium',
               )}
             >
               {row.id}
             </span>
+          </div>
+          <div className="col-start-1 row-start-2 flex min-w-0 items-center gap-2 sm:col-start-2 sm:row-start-1">
             <Badge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</Badge>
             {isError && <Badge tone="danger">Error</Badge>}
           </div>
-          <div className="flex items-center gap-2 text-caption tabular-nums">
-            <span
-              className={cx(
-                row.net_pnl > 0
-                  ? 'text-success-text'
-                  : row.net_pnl < 0
-                    ? 'text-danger-text'
-                    : 'text-text-muted',
-              )}
-            >
-              {row.state === 'not_tracked'
-                ? '$0.00'
-                : formatNetPnl(row.net_pnl)}
-            </span>
-            <span className="text-text-muted">
-              {row.relative_time ? (
-                row.relative_time
-              ) : (
-                <RelativeTime ts={row.last_message_at_ms} compact />
-              )}
-            </span>
-          </div>
+          <span
+            className={cx(
+              'col-start-2 row-start-1 justify-self-end text-caption tabular-nums sm:col-start-3',
+              row.net_pnl > 0
+                ? 'text-success-text'
+                : row.net_pnl < 0
+                  ? 'text-danger-text'
+                  : 'text-text-muted',
+            )}
+          >
+            {row.state === 'not_tracked' ? '$0.00' : formatNetPnl(row.net_pnl)}
+          </span>
+          <span className="col-start-2 row-start-2 justify-self-end text-caption tabular-nums text-text-muted sm:col-start-4 sm:row-start-1">
+            {row.relative_time ? (
+              row.relative_time
+            ) : (
+              <RelativeTime ts={row.last_message_at_ms} compact />
+            )}
+          </span>
         </div>
         <div className="flex items-center justify-between mt-2">
           <p

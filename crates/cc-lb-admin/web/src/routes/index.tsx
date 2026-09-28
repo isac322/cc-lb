@@ -45,7 +45,6 @@ import {
 import {
   Badge,
   Button,
-  Card,
   cx,
   Hint,
   INPUT_SM_CLASS,
@@ -129,6 +128,7 @@ import {
   type PoolQuotaLatest,
   type PoolQuotaWindow,
   poolQuotaResponseLatest,
+  poolTooltipRows,
   poolWindowResets,
 } from './-overviewPoolQuota';
 
@@ -589,7 +589,7 @@ function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
     <BasePopover.Root open={open} onOpenChange={setOpen}>
       <BasePopover.Trigger
         aria-label={`${principal.name} cost breakdown`}
-        className="block w-full cursor-help rounded-sm py-1.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+        className="block w-full cursor-help rounded-sm py-1.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:-my-3 max-md:py-4.5"
         data-testid="top-principal-cost-trigger"
         delay={200}
         onBlur={() => setOpen(false)}
@@ -692,6 +692,8 @@ function SortableHeadCell({
       <button
         className={cx(
           'inline-flex items-center gap-1 rounded-sm transition-colors hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+          // Phones: a 40px touch target inside the 36px header row.
+          'max-md:-my-3 max-md:py-3',
           active && 'text-text',
         )}
         onClick={() => onSort(sortKey)}
@@ -805,8 +807,9 @@ export function TopPrincipalsSection({
               data-testid="top-principal-row"
             >
               <TableCell className="w-full max-w-0">
+                {/* Phones: the name link spans the row's 40px height. */}
                 <Link
-                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2"
+                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:-my-2.5 max-md:py-2.5"
                   search={{ selectedId: principal.id }}
                   title={principal.name}
                   to="/principals"
@@ -945,7 +948,9 @@ export function TopPrincipalsSection({
  * One region inside the Usage group: an h3 title row with a subtitle that
  * ends in the group's range words, then the content. `bleed` drops the
  * horizontal inset so a table can run edge to edge inside the frame (its
- * cells keep the same inset).
+ * cells keep the same inset); below `md`, where the group has no frame,
+ * the content sits at the page inset and a bled table reaches the screen
+ * edges.
  */
 function UsageBlock({
   title,
@@ -967,7 +972,9 @@ function UsageBlock({
       aria-label={title}
       className={cx(
         'flex min-w-0 flex-col gap-4 py-5 md:py-6',
-        bleed ? 'pb-2 md:pb-3' : 'px-4 md:px-6',
+        // Phones: a bled table runs to the screen edges; its cells and the
+        // title keep the 16px page inset.
+        bleed ? 'pb-2 max-md:-mx-4 md:pb-3' : 'md:px-6',
       )}
       data-testid={testId}
     >
@@ -1074,12 +1081,6 @@ const POOL_QUOTA_WINDOWS_DRAW_ORDER: readonly PoolQuotaWindow[] = [
   '7d_fable',
   '5h',
 ];
-
-/** Tooltip rows follow the legend (5h, 7d, Fable), not the paint order. */
-function legendOrder(key: string): number {
-  const index = (POOL_QUOTA_WINDOWS as readonly string[]).indexOf(key);
-  return index === -1 ? POOL_QUOTA_WINDOWS.length : index;
-}
 
 /** Filled square chip in a quota window's color: its legend identity. */
 function WindowChip({ window }: { window: PoolQuotaWindow }) {
@@ -1321,37 +1322,32 @@ export function PoolQuotaThemedChart({
                 <div className="mb-1.5 tabular-nums text-text-muted">
                   {fmtChartTooltip(Number(label))}
                 </div>
-                {[...payload]
-                  .sort(
-                    (a, b) =>
-                      legendOrder(String(a.dataKey)) -
-                      legendOrder(String(b.dataKey)),
-                  )
-                  .map((p) => {
-                    const key = String(p.dataKey);
-                    return (
-                      <div
-                        key={key}
-                        className="flex items-center justify-between gap-3 py-0.5"
-                      >
-                        <span className="inline-flex items-center gap-1.5 text-text-muted">
-                          {isPoolQuotaWindow(key) ? (
-                            <>
-                              <WindowChip window={key} />
-                              {`${WINDOW_LABELS[key]} window`}
-                            </>
-                          ) : (
-                            key
-                          )}
-                        </span>
-                        <span className="font-medium tabular-nums">
-                          {typeof p.value === 'number'
-                            ? `${formatQuotaPercent(p.value)} used`
-                            : '—'}
-                        </span>
-                      </div>
-                    );
-                  })}
+                {poolTooltipRows(payload).map((p) => {
+                  const key = String(p.dataKey);
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-center justify-between gap-3 py-0.5"
+                      data-slot="pool-tooltip-row"
+                    >
+                      <span className="inline-flex items-center gap-1.5 text-text-muted">
+                        {isPoolQuotaWindow(key) ? (
+                          <>
+                            <WindowChip window={key} />
+                            {`${WINDOW_LABELS[key]} window`}
+                          </>
+                        ) : (
+                          key
+                        )}
+                      </span>
+                      <span className="font-medium tabular-nums">
+                        {typeof p.value === 'number'
+                          ? `${formatQuotaPercent(p.value)} used`
+                          : '—'}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             );
           }}
@@ -1733,13 +1729,15 @@ function OverviewPage() {
         <>
           {/* Usage first: one frame binds the range control to everything it
           scopes (pool quota usage, traffic, top principals); the sections
-          after it read "as last observed" or "any time". */}
+          after it read "as last observed" or "any time". Below `md` the
+          frame and its rules drop: the blocks sit on the ground at the page
+          inset, separated by space and their own titles. */}
           <section
             aria-labelledby="overview-usage-title"
-            className="min-w-0 rounded-md border border-subtle"
+            className="min-w-0 md:rounded-md md:border md:border-subtle"
             data-testid="overview-usage-group"
           >
-            <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 border-b border-subtle px-4 py-4 md:flex-nowrap md:px-6">
+            <header className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 md:flex-nowrap md:border-b md:border-subtle md:px-6 md:py-4">
               <div className="min-w-0">
                 <h2
                   className="text-title-section text-text"
@@ -1752,15 +1750,17 @@ function OverviewPage() {
                   range
                 </p>
               </div>
+              {/* Phones: the four presets share the full width as equal
+              segments, one row under the title. */}
               <SegmentedControl
                 ariaLabel="Usage range"
-                className="shrink-0"
+                className="shrink-0 max-md:grid max-md:w-full max-md:grid-cols-4"
                 options={RANGE_OPTIONS}
                 value={range}
                 onChange={selectRange}
               />
             </header>
-            <div className="divide-y divide-subtle">
+            <div className="md:divide-y md:divide-subtle">
               <PoolQuotaUsage
                 aggregate={quotaAggregate.data}
                 chart={poolQuotaChart}
@@ -1920,8 +1920,9 @@ function OverviewPage() {
             }
           >
             {/* A preview, not a feed: the newest rows at their natural
-            height, with the full history one click away on Logs. */}
-            <Card className="min-w-0">
+            height, with the full history one click away on Logs. A card
+            from `md`; on phones the rows run to the screen edges. */}
+            <div className="min-w-0 max-md:-mx-4 md:glass md:rounded-md">
               <div className="relative overflow-x-auto scroll-fade-right">
                 <RequestEventsTable
                   events={latestRows}
@@ -1934,7 +1935,7 @@ function OverviewPage() {
                   emptyTitle="No recent requests"
                 />
               </div>
-            </Card>
+            </div>
           </Section>
         </>
       )}

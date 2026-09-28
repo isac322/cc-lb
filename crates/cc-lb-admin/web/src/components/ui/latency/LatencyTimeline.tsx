@@ -605,7 +605,7 @@ function ResponsibilityOverview({
                   ? `${pct(group.valueMs, attribution.totalMs)}% of total`
                   : 'no timing recorded'
               }`}
-              className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 text-left text-caption transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+              className="flex min-w-0 items-center gap-2 rounded-sm px-1.5 py-1 max-md:min-h-10 text-left text-caption transition-colors hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
               data-ms={group.observed ? group.valueMs : undefined}
               data-responsibility={group.key}
               type="button"
@@ -1047,7 +1047,7 @@ function TimeAxisTicks({
   if (ticks.length === 0) return null;
   const last = ticks.length - 1;
   return (
-    <div className="relative h-3 mt-1" aria-hidden>
+    <div className="relative h-3 mt-1 mx-1.5" aria-hidden>
       {ticks.map((t, i) => {
         const isFirst = i === 0;
         const isLast = i === last;
@@ -1101,7 +1101,9 @@ function SseLane({
         <span className="text-label text-text-muted">SSE markers</span>
         <span className="text-caption text-text-faint">Request axis</span>
       </div>
-      <div className="relative w-full" style={{ height: `${laneHeight}px` }}>
+      {/* Inset by half a marker so one at 0% or 100% is never clipped by the
+      drawer edge; the tick row below shares the inset. */}
+      <div className="relative mx-1.5" style={{ height: `${laneHeight}px` }}>
         <div
           className="absolute inset-x-0 h-px bg-[color:var(--color-text-faint)]/40"
           style={{ top: `${axisTop}px` }}
@@ -1200,7 +1202,7 @@ function CollapsibleSummary({
   return (
     <summary
       className={cx(
-        'text-label cursor-pointer select-none flex items-center gap-2 px-1.5 py-1 rounded-sm transition [&::-webkit-details-marker]:hidden list-none',
+        'text-label cursor-pointer select-none flex items-center gap-2 px-1.5 py-1 max-md:min-h-10 rounded-sm transition [&::-webkit-details-marker]:hidden list-none',
         suggested ? 'bg-warn/8 text-warn-text' : 'text-text-muted',
       )}
     >
@@ -1332,7 +1334,7 @@ function SseDetailsList({
               type="button"
               {...active.bind(m.key)}
               className={cx(
-                'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+                'flex items-center gap-2 text-caption w-full px-1.5 py-1 max-md:min-h-10 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
                 isSticky
                   ? 'bg-selected text-text'
                   : isActive
@@ -1403,7 +1405,7 @@ function DetailRow({
       type="button"
       {...active.bind(stateKey)}
       className={cx(
-        'flex items-center gap-2 text-caption w-full px-1.5 py-1 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
+        'flex items-center gap-2 text-caption w-full px-1.5 py-1 max-md:min-h-10 rounded-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
         isSticky
           ? 'bg-selected text-text'
           : isActive

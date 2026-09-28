@@ -123,6 +123,11 @@ vi.mock('@tanstack/react-router', async () => {
 const rechartsMock = vi.hoisted(() => ({
   areaChartRenderCount: 0,
   data: [] as readonly Record<string, unknown>[],
+  /** When set, the Tooltip mock renders its `content` with this hover. */
+  tooltip: null as null | {
+    label: number;
+    payload: readonly Record<string, unknown>[];
+  },
 }));
 
 vi.mock('recharts', () => ({
@@ -179,7 +184,16 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null,
   ReferenceArea: () => null,
   ReferenceLine: () => null,
-  Tooltip: () => null,
+  Tooltip: ({
+    content,
+  }: {
+    content?: (props: Record<string, unknown>) => ReactNode;
+  }) =>
+    rechartsMock.tooltip && content ? (
+      <foreignObject data-testid="pool-quota-tooltip">
+        {content({ active: true, ...rechartsMock.tooltip })}
+      </foreignObject>
+    ) : null,
   YAxis: () => null,
 }));
 
@@ -609,6 +623,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   routerMock.search = { range: '24h' };
   rechartsMock.areaChartRenderCount = 0;
+  rechartsMock.tooltip = null;
   // OAuthReconnectSummary polls upstreams itself; default to a resolved
   // empty list so no OAuth status queries spin up. Tests that need an
   // OAuth upstream override this.
@@ -733,6 +748,47 @@ describe('Overview pool quota usage', () => {
         slot.querySelector(`linearGradient[id="${gradientId}"]`),
       ).not.toBeNull();
     }
+  });
+
+  it('lists each window once in the hover tooltip, in legend order', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: poolHistoryResponse(POOL_HISTORY_NOW, 12),
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    // What Recharts hands custom content: an entry for every Area in paint
+    // order, the fill pass (`tooltipType="none"`) included.
+    const values: Record<string, number> = {
+      '7d': 66,
+      '7d_fable': 62,
+      '5h': 14,
+    };
+    rechartsMock.tooltip = {
+      label: POOL_HISTORY_NOW - 60,
+      payload: [
+        ...Object.entries(values).map(([dataKey, value]) => ({
+          dataKey,
+          value,
+          type: 'none',
+        })),
+        ...Object.entries(values).map(([dataKey, value]) => ({
+          dataKey,
+          value,
+        })),
+      ],
+    };
+
+    render(<OverviewPage />);
+
+    const rows = within(screen.getByTestId('pool-quota-tooltip')).getAllByText(
+      /% used$/,
+    );
+    expect(rows.map((row) => row.parentElement?.textContent)).toEqual([
+      '5h window14% used',
+      '7d window66% used',
+      '7d (Fable) window62% used',
+    ]);
   });
 
   it('links to the upstreams page from the upstreams table section', () => {

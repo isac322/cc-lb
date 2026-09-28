@@ -43,8 +43,10 @@ function DetailRow({
   label: string;
   children: ReactNode;
 }) {
+  // Phones stack the label over its value so the value gets the full width;
+  // from `sm` the label takes a fixed 8rem column beside it.
   return (
-    <div className="grid grid-cols-[8rem_minmax(0,1fr)] items-baseline gap-3 py-2">
+    <div className="grid grid-cols-1 gap-0.5 py-2 sm:grid-cols-[8rem_minmax(0,1fr)] sm:items-baseline sm:gap-3">
       <dt className="text-label text-text-faint">{label}</dt>
       <dd className="min-w-0 break-words text-text">{children}</dd>
     </div>
@@ -191,14 +193,14 @@ export function AuditEntryDrawer({
           ) : null}
 
           <details className="group">
-            <summary className="inline-flex w-fit list-none items-center gap-1.5 rounded-sm text-body text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+            <summary className="flex list-none flex-wrap items-center gap-x-1.5 rounded-sm text-body text-text-muted hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 max-sm:min-h-11 sm:w-fit [&::-webkit-details-marker]:hidden">
               <ChevronRight
                 className="size-3 shrink-0 transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none"
                 strokeWidth={1.75}
                 aria-hidden="true"
               />
               Raw entry
-              <span className="text-text-faint">
+              <span className="text-text-faint max-sm:basis-full max-sm:pl-[1.125rem] max-sm:text-caption">
                 (sensitive keys are stripped server-side)
               </span>
             </summary>

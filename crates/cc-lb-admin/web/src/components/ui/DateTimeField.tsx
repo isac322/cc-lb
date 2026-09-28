@@ -71,7 +71,10 @@ export function DateTimeField({
           inputMode="numeric"
           placeholder={placeholder}
           autoComplete="off"
-          className={cx(INPUT_SM_CLASS, '!w-48 tabular-nums pl-8')}
+          className={cx(
+            INPUT_SM_CLASS,
+            '!w-48 max-md:!w-full tabular-nums pl-8',
+          )}
           value={value}
           aria-invalid={error != null ? true : undefined}
           aria-describedby={error != null ? errorId : undefined}

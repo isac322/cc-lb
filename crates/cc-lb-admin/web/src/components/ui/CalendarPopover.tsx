@@ -16,9 +16,11 @@ interface CalendarPopoverProps {
 }
 
 const DESKTOP_QUERY = '(min-width: 1024px)';
+// Phones: the trigger fills the field's 32px left inset at full field height,
+// so the icon is a 40px-tall target without covering typed text.
 const TRIGGER_CLASS = cx(
   'absolute left-1.5 top-1/2 -translate-y-1/2 inline-flex items-center justify-center',
-  'w-6 h-6 lg:w-5 lg:h-5 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 transition-colors',
+  'w-6 h-6 max-md:left-0 max-md:w-8 max-md:h-10 lg:w-5 lg:h-5 rounded-sm text-text-faint hover:text-text hover:bg-overlay-5 transition-colors',
   'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
 );
 
