@@ -23,27 +23,38 @@ export function requestKindBadgeText(
 }
 
 /**
- * Fixed OKLCH hue per known request kind. The hues stay clear of warn (amber,
- * ~75–85), danger (red, ~20–30) and the accent violet (~280–290), so a kind
- * badge never reads as a severity or a brand mark, and neighbours are at
- * least 22° apart. `main` (the bulk of traffic) and `unknown` have no hue:
- * they render as the quiet neutral badge and an outlined neutral badge.
+ * Fixed OKLCH hue per known request kind, 21° apart. Every badge color
+ * (`categoricalColor`, both themes) stays at least OKLab ΔE 0.08 from warn,
+ * danger and the cache-write series, and from the accent teal and
+ * accent-text — the free arcs are 110–142 and 228–354 — so a kind badge
+ * never reads as a severity or a brand mark. `main` (the bulk of traffic)
+ * and `unknown` have no hue: they render as the quiet neutral badge and an
+ * outlined neutral badge.
  */
 const REQUEST_KIND_HUE: Readonly<Record<string, number>> = {
-  side: 115,
-  session_title: 140,
-  recap: 165,
-  compaction: 190,
-  notification: 215,
-  subagent: 240,
-  look_at: 262,
-  auto_thinking: 318,
-  advisor: 342,
+  side: 112,
+  session_title: 133,
+  notification: 228,
+  subagent: 249,
+  look_at: 270,
+  compaction: 291,
+  auto_thinking: 312,
+  advisor: 333,
+  recap: 354,
 };
 
-/** Hue range a custom kind hashes into: the same status- and accent-free arc. */
-const CUSTOM_KIND_HUE_FROM = 110;
-const CUSTOM_KIND_HUE_SPAN = 155;
+/** Hue arcs a custom kind hashes into: the same arcs, 110–142 then 228–354. */
+const CUSTOM_KIND_LOW_FROM = 110;
+const CUSTOM_KIND_LOW_SPAN = 33;
+const CUSTOM_KIND_HIGH_FROM = 228;
+const CUSTOM_KIND_HUE_SPAN = 160;
+
+function customKindHue(requestKind: string): number {
+  const offset = fnv1aHash(requestKind) % CUSTOM_KIND_HUE_SPAN;
+  return offset < CUSTOM_KIND_LOW_SPAN
+    ? CUSTOM_KIND_LOW_FROM + offset
+    : CUSTOM_KIND_HIGH_FROM + offset - CUSTOM_KIND_LOW_SPAN;
+}
 
 export type RequestKindTone =
   | { kind: 'main' }
@@ -55,8 +66,6 @@ export function requestKindTone(requestKind: string): RequestKindTone {
   if (requestKind === 'unknown') return { kind: 'unknown' };
   return {
     kind: 'hue',
-    hue:
-      REQUEST_KIND_HUE[requestKind] ??
-      CUSTOM_KIND_HUE_FROM + (fnv1aHash(requestKind) % CUSTOM_KIND_HUE_SPAN),
+    hue: REQUEST_KIND_HUE[requestKind] ?? customKindHue(requestKind),
   };
 }

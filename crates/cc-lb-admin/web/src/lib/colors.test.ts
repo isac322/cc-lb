@@ -18,8 +18,8 @@ describe('getSessionColor', () => {
     colors = await import('./colors');
   });
 
-  it('gives the first nine sessions visibly different hues', () => {
-    const hues = Array.from({ length: 9 }, (_, i) =>
+  it('gives the first seven sessions visibly different hues', () => {
+    const hues = Array.from({ length: 7 }, (_, i) =>
       hueOf(colors.getSessionColor(`session-${i}`).text),
     );
     for (const [i, a] of hues.entries()) {
@@ -35,10 +35,10 @@ describe('getSessionColor', () => {
     expect(colors.getSessionColor('session-a')).toEqual(first);
   });
 
-  it('never uses warn, danger or accent-violet hues', () => {
+  it('never uses warn, danger or accent-teal hues', () => {
     for (let i = 0; i < 40; i++) {
       const hue = hueOf(colors.getSessionColor(`s-${i}`).text);
-      const inBands = (hue >= 135 && hue <= 263) || (hue >= 309 && hue <= 350);
+      const inBands = (hue >= 135 && hue <= 142) || (hue >= 228 && hue <= 350);
       expect(inBands).toBe(true);
     }
   });

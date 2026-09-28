@@ -141,7 +141,7 @@ describe('RequestEventsTable', () => {
       'max-w-24',
       'max-w-28',
       'max-w-12',
-      'max-w-40',
+      'max-w-24',
       'max-w-12',
       'max-w-16',
       'max-w-20',

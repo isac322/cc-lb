@@ -7,6 +7,7 @@ import {
   screen,
   within,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ComponentType, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -1083,10 +1084,10 @@ describe('Overview loading geometry', () => {
         loading={false}
         principals={[
           {
+            cache_hit_ratio: null,
             cost_components_micros: null,
             cost_micros: 1_250_000,
             id: 'principal-1',
-            total_cost_micros: 1_250_000,
             name: 'Primary principal',
             requests: 12,
             share_pct: 100,
@@ -1358,9 +1359,10 @@ describe('Overview loading geometry', () => {
 
     expect(screen.getAllByRole('radiogroup')).toHaveLength(1);
     fireEvent.click(rangeOption('Usage range', '1h'));
-    // The one control drives every usage query, in the URL.
+    // The one control drives every usage query, in the URL, and keeps the
+    // reader's place: the router must not reset the scroll to the top.
     expect(routerMock.navigate).toHaveBeenLastCalledWith(
-      expect.objectContaining({ replace: true }),
+      expect.objectContaining({ replace: true, resetScroll: false }),
     );
     expect(routerMock.search).toEqual({ range: '1h' });
     expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('1h');
@@ -1948,6 +1950,7 @@ describe('Overview OAuth reconnect summary', () => {
 const COST_NOTE = 'Per-category cost not recorded for this window';
 
 const COMPLETE_PRINCIPAL: TopPrincipal = {
+  cache_hit_ratio: 0.875,
   cost_components_micros: {
     input: 400_000,
     output: 300_000,
@@ -1957,7 +1960,6 @@ const COMPLETE_PRINCIPAL: TopPrincipal = {
   },
   cost_micros: 1_000_000,
   id: 'principal-complete',
-  total_cost_micros: 1_600_000,
   name: 'Complete principal',
   requests: 12,
   share_pct: 62.5,
@@ -1987,20 +1989,18 @@ const UNRECORDED_PRINCIPAL: TopPrincipal = {
   name: 'Unrecorded principal',
 };
 
-function costMeters(): HTMLElement[] {
-  return screen.getAllByTestId('top-principal-cost-meter');
+function costTrigger(name: string): HTMLButtonElement {
+  return screen.getByRole<HTMLButtonElement>('button', {
+    name: new RegExp(`^${name} cost .*, show breakdown$`),
+  });
 }
 
-function costTriggers(): HTMLButtonElement[] {
-  return screen.getAllByTestId<HTMLButtonElement>('top-principal-cost-trigger');
-}
-
-function meterFill(meter: HTMLElement): HTMLElement {
-  const fill = meter.querySelector<HTMLElement>(
-    '[data-slot="cost-meter-fill"]',
+/** The cost bar's drawn segments as `color width` pairs, in paint order. */
+function costBar(trigger: HTMLElement): string[] {
+  return Array.from(
+    trigger.querySelectorAll<HTMLElement>('[data-cell-bar] span'),
+    (segment) => `${segment.style.backgroundColor} ${segment.style.width}`,
   );
-  if (!fill) throw new Error('cost meter has no fill');
-  return fill;
 }
 
 /** Every figure the open breakdown shows, in order. */
@@ -2021,54 +2021,49 @@ function renderPrincipals(principals: readonly TopPrincipal[]) {
   );
 }
 
-describe('Top principal cost meter', () => {
-  it('reads requests, tokens, cost and share in one row with no placeholder', () => {
+describe('Top principal cost breakdown and cache hit', () => {
+  it('reads requests, tokens, cache hit, cost and share in one row', () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
 
     const cells = within(screen.getByTestId('top-principal-row')).getAllByRole(
       'cell',
     );
-    expect(cells.slice(0, 4).map((cell) => cell.textContent)).toEqual([
+    expect(within(cells[0]!).getByRole('link').textContent).toBe(
       'Complete principal',
+    );
+    expect(cells.slice(1).map((cell) => cell.textContent)).toEqual([
       '12',
       '345',
+      '87%',
       '$1.00',
+      '62.5%',
     ]);
-    expect(within(cells[4]!).getByText('62.5%')).toBeDefined();
-    expect(within(cells[4]!).getByRole('meter')).toBeDefined();
   });
 
-  it("fills one neutral bar by the principal's share of every principal's cost", () => {
+  it('draws the cost bar in the request table categories, order and colors', () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
-    const meter = costMeters()[0];
 
-    expect(meter.dataset.costComponents).toBe('complete');
-    expect(meterFill(meter).style.width).toBe('62.5%');
-    expect(meterFill(meter).children).toHaveLength(0);
+    expect(costBar(costTrigger('Complete principal'))).toEqual([
+      'var(--color-series-cache-read) 10%',
+      'var(--color-series-cache-create-5m) 10%',
+      'var(--color-series-cache-create-1h) 10%',
+      'var(--color-series-input) 40%',
+      'var(--color-series-output) 30%',
+    ]);
   });
 
-  it('names the meter and carries the whole breakdown in its value text', () => {
+  it('opens the exact breakdown from the keyboard', async () => {
+    const user = userEvent.setup();
     renderPrincipals([COMPLETE_PRINCIPAL]);
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Complete principal');
 
-    expect(meter.getAttribute('role')).toBe('meter');
-    expect(meter.getAttribute('aria-label')).toBe('Complete principal cost');
-    expect(meter.getAttribute('aria-valuenow')).toBe('1000000');
-    expect(meter.getAttribute('aria-valuemax')).toBe('1600000');
-    expect(meter.getAttribute('aria-valuetext')).toBe(
-      'Total $1.0000; 62.5% of all principals; Cache read $0.1000, Cache create 5m $0.1000, Cache create 1h $0.1000, Input $0.4000, Output $0.3000',
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Complete principal cost $1.00, show breakdown',
     );
-  });
-
-  it('shows exact values and keeps keyboard focus on the breakdown trigger', () => {
-    renderPrincipals([COMPLETE_PRINCIPAL]);
-    const trigger = costTriggers()[0];
-    const meter = costMeters()[0];
-
     expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
-    act(() => trigger.focus());
+    trigger.focus();
+    await user.keyboard('{Enter}');
 
-    expect(document.activeElement).toBe(trigger);
     expect(costDetailValues()).toEqual([
       'Cache read',
       '$0.1000',
@@ -2088,18 +2083,13 @@ describe('Top principal cost meter', () => {
       'Total',
       '$1.0000',
     ]);
-    expect(costTriggers()[0]).toBe(trigger);
-    expect(document.activeElement).toBe(trigger);
-    expect(costMeters()[0]).toBe(meter);
-    expect(meter.getAttribute('role')).toBe('meter');
-    expect(meter.getAttribute('aria-valuetext')).toContain('Input $0.4000');
   });
 
   it('opens the same breakdown after the hover delay', () => {
     vi.useFakeTimers();
     try {
       renderPrincipals([COMPLETE_PRINCIPAL]);
-      fireEvent.pointerEnter(costTriggers()[0]);
+      fireEvent.pointerEnter(costTrigger('Complete principal'));
 
       act(() => vi.advanceTimersByTime(199));
       expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
@@ -2112,14 +2102,17 @@ describe('Top principal cost meter', () => {
     }
   });
 
-  it('lists an unattributed remainder when the total outruns the categories', () => {
+  it('draws and lists an unattributed remainder when the total outruns the categories', () => {
     renderPrincipals([PARTIAL_PRINCIPAL]);
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Partial principal');
 
-    expect(meter.dataset.costComponents).toBe('partial');
-    expect(meterFill(meter).style.width).toBe('50%');
-
-    fireEvent.focus(costTriggers()[0]);
+    expect(costBar(trigger)).toEqual([
+      'var(--color-series-cache-read) 25%',
+      'var(--color-series-input) 25%',
+      'var(--color-series-output) 25%',
+      'var(--color-neutral) 25%',
+    ]);
+    fireEvent.click(trigger);
     expect(costDetailValues()).toEqual([
       'Cache read',
       '$0.2000',
@@ -2144,62 +2137,72 @@ describe('Top principal cost meter', () => {
     ]);
   });
 
-  it('says so in the breakdown when no category cost was recorded', () => {
+  it('leaves bare track and says so when no category cost was recorded', () => {
     renderPrincipals([UNRECORDED_PRINCIPAL]);
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Unrecorded principal');
 
-    expect(meter.dataset.costComponents).toBe('unavailable');
-    expect(meter.getAttribute('aria-valuetext')).toBe(
-      `Total $0.5000; 62.5% of all principals; ${COST_NOTE}`,
-    );
-
-    fireEvent.focus(costTriggers()[0]);
+    expect(costBar(trigger)).toEqual([]);
+    fireEvent.click(trigger);
     expect(screen.getByText(COST_NOTE)).toBeDefined();
     expect(costDetailValues()).toEqual(['Total', '$0.5000']);
   });
 
-  it("scales every meter against every principal's cost below one dollar", () => {
+  it('rounds the cache hit down and shows a dash without prompt tokens', () => {
     renderPrincipals([
+      { ...COMPLETE_PRINCIPAL, cache_hit_ratio: 0.999 },
       {
-        ...COMPLETE_PRINCIPAL,
-        cost_components_micros: {
-          input: 250_000,
-          output: 250_000,
-          cache_create_5m: 0,
-          cache_create_1h: 0,
-          cache_read: 0,
-        },
-        cost_micros: 500_000,
-        id: 'principal-top',
-        total_cost_micros: 625_000,
-        name: 'Top principal',
-        share_pct: 80,
-      },
-      {
-        ...UNRECORDED_PRINCIPAL,
-        cost_micros: 125_000,
-        total_cost_micros: 625_000,
-        share_pct: 20,
+        ...PARTIAL_PRINCIPAL,
+        cache_hit_ratio: null,
       },
     ]);
-    const [top, tail] = costMeters();
+    const [cached, uncached] = screen.getAllByTestId('top-principal-row');
 
-    expect(meterFill(top).style.width).toBe('80%');
-    expect(meterFill(tail).style.width).toBe('20%');
-    expect(screen.getAllByTestId('top-principal-row')[0].textContent).toContain(
-      '$0.50',
+    // A partial hit never reads as a full one.
+    expect(within(cached!).getAllByRole('cell')[3]!.textContent).toBe('99%');
+    expect(within(uncached!).getAllByRole('cell')[3]!.textContent).toBe(
+      '—No prompt tokens',
     );
+    // Phones fold the figure into the name cell's second line.
+    expect(
+      cached!.querySelector('[data-slot="principal-cache-hit"]')!.textContent,
+    ).toBe('99% cache hit');
+    expect(
+      uncached!.querySelector('[data-slot="principal-cache-hit"]')!.textContent,
+    ).toBe('No prompt tokens');
   });
 
-  it('aggregates bucket components and follows refreshed usage data', () => {
+  it('sorts by cache hit with principals that sent no prompt tokens last either way', () => {
+    renderPrincipals([
+      { ...COMPLETE_PRINCIPAL, id: 'a', name: 'Low', cache_hit_ratio: 0.2 },
+      { ...COMPLETE_PRINCIPAL, id: 'b', name: 'None', cache_hit_ratio: null },
+      { ...COMPLETE_PRINCIPAL, id: 'c', name: 'High', cache_hit_ratio: 0.9 },
+    ]);
+    const order = () =>
+      screen
+        .getAllByTestId('top-principal-row')
+        .map((row) => within(row).getByRole('link').textContent);
+    const header = () =>
+      screen.getByRole('button', { name: 'Cache hit' }).closest('th')!;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cache hit' }));
+    expect(header().getAttribute('aria-sort')).toBe('descending');
+    expect(order()).toEqual(['High', 'Low', 'None']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cache hit' }));
+    expect(header().getAttribute('aria-sort')).toBe('ascending');
+    expect(order()).toEqual(['Low', 'High', 'None']);
+  });
+
+  it('aggregates bucket components and prompt tokens and follows refreshed usage data', () => {
     mockResolvedKpiQueries();
     const { rerender } = render(<OverviewPage />);
-    const meter = costMeters()[0];
+    const row = screen.getByTestId('top-principal-row');
 
+    // Cache read 2,000 of 2,400 prompt tokens over the two buckets.
+    expect(within(row).getAllByRole('cell')[3]!.textContent).toBe('83%');
     // $1.00 of the window's $3.00 carries components; the pre-upgrade bucket's
     // $2.00 stays unattributed instead of being spread over the categories.
-    expect(meter.dataset.costComponents).toBe('partial');
-    fireEvent.focus(costTriggers()[0]);
+    fireEvent.click(costTrigger('Principal Alpha'));
     expect(costDetailValues()).toEqual([
       'Cache read',
       '$0.1500',
@@ -2223,9 +2226,7 @@ describe('Top principal cost meter', () => {
       '$3.0000',
     ]);
     // 1,100 + 1,500 tokens over the two buckets.
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '2.6k',
-    );
+    expect(row.textContent).toContain('2.6k');
 
     // Same window, same total, same tokens: only the recorded split moves.
     const refreshed: DashboardUsageResponse = {
@@ -2277,7 +2278,6 @@ describe('Top principal cost meter', () => {
       'Total',
       '$3.0000',
     ]);
-    // 1,100 + 1,500 tokens over the two buckets.
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
       '2.6k',
     );

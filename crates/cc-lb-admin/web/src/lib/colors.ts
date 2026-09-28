@@ -70,17 +70,16 @@ export function categoricalColor(hue: number): CategoricalColor {
 }
 
 /**
- * Session chip hues: steps ≥ 21° apart inside the bands a session may use —
- * the whole circle except pink-red through yellow-green (danger, warn and the
- * cache-write series, 351–134; below ~135 a chip tint reads khaki, next to
- * warn) and the accent violet (264–308) — so a chip never reads as severity
- * or brand and any two palette hues are visibly different.
+ * Session chip hues: seven hues ≥ 21° apart. Every chip color (text, dot,
+ * tint; both themes) sits at least OKLab ΔE 0.08 from the accent teal and
+ * accent-text, which rules out 143–227, and the palette skips pink-red
+ * through yellow-green (danger, warn and the cache-write series, 351–134;
+ * below ~135 a chip tint reads khaki, next to warn) — so a chip never reads
+ * as severity or brand and any two palette hues are visibly different.
  */
-const SESSION_HUES: readonly number[] = [
-  135, 156, 177, 198, 219, 240, 261, 316, 338,
-];
+const SESSION_HUES: readonly number[] = [135, 228, 249, 270, 291, 312, 333];
 
-/** Coprime with the palette size: each probe lands ~100° from the last. */
+/** Coprime with the palette size (7), so the probe visits every slot. */
 const SESSION_PROBE_STRIDE = 4;
 
 const sessionSlots = new Map<string, number>();
@@ -89,7 +88,7 @@ const sessionSlotLoad: number[] = SESSION_HUES.map(() => 0);
 /**
  * A session keeps the palette slot it was first given. A new session takes
  * its hashed slot unless another session already holds it, then the
- * least-used slot along the probe order — so the first nine sessions seen
+ * least-used slot along the probe order — so the first seven sessions seen
  * never share a hue, and past that each hue carries an even share.
  */
 function sessionSlot(sessionId: string): number {

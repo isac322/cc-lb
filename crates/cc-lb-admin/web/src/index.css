@@ -93,6 +93,8 @@
   --color-text: var(--color-text);
   --color-text-muted: var(--color-text-muted);
   --color-text-faint: var(--color-text-faint);
+  --color-text-disabled: var(--color-text-disabled);
+  --color-border-disabled: var(--color-border-disabled);
   --color-accent: var(--color-accent);
   --color-accent-dim: var(--color-accent-dim);
   --color-accent-hover: var(--color-accent-hover);
@@ -162,45 +164,50 @@
       --shell-bottom: 0px;
     }
   }
-  /* Night (graphite) is the default; Day (neutral daylight) via data-theme or
-     the OS preference under "system". Contrast (WCAG): text ≥ 12.9:1,
-     text-muted ≥ 6.9:1, text-faint ≥ 4.9:1 on every surface; accent-text,
-     warn-text, danger-text ≥ 4.5:1 on ground, surfaces, their own /12 badge
-     fill and the selected-row fill; white on danger-solid ≥ 5.2:1. */
+  /* Signal teal. Night (blue-slate) is the default; Day (cool slate daylight)
+     via data-theme or the OS preference under "system". Contrast (WCAG):
+     text ≥ 13:1, text-muted ≥ 6.9:1, text-faint ≥ 5.4:1 on every surface;
+     accent-text, warn-text, danger-text ≥ 4.5:1 on ground, surfaces, their
+     own /12 badge fill and the selected-row fill; white on danger-solid
+     ≥ 5.2:1. `text-disabled` is deliberately 2.6–3.1:1: legible, but a clear
+     step below `text-faint`, so an unavailable control reads as such. */
   :root,
   :root[data-theme="dark"] {
     color-scheme: dark;
-    /* Graphite night. Ground, then flat surfaces one step up; 1px lines. */
-    --color-bg: #15171a;
-    --color-bg-sub: #23272c;
-    --color-panel: #1c1f23;
-    --color-panel-strong: #23272c;
-    --color-border: #2f343a;
-    --color-border-strong: #666d76;
-    --color-border-row: #272b30;
-    --color-text: #eceef0;
-    --color-text-muted: #b3b9c1;
-    --color-text-faint: #959ca5;
-    /* Ion violet: the brand mark, focus, the switch "on" track, links, the
-       7d chart lines and the one primary action. `accent-ink` is text on a
-       solid accent fill. Selection is neutral (`--color-selected`). */
-    --color-accent: #a493ff;
-    --color-accent-hover: #b3a6ff;
-    --color-accent-dim: rgb(164 147 255 / 0.14);
-    --color-accent-text: #b3a6ff;
-    --color-accent-ink: #15171a;
+    /* Blue-slate night. Ground, then flat surfaces one step up; 1px lines. */
+    --color-bg: #11181e;
+    --color-bg-sub: #1d262d;
+    --color-panel: #171f25;
+    --color-panel-strong: #1d262d;
+    --color-border: #293139;
+    --color-border-strong: #636d77;
+    --color-border-row: #212930;
+    --color-text: #ebeef2;
+    --color-text-muted: #bbc3c9;
+    --color-text-faint: #989fa6;
+    /* Disabled controls: dim ink and a dashed line (`control-disabled`). */
+    --color-text-disabled: #5e6770;
+    --color-border-disabled: #414a53;
+    /* Signal teal: the brand mark, focus, the switch "on" track, links and
+       the one primary action. `accent-ink` is text on a solid accent fill.
+       Selection is neutral (`--color-selected`). */
+    --color-accent: #4cd7c8;
+    --color-accent-hover: #76e6d8;
+    --color-accent-dim: rgb(76 215 200 / 0.14);
+    --color-accent-text: #69e0d2;
+    --color-accent-ink: #11181e;
     /* Healthy is neutral: warn and danger are the only other hues. */
-    --color-ok: #b3b9c1;
+    --color-ok: #bbc3c9;
     --color-warn: #f0b429;
     --color-danger: #ff6f61;
     --color-danger-solid: #c7372c;
     --color-danger-solid-hover: #b02f25;
-    --color-success-text: #b3b9c1;
+    --color-success-text: #bbc3c9;
     --color-warn-text: #f0b429;
     --color-danger-text: #ff8a7e;
-    --color-neutral: #8f969f;
-    --color-scrollbar: #2f343a;
-    --color-scrollbar-hover: #666d76;
+    --color-neutral: #8e959b;
+    --color-scrollbar: #293139;
+    --color-scrollbar-hover: #636d77;
     --color-hover-bg: rgb(255 255 255 / 0.04);
     /* Selected row / nav item: a neutral fill a clear step above hover. */
     --color-selected: rgb(255 255 255 / 0.08);
@@ -212,162 +219,166 @@
     --color-overlay-6: rgb(255 255 255 / 0.08);
     --color-overlay-skeleton-base: rgb(255 255 255 / 0.03);
     --color-overlay-skeleton-shimmer: rgb(255 255 255 / 0.07);
-    --color-progress-track: #2c3036;
-    --color-modal-backdrop: rgb(10 11 13 / 0.72);
-    --color-drawer-backdrop: rgb(10 11 13 / 0.6);
-    --color-toast-bg: #23272c;
+    --color-progress-track: #262e36;
+    --color-modal-backdrop: rgb(3 7 12 / 0.72);
+    --color-drawer-backdrop: rgb(3 7 12 / 0.6);
+    --color-toast-bg: #1d262d;
     /* Series. Tokens: cache read (the good outcome) is green, cache
        creation (the costly miss) is amber/orange, uncached input is a quiet
        slate, output violet. Quota windows: the three live windows (5h, 7d,
        7d Fable) are sky, magenta and lime, at least OKLab ΔE 0.12 apart under
        protan/deutan/tritan simulation; legacy Sonnet/Opus windows are muted.
        Latency responsibility groups have their own tokens. */
-    --color-series-input: #95a7ba;
+    --color-series-input: #96a6bb;
     --color-series-output: #997fde;
-    --color-series-cache-create-5m: #f8bd40;
-    --color-series-cache-create-1h: #e2832d;
+    --color-series-cache-create-5m: #e48d28;
+    --color-series-cache-create-1h: #cc612e;
     --color-series-cache-read: #24c27d;
-    --color-series-5h: #4ebdf7;
+    --color-series-5h: #63b1f9;
     --color-series-7d: #cd5cac;
     --color-series-fable: #bbe75f;
     --color-series-sonnet: #629092;
     --color-series-opus: #91745d;
-    --color-series-overage: oklch(0.72 0.005 260);
-    --color-series-unified: oklch(0.58 0.010 260);
-    --color-series-latency-downstream: oklch(0.88 0.060 215);
-    --color-series-latency-cclb: oklch(0.76 0.110 235);
-    --color-series-latency-net: oklch(0.72 0.140 145);
-    --color-series-latency-wait: oklch(0.78 0.100 180);
+    --color-series-overage: #a3a5a8;
+    --color-series-unified: #777a80;
+    --color-series-latency-downstream: #abe2f0;
+    --color-series-latency-cclb: #64bced;
+    --color-series-latency-net: #67bb6b;
+    --color-series-latency-wait: #5cadb6;
     --chart-fill-opacity: 0.12;
-    --color-input-bg: #15171a;
+    --color-input-bg: #11181e;
     --color-overlay-shadow: rgb(0 0 0 / 0.5);
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    /* Cool neutral daylight gray. Surfaces lighten one step at a time. */
-    --color-bg: #e6e7ea;
-    --color-bg-sub: #f8f8f9;
-    --color-panel: #f1f2f4;
-    --color-panel-strong: #f8f8f9;
-    --color-border: #c9ccd2;
-    --color-border-strong: #7e838b;
-    --color-border-row: #d7d9de;
-    --color-text: #17191c;
-    --color-text-muted: #464b52;
-    --color-text-faint: #565a61;
-    --color-accent: #5a3fd6;
-    --color-accent-hover: #4c31c4;
-    --color-accent-dim: rgb(90 63 214 / 0.1);
-    --color-accent-text: #4c31c4;
+    /* Cool slate daylight. Surfaces lighten one step at a time. */
+    --color-bg: #dee6ec;
+    --color-bg-sub: #f5f8fb;
+    --color-panel: #ebf0f5;
+    --color-panel-strong: #f5f8fb;
+    --color-border: #c5cdd5;
+    --color-border-strong: #78828a;
+    --color-border-row: #d2dae1;
+    --color-text: #141a20;
+    --color-text-muted: #434c53;
+    --color-text-faint: #535c64;
+    --color-text-disabled: #868f97;
+    --color-border-disabled: #a9b2ba;
+    --color-accent: #007370;
+    --color-accent-hover: #006260;
+    --color-accent-dim: rgb(0 115 112 / 0.1);
+    --color-accent-text: #006563;
     --color-accent-ink: #ffffff;
-    --color-ok: #464b52;
+    --color-ok: #434c53;
     --color-warn: #8a5a00;
     --color-danger: #a61e30;
     --color-danger-solid: #a61e30;
     --color-danger-solid-hover: #8e1828;
-    --color-success-text: #464b52;
+    --color-success-text: #434c53;
     --color-warn-text: #7a4f00;
     --color-danger-text: #a61e30;
-    --color-neutral: #6b6f76;
-    --color-scrollbar: #c9ccd2;
-    --color-scrollbar-hover: #7e838b;
-    --color-hover-bg: rgb(23 25 28 / 0.04);
-    --color-selected: rgb(15 20 30 / 0.07);
-    --color-overlay-1: rgb(23 25 28 / 0.02);
-    --color-overlay-2: rgb(23 25 28 / 0.03);
-    --color-overlay-3: rgb(23 25 28 / 0.04);
-    --color-overlay-4: rgb(23 25 28 / 0.05);
-    --color-overlay-5: rgb(23 25 28 / 0.06);
-    --color-overlay-6: rgb(23 25 28 / 0.08);
-    --color-overlay-skeleton-base: rgb(23 25 28 / 0.04);
-    --color-overlay-skeleton-shimmer: rgb(23 25 28 / 0.09);
-    --color-progress-track: #cfd2d8;
-    --color-modal-backdrop: rgb(23 25 28 / 0.4);
-    --color-drawer-backdrop: rgb(23 25 28 / 0.32);
-    --color-toast-bg: #f8f8f9;
+    --color-neutral: #677078;
+    --color-scrollbar: #c5cdd5;
+    --color-scrollbar-hover: #78828a;
+    --color-hover-bg: rgb(20 26 32 / 0.04);
+    --color-selected: rgb(20 26 32 / 0.07);
+    --color-overlay-1: rgb(20 26 32 / 0.02);
+    --color-overlay-2: rgb(20 26 32 / 0.03);
+    --color-overlay-3: rgb(20 26 32 / 0.04);
+    --color-overlay-4: rgb(20 26 32 / 0.05);
+    --color-overlay-5: rgb(20 26 32 / 0.06);
+    --color-overlay-6: rgb(20 26 32 / 0.08);
+    --color-overlay-skeleton-base: rgb(20 26 32 / 0.04);
+    --color-overlay-skeleton-shimmer: rgb(20 26 32 / 0.09);
+    --color-progress-track: #ccd4db;
+    --color-modal-backdrop: rgb(20 26 32 / 0.4);
+    --color-drawer-backdrop: rgb(20 26 32 / 0.32);
+    --color-toast-bg: #f5f8fb;
     --color-series-input: #657689;
     --color-series-output: #613ea6;
-    --color-series-cache-create-5m: #b67700;
-    --color-series-cache-create-1h: #a05000;
-    --color-series-cache-read: #00774b;
+    --color-series-cache-create-5m: #cc8d16;
+    --color-series-cache-create-1h: #bf5b0d;
+    --color-series-cache-read: #278a47;
     --color-series-5h: #0c82bf;
     --color-series-7d: #8d1071;
-    --color-series-fable: #427a17;
-    --color-series-sonnet: #486a6c;
-    --color-series-opus: #755e4c;
-    --color-series-overage: oklch(0.50 0.005 260);
-    --color-series-unified: oklch(0.62 0.010 260);
-    --color-series-latency-downstream: oklch(0.40 0.070 210);
-    --color-series-latency-cclb: oklch(0.52 0.130 240);
-    --color-series-latency-net: oklch(0.54 0.130 145);
-    --color-series-latency-wait: oklch(0.54 0.100 185);
+    --color-series-fable: #486a00;
+    --color-series-sonnet: #39555c;
+    --color-series-opus: #6a5647;
+    --color-series-overage: #616366;
+    --color-series-unified: #83868c;
+    --color-series-latency-downstream: #00525c;
+    --color-series-latency-cclb: #0070ab;
+    --color-series-latency-net: #34823b;
+    --color-series-latency-wait: #5191a1;
     --chart-fill-opacity: 0.1;
-    --color-input-bg: #f8f8f9;
-    --color-overlay-shadow: rgb(23 25 28 / 0.16);
+    --color-input-bg: #f5f8fb;
+    --color-overlay-shadow: rgb(20 26 32 / 0.16);
   }
   @media (prefers-color-scheme: light) {
     :root[data-theme="system"] {
       color-scheme: light;
-      /* Cool neutral daylight gray. Surfaces lighten one step at a time. */
-      --color-bg: #e6e7ea;
-      --color-bg-sub: #f8f8f9;
-      --color-panel: #f1f2f4;
-      --color-panel-strong: #f8f8f9;
-      --color-border: #c9ccd2;
-      --color-border-strong: #7e838b;
-      --color-border-row: #d7d9de;
-      --color-text: #17191c;
-      --color-text-muted: #464b52;
-      --color-text-faint: #565a61;
-      --color-accent: #5a3fd6;
-      --color-accent-hover: #4c31c4;
-      --color-accent-dim: rgb(90 63 214 / 0.1);
-      --color-accent-text: #4c31c4;
+      /* Cool slate daylight. Surfaces lighten one step at a time. */
+      --color-bg: #dee6ec;
+      --color-bg-sub: #f5f8fb;
+      --color-panel: #ebf0f5;
+      --color-panel-strong: #f5f8fb;
+      --color-border: #c5cdd5;
+      --color-border-strong: #78828a;
+      --color-border-row: #d2dae1;
+      --color-text: #141a20;
+      --color-text-muted: #434c53;
+      --color-text-faint: #535c64;
+      --color-text-disabled: #868f97;
+      --color-border-disabled: #a9b2ba;
+      --color-accent: #007370;
+      --color-accent-hover: #006260;
+      --color-accent-dim: rgb(0 115 112 / 0.1);
+      --color-accent-text: #006563;
       --color-accent-ink: #ffffff;
-      --color-ok: #464b52;
+      --color-ok: #434c53;
       --color-warn: #8a5a00;
       --color-danger: #a61e30;
       --color-danger-solid: #a61e30;
       --color-danger-solid-hover: #8e1828;
-      --color-success-text: #464b52;
+      --color-success-text: #434c53;
       --color-warn-text: #7a4f00;
       --color-danger-text: #a61e30;
-      --color-neutral: #6b6f76;
-      --color-scrollbar: #c9ccd2;
-      --color-scrollbar-hover: #7e838b;
-      --color-hover-bg: rgb(23 25 28 / 0.04);
-      --color-selected: rgb(15 20 30 / 0.07);
-      --color-overlay-1: rgb(23 25 28 / 0.02);
-      --color-overlay-2: rgb(23 25 28 / 0.03);
-      --color-overlay-3: rgb(23 25 28 / 0.04);
-      --color-overlay-4: rgb(23 25 28 / 0.05);
-      --color-overlay-5: rgb(23 25 28 / 0.06);
-      --color-overlay-6: rgb(23 25 28 / 0.08);
-      --color-overlay-skeleton-base: rgb(23 25 28 / 0.04);
-      --color-overlay-skeleton-shimmer: rgb(23 25 28 / 0.09);
-      --color-progress-track: #cfd2d8;
-      --color-modal-backdrop: rgb(23 25 28 / 0.4);
-      --color-drawer-backdrop: rgb(23 25 28 / 0.32);
-      --color-toast-bg: #f8f8f9;
+      --color-neutral: #677078;
+      --color-scrollbar: #c5cdd5;
+      --color-scrollbar-hover: #78828a;
+      --color-hover-bg: rgb(20 26 32 / 0.04);
+      --color-selected: rgb(20 26 32 / 0.07);
+      --color-overlay-1: rgb(20 26 32 / 0.02);
+      --color-overlay-2: rgb(20 26 32 / 0.03);
+      --color-overlay-3: rgb(20 26 32 / 0.04);
+      --color-overlay-4: rgb(20 26 32 / 0.05);
+      --color-overlay-5: rgb(20 26 32 / 0.06);
+      --color-overlay-6: rgb(20 26 32 / 0.08);
+      --color-overlay-skeleton-base: rgb(20 26 32 / 0.04);
+      --color-overlay-skeleton-shimmer: rgb(20 26 32 / 0.09);
+      --color-progress-track: #ccd4db;
+      --color-modal-backdrop: rgb(20 26 32 / 0.4);
+      --color-drawer-backdrop: rgb(20 26 32 / 0.32);
+      --color-toast-bg: #f5f8fb;
       --color-series-input: #657689;
       --color-series-output: #613ea6;
-      --color-series-cache-create-5m: #b67700;
-      --color-series-cache-create-1h: #a05000;
-      --color-series-cache-read: #00774b;
+      --color-series-cache-create-5m: #cc8d16;
+      --color-series-cache-create-1h: #bf5b0d;
+      --color-series-cache-read: #278a47;
       --color-series-5h: #0c82bf;
       --color-series-7d: #8d1071;
-      --color-series-fable: #427a17;
-      --color-series-sonnet: #486a6c;
-      --color-series-opus: #755e4c;
-      --color-series-overage: oklch(0.50 0.005 260);
-      --color-series-unified: oklch(0.62 0.010 260);
-      --color-series-latency-downstream: oklch(0.40 0.070 210);
-      --color-series-latency-cclb: oklch(0.52 0.130 240);
-      --color-series-latency-net: oklch(0.54 0.130 145);
-      --color-series-latency-wait: oklch(0.54 0.100 185);
+      --color-series-fable: #486a00;
+      --color-series-sonnet: #39555c;
+      --color-series-opus: #6a5647;
+      --color-series-overage: #616366;
+      --color-series-unified: #83868c;
+      --color-series-latency-downstream: #00525c;
+      --color-series-latency-cclb: #0070ab;
+      --color-series-latency-net: #34823b;
+      --color-series-latency-wait: #5191a1;
       --chart-fill-opacity: 0.1;
-      --color-input-bg: #f8f8f9;
-      --color-overlay-shadow: rgb(23 25 28 / 0.16);
+      --color-input-bg: #f5f8fb;
+      --color-overlay-shadow: rgb(20 26 32 / 0.16);
     }
   }
   html, body, #root { height: 100%; min-height: 100%; }
@@ -438,20 +449,22 @@
   background-color: var(--color-overlay-3);
   border-radius: var(--radius-sm);
 }
-/* Disabled control: `text-faint` ink (at least 4.9:1 on every surface, so
-   the label stays readable) on no fill with the quiet 1px line, and no hover
-   response. Use as `disabled:control-disabled` on native controls, or as a
-   plain class on elements that carry `aria-disabled`. Never dim with opacity. */
+/* Disabled control: `text-disabled` ink (2.6–3.1:1, legible but a clear step
+   below `text-faint`) on no fill with a dashed `border-disabled` line (only
+   where the control draws a border), and no hover or press response. Use as
+   `disabled:control-disabled` on native controls, or as a plain class on
+   elements that carry `aria-disabled`. Never dim with opacity. A loading
+   (`aria-busy`) button keeps its normal look instead. The paint is
+   `!important` because the utility is the element's final state: as a plain
+   class it would otherwise lose to the chrome it sits beside (`text-text`,
+   `border-subtle-strong`, `hover:bg-*`) by sort order. The cursor is not, so
+   a caller can still add `cursor-progress`. */
 @utility control-disabled {
   cursor: not-allowed;
-  color: var(--color-text-faint);
-  background-color: transparent;
-  border-color: var(--color-border);
-  &:hover {
-    color: var(--color-text-faint);
-    background-color: transparent;
-    border-color: var(--color-border);
-  }
+  color: var(--color-text-disabled) !important;
+  background-color: transparent !important;
+  border-color: var(--color-border-disabled) !important;
+  border-style: dashed !important;
 }
 /* Sticky table header (`thead`): opaque panel so rows scrolling underneath
    never show through; 12px/500 `text-faint`, sentence case, 1px line. */
@@ -546,7 +559,7 @@
   color: var(--color-text);
 }
 [cmdk-item][data-disabled='true'] {
-  color: var(--color-text-faint);
+  color: var(--color-text-disabled);
   cursor: not-allowed;
 }
 /* Phones: 44px rows so every command is a comfortable touch target. */

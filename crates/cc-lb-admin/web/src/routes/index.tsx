@@ -1,5 +1,3 @@
-import { Meter as BaseMeter } from '@base-ui/react/meter';
-import { Popover as BasePopover } from '@base-ui/react/popover';
 import {
   createFileRoute,
   Link,
@@ -8,14 +6,7 @@ import {
   useSearch,
 } from '@tanstack/react-router';
 import { AlertTriangle, ArrowDown, ArrowUp } from 'lucide-react';
-import {
-  memo,
-  type ReactNode,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { memo, type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -42,6 +33,7 @@ import {
   Sparkline,
   useChartId,
 } from '../components/ui/charts';
+import { MetricCell } from '../components/ui/MetricCell';
 import {
   Badge,
   Button,
@@ -56,6 +48,7 @@ import {
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
+  EmptyValue,
   Table,
   TableCell,
   TableEmptyRow,
@@ -78,6 +71,7 @@ import {
 import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
 import { getWindowColor } from '../lib/colors';
 import {
+  cacheHitRatio,
   cacheMissRatio,
   formatCostMicros,
   formatCount,
@@ -505,29 +499,38 @@ export type TopPrincipal = {
    */
   cost_components_micros: CostComponentMicros | null;
   tokens: number;
+  /**
+   * Cache read over every prompt token (cache read + cache create + uncached
+   * input), 0-1 (`cacheHitRatio`); null when the principal sent no prompt
+   * tokens in the window.
+   */
+  cache_hit_ratio: number | null;
   requests: number;
   /** Share of every principal's cost in the window, 0-100. */
   share_pct: number;
-  /** Every principal's cost in the window: the full-length reference for a meter. */
-  total_cost_micros: number;
 };
 
 /** Rows the ranking shows before "Show all N principals" expands it. */
 export const TOP_PRINCIPAL_ROWS = 10;
 
-type TopPrincipalSortKey = 'requests' | 'tokens' | 'cost';
+type TopPrincipalSortKey = 'requests' | 'tokens' | 'hit' | 'cost';
 type SortDirection = 'asc' | 'desc';
 
 const TOP_PRINCIPAL_SORT_VALUE: Record<
   TopPrincipalSortKey,
-  (principal: TopPrincipal) => number
+  (principal: TopPrincipal) => number | null
 > = {
   requests: (principal) => principal.requests,
   tokens: (principal) => principal.tokens,
+  hit: (principal) => principal.cache_hit_ratio,
   cost: (principal) => principal.cost_micros,
 };
 
-/** Sorted copy: the chosen figure, then cost (desc) and name as tie-breaks. */
+/**
+ * Sorted copy: the chosen figure, then cost (desc) and name as tie-breaks. A
+ * principal without the figure (no prompt tokens for Cache hit) sorts last in
+ * either direction: it has no reading to rank.
+ */
 function sortTopPrincipals(
   principals: readonly TopPrincipal[],
   key: TopPrincipalSortKey,
@@ -535,126 +538,77 @@ function sortTopPrincipals(
 ): TopPrincipal[] {
   const value = TOP_PRINCIPAL_SORT_VALUE[key];
   const sign = direction === 'desc' ? -1 : 1;
-  return [...principals].sort(
-    (a, b) =>
-      sign * (value(a) - value(b)) ||
-      b.cost_micros - a.cost_micros ||
-      a.name.localeCompare(b.name),
-  );
+  return [...principals].sort((a, b) => {
+    const left = value(a);
+    const right = value(b);
+    const byValue =
+      left == null || right == null
+        ? Number(left == null) - Number(right == null)
+        : sign * (left - right);
+    return (
+      byValue || b.cost_micros - a.cost_micros || a.name.localeCompare(b.name)
+    );
+  });
+}
+
+/**
+ * Whole percent rounded down, like the request table's `hit`: a partial hit
+ * never reads `100%`.
+ */
+function fmtCacheHit(ratio: number): string {
+  return `${Math.floor(ratio * 100)}%`;
 }
 
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
-/** Share-of-total track: UsageMeter `sm` geometry (4px, square), neutral fill. */
-const SHARE_TRACK_CLASS =
-  'relative block h-1 w-full overflow-hidden bg-progress-track';
-
 /**
- * Share-of-cost meter for one principal row: one neutral fill whose length is
- * the principal's share of every principal's cost in the window. The
- * per-category split lives in the hover/focus breakdown and in the meter's
- * value text, so the row keeps its geometry and its reading.
+ * The principal's cost over a bar of what it paid for, in the request
+ * table's cost categories, order and colors (`costCategorySegments`), with
+ * the same hover / Enter breakdown. Cost the recorded categories do not
+ * account for (windows rolled up before per-category cost was persisted)
+ * draws as the neutral Unattributed tail; a window with no split at all
+ * leaves bare track and says so in the breakdown.
  */
-function PrincipalCostMeter({ principal }: { principal: TopPrincipal }) {
-  const [open, setOpen] = useState(false);
-  const hoverTimerRef = useRef<number | undefined>(undefined);
-  useEffect(
-    () => () => {
-      window.clearTimeout(hoverTimerRef.current);
-    },
-    [],
-  );
+function PrincipalCostCell({ principal }: { principal: TopPrincipal }) {
   const totalMicros = principal.cost_micros;
   const components = principal.cost_components_micros;
-  const attributedMicros = components ? sumCostMicros(components) : 0;
   const unattributedMicros = components
-    ? Math.max(0, totalMicros - attributedMicros)
+    ? Math.max(0, totalMicros - sumCostMicros(components))
     : 0;
   const segments = components
     ? costCategorySegments(components, unattributedMicros)
     : [];
-  const valueText = [
-    `Total ${formatCostMicros(totalMicros)}`,
-    `${fmtPercent(principal.share_pct)} of all principals`,
-    components
-      ? segments
-          .map(
-            (segment) => `${segment.label} ${formatCostMicros(segment.value)}`,
-          )
-          .join(', ')
-      : PRINCIPAL_COST_NOTE,
-  ].join('; ');
+  const text = formatUsdAmount(totalMicros / 1_000_000);
 
   return (
-    <BasePopover.Root open={open} onOpenChange={setOpen}>
-      <BasePopover.Trigger
-        aria-label={`${principal.name} cost breakdown`}
-        className="block w-full cursor-help rounded-sm py-1.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:-my-3 max-md:py-4.5"
-        data-testid="top-principal-cost-trigger"
-        delay={200}
-        onBlur={() => setOpen(false)}
-        onFocus={() => setOpen(true)}
-        onPointerEnter={() => {
-          window.clearTimeout(hoverTimerRef.current);
-          hoverTimerRef.current = window.setTimeout(() => setOpen(true), 200);
-        }}
-        onPointerLeave={() => {
-          window.clearTimeout(hoverTimerRef.current);
-          setOpen(false);
-        }}
-        openOnHover
-        type="button"
-      >
-        <BaseMeter.Root
-          aria-label={`${principal.name} cost`}
-          data-cost-components={
-            components
-              ? unattributedMicros > 0
-                ? 'partial'
-                : 'complete'
-              : 'unavailable'
-          }
-          data-testid="top-principal-cost-meter"
-          getAriaValueText={() => valueText}
-          max={Math.max(1, principal.total_cost_micros)}
-          value={totalMicros}
-        >
-          <BaseMeter.Track className={SHARE_TRACK_CLASS}>
-            <BaseMeter.Indicator
-              className="h-full bg-text-muted"
-              data-slot="cost-meter-fill"
-            />
-          </BaseMeter.Track>
-        </BaseMeter.Root>
-      </BasePopover.Trigger>
-      <BasePopover.Portal>
-        <BasePopover.Positioner side="top" sideOffset={4}>
-          <BasePopover.Popup
-            className="glass-strong z-50 rounded-md px-2 py-1.5 text-caption text-text"
-            initialFocus={false}
-          >
-            <div data-testid="top-principal-cost-details">
-              <BreakdownPopover
-                title="Cost"
-                showZeroRows={true}
-                note={components ? undefined : PRINCIPAL_COST_NOTE}
-                rows={segments.map((segment) => ({
-                  label: segment.label,
-                  value: segment.value,
-                  color: segment.color,
-                  fmt: formatCostMicros,
-                }))}
-                footer={{
-                  label: 'Total',
-                  value: totalMicros,
-                  fmt: formatCostMicros,
-                }}
-              />
-            </div>
-          </BasePopover.Popup>
-        </BasePopover.Positioner>
-      </BasePopover.Portal>
-    </BasePopover.Root>
+    <MetricCell
+      className="@4xl/principals:w-36"
+      label={`${principal.name} cost ${text}, show breakdown`}
+      popover={
+        <div data-testid="top-principal-cost-details">
+          <BreakdownPopover
+            title="Cost"
+            showZeroRows={true}
+            note={components ? undefined : PRINCIPAL_COST_NOTE}
+            rows={segments.map((segment) => ({
+              label: segment.label,
+              value: segment.value,
+              color: segment.color,
+              fmt: formatCostMicros,
+            }))}
+            footer={{
+              label: 'Total',
+              value: totalMicros,
+              fmt: formatCostMicros,
+            }}
+          />
+        </div>
+      }
+      segments={segments}
+      total={totalMicros}
+    >
+      <span className="text-text">{text}</span>
+    </MetricCell>
   );
 }
 
@@ -708,7 +662,10 @@ function SortableHeadCell({
   );
 }
 
-/** Requests and Tokens drop below `sm`: Principal, Cost and Share stay. */
+/**
+ * Requests, Tokens and Cache hit drop below `sm`: Principal, Cost and Share
+ * stay, and the cache hit folds into the name cell's second line.
+ */
 const TOP_PRINCIPAL_OPTIONAL_CELL = 'max-sm:hidden';
 
 export function TopPrincipalsSection({
@@ -784,19 +741,27 @@ export function TopPrincipalsSection({
           />
           <SortableHeadCell
             activeKey={sortKey}
+            className={TOP_PRINCIPAL_OPTIONAL_CELL}
+            direction={direction}
+            label="Cache hit"
+            onSort={handleSort}
+            sortKey="hit"
+          />
+          <SortableHeadCell
+            activeKey={sortKey}
             direction={direction}
             label="Cost"
             onSort={handleSort}
             sortKey="cost"
           />
-          <TableHeadCell className="@4xl/principals:w-80" numeric>
+          <TableHeadCell className="@4xl/principals:w-24" numeric>
             Share
           </TableHeadCell>
         </tr>
       </TableHead>
       <tbody>
         {rows.length === 0 ? (
-          <TableEmptyRow colSpan={5}>
+          <TableEmptyRow colSpan={6}>
             {`No principals match "${query.trim()}"`}
           </TableEmptyRow>
         ) : (
@@ -807,15 +772,24 @@ export function TopPrincipalsSection({
               data-testid="top-principal-row"
             >
               <TableCell className="w-full max-w-0">
-                {/* Phones: the name link spans the row's 40px height. */}
+                {/* From `sm` to `md` the name link spans the row's 40px
+                height; phones stack it over the cache-hit line instead. */}
                 <Link
-                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:-my-2.5 max-md:py-2.5"
+                  className="block truncate rounded-sm text-text underline decoration-transparent underline-offset-4 transition-colors hover:decoration-border-strong focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 sm:max-md:-my-2.5 sm:max-md:py-2.5"
                   search={{ selectedId: principal.id }}
                   title={principal.name}
                   to="/principals"
                 >
                   {principal.name}
                 </Link>
+                <span
+                  className="block text-caption text-text-muted tabular-nums sm:hidden"
+                  data-slot="principal-cache-hit"
+                >
+                  {principal.cache_hit_ratio == null
+                    ? 'No prompt tokens'
+                    : `${fmtCacheHit(principal.cache_hit_ratio)} cache hit`}
+                </span>
               </TableCell>
               <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
                 {formatCount(principal.requests)}
@@ -823,18 +797,16 @@ export function TopPrincipalsSection({
               <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
                 {fmtTokens(principal.tokens)}
               </TableCell>
-              <TableCell numeric>
-                {formatUsdAmount(principal.cost_micros / 1_000_000)}
+              <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
+                {principal.cache_hit_ratio == null ? (
+                  <EmptyValue label="No prompt tokens" />
+                ) : (
+                  fmtCacheHit(principal.cache_hit_ratio)
+                )}
               </TableCell>
-              <TableCell numeric>
-                <div className="flex items-center justify-end gap-2">
-                  <div className="w-14 sm:w-24 @4xl/principals:w-52">
-                    <PrincipalCostMeter principal={principal} />
-                  </div>
-                  <span className="w-12 text-text-muted">
-                    {fmtPercent(principal.share_pct)}
-                  </span>
-                </div>
+              <PrincipalCostCell principal={principal} />
+              <TableCell className="text-text-muted" numeric>
+                {fmtPercent(principal.share_pct)}
               </TableCell>
             </TableRow>
           ))
@@ -1479,9 +1451,14 @@ function OverviewPage() {
   // the previous window would address unrelated data: drop it with the range.
   const selectRange = (next: Range) => {
     setActiveKpiIndex(null);
+    // `resetScroll: false`: the router's scroll restoration would otherwise
+    // snap the page to the top, and the control sits above what it scopes —
+    // the reader changing the range from Traffic or Top principals keeps
+    // their place while the figures re-scope in place.
     void navigate({
       search: (prev) => ({ ...prev, range: next }),
       replace: true,
+      resetScroll: false,
     });
   };
 
@@ -1666,21 +1643,33 @@ function OverviewPage() {
   // sorts and pages them), and how many known principals had none.
   const principalRanking = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
-    const listed: Omit<TopPrincipal, 'share_pct' | 'total_cost_micros'>[] = [];
+    const listed: Omit<TopPrincipal, 'share_pct'>[] = [];
     const listedIds = new Set<string>();
     let totalCostMicros = 0;
 
     for (const s of series) {
       if (!s.key) continue;
       let costMicros = 0;
-      let tokens = 0;
       let requests = 0;
+      // Window token totals per component: the cache hit is taken over the
+      // whole window (cache read over every prompt token), not averaged
+      // over buckets.
+      const tokenTotals = {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      };
       const components = emptyCostComponents();
       let recordedComponents = false;
       for (const b of s.buckets) {
         costMicros += b.virtual_cost_micros ?? 0;
-        tokens += sumTokens(b);
         requests += b.request_count ?? 0;
+        tokenTotals.input_tokens += b.input_tokens ?? 0;
+        tokenTotals.output_tokens += b.output_tokens ?? 0;
+        tokenTotals.cache_creation_input_tokens +=
+          b.cache_creation_input_tokens ?? 0;
+        tokenTotals.cache_read_input_tokens += b.cache_read_input_tokens ?? 0;
         if (addBucketCostMicros(b, components)) recordedComponents = true;
       }
       if (requests <= 0) continue;
@@ -1692,7 +1681,8 @@ function OverviewPage() {
         name: principalNameMap.get(s.key) ?? s.key,
         cost_micros: costMicros,
         cost_components_micros: recordedComponents ? components : null,
-        tokens,
+        tokens: sumTokens(tokenTotals),
+        cache_hit_ratio: cacheHitRatio(tokenTotals),
         requests,
       });
     }
@@ -1701,7 +1691,6 @@ function OverviewPage() {
       ...p,
       share_pct:
         totalCostMicros > 0 ? (p.cost_micros / totalCostMicros) * 100 : 0,
-      total_cost_micros: totalCostMicros,
     }));
     let idleCount = 0;
     for (const id of principalNameMap.keys()) {

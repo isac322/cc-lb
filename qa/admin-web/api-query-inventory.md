@@ -17,10 +17,10 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 | Dimension | Count / Status |
 |---|---|
-| UI parent actions | 209 |
-| UI atomic request occurrences | 148 |
-| Registered API method/path rows | 104 |
-| Independent backend route scan | 104 |
+| UI parent actions | 208 |
+| UI atomic request occurrences | 146 |
+| Registered API method/path rows | 102 |
+| Independent backend route scan | 102 |
 | Production UI source denominator | 97 files |
 | UI route denominator | 8 routes |
 | Unknown UI requests | 0 |
@@ -322,11 +322,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-UP-07** | `network_request` | UI-SRC-1EEBA1898F34 | Upstreams / Refresh Metadata Button | POST /admin/v1/upstreams/{id}/subscription-metadata/refresh | `external_action` | `available` |
 | **UI-SRC-224914630CC5** | `ui_action` | — | Upstreams / Quota Series Query | Subscription Quota Series Query | `read` | `available` |
 | **UI-UP-08A** | `network_request` | UI-SRC-224914630CC5 | Upstreams / Quota Series Query | GET /admin/v1/subscription-quotas/series | `read` | `available` |
-| **UI-SRC-2351FFDF6073** | `ui_action` | — | Upstreams / Quota Analysis Query | Subscription Quota Analysis Query | `read` | `available` |
-| **UI-UP-08B** | `network_request` | UI-SRC-2351FFDF6073 | Upstreams / Quota Analysis Query | GET /admin/v1/subscription-quotas/analysis | `read` | `available` |
 | **UI-UP-09** | `ui_action` | — | Upstreams / Quota History Range Toggle | Toggle Quota History Range | `read` | `available` |
 | **UI-UP-09A** | `network_request` | UI-UP-09 | Upstreams / Quota History Range Toggle | GET /admin/v1/subscription-quotas/series | `read` | `available` |
-| **UI-UP-09B** | `network_request` | UI-UP-09 | Upstreams / Quota History Range Toggle | GET /admin/v1/subscription-quotas/analysis | `read` | `available` |
 | **UI-UP-10** | `ui_action` | — | Upstreams / Quota History Legend Window Isolation | Isolate Quota Window in Legend | `read` | `available` |
 | **UI-SRC-0D929B471D7A** | `ui_action` | — | Upstreams / Inline Name Editor | Rename Upstream | `reversible_write` | `available` |
 | **UI-UP-11** | `network_request` | UI-SRC-0D929B471D7A | Upstreams / Inline Name Editor | PUT /admin/v1/upstreams/{id} | `reversible_write` | `available` |
@@ -433,7 +430,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **API-SRC-FC8E60B994F7** | `backend_endpoint` | — | Backend-Only / handle_latest | GET /admin/subscription-quotas/latest | `read` | `available` |
 | **API-SRC-063C7455BC4D** | `backend_endpoint` | — | Backend-Only / handle_series | GET /admin/subscription-quotas/series | `read` | `available` |
 | **API-SRC-B19EB1F130F2** | `backend_endpoint` | — | Backend-Only / handle_aggregate | GET /admin/subscription-quotas/aggregate | `read` | `available` |
-| **API-SRC-1CD1FD9DEBA0** | `backend_endpoint` | — | Backend-Only / handle_analysis | GET /admin/subscription-quotas/analysis | `read` | `available` |
 | **API-SRC-155F19B11A2E** | `backend_endpoint` | — | Backend-Only / handle_pool_history | GET /admin/subscription-quotas/pool-history | `read` | `available` |
 | **API-SYS-04** | `backend_endpoint` | — | Backend-Only / status | GET /admin/scheduler/status | `read` | `available` |
 | **API-SYS-03** | `backend_endpoint` | — | Backend-Only / failures | GET /admin/scheduler/failures | `read` | `available` |
@@ -5175,51 +5171,17 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** Renders area curves for 5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, and overage
 - **Runtime result:** `PENDING`
 
-### [UI-SRC-2351FFDF6073] Upstreams — Subscription Quota Analysis Query
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `UI-UP-08B`
-- **Source:** `crates/cc-lb-admin/web/src/routes/upstreams.tsx:869#DetailView`
-- **Preconditions:** OAuth upstream selected
-- **Steps:** Select an OAuth upstream or change quota range
-- **Scope:** `each_upstream` — Each selected OAuth upstream
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Fills in snapshot burn stats, deficit multiplier, shortfall tokens, and caveat bullets
-- **Runtime result:** `PENDING`
-
-### [UI-UP-08B] Upstreams — Subscription Quota Analysis Query — useSubscriptionQuotaAnalysis
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-SRC-2351FFDF6073`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:876#useSubscriptionQuotaAnalysis`
-- **Preconditions:** OAuth upstream selected
-- **Steps:** Select an OAuth upstream or change quota range
-- **Scope:** `each_upstream` — Each selected OAuth upstream
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/subscription-quotas/analysis`
-  - Query: `upstream_ids`, `windows`, `source`, `range_secs`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_analysis`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range`, `postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints`
-- **Cache / no-query path:** Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache.
-- **Side effects:** None
-- **Expected UI:** Fills in snapshot burn stats, deficit multiplier, shortfall tokens, and caveat bullets
-- **Runtime result:** `PENDING`
-
 ### [UI-UP-09] Upstreams — Toggle Quota History Range
 
 - **Entry type:** `ui_action`
-- **Atomic requests:** `UI-UP-09A`, `UI-UP-09B`
+- **Atomic requests:** `UI-UP-09A`
 - **Source:** `crates/cc-lb-admin/web/src/routes/upstreams.tsx:1335#DetailView`
 - **Preconditions:** OAuth upstream selected
 - **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
 - **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis
+- **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series
 - **Runtime result:** `PENDING`
 
 ### [UI-UP-09A] Upstreams — Toggle Quota History Range — useSubscriptionQuotaSeries
@@ -5240,28 +5202,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints`
 - **Cache / no-query path:** Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL.
 - **Side effects:** None
-- **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis
-- **Runtime result:** `PENDING`
-
-### [UI-UP-09B] Upstreams — Toggle Quota History Range — useSubscriptionQuotaAnalysis
-
-- **Entry type:** `network_request`
-- **Parent action:** `UI-UP-09`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:876#useSubscriptionQuotaAnalysis`
-- **Preconditions:** OAuth upstream selected
-- **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
-- **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/subscription-quotas/analysis`
-  - Query: `upstream_ids`, `windows`, `source`, `range_secs`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_analysis`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range`, `postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints`
-- **Cache / no-query path:** Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache.
-- **Side effects:** None
-- **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis
+- **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series
 - **Runtime result:** `PENDING`
 
 ### [UI-UP-10] Upstreams — Isolate Quota Window in Legend
@@ -7027,7 +6968,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-FC8E60B994F7] Backend-Only — GET /admin/subscription-quotas/latest
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:57`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:50`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7047,7 +6988,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-063C7455BC4D] Backend-Only — GET /admin/subscription-quotas/series
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:59`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:52`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7067,7 +7008,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 ### [API-SRC-B19EB1F130F2] Backend-Only — GET /admin/subscription-quotas/aggregate
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:64`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:57`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7084,30 +7025,10 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SRC-1CD1FD9DEBA0] Backend-Only — GET /admin/subscription-quotas/analysis
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:72`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/subscription-quotas/analysis`
-  - Query: `upstream_ids`, `windows`, `since_unix_secs`, `until_unix_secs`, `source`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_analysis`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range`, `postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints`
-- **Cache / no-query path:** Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
 ### [API-SRC-155F19B11A2E] Backend-Only — GET /admin/subscription-quotas/pool-history
 
 - **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:77`
+- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:65`
 - **Preconditions:** require_admin_auth middleware
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
@@ -7880,9 +7801,9 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-OV-16** | `preserved` | UI-OV-16 | Same source-backed UI action. |
 | **UI-OV-17** | `preserved` | UI-OV-17 | Same source-backed UI action. |
 | **UI-UP-08A** | `preserved` | UI-UP-08A | Same method/path and source-backed request occurrence. |
-| **UI-UP-08B** | `preserved` | UI-UP-08B | Same method/path and source-backed request occurrence. |
+| **UI-UP-08B** | `retired` | — | Subscription quota analysis endpoint was removed; no UI action requests it. |
 | **UI-UP-09A** | `preserved` | UI-UP-09A | Same method/path and source-backed request occurrence. |
-| **UI-UP-09B** | `preserved` | UI-UP-09B | Same method/path and source-backed request occurrence. |
+| **UI-UP-09B** | `retired` | — | Subscription quota analysis endpoint was removed; no UI action requests it. |
 | **UI-UP-30** | `preserved` | UI-UP-30 | Same method/path and source-backed request occurrence. |
 | **UI-UP-31** | `preserved` | UI-UP-31 | Same method/path and source-backed request occurrence. |
 | **UI-UP-32** | `preserved` | UI-UP-32 | Same method/path and source-backed request occurrence. |

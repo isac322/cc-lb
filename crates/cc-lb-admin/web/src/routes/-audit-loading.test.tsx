@@ -165,6 +165,10 @@ test('audit offers the shared presets in order with All time last, and 6h sets s
     until: undefined,
     range: '6h',
   });
+  // A preset re-scopes the trail in place: the reader keeps their place.
+  expect(routerMocks.navigate).toHaveBeenLastCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
 });
 
 test('audit shows writes by default and one click switches to all actions', () => {

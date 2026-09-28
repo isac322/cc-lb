@@ -44,6 +44,21 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).toContain('5h');
     expect(row.textContent).toContain('42% used');
     expect(row.textContent).toContain('Resets in');
+    // Resets in 1h of a 5h window: 4h elapsed is 80% even pace.
+    const meter = screen.getByRole('meter');
+    expect(meter.getAttribute('aria-valuetext')).toBe(
+      '42% used, even pace 80%',
+    );
+    const marker = row.querySelector<HTMLElement>('[data-slot="pace-marker"]');
+    expect(marker?.style.left).toBe('80%');
+  });
+
+  it('paces a 7d window over seven days', () => {
+    const row = renderRow(
+      snap({ window: '7d_fable', resets_at_unix_secs: NOW + 5 * 86400 }),
+    );
+    const marker = row.querySelector<HTMLElement>('[data-slot="pace-marker"]');
+    expect(Number(marker?.dataset.pacePct)).toBeCloseTo((2 / 7) * 100, 6);
   });
 
   it('shows extra usage as dollars spent of the monthly limit', () => {
@@ -59,6 +74,8 @@ describe('QuotaWindowRow', () => {
     expect(row.textContent).toContain('Extra usage');
     expect(row.textContent).toContain('$12.00 of $50.00');
     expect(screen.getByRole('meter').getAttribute('aria-valuenow')).toBe('24');
+    // Extra usage is a monthly budget, not a timed window: no pace.
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
 
   it('shows disabled extra usage as Off with an empty meter', () => {
@@ -77,5 +94,6 @@ describe('QuotaWindowRow', () => {
     const row = renderRow(snap({ utilization: 0, resets_at_unix_secs: null }));
     expect(row.textContent).toContain('Not started');
     expect(row.textContent).not.toContain('Resets in');
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
 });

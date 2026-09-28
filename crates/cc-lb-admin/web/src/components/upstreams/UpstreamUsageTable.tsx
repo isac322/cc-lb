@@ -28,10 +28,11 @@ import {
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
+  quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx, Skeleton } from '../ui/primitives';
-import { UsageMeter } from '../ui/UsageMeter';
+import { PaceLegend, UsageMeter } from '../ui/UsageMeter';
 import { QUOTA_WINDOW_ORDER } from './quotaWindowVisibility';
 import { type UpstreamHealth, upstreamHealth } from './upstreamHealth';
 
@@ -321,6 +322,11 @@ function WindowCell({
       ? null
       : snap.utilization * 100;
   const severity = quotaSeverity(used);
+  // Even pace only while the window runs (a reading and a reset ahead).
+  const pace =
+    used == null
+      ? null
+      : quotaPacePct(windowName, snap?.resets_at_unix_secs, nowUnixSecs);
   const reset = snap
     ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
     : { text: 'No reading' };
@@ -373,7 +379,11 @@ function WindowCell({
             {reset.text}
           </span>
           <div className={METER_CELL_CLASS}>
-            <UsageMeter label={`${label} window used`} usedPct={used} />
+            <UsageMeter
+              label={`${label} window used`}
+              pacePct={pace}
+              usedPct={used}
+            />
           </div>
         </>
       )}
@@ -543,6 +553,9 @@ export function UpstreamUsageTable({
   const collapsible = sorted.length > collapsedRows;
   const shown =
     collapsible && !expanded ? sorted.slice(0, collapsedRows) : sorted;
+  const hasQuotaRows = sorted.some(
+    (row) => row.upstream.kind === 'anthropic_oauth',
+  );
 
   return (
     <div className={cx('@container flex flex-col', className)}>
@@ -581,18 +594,27 @@ export function UpstreamUsageTable({
           </li>
         ))}
       </ul>
-      {collapsible ? (
-        <div className="border-t border-row pt-3 @4xl:px-3">
-          <button
-            aria-controls={listId}
-            aria-expanded={expanded}
-            className="inline-flex items-center rounded-sm text-body text-text-muted underline decoration-border-strong underline-offset-4 transition-colors hover:text-text hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:min-h-11"
-            data-testid="upstream-usage-toggle"
-            onClick={() => setExpanded((open) => !open)}
-            type="button"
-          >
-            {expanded ? 'Show fewer' : `Show all ${sorted.length}`}
-          </button>
+      {/* One pace key per table, beside the "Show all" toggle when there is one. */}
+      {collapsible || hasQuotaRows ? (
+        <div
+          className={cx(
+            'flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-row pt-3 @4xl:px-3',
+            collapsible ? 'justify-between' : 'justify-end',
+          )}
+        >
+          {collapsible ? (
+            <button
+              aria-controls={listId}
+              aria-expanded={expanded}
+              className="inline-flex items-center rounded-sm text-body text-text-muted underline decoration-border-strong underline-offset-4 transition-colors hover:text-text hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-md:min-h-11"
+              data-testid="upstream-usage-toggle"
+              onClick={() => setExpanded((open) => !open)}
+              type="button"
+            >
+              {expanded ? 'Show fewer' : `Show all ${sorted.length}`}
+            </button>
+          ) : null}
+          {hasQuotaRows ? <PaceLegend /> : null}
         </div>
       ) : null}
     </div>

@@ -1,3 +1,5 @@
+import { WINDOW_DURATION_SECS } from './colors';
+
 /**
  * Quota severity is the only thing a quota figure's color communicates:
  * usage below 80% renders in the default ink, 80% and up is a warning, 95%
@@ -37,3 +39,23 @@ export const QUOTA_SEVERITY_TEXT_CLASS: Record<QuotaSeverity, string> = {
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 };
+
+/**
+ * Even pace for a timed quota window (0-100): where usage would sit if it
+ * were spread evenly over the window, i.e. the share of the window already
+ * elapsed. The window started at `resets_at − length` (5h or 7d). `null`
+ * for windows without a fixed length (Extra usage, Unified), without a reset
+ * time, or when the window has not started (no reset ahead of `now`).
+ */
+export function quotaPacePct(
+  window: string,
+  resetsAtUnixSecs: number | null | undefined,
+  nowUnixSecs: number,
+): number | null {
+  const length = WINDOW_DURATION_SECS[window];
+  if (!length || resetsAtUnixSecs == null || !Number.isFinite(resetsAtUnixSecs))
+    return null;
+  if (resetsAtUnixSecs <= nowUnixSecs) return null;
+  const elapsed = nowUnixSecs - (resetsAtUnixSecs - length);
+  return Math.min(100, Math.max(0, (elapsed / length) * 100));
+}

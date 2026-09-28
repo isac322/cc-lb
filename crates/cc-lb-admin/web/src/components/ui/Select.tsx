@@ -12,7 +12,7 @@ export type SelectOption = {
 };
 
 const ITEM_CLASS =
-  'flex items-center gap-2 px-2 min-h-8 max-md:min-h-10 py-1.5 text-body text-text rounded-sm cursor-pointer outline-none select-none data-[highlighted]:bg-overlay-5 data-[disabled]:cursor-not-allowed data-[disabled]:text-text-faint';
+  'flex items-center gap-2 px-2 min-h-8 max-md:min-h-10 py-1.5 text-body text-text rounded-sm cursor-pointer outline-none select-none data-[highlighted]:bg-overlay-5 data-[disabled]:cursor-not-allowed data-[disabled]:text-text-disabled data-[disabled]:data-[highlighted]:bg-transparent';
 
 /** Reserves the check column so labels never shift when selection changes. */
 function ItemIndicator() {
@@ -84,8 +84,8 @@ export function Select({
         {...dataAttributes}
         className={cx(
           size === 'sm' ? INPUT_SM_CLASS : INPUT_CLASS,
-          'flex items-center justify-between gap-2 cursor-pointer shrink-0 text-left',
-          'data-[popup-open]:border-accent data-[disabled]:cursor-not-allowed data-[disabled]:border-subtle data-[disabled]:text-text-faint',
+          'group/select flex items-center justify-between gap-2 cursor-pointer shrink-0 text-left',
+          'data-[popup-open]:border-accent data-[disabled]:control-disabled',
           className,
         )}
       >
@@ -97,7 +97,7 @@ export function Select({
               : undefined;
             if (!option && !key)
               return (
-                <span className="block truncate whitespace-nowrap text-text-faint">
+                <span className="block truncate whitespace-nowrap text-text-faint group-data-[disabled]/select:text-text-disabled">
                   {emptyLabel}
                 </span>
               );
@@ -108,7 +108,7 @@ export function Select({
             );
           }}
         </BaseSelect.Value>
-        <BaseSelect.Icon className="flex shrink-0 text-text-faint">
+        <BaseSelect.Icon className="flex shrink-0 text-text-faint group-data-[disabled]/select:text-text-disabled">
           <ChevronDown
             className="size-3.5"
             strokeWidth={1.75}

@@ -57,6 +57,7 @@ import {
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { PaceLegend } from '../components/ui/UsageMeter';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
   buildQuotaChartData,
@@ -197,6 +198,12 @@ const ROW_WINDOWS = [
   ['7d', '7d'],
   ['7d_fable', 'Fable'],
 ] as const;
+// Row quota facts read as three fixed columns (5h, 7d, Fable) so every row
+// puts each window's label and figure at the same x: a constant label and a
+// right-aligned figure slot wide enough for "100%". A missing window keeps
+// its (invisible) cell so the columns never shift.
+const ROW_FACTS_CLASS = 'grid grid-cols-[repeat(3,auto)] gap-x-2.5';
+const ROW_FACT_CLASS = 'grid grid-cols-[auto_4.5ch] items-baseline gap-x-1';
 /** Windows whose utilization counts toward a row's peak. */
 const PEAK_WINDOWS: ReadonlySet<string> = new Set([
   '5h',
@@ -440,7 +447,13 @@ function UpstreamsPage() {
                 const snap = row.windows.find((s) => s.window === windowName);
                 return snap?.utilization == null
                   ? []
-                  : [{ label, used: snap.utilization * 100 }];
+                  : [
+                      {
+                        window: windowName,
+                        label,
+                        used: snap.utilization * 100,
+                      },
+                    ];
               })
             : [];
           const factsText = facts
@@ -494,22 +507,34 @@ function UpstreamsPage() {
             captionTrailing: quotaPending ? (
               <Skeleton as="span" className="inline-block h-3 w-24" />
             ) : facts.length ? (
-              <span className="text-text-faint">
-                {facts.map((f, i) => (
-                  <span key={f.label}>
-                    {i > 0 ? ' · ' : null}
-                    {f.label}{' '}
+              <span
+                className={ROW_FACTS_CLASS}
+                data-testid="upstream-row-quota"
+              >
+                {ROW_WINDOWS.map(([windowName, label]) => {
+                  const fact = facts.find((f) => f.window === windowName);
+                  const severity = quotaSeverity(fact?.used ?? null);
+                  return (
                     <span
-                      className={
-                        quotaSeverity(f.used) === 'ok'
-                          ? 'text-text-muted'
-                          : QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(f.used)]
-                      }
+                      key={windowName}
+                      aria-hidden={fact ? undefined : true}
+                      className={cx(ROW_FACT_CLASS, !fact && 'invisible')}
+                      data-window={windowName}
                     >
-                      {formatQuotaPercent(f.used)}
+                      <span className="text-text-faint">{label}</span>
+                      <span
+                        className={cx(
+                          'text-right',
+                          severity === 'warn' || severity === 'danger'
+                            ? QUOTA_SEVERITY_TEXT_CLASS[severity]
+                            : 'text-text-muted',
+                        )}
+                      >
+                        {fact ? formatQuotaPercent(fact.used) : '—'}
+                      </span>
                     </span>
-                  </span>
-                ))}
+                  );
+                })}
               </span>
             ) : null,
           };
@@ -1160,7 +1185,10 @@ function DetailView({
         <span className="flex flex-wrap items-center gap-x-2">
           Used per window and when it resets
           {selectedLatest ? (
-            <QuotaFreshnessCaption snapshots={selectedLatest.windows} />
+            <>
+              <QuotaFreshnessCaption snapshots={selectedLatest.windows} />
+              <PaceLegend />
+            </>
           ) : null}
         </span>
       }

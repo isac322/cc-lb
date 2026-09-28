@@ -57,20 +57,23 @@ describe('requestKindTone', () => {
     const hues = hued.map(hueOf);
     for (let i = 0; i < hues.length; i++) {
       for (let j = i + 1; j < hues.length; j++) {
-        expect(circularGap(hues[i]!, hues[j]!)).toBeGreaterThanOrEqual(20);
+        expect(circularGap(hues[i]!, hues[j]!)).toBeGreaterThanOrEqual(21);
       }
-      // danger ~20–28, warn ~73–83, accent violet ~282–290
-      for (const status of [24, 78, 286]) {
+      // danger ~20–28, warn ~73–83: at least 20° away. Accent teal ~185–192:
+      // at least 40° away (closer hues read teal next to accent elements).
+      for (const status of [24, 78]) {
         expect(circularGap(hues[i]!, status)).toBeGreaterThanOrEqual(20);
       }
+      expect(circularGap(hues[i]!, 188)).toBeGreaterThanOrEqual(40);
     }
   });
 
   it('hashes custom kinds to hues clear of warn, danger and accent', () => {
     for (const kind of ['future_kind', 'review', 'planner', 'x', 'tool_use']) {
-      for (const status of [24, 78, 286]) {
+      for (const status of [24, 78]) {
         expect(circularGap(hueOf(kind), status)).toBeGreaterThanOrEqual(20);
       }
+      expect(circularGap(hueOf(kind), 188)).toBeGreaterThanOrEqual(40);
     }
   });
 });

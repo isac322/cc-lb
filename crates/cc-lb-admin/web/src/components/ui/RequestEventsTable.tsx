@@ -61,8 +61,10 @@ const MOBILE_METRIC = '@max-[46rem]/events:*:-my-2 @max-[46rem]/events:*:py-2';
 const MOBILE_AT = {
   time: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-1 @max-[46rem]/events:min-w-14',
   kind: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-2 @max-[46rem]/events:justify-self-start',
+  // The chip's min-content is the whole id, so the cell takes its track's
+  // width outright; the chip then middle-truncates inside it.
   session:
-    '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-3 @max-[46rem]/events:justify-self-start',
+    '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-3 @max-[46rem]/events:w-full @max-[46rem]/events:min-w-0',
   status: '@max-[46rem]/events:row-start-1 @max-[46rem]/events:col-start-4',
   principal:
     '@max-[46rem]/events:row-start-2 @max-[46rem]/events:col-start-1 @max-[46rem]/events:col-span-2 @max-[46rem]/events:max-w-[40cqw]!',
@@ -95,6 +97,9 @@ const WIDE_METRIC_CELL =
 interface ColumnFit {
   /** Principal and upstream when both are shown. */
   bothEntities: string;
+  /** Session, the flexible column that absorbs spare width. */
+  session: string;
+  /** Model, a fixed-width column capped at a dated model id. */
   model: string;
   /** The pane band's two-line row (fit mode, 46–60rem); empty when scrolling. */
   band: {
@@ -127,16 +132,21 @@ interface ColumnFit {
  * and headed by the cells themselves: time, kind, session, the principal or
  * upstream, model and status; then latency under time and kind, tokens under
  * session and cost at the right edge. When both principal and upstream are
- * shown they sit out that band. From 60rem the pane gets the table, model
- * absorbing the slack, truncated.
+ * shown they sit out that band. From 60rem the pane gets the table, session
+ * absorbing the slack and middle-truncating while model keeps its capped
+ * content width.
  */
 const FIT_COLUMNS: ColumnFit = {
   bothEntities: '@min-[46rem]/events:@max-[60rem]/events:hidden',
-  model: '@min-[60rem]/events:w-full @min-[60rem]/events:max-w-0',
+  // No right inset: the Kind cell's own left inset already separates them,
+  // and the 12px lets a full 36-character id fit a 298px column.
+  session:
+    '@min-[60rem]/events:w-full @min-[60rem]/events:max-w-0 @min-[60rem]/events:pr-0',
+  model: '@min-[60rem]/events:whitespace-nowrap @min-[60rem]/events:max-w-40',
   band: {
     table: '@min-[46rem]/events:@max-[60rem]/events:block',
     head: '@min-[46rem]/events:@max-[60rem]/events:hidden',
-    row: '@min-[46rem]/events:@max-[60rem]/events:grid @min-[46rem]/events:@max-[60rem]/events:h-auto! @min-[46rem]/events:@max-[60rem]/events:grid-cols-[4rem_3.25rem_6rem_minmax(0,1fr)_auto_auto] @min-[46rem]/events:@max-[60rem]/events:items-center @min-[46rem]/events:@max-[60rem]/events:gap-x-3 @min-[46rem]/events:@max-[60rem]/events:gap-y-1 @min-[46rem]/events:@max-[60rem]/events:px-4 @min-[46rem]/events:@max-[60rem]/events:py-2',
+    row: '@min-[46rem]/events:@max-[60rem]/events:grid @min-[46rem]/events:@max-[60rem]/events:h-auto! @min-[46rem]/events:@max-[60rem]/events:grid-cols-[4rem_3.25rem_minmax(6rem,1fr)_auto_auto_auto] @min-[46rem]/events:@max-[60rem]/events:items-center @min-[46rem]/events:@max-[60rem]/events:gap-x-3 @min-[46rem]/events:@max-[60rem]/events:gap-y-1 @min-[46rem]/events:@max-[60rem]/events:px-4 @min-[46rem]/events:@max-[60rem]/events:py-2',
     cell: '@min-[46rem]/events:@max-[60rem]/events:p-0! @min-[46rem]/events:@max-[60rem]/events:*:p-0 @min-[46rem]/events:@max-[60rem]/events:min-w-0',
     skeletonRow:
       '@min-[46rem]/events:@max-[60rem]/events:flex @min-[46rem]/events:@max-[60rem]/events:items-center @min-[46rem]/events:@max-[60rem]/events:px-1',
@@ -147,11 +157,11 @@ const FIT_COLUMNS: ColumnFit = {
     timeAnchors: '@min-[46rem]/events:@max-[60rem]/events:hidden',
     kind: '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-2 @min-[46rem]/events:@max-[60rem]/events:justify-self-start',
     session:
-      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-3 @min-[46rem]/events:@max-[60rem]/events:justify-self-start',
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-3 @min-[46rem]/events:@max-[60rem]/events:w-full',
     entity:
       '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-4',
     model:
-      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-5 @min-[46rem]/events:@max-[60rem]/events:max-w-[16rem] @min-[46rem]/events:@max-[60rem]/events:text-right',
+      '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-5 @min-[46rem]/events:@max-[60rem]/events:max-w-40 @min-[46rem]/events:@max-[60rem]/events:text-right',
     status:
       '@min-[46rem]/events:@max-[60rem]/events:row-start-1 @min-[46rem]/events:@max-[60rem]/events:col-start-6',
     latency:
@@ -162,13 +172,18 @@ const FIT_COLUMNS: ColumnFit = {
   },
 };
 /*
- * With a floor the table keeps every column at every width from 46rem; model
- * still absorbs the slack and truncates, so the wrapper scrolls only once the
- * floor is reached. Its 6rem minimum fits a family and version ("sonnet-4-6").
+ * With a floor the table keeps every column at every width from 46rem;
+ * session absorbs the slack and middle-truncates, so the wrapper scrolls only
+ * once the floor is reached, and even then session keeps 7rem (a head, the
+ * ellipsis and the tail). Model is a content column capped at 10rem: its 6rem
+ * minimum fits a family and version ("sonnet-4-6"), longer dated ids truncate.
  */
 const SCROLL_COLUMNS: ColumnFit = {
   bothEntities: '',
-  model: 'w-full max-w-0 @min-[46rem]/events:min-w-24',
+  session:
+    '@min-[46rem]/events:w-full @min-[46rem]/events:max-w-0 @min-[46rem]/events:min-w-28 @min-[46rem]/events:pr-0',
+  model:
+    '@min-[46rem]/events:whitespace-nowrap @min-[46rem]/events:max-w-40 @min-[46rem]/events:min-w-24',
   band: {
     table: '',
     head: '',
@@ -382,6 +397,7 @@ const RequestEventRow = memo(function RequestEventRow({
             'px-3 py-2 whitespace-nowrap',
             MOBILE_CELL,
             MOBILE_AT.session,
+            fit.session,
             fit.band.cell,
             fit.band.session,
           )}
@@ -534,9 +550,11 @@ export const RequestEventsTable = memo(function RequestEventsTable({
     ...(showUpstream
       ? [{ label: 'Upstream', skeleton: 'max-w-28', className: entityFit }]
       : []),
-    ...(showSession ? [{ label: 'Session', skeleton: 'max-w-24' }] : []),
+    ...(showSession
+      ? [{ label: 'Session', skeleton: 'max-w-40', className: fit.session }]
+      : []),
     { label: 'Kind', skeleton: 'max-w-12' },
-    { label: 'Model', skeleton: 'max-w-40', className: fit.model },
+    { label: 'Model', skeleton: 'max-w-24', className: fit.model },
     { label: 'Status', numeric: true, skeleton: 'max-w-12 ml-auto' },
     { label: 'Latency', numeric: true, skeleton: 'max-w-16 ml-auto' },
     ...(showTokens

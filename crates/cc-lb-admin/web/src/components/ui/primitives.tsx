@@ -985,7 +985,7 @@ export function ToggleSwitch({
             <span
               className={cx(
                 'block text-body-sm',
-                rest.disabled ? 'text-text-faint' : 'text-text',
+                rest.disabled ? 'text-text-disabled' : 'text-text',
               )}
             >
               {label}
@@ -1005,8 +1005,8 @@ export function ToggleSwitch({
         )}
       >
         <input {...rest} type="checkbox" className="peer sr-only" />
-        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-disabled:border-subtle peer-checked:peer-disabled:border-transparent peer-checked:peer-disabled:bg-accent-dim peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
-        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink peer-disabled:bg-text-faint peer-checked:peer-disabled:bg-accent" />
+        <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-disabled:border-dashed peer-disabled:border-border-disabled peer-disabled:bg-transparent peer-checked:peer-disabled:border-border-disabled peer-checked:peer-disabled:bg-progress-track peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink peer-disabled:bg-text-disabled peer-checked:peer-disabled:bg-text-disabled" />
       </span>
     </label>
   );
@@ -1311,7 +1311,7 @@ export function Notice({
 // Phones: every field is at least a 40px touch target, like every Button.
 const INPUT_BASE_CLASS =
   'w-full px-2.5 text-sm bg-input-bg border border-subtle-strong rounded-sm text-text placeholder:text-text-faint transition-colors max-md:min-h-10 ' +
-  'focus:border-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
+  'focus:border-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 disabled:control-disabled disabled:placeholder:text-text-disabled';
 /** 36px (md) text input / select trigger. */
 export const INPUT_CLASS = `${INPUT_BASE_CLASS} h-9`;
 /** 32px (sm) text input / select trigger for toolbars and dense forms. */

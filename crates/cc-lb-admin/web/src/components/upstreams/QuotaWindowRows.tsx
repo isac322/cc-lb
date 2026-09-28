@@ -12,6 +12,7 @@ import { getWindowColor } from '../../lib/colors';
 import {
   formatQuotaPercent,
   QUOTA_SEVERITY_TEXT_CLASS,
+  quotaPacePct,
   quotaSeverity,
 } from '../../lib/quotaSeverity';
 import { cx, Hint, Skeleton } from '../ui/primitives';
@@ -107,6 +108,10 @@ export function QuotaWindowRow({
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
   const started = timed && !unobserved && !notStarted;
+  // Even pace only for a running 5h / 7d window (never Extra usage/Unified).
+  const pacePct = started
+    ? quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs)
+    : null;
 
   let used: ReactNode;
   if (isOverage && !overageOn) {
@@ -163,7 +168,11 @@ export function QuotaWindowRow({
     <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
       <WindowName window={snap.window} />
       <div className={METER_CELL_CLASS}>
-        <UsageMeter label={windowLabel(snap.window)} usedPct={usedPct} />
+        <UsageMeter
+          label={windowLabel(snap.window)}
+          pacePct={pacePct}
+          usedPct={usedPct}
+        />
       </div>
       <span className={USED_CELL_CLASS}>{used}</span>
       {facts.length ? (

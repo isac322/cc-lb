@@ -27,7 +27,7 @@ use cc_lb_storage_conformance::{
         prompt_cache_observation_store, request_event_key_usage, request_event_list,
         request_event_principal_costs, storage_roundtrips, storage_roundtrips_cache_split,
         storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store, usage_rollups,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
         warmup_attempts_store,
     },
 };
@@ -245,14 +245,6 @@ fn cache_keepalive_batch_turn_reads_match_per_session_postgres() {
     run_postgres_scenario(
         "cache_keepalive_batch_turn_reads_match_per_session",
         cache_keepalive_session_reads::batch_turn_reads_match_canonical_per_session_reads,
-    );
-}
-
-#[test]
-fn usage_rollup_filtered_analysis_query_postgres() {
-    run_postgres_scenario(
-        "usage_rollup_filtered_analysis_query",
-        usage_rollups::run_all,
     );
 }
 

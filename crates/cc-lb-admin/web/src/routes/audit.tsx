@@ -343,6 +343,9 @@ function AuditPage() {
     });
   };
 
+  // `resetScroll: false` on range changes: the router's scroll restoration
+  // would otherwise snap the page to the top; a range re-scopes the trail in
+  // place.
   const setRange = (value: RangePreset | 'all') => {
     navigate({
       search: (prev) =>
@@ -354,6 +357,7 @@ function AuditPage() {
               until: undefined,
               range: value,
             },
+      resetScroll: false,
     });
   };
 
@@ -565,6 +569,7 @@ function AuditPage() {
                       until,
                       range: undefined,
                     }),
+                    resetScroll: false,
                   });
                 }}
               />

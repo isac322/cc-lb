@@ -165,9 +165,9 @@ export function Tabs<T extends string>({
             }}
             onKeyDown={handleKeyDown}
             className={cx(
-              'relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
+              'group/tab relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium transition-colors',
               'focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent',
-              'disabled:cursor-not-allowed disabled:text-text-faint disabled:hover:text-text-faint',
+              'disabled:control-disabled',
               "after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:content-['']",
               active
                 ? 'text-text after:bg-accent'
@@ -179,7 +179,7 @@ export function Tabs<T extends string>({
               <span className="sr-only">{`, ${item.srDescription}`}</span>
             ) : null}
             {item.trailing != null ? (
-              <span className="inline-flex items-center gap-1 text-caption text-text-faint tabular-nums">
+              <span className="inline-flex items-center gap-1 text-caption text-text-faint tabular-nums group-disabled/tab:text-text-disabled">
                 {item.trailing}
               </span>
             ) : null}

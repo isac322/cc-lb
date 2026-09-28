@@ -44,6 +44,7 @@ import { TimeRangeStrip } from '../components/ui/TimeRangeStrip';
 import {
   eventTime,
   type RecentEventsPayload,
+  type RequestEventKind,
   RequestEventKindSchema,
 } from '../lib/api';
 import {
@@ -91,6 +92,22 @@ const unixSecondsSearchParam = z.preprocess((value) => {
     : undefined;
 }, z.number().optional());
 
+/** `event_kind` value that lifts the default kind filter. */
+const ALL_EVENT_KINDS = 'all';
+/** The kind Logs lists when the URL names none: model traffic, `/v1/messages`. */
+export const DEFAULT_EVENT_KIND: RequestEventKind = 'messages';
+
+/**
+ * The kind the list is filtered to: the URL's kind, the default kind when the
+ * URL has none, or undefined (every kind) for `all`.
+ */
+export function effectiveEventKind(
+  eventKind: RequestEventKind | typeof ALL_EVENT_KINDS | undefined,
+): RequestEventKind | undefined {
+  if (eventKind === ALL_EVENT_KINDS) return undefined;
+  return eventKind ?? DEFAULT_EVENT_KIND;
+}
+
 export const logsSearchSchema = z
   .object({
     principal_id: z.string().optional(),
@@ -99,9 +116,13 @@ export const logsSearchSchema = z
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_FILTER_VALUES).optional(),
     // Old bookmarks may still carry `source_kind`; it is stripped as an
-    // unknown key. Absent or invalid `event_kind` means unfiltered — the
-    // list shows every endpoint category by default.
-    event_kind: RequestEventKindSchema.optional().catch(undefined),
+    // unknown key. Absent or invalid `event_kind` means the default kind,
+    // `messages` (`effectiveEventKind`), so the default URL stays clean;
+    // `all` is the explicit opt-out that lists every endpoint category.
+    event_kind: z
+      .union([RequestEventKindSchema, z.literal(ALL_EVENT_KINDS)])
+      .optional()
+      .catch(undefined),
     // Accepted only so bookmarked preset URLs do not fail validateSearch and
     // fall through to the route error boundary. Normalized away on load.
     time_range: z.string().optional(),
@@ -173,7 +194,8 @@ export function buildLiveFilters(filters: z.infer<typeof logsSearchSchema>) {
   if (filters.status && filters.status !== 'errors') {
     base.status_class = filters.status;
   }
-  if (filters.event_kind) base.event_kind = filters.event_kind;
+  const eventKind = effectiveEventKind(filters.event_kind);
+  if (eventKind) base.event_kind = eventKind;
   return base;
 }
 
@@ -249,9 +271,14 @@ function LogsPage() {
   const upstreams = useUpstreams();
 
   const { session: sessionFilter } = filters;
-  // Absent means unfiltered: the list shows every endpoint category until the
-  // operator picks one. Tests that stub useSearch get the same behavior.
-  const eventKindFilter = filters.event_kind;
+  // No kind in the URL means the default kind (messages); `all` lifts it.
+  // Tests that stub useSearch get the same behavior.
+  const eventKindFilter = effectiveEventKind(filters.event_kind);
+  // Retained rows are filtered by the effective kind, never the raw param.
+  const rowFilters = useMemo(
+    () => ({ ...filters, event_kind: eventKindFilter }),
+    [filters, eventKindFilter],
+  );
   const liveFilters = buildLiveFilters(filters);
   const historicalFilters = buildHistoricalFilters(filters);
   const nextPaginationIdentity = JSON.stringify([
@@ -285,9 +312,11 @@ function LogsPage() {
   const [paginationIdentity, setPaginationIdentity] = useState(
     nextPaginationIdentity,
   );
-  // This checkpoint and the pagination reset are render-phase state updates,
-  // so React retries them together when a concurrent render is discarded.
-  const scrollResetPaginationIdentityRef = useRef(nextPaginationIdentity);
+  // Scroll offset to restore after a filter identity change (see below).
+  const pendingScrollRestoreRef = useRef<number | null>(null);
+  // The pagination reset below is a render-phase state update, so React
+  // retries it together with the render when a concurrent render is
+  // discarded.
   const paginationIdentityChanged =
     paginationIdentity !== nextPaginationIdentity;
   if (paginationIdentityChanged) {
@@ -328,7 +357,11 @@ function LogsPage() {
   useEffect(() => {
     if (filters.time_range == null) return;
     const width = LEGACY_PRESET_SECONDS[filters.time_range];
+    // resetScroll: false on every search-only navigate below: the router's
+    // scrollRestoration would snap the page to the top, but a range or filter
+    // change re-scopes the rows in place.
     navigate({
+      resetScroll: false,
       replace: true,
       search: (prev) => ({
         ...prev,
@@ -358,19 +391,33 @@ function LogsPage() {
     const timer = setTimeout(() => {
       lastCommittedModelRef.current = next;
       navigate({
+        resetScroll: false,
         search: (prev) => ({ ...prev, model: next || undefined }),
       });
     }, MODEL_FILTER_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [modelDraft, routeModel, navigate]);
 
-  useEffect(() => {
-    if (scrollResetPaginationIdentityRef.current === nextPaginationIdentity) {
-      return;
+  // Filter and range changes keep the reader's scroll: the navigate calls
+  // all pass `resetScroll: false`, and the rows scroller restores the spot it
+  // held before the identity reset — `commitPage` alone brings a new page
+  // back to its first row.
+  if (paginationIdentityChanged) {
+    pendingScrollRestoreRef.current =
+      scrollContainerRef.current?.scrollTop ?? null;
+  }
+  useLayoutEffect(() => {
+    const pending = pendingScrollRestoreRef.current;
+    const el = scrollContainerRef.current;
+    if (pending == null || !el) return;
+    if (el.scrollHeight > el.clientHeight) {
+      el.scrollTop = Math.min(pending, el.scrollHeight - el.clientHeight);
+      pendingScrollRestoreRef.current = null;
+    } else if (!recent.isPending && !recent.isPlaceholderData) {
+      // The re-scoped result is genuinely empty; nothing to restore into.
+      pendingScrollRestoreRef.current = null;
     }
-    scrollResetPaginationIdentityRef.current = nextPaginationIdentity;
-    resetRowsScroll(scrollContainerRef.current);
-  }, [nextPaginationIdentity]);
+  });
 
   // Invalidate page requests only after the identity reset commits. A render
   // mutation would survive a discarded transition while its state updates do not.
@@ -506,8 +553,8 @@ function LogsPage() {
   }, [rows]);
 
   const visibleRows = useMemo(
-    () => filterLogRows(rows, filters),
-    [rows, filters],
+    () => filterLogRows(rows, rowFilters),
+    [rows, rowFilters],
   );
   const currentHistoricalEvents = historicalPages[clampedPage]?.events ?? [];
   const pageRows = useMemo(
@@ -518,9 +565,9 @@ function LogsPage() {
           clampedPage === 0 ? rangedLiveEvents : undefined,
           currentHistoricalEvents,
         ),
-        filters,
+        rowFilters,
       ).slice(0, LOGS_PAGE_SIZE),
-    [clampedPage, currentHistoricalEvents, filters, rangedLiveEvents, rows],
+    [clampedPage, currentHistoricalEvents, rowFilters, rangedLiveEvents, rows],
   );
   const currentCursor = pageRows.length
     ? getRecentEventsCursor(pageRows[pageRows.length - 1])
@@ -663,8 +710,8 @@ function LogsPage() {
 
   const eventKindSelectOptions = useMemo<SelectOption[]>(
     () =>
-      // The empty/"all" item is the unfiltered default, so every kind —
-      // including `messages` — stays selectable.
+      // Messages is the default; the "All kinds" item (`''`) lifts the
+      // filter, so every kind and the unfiltered list stay selectable.
       REQUEST_EVENT_KINDS.map((kind) => ({
         value: kind,
         label: REQUEST_EVENT_KIND_LABELS[kind],
@@ -679,7 +726,10 @@ function LogsPage() {
   );
 
   const setFilter = (key: keyof typeof filters, value: string) => {
-    navigate({ search: { ...filters, [key]: value || undefined } });
+    navigate({
+      search: { ...filters, [key]: value || undefined },
+      resetScroll: false,
+    });
   };
 
   const downloadJson = () => {
@@ -700,7 +750,8 @@ function LogsPage() {
     filters.session,
     filters.model,
     filters.status,
-    eventKindFilter,
+    // The raw param: the default kind is not an applied filter, `all` is.
+    filters.event_kind,
     filters.since_unix_secs ?? filters.until_unix_secs,
   ].filter((value) => value != null && value !== '').length;
   const emptyCopy =
@@ -764,12 +815,17 @@ function LogsPage() {
           },
         ]
       : []),
-    ...(eventKindFilter
+    // Only a kind that differs from the default gets a chip; removing it
+    // returns to the default kind.
+    ...(filters.event_kind
       ? [
           {
             key: 'event_kind' as const,
             label: 'Kind',
-            value: REQUEST_EVENT_KIND_LABELS[eventKindFilter],
+            value:
+              eventKindFilter == null
+                ? 'All kinds'
+                : REQUEST_EVENT_KIND_LABELS[eventKindFilter],
           },
         ]
       : []),
@@ -909,7 +965,7 @@ function LogsPage() {
             <Button
               variant="ghost"
               iconLeft={<X />}
-              onClick={() => navigate({ search: {} })}
+              onClick={() => navigate({ search: {}, resetScroll: false })}
             >
               Clear
             </Button>
@@ -977,7 +1033,18 @@ function LogsPage() {
               size="sm"
               value={eventKindFilter ?? ''}
               options={eventKindSelectOptions}
-              onChange={(v) => setFilter('event_kind', v)}
+              // The default kind keeps the URL clean; "All kinds" is written
+              // out, since an absent kind means the default.
+              onChange={(v) =>
+                setFilter(
+                  'event_kind',
+                  v === ''
+                    ? ALL_EVENT_KINDS
+                    : v === DEFAULT_EVENT_KIND
+                      ? ''
+                      : v,
+                )
+              }
               allLabel="All kinds"
               className={FILTER_CONTROL_WIDTH}
             />
@@ -994,6 +1061,7 @@ function LogsPage() {
               until={filters.until_unix_secs}
               onCommit={({ since, until }) => {
                 navigate({
+                  resetScroll: false,
                   search: (prev) => ({
                     ...prev,
                     since_unix_secs: since,
@@ -1248,6 +1316,7 @@ function LogsTimeStrip({
       return;
     }
     navigate({
+      resetScroll: false,
       search: (prev) => ({
         ...prev,
         since_unix_secs: since,
@@ -1267,6 +1336,7 @@ function LogsTimeStrip({
     // freeze tailing on a window that has not happened yet.
     const untilRaw = centerSecs + radiusSecs;
     navigate({
+      resetScroll: false,
       search: (prev) => ({
         ...prev,
         since_unix_secs: centerSecs - radiusSecs,
@@ -1279,6 +1349,7 @@ function LogsTimeStrip({
   const applyPreset = (widthSecs: number | null) => {
     if (widthSecs == null) {
       navigate({
+        resetScroll: false,
         search: (prev) => ({
           ...prev,
           since_unix_secs: undefined,
@@ -1292,6 +1363,7 @@ function LogsTimeStrip({
     // Frame the whole preset with a little lead-in so its left edge shows.
     changeView({ a: (since - Math.max(60, widthSecs * 0.1)) * 1000, b: nowMs });
     navigate({
+      resetScroll: false,
       search: (prev) => ({
         ...prev,
         since_unix_secs: since,

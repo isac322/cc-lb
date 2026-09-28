@@ -85,7 +85,7 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
 }
 
 /**
- * The mark: an open 240° dial with a violet sweep. `size` in px.
+ * The mark: an open 240° dial with an accent (teal) sweep. `size` in px.
  */
 export function BrandMark({ size = 24 }: { size?: number }) {
   return (

@@ -169,14 +169,21 @@ describe('UpstreamUsageTable', () => {
     const busy7d = rows[1]!.querySelector('[data-window="7d"]')!;
     expect(busy7d.textContent).toContain('90%used');
     expect(busy7d.textContent).toContain('resets in 3h 12m');
+    // Resets in 3h 12m 30s of a 7d window: 98% of it has elapsed.
     expect(
       within(busy7d as HTMLElement)
         .getByRole('meter')
         .getAttribute('aria-valuetext'),
-    ).toBe('90% used');
+    ).toBe('90% used, even pace 98%');
     expect(
       rows[1]!.querySelector('[data-window="7d_fable"]')?.textContent,
     ).toContain('No reading');
+    // A window without a reading draws no pace tick.
+    expect(
+      rows[1]!.querySelector(
+        '[data-window="7d_fable"] [data-slot="pace-marker"]',
+      ),
+    ).toBeNull();
   });
 
   it('shows every row up to the limit, then the rest behind Show all N', () => {

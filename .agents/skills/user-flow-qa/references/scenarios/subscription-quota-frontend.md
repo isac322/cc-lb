@@ -85,8 +85,8 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 - Initial: OAuth upstream selected.
 - Steps: read each card.
 - Expected: each active window shows utilization %, a meter bar matching the %, source
-  (Header/API/—), observed-at relative time, reset countdown or "not started", ETA/burn if
-  present. `overage` card present only when overage billing enabled or monthly limit set.
+  (Header/API/—), observed-at relative time, reset countdown or "not started".
+  `overage` card present only when overage billing enabled or monthly limit set.
   `7d_fable` card is rendered conditionally only when Fable data exists (state is not missing).
   When rendered, the `7d_fable` card displays "7d (Fable)" with pink color and correct utilization.
   Values agree with `/subscription-quotas/latest` for that upstream.
@@ -96,11 +96,8 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
     - `overage` card unchanged: renders when non-missing AND (`extra_usage_enabled` or `extra_usage_monthly_limit` set).
     - Card order follows `QUOTA_WINDOW_ORDER` (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
 
-### TC-3 — Detail quota deficit + analysis caveats
-- Surface: detail → "Quota deficit" card + caveats list.
-- Steps: observe when a deficit is detected (shortfall tokens, recommended multiplier, confidence).
-- Expected: renders only when analysis returns a deficit; multiplier/confidence numeric;
-  caveats list matches `/subscription-quotas/analysis` output. No crash when analysis empty.
+### TC-3 — Retired: detail quota deficit + analysis caveats
+- The deficit card, caveats list, and `/subscription-quotas/analysis` endpoint were removed (2026-09-28). Nothing to execute; the number is kept so later TC references stay stable.
 
 ### TC-4 — Detail empty / loading states
 - Steps: (a) select an OAuth upstream with no quota rows; (b) observe during initial load.
@@ -168,7 +165,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 
 ### TC-11, Memory-Allocation Root Fixes Non-Regression (C1.4), Admin-web quota rendering and auto-refresh
 - **Source and Context:** Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes`.
-- **Live browser action:** Run `agent-browser skills get core`, open `$QA_ADMIN/`, set `localStorage['cc-lb-admin-token']` to the disposable `$QA_ADMIN_TOKEN`, reload, then open the fixture upstream from the Upstreams list. On the detail page, record the `Subscription Quota` snapshot card, `Quota History`, and `Quota deficit`/caveat area. On the Overview page record the pool quota chart. In the Upstreams sidebar record the mini meter. Apply the C1.2 `0.20 -> 0.80` writer mutation while this same browser page remains open, wait the documented isolated poll interval, and take a second snapshot **without reloading**.
+- **Live browser action:** Run `agent-browser skills get core`, open `$QA_ADMIN/`, set `localStorage['cc-lb-admin-token']` to the disposable `$QA_ADMIN_TOKEN`, reload, then open the fixture upstream from the Upstreams list. On the detail page, record the `Subscription Quota` snapshot card and `Quota History`. On the Overview page record the pool quota chart. In the Upstreams sidebar record the mini meter. Apply the C1.2 `0.20 -> 0.80` writer mutation while this same browser page remains open, wait the documented isolated poll interval, and take a second snapshot **without reloading**.
 - **Expected observable result:** Before the mutation, the 5h card/meter and chart show `20%`. After it, the detail snapshot card and sidebar show `80%`, Quota History has the new step, and the Overview pool quota rises. The rendered text/state agrees with `/latest` and `/aggregate`. The UI changes without a manual reload. The range selector shows distinct 1h/6h/24h/7d x-axis spans and never renders a fabricated 0% leading segment.
 - **Visual Evidence (from gitignored `.omo/evidence/task-F5-screenshots/`):**
   - `c1_4_before_mutation.png`: Showed the upstream detail page with the 5h snapshot card displaying exactly `20.0%` utilization, a green status badge, and the relative observed-at text "live, Header, 10s ago". The Quota History chart rendered a flat line at 20% across the selected 7d range. The sidebar mini meter for the upstream also showed a 20% filled bar.
@@ -180,7 +177,7 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 |----|---------|--------|----------|
 | 1  | Detail Quota History range | **PASS** (gating) | post_{1h,6h,24h,7d}.png: x-spans 03:04–04:04 / 22:04–04:04 / 7/8–7/9 / 7/2–7/9 → 1h/6h/24h/7d, all distinct, no 16-day/6-23 stretch |
 | 2  | Detail snapshot cards | **PASS** | post_7d.png: 5H 59.0% / 7D 71.0% with meter + "live · Header · 16초 전" ("16 seconds ago"), no NaN/broken cards |
-| 3  | Detail deficit/analysis | N/A | analysis/deficit code unchanged by fix; not force-reproduced (deficit renders only when detected) |
+| 3  | Detail deficit/analysis | Retired | surface and `/analysis` endpoint removed 2026-09-28 |
 | 4  | Detail empty/loading | N/A | code unchanged by fix; empty/skeleton paths not force-reproduced |
 | 5  | Overview pool quota | **PASS** (regression guard) | ov_post_{1h,7d}.png: 1h flat vs 7d dynamic, distinct spans, clean render; Overview code untouched |
 | 6  | Sidebar mini meters | **PASS** | /upstreams snapshot: per-window meters render (bh322yoo-max 5h 59% / 7d 72%, etc.) |

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The admin endpoint `GET /admin/v1/subscription-quotas/analysis` (and its unversioned alias `/admin/subscription-quotas/analysis`) has been removed, along with its burn-rate, projected-burn, deficit, and ETA estimates. The admin dashboard no longer calls it. Scripts that queried it now receive 404; use `/admin/v1/subscription-quotas/series` for quota history and `/admin/v1/subscription-quotas/aggregate` for current pool state.
+
 ## [0.8.1] - 2026-09-26
 
 ### Fixed

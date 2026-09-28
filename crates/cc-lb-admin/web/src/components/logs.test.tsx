@@ -30,6 +30,7 @@ const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   ts: (1_000 - i) / 1_000,
   ts_ms: 1_000 - i,
   model: 'claude-3',
+  event_kind: 'messages',
   status: 200,
   tokens: 100,
   cost: 0.01,
@@ -288,6 +289,7 @@ describe('LogsPage', () => {
     );
     expect(routerMocks.navigate).toHaveBeenCalledWith({
       search: { session: undefined, status: '4xx' },
+      resetScroll: false,
     });
 
     fireEvent.click(filtersButton);
@@ -416,7 +418,8 @@ describe('LogsPage', () => {
       expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined(),
     );
     expect(getRowCount()).toBe(50);
-    expect(scroller.scrollTop).toBe(0);
+    // A filter change re-scopes the rows in place; the scroller stays.
+    expect(scroller.scrollTop).toBe(100);
   }, 30_000);
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
@@ -497,7 +500,7 @@ describe('LogsPage', () => {
 
     await waitFor(() =>
       expect(queryMocks.fetchRecentEventsPage).toHaveBeenCalledWith(
-        {},
+        { event_kind: 'messages' },
         {
           kind: 'cursor',
           limit: 50,

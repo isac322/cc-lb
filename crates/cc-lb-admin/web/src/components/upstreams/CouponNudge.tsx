@@ -195,6 +195,9 @@ export function CouponActionButton({
   const tone = TONE[kind];
   const isDisabled = Boolean(disabled || loading);
   const wrapped = Boolean(isDisabled && disabledReason);
+  // Disabled (not in-flight): the ticket reads inert — no fill, a dashed
+  // disabled line and disabled ink. A loading claim keeps its normal look.
+  const inert = isDisabled && !loading;
   const [reasonOpen, setReasonOpen] = useState(false);
   const suppressFocusOpen = useRef(false);
 
@@ -242,8 +245,10 @@ export function CouponActionButton({
       onClick={onClick}
       className={cx(
         ACTION_BASE,
-        'group/coupon relative items-stretch p-0 border-transparent',
-        'text-text',
+        // The SVG ticket is the outline; keep the native border out of it
+        // (`control-disabled` would add a dashed rectangle on top).
+        'group/coupon relative items-stretch p-0 border-transparent disabled:border-transparent!',
+        inert ? 'text-text-disabled' : 'text-text',
         wrapped && 'pointer-events-none',
       )}
     >
@@ -256,7 +261,12 @@ export function CouponActionButton({
         >
           <path
             d={ticketOutlinePath(geo.w, geo.h, geo.x)}
-            className={cx(tone.fill, tone.stroke)}
+            className={
+              inert
+                ? 'fill-transparent stroke-[var(--color-border-disabled)]'
+                : cx(tone.fill, tone.stroke)
+            }
+            strokeDasharray={inert ? '3 3' : undefined}
             strokeWidth={1}
           />
         </svg>
@@ -265,7 +275,12 @@ export function CouponActionButton({
         {loading ? (
           <Spinner className={cx('h-3.5 w-3.5 shrink-0', tone.icon)} />
         ) : (
-          <Ticket className={cx('h-3.5 w-3.5 shrink-0', tone.icon)} />
+          <Ticket
+            className={cx(
+              'h-3.5 w-3.5 shrink-0',
+              inert ? 'text-text-disabled' : tone.icon,
+            )}
+          />
         )}
         {children}
       </span>
@@ -274,8 +289,9 @@ export function CouponActionButton({
           ref={setDividerNode}
           className={cx(
             'relative inline-flex items-center border-l border-dashed px-2 tabular-nums',
-            tone.divider,
-            tone.icon,
+            inert
+              ? 'border-border-disabled text-text-disabled'
+              : cx(tone.divider, tone.icon),
           )}
         >
           {count}
