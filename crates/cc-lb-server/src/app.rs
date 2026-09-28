@@ -61,7 +61,6 @@ use crate::admin_ports::{
     ServerRoutePreviewPort, ServerSubscriptionQuotaIngestionPort, ServerWarmupPort,
 };
 use crate::build_meta::BuildMeta;
-use crate::builtins::NoopObservabilityHook;
 use crate::drain::DrainController;
 use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
@@ -2332,11 +2331,9 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             crate::drain::proxy_drain_middleware,
         ))
         .layer(HopByHopStripLayer::new())
-        .layer(
-            cc_lb_observability::trace_layer(NoopObservabilityHook).make_span_with(
-                cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
-            ),
-        );
+        .layer(cc_lb_observability::trace_layer().make_span_with(
+            cc_lb_observability::ProxyMakeSpan::with_route_template(proxy_route_template),
+        ));
 
     let inner_sb = ServiceBuilder::new()
         .layer(crate::chaos::ChaosLayer::from_env())
@@ -2792,7 +2789,6 @@ async fn lifecycle_middleware(
         context.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
             request.uri().path(),
         ));
-        context.set_observability_hooks(&state.dynamic_view.load().global_observability_hooks);
         context
     });
     if let Some(c) = ctx.as_ref() {
@@ -3971,7 +3967,6 @@ mod tests {
         let view = cc_lb_engine::DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(PendingSignerFactory))
             .global_router(Arc::new(PendingRouter))
-            .global_observability_hooks(Vec::new())
             .principal_view(Arc::new(PrincipalView::for_tests(
                 TEST_PRINCIPAL,
                 true,

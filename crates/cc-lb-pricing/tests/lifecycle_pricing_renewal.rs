@@ -76,7 +76,6 @@ async fn renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
             connection_reused: None,
             internal_errors: Vec::new(),
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,

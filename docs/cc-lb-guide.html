@@ -1147,7 +1147,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
       cmd += '# Upload Wasm first with POST /admin/v1/plugins/wasm, then replace the placeholder id.\n';
       cmd += 'curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain" \\\n';
       cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" -H "content-type: application/json" \\\n';
-      cmd += '  -d \'{"slot":"ObservabilityHook","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
+      cmd += '  -d \'{"slot":"Router","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
     }
     cmd += '\n# 5) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
     var sampleModel = 'claude-sonnet-4-5-20250929';

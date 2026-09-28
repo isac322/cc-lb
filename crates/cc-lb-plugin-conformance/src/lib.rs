@@ -71,16 +71,14 @@ pub mod prelude;
 mod tests;
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
-    ShapeRequest, ShapeResponse,
+    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ShapeRequest,
+    ShapeResponse,
 };
 use cc_lb_runtime_wasmtime::{
     HotEngineConfig, ModuleInspection, RuntimeSlotKey, SlotKind, WasmtimeRuntime, inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
-
-use crate::fixtures::observe_event_samples;
 
 /// Fluent builder pinning the wasm bytes + slot kind + engine budget.
 ///
@@ -97,17 +95,15 @@ pub struct ConformanceSuite<'a> {
 enum ConformanceKind {
     Filter,
     Shape,
-    Observe,
 }
 
 impl ConformanceKind {
-    const ALL: [Self; 3] = [Self::Filter, Self::Shape, Self::Observe];
+    const ALL: [Self; 2] = [Self::Filter, Self::Shape];
 
     fn slot_kind(self) -> SlotKind {
         match self {
             Self::Filter => SlotKind::Filter,
             Self::Shape => SlotKind::Shape,
-            Self::Observe => SlotKind::Observe,
         }
     }
 
@@ -115,7 +111,6 @@ impl ConformanceKind {
         match self {
             Self::Filter => "filter",
             Self::Shape => "shape",
-            Self::Observe => "observe",
         }
     }
 }
@@ -129,11 +124,6 @@ impl<'a> ConformanceSuite<'a> {
     /// Build a suite for a Shape-slot plugin.
     pub fn for_shape(wasm: &'a [u8]) -> Self {
         Self::with_kind(wasm, ConformanceKind::Shape)
-    }
-
-    /// Build a suite for an Observe-slot plugin.
-    pub fn for_observe(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, ConformanceKind::Observe)
     }
 
     pub fn from_wasm(wasm: &'a [u8]) -> Self {
@@ -219,11 +209,6 @@ impl<'a> ConformanceSuite<'a> {
                     .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                     .expect("register_shape must accept a conforming plugin");
             }
-            ConformanceKind::Observe => {
-                runtime
-                    .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                    .expect("register_observe must accept a conforming plugin");
-            }
         }
         PluginSession {
             runtime,
@@ -242,7 +227,6 @@ impl<'a> ConformanceSuite<'a> {
     /// Coverage:
     /// - `Filter` → canonical V1 request
     /// - `Shape` → `call_shape(sample_shape_request())`
-    /// - `Observe` → [`PluginSession::exercise_observe_variants`]
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
     /// (where hooks return one) must rkyv-decode as the expected type.
@@ -256,9 +240,6 @@ impl<'a> ConformanceSuite<'a> {
             }
             ConformanceKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
-            }
-            ConformanceKind::Observe => {
-                session.exercise_observe_variants();
             }
         }
     }
@@ -335,32 +316,6 @@ impl PluginSession {
             .expect("rkyv access ShapeResponse");
         rkyv::deserialize::<ShapeResponse, RkyvError>(archived)
             .expect("rkyv deserialize ShapeResponse")
-    }
-
-    /// Send an [`ObserveEvent`] through the guest boundary. Observe
-    /// hooks are side-effect-only; return type is `()`. Panics if this
-    /// session is not Observe-kind.
-    pub fn call_observe(&self, event: ObserveEvent) {
-        assert!(
-            matches!(self.kind, ConformanceKind::Observe),
-            "call_observe requires SlotKind::Observe, got {:?}",
-            self.kind.slot_kind()
-        );
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&event).expect("rkyv encode ObserveEvent");
-        self.runtime
-            .call_observe(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_observe must complete without trap");
-    }
-
-    /// Send one of every [`ObserveEvent`] variant, using
-    /// [`observe_event_samples`], and assert no variant traps. Cheap
-    /// coverage insurance for observe plugins because a missing match
-    /// arm in the guest would only surface when production emits that
-    /// specific event kind. Panics if this session is not Observe-kind.
-    pub fn exercise_observe_variants(&self) {
-        for event in observe_event_samples() {
-            self.call_observe(event);
-        }
     }
 }
 

@@ -13,8 +13,7 @@ use cc_lb_domain::{
     UpstreamCandidate,
 };
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache, ShapePluginCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::clock::{unix_millis, unix_secs};
@@ -28,9 +27,7 @@ use cc_lb_engine::{
 use cc_lb_routing::{FilterPlugin, RouteDecision, RouteError, RouterPlugin};
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 
-use crate::wasm_host::{
-    WasmtimeFilterPlugin, WasmtimeObservabilityHookPlugin, WasmtimeUpstreamDialect,
-};
+use crate::wasm_host::{WasmtimeFilterPlugin, WasmtimeUpstreamDialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, MetadataTierMappingOverrideRecord,
@@ -102,18 +99,6 @@ async fn register_shape_slot(
 > {
     let wasm = read_wasm_for_manifest(manifest).await?;
     runtime.register_shape(slot_key.clone(), manifest.name.clone(), &wasm)
-}
-
-async fn register_observe_slot(
-    runtime: &Arc<WasmtimeRuntime>,
-    slot_key: &cc_lb_runtime_wasmtime::RuntimeSlotKey,
-    manifest: &PluginManifest,
-) -> Result<
-    Arc<cc_lb_runtime_wasmtime::LoadedPluginSlot>,
-    cc_lb_runtime_wasmtime::WasmtimeRuntimeError,
-> {
-    let wasm = read_wasm_for_manifest(manifest).await?;
-    runtime.register_observe(slot_key.clone(), manifest.name.clone(), &wasm)
 }
 
 async fn read_wasm_for_manifest(
@@ -257,7 +242,6 @@ pub async fn build_dynamic_view(
     let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
-        .global_observability_hooks(Vec::new())
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
@@ -586,11 +570,7 @@ async fn build_principal_chains(
         .iter()
         .map(|principal| principal.id)
         .collect::<Vec<_>>();
-    let slots = [
-        PluginSlotKind::Router,
-        PluginSlotKind::ObservabilityHook,
-        PluginSlotKind::Shape,
-    ];
+    let slots = [PluginSlotKind::Router, PluginSlotKind::Shape];
     let mut chain_entries: HashMap<(Uuid, PluginSlotKind), Vec<PluginChainEntry>> = stores
         .plugin_registry
         .list_chains_for_principals(&principal_ids, &slots)
@@ -608,11 +588,6 @@ async fn build_principal_chains(
     for principal in principals {
         let router_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Router);
-        let hook_entries = take_chain_entries(
-            &mut chain_entries,
-            principal.id,
-            PluginSlotKind::ObservabilityHook,
-        );
         let shape_entries =
             take_chain_entries(&mut chain_entries, principal.id, PluginSlotKind::Shape);
 
@@ -626,65 +601,6 @@ async fn build_principal_chains(
             &mut registered_slot_keys,
         )
         .await?;
-
-        let mut hooks = Vec::new();
-        for entry in hook_entries {
-            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-            })?;
-            if registry_entry_unsupported_slot(registry_entry, PluginSlotKind::ObservabilityHook) {
-                tracing::warn!(
-                    target: "cc_lb_server::drift",
-                    principal = %principal.name,
-                    plugin = registry_entry.name.as_str(),
-                    chain_entry_id = %entry.id,
-                    wasm_registry_id = %registry_entry.id,
-                    requested_slot = PluginSlotKind::ObservabilityHook.as_str(),
-                    supported_slots = ?registry_entry.supported_slots,
-                    "skipping observability_hook chain entry: registry entry does not support requested slot",
-                );
-                continue;
-            }
-            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-            let manifest = PluginManifest {
-                pure: true,
-                name: registry_entry.name.clone(),
-                artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
-                config: entry.config,
-                metadata: std::collections::BTreeMap::new(),
-            };
-            let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
-                principal.name.clone(),
-                manifest.name.clone(),
-            );
-            registered_slot_keys.insert(slot_key.clone());
-            match register_observe_slot(runtime, &slot_key, &manifest).await {
-                Ok(slot) => {
-                    let dispatch = Arc::new(WasmPluginWireDispatch::from_slot(
-                        slot,
-                        runtime.config_arc(),
-                    ));
-                    let handle: Arc<dyn cc_lb_observability::ObservabilityHook> =
-                        Arc::new(WasmtimeObservabilityHookPlugin::new(dispatch));
-                    hooks.push(handle);
-                }
-                Err(error) => {
-                    tracing::error!(
-                        principal = %principal.name,
-                        plugin = %manifest.name,
-                        chain_entry_id = %entry.id,
-                        %error,
-                        "skipping observability_hook chain entry: instantiation failed",
-                    );
-                }
-            }
-        }
-        let hooks = if hooks.is_empty() {
-            ObservabilityHooksCache::Inherit
-        } else {
-            ObservabilityHooksCache::Explicit(hooks)
-        };
 
         let dialect = if let Some(entry) = shape_entries.into_iter().next() {
             let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
@@ -743,7 +659,7 @@ async fn build_principal_chains(
             DialectCache::Inherit
         };
 
-        chains.insert(principal.name.clone(), (router, hooks, dialect));
+        chains.insert(principal.name.clone(), (router, dialect));
     }
     Ok((chains, registered_slot_keys))
 }

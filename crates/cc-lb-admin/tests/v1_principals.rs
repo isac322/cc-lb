@@ -415,9 +415,6 @@ async fn delete_principal_cascades_owned_plugin_chains() {
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({}),
-            sse_per_event: false,
-            batched_events_per_flush: 1,
-            batched_flush_ms: 1000,
         })
         .await
         .unwrap();

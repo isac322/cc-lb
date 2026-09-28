@@ -38,7 +38,6 @@ struct ListPayload {
     connection_reused: Option<bool>,
     limit_reconcile_ms: Option<i64>,
     finalize_ms: Option<i64>,
-    observability_post_ms: Option<i64>,
     proxy_setup_ms: Option<i64>,
     shape_ms: Option<i64>,
     sign_ms: Option<i64>,
@@ -178,10 +177,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         finalize_ms: payload
             .finalize_ms
             .map(|value| i64_to_u64(value, "request event list finalize_ms"))
-            .transpose()?,
-        observability_post_ms: payload
-            .observability_post_ms
-            .map(|value| i64_to_u64(value, "request event list observability_post_ms"))
             .transpose()?,
         proxy_setup_ms: payload
             .proxy_setup_ms

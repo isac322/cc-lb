@@ -1,11 +1,9 @@
 pub mod filter;
 mod filter_request;
-pub mod observe;
 mod scratch;
 pub mod shape;
 
 pub use filter::WasmtimeFilterPlugin;
-pub use observe::WasmtimeObservabilityHookPlugin;
 pub(super) use scratch::{access_archived_scoped_or_copy, serialize_with_input_scratch};
 pub use shape::WasmtimeUpstreamDialect;
 

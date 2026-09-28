@@ -17,8 +17,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
 use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache, ShapePluginCache,
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
 use cc_lb_engine::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
@@ -37,7 +36,7 @@ use http_body::{Body as HttpBody, Frame};
 use tokio::sync::Notify;
 use url::Url;
 
-use super::common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState};
+use super::common::{TestAuthn, TestLifecycleBus, TestRouter, TestState};
 
 pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
     let state = TestState::default();
@@ -47,7 +46,6 @@ pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycle
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
         dispatcher,
-        vec![Arc::new(RecordingHook::default())],
         cc_lb_engine::LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc())
@@ -67,7 +65,6 @@ pub fn transform_lifecycle(
             Some(Arc::new(RouterPipelineCache::empty(
                 TerminalStrategy::FirstPick,
             ))),
-            ObservabilityHooksCache::Inherit,
             DialectCache::Explicit(ShapePluginCache { dialect }),
         ),
     );
@@ -97,7 +94,6 @@ pub fn transform_lifecycle(
         .global_router(Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: upstream_id,

@@ -139,7 +139,6 @@ pub(super) fn publish_renewal_lifecycle(
         request_body_bytes: None,
         finalize_ms: None,
         limit_reconcile_ms: None,
-        observability_post_ms: None,
         proxy_setup_ms: None,
         setup_timings: Default::default(),
         upstream_body_ms: None,

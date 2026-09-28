@@ -78,7 +78,6 @@ mod tests {
             connect_ms: Some(85),
             connection_reused: Some(false),
             limit_reconcile_ms: Some(15),
-            observability_post_ms: Some(20),
             request_body_first_chunk_ms: Some(0.0),
             request_body_receive_ms: Some(4.5),
             request_body_wait_ms: Some(4.0),
@@ -100,7 +99,6 @@ mod tests {
         assert_eq!(decoded.connect_ms, Some(85));
         assert_eq!(decoded.connection_reused, Some(false));
         assert_eq!(decoded.limit_reconcile_ms, Some(15));
-        assert_eq!(decoded.observability_post_ms, Some(20));
         assert_eq!(decoded.request_body_first_chunk_ms, Some(0.0));
         assert_eq!(decoded.request_body_receive_ms, Some(4.5));
         assert_eq!(decoded.request_body_wait_ms, Some(4.0));
@@ -125,7 +123,6 @@ mod tests {
         assert_eq!(decoded.connect_ms, None);
         assert_eq!(decoded.connection_reused, None);
         assert_eq!(decoded.limit_reconcile_ms, None);
-        assert_eq!(decoded.observability_post_ms, None);
         assert_eq!(decoded.request_body_first_chunk_ms, None);
         assert_eq!(decoded.request_body_receive_ms, None);
         assert_eq!(decoded.request_body_wait_ms, None);

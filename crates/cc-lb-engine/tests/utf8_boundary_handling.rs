@@ -1,11 +1,9 @@
 use crate::sse_relay_support;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use cc_lb_engine::SseBatchConfig;
-use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
+use sse_relay_support::{body_from_chunks, collect_response_body, relay_for};
 
 #[tokio::test]
 async fn utf8_boundary_handling() {
@@ -16,8 +14,7 @@ async fn utf8_boundary_handling() {
         Bytes::copy_from_slice(&bytes[..split]),
         Bytes::copy_from_slice(&bytes[split..]),
     ];
-    let hook = Arc::new(RecordingHook::default());
-    let relay = relay_for(Arc::clone(&hook), SseBatchConfig::default());
+    let relay = relay_for();
     let response = relay.into_response_from_body(body_from_chunks(chunks, Duration::ZERO, None));
 
     let output = collect_response_body(response).await;

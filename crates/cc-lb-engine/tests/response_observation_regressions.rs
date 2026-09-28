@@ -15,7 +15,6 @@ use bytes::{Bytes, BytesMut};
 use cc_lb_control::{BusReceiver, LifecycleBusReceiver, RequestEventBus};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::types::RequestEvent;
 use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
@@ -35,7 +34,8 @@ use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_reques
 
 const BOUNDED_WAIT: Duration = Duration::from_secs(2);
 const SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
-const SPAN_TEST_NAME: &str = "response_observation_regressions::response_span_closes_before_blocked_callback_at_eos_and_body_drop";
+const SPAN_TEST_NAME: &str =
+    "response_observation_regressions::response_span_closes_at_eos_and_body_drop";
 const CHILD_WAIT: Duration = Duration::from_secs(15);
 
 fn run_span_regression_child() {
@@ -108,7 +108,7 @@ fn assert_child_success(output: Output) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn response_span_closes_before_blocked_callback_at_eos_and_body_drop() {
+async fn response_span_closes_at_eos_and_body_drop() {
     if std::env::var_os(SPAN_CHILD_ENV).is_none() {
         run_span_regression_child();
         return;
@@ -132,7 +132,7 @@ async fn finite_gzip_eos_case(
     seen_spans: &Mutex<Vec<String>>,
 ) {
     let dir = tempfile::tempdir().expect("temporary directory");
-    let storage = Arc::new(sqlite_storage(&dir, "blocked-finish.sqlite").await);
+    let storage = Arc::new(sqlite_storage(&dir, "gzip-eos.sqlite").await);
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
     let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
     else {
@@ -141,7 +141,6 @@ async fn finite_gzip_eos_case(
     let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
         panic!("expected in-memory request-event receiver");
     };
-    let (hook, hook_entered_rx, release_hook_tx, callback_rx) = BlockingFinishedHook::channels();
     let expected_plaintext = Bytes::from_static(
         b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
     );
@@ -150,7 +149,6 @@ async fn finite_gzip_eos_case(
         Arc::new(SequenceDispatch::new([ResponseSpec::gzip(
             expected_body.clone(),
         )])),
-        hook,
         &test_bus,
     );
 
@@ -172,37 +170,20 @@ async fn finite_gzip_eos_case(
         response.headers().get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
     );
-    let (first_data_rx, body_join) = collect_body_on_thread(response.into_body());
-
-    let hook_entered = hook_entered_rx.recv_timeout(BOUNDED_WAIT);
-    let first_data_before_release = first_data_rx.recv_timeout(BOUNDED_WAIT);
-    let span_closed_before_release = span_closed_rx.recv_timeout(BOUNDED_WAIT);
-
-    let _ = release_hook_tx.send(());
+    let body_join = collect_body_on_thread(response.into_body());
     let collected_body = body_join.join();
-    let callback = callback_rx.recv_timeout(BOUNDED_WAIT);
+    let span_closed = span_closed_rx.recv_timeout(BOUNDED_WAIT);
     let terminal = receive_terminal(&mut lifecycle_rx).await;
     let final_event = receive_final(&mut update_rx).await;
     lifecycle.shutdown().await;
 
-    assert!(
-        hook_entered.is_ok(),
-        "RequestFinished callback did not start"
-    );
-    assert_eq!(
-        first_data_before_release.expect("body data must arrive while callback is blocked"),
-        expected_body
-    );
     assert_eq!(
         created_count.load(Ordering::SeqCst),
         1,
         "EOS response span was not created exactly once; seen={:?}",
         seen_spans.lock().expect("seen spans lock")
     );
-    assert!(
-        span_closed_before_release.is_ok(),
-        "response span must close at EOS while callback is blocked"
-    );
+    assert!(span_closed.is_ok(), "response span must close at EOS");
     assert_eq!(closed_count.load(Ordering::SeqCst), 1);
     assert_eq!(
         collected_body
@@ -210,21 +191,10 @@ async fn finite_gzip_eos_case(
             .expect("body reaches EOS"),
         expected_body
     );
-    assert_finished_event(
-        callback.expect("callback returns after release"),
-        StatusCode::OK,
-        Some(3),
-        Some(5),
-    );
-    assert!(
-        callback_rx.try_recv().is_err(),
-        "RequestFinished callback ran more than once"
-    );
     assert_eq!(
         terminal.expect("request terminates"),
         (StatusCode::OK.as_u16(), TerminationReason::Success)
     );
-
     let final_event = final_event.expect("assembler publishes final request event");
     assert_eq!(final_event.status, StatusCode::OK.as_u16());
     assert_eq!(final_event.error_code, None);
@@ -247,7 +217,6 @@ async fn delivered_body_drop_case(
     else {
         panic!("expected in-memory lifecycle receiver");
     };
-    let (hook, hook_entered_rx, release_hook_tx, callback_rx) = BlockingFinishedHook::channels();
     let expected_body = gzip_bytes(&Bytes::from_static(
         b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":7,\"output_tokens\":11}}\n\n",
     ));
@@ -255,7 +224,6 @@ async fn delivered_body_drop_case(
         Arc::new(SequenceDispatch::new([ResponseSpec::gzip(
             expected_body.clone(),
         )])),
-        hook,
         &test_bus,
     );
 
@@ -277,26 +245,12 @@ async fn delivered_body_drop_case(
         response.headers().get(CONTENT_ENCODING),
         Some(&HeaderValue::from_static("gzip"))
     );
-    let (body_dropped_rx, body_join) = take_first_frame_and_drop_on_thread(response.into_body());
-
-    let hook_entered = hook_entered_rx.recv_timeout(BOUNDED_WAIT);
-    let body_dropped_before_release = body_dropped_rx.recv_timeout(BOUNDED_WAIT);
-    let span_closed_before_release = span_closed_rx.recv_timeout(BOUNDED_WAIT);
-
-    let _ = release_hook_tx.send(());
+    let body_join = take_first_frame_and_drop_on_thread(response.into_body());
     let delivered = body_join.join();
-    let callback = callback_rx.recv_timeout(BOUNDED_WAIT);
+    let span_closed = span_closed_rx.recv_timeout(BOUNDED_WAIT);
     let terminal = receive_terminal(&mut lifecycle_rx).await;
     lifecycle.shutdown().await;
 
-    assert!(
-        hook_entered.is_ok(),
-        "RequestFinished callback did not start"
-    );
-    assert!(
-        body_dropped_before_release.is_ok(),
-        "delivered body was not dropped while the callback was blocked"
-    );
     assert_eq!(
         created_count.load(Ordering::SeqCst),
         2,
@@ -304,8 +258,8 @@ async fn delivered_body_drop_case(
         seen_spans.lock().expect("seen spans lock")
     );
     assert!(
-        span_closed_before_release.is_ok(),
-        "dropping the delivered body must close its span while the callback is blocked"
+        span_closed.is_ok(),
+        "dropping the delivered body must close its span"
     );
     assert_eq!(closed_count.load(Ordering::SeqCst), 2);
     assert_eq!(
@@ -314,122 +268,19 @@ async fn delivered_body_drop_case(
             .expect("first body frame is delivered"),
         expected_body
     );
-    assert_finished_event(
-        callback.expect("callback returns after release"),
-        StatusCode::OK,
-        Some(7),
-        Some(11),
-    );
-    assert!(
-        callback_rx.try_recv().is_err(),
-        "RequestFinished callback ran more than once"
-    );
     assert_eq!(
         terminal.expect("request terminates"),
         (StatusCode::OK.as_u16(), TerminationReason::Success)
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn callback_panic_preserves_bodies_and_worker_handles_next_completion() {
-    let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
-    let (hook, normal_completion_rx) = PanicOnceFinishedHook::new();
-    let first_body = Bytes::from_static(
-        b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":13,\"output_tokens\":17}}\n\n",
-    );
-    let second_body = Bytes::from_static(
-        b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":19,\"output_tokens\":23}}\n\n",
-    );
-    let lifecycle = lifecycle(
-        Arc::new(SequenceDispatch::new([
-            ResponseSpec::identity(first_body.clone()),
-            ResponseSpec::identity(second_body.clone()),
-        ])),
-        hook.clone(),
-        &test_bus,
-    );
-
-    let first_request = stream_request();
-    let first_auth = lifecycle
-        .authenticate(first_request.headers())
-        .await
-        .expect("test request authenticates");
-    let first_response = lifecycle
-        .handle(first_request, &first_auth)
-        .await
-        .expect("first response is returned");
-    assert_eq!(first_response.status(), StatusCode::OK);
-    assert_eq!(
-        first_response.headers().get(CONTENT_LENGTH),
-        Some(&HeaderValue::from_str(&first_body.len().to_string()).expect("content length"))
-    );
-    let delivered_first = first_response
-        .into_body()
-        .collect()
-        .await
-        .expect("first body reaches EOS despite callback panic")
-        .to_bytes();
-
-    let second_request = stream_request();
-    let second_auth = lifecycle
-        .authenticate(second_request.headers())
-        .await
-        .expect("test request authenticates");
-    let second_response = lifecycle
-        .handle(second_request, &second_auth)
-        .await
-        .expect("second response is returned");
-    assert_eq!(second_response.status(), StatusCode::OK);
-    assert_eq!(
-        second_response.headers().get(CONTENT_LENGTH),
-        Some(&HeaderValue::from_str(&second_body.len().to_string()).expect("content length"))
-    );
-    let delivered_second = second_response
-        .into_body()
-        .collect()
-        .await
-        .expect("second body reaches EOS")
-        .to_bytes();
-
-    let normal_completion = normal_completion_rx.recv_timeout(BOUNDED_WAIT);
-    let terminals = receive_terminals(&mut lifecycle_rx, 2).await;
-    lifecycle.shutdown().await;
-
-    assert_eq!(delivered_first, first_body);
-
-    assert_eq!(delivered_second, second_body);
-    assert_eq!(hook.finished_calls.load(Ordering::SeqCst), 2);
-    assert_finished_event(
-        normal_completion.expect("worker processes completion after callback panic"),
-        StatusCode::OK,
-        Some(19),
-        Some(23),
-    );
-    assert_eq!(
-        terminals.expect("both requests terminate"),
-        vec![
-            (StatusCode::OK.as_u16(), TerminationReason::Success),
-            (StatusCode::OK.as_u16(), TerminationReason::Success),
-        ]
-    );
-}
-
-fn lifecycle(
-    dispatcher: Arc<dyn UpstreamDispatch>,
-    hook: Arc<dyn ObservabilityHook>,
-    test_bus: &TestLifecycleBus,
-) -> Lifecycle {
+fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
     common::lifecycle_with_parts(
         TestAuthn::new(TestState::default()),
         Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
         dispatcher,
-        vec![hook],
         LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc())
@@ -451,13 +302,6 @@ impl ResponseSpec {
         Self {
             body,
             content_encoding: Some("gzip"),
-        }
-    }
-
-    fn identity(body: Bytes) -> Self {
-        Self {
-            body,
-            content_encoding: None,
         }
     }
 }
@@ -501,81 +345,6 @@ impl UpstreamDispatch for SequenceDispatch {
                 .insert(CONTENT_ENCODING, HeaderValue::from_static(content_encoding));
         }
         Ok(response)
-    }
-}
-
-struct BlockingFinishedHook {
-    entered_tx: Sender<()>,
-    release_rx: Mutex<Receiver<()>>,
-    completed_tx: Sender<ObserveEvent>,
-}
-
-impl BlockingFinishedHook {
-    fn channels() -> (
-        Arc<dyn ObservabilityHook>,
-        Receiver<()>,
-        Sender<()>,
-        Receiver<ObserveEvent>,
-    ) {
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let (completed_tx, completed_rx) = mpsc::channel();
-        (
-            Arc::new(Self {
-                entered_tx,
-                release_rx: Mutex::new(release_rx),
-                completed_tx,
-            }),
-            entered_rx,
-            release_tx,
-            completed_rx,
-        )
-    }
-}
-
-impl ObservabilityHook for BlockingFinishedHook {
-    fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        if matches!(event, ObserveEvent::RequestFinished { .. }) {
-            let _ = self.entered_tx.send(());
-            let _ = self
-                .release_rx
-                .lock()
-                .expect("release receiver lock")
-                .recv();
-            let _ = self.completed_tx.send(event);
-        }
-        Ok(())
-    }
-}
-
-struct PanicOnceFinishedHook {
-    finished_calls: AtomicUsize,
-    normal_completion_tx: Sender<ObserveEvent>,
-}
-
-impl PanicOnceFinishedHook {
-    fn new() -> (Arc<Self>, Receiver<ObserveEvent>) {
-        let (normal_completion_tx, normal_completion_rx) = mpsc::channel();
-        (
-            Arc::new(Self {
-                finished_calls: AtomicUsize::new(0),
-                normal_completion_tx,
-            }),
-            normal_completion_rx,
-        )
-    }
-}
-
-impl ObservabilityHook for PanicOnceFinishedHook {
-    fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        if matches!(event, ObserveEvent::RequestFinished { .. }) {
-            let call = self.finished_calls.fetch_add(1, Ordering::SeqCst);
-            if call == 0 {
-                panic!("intentional RequestFinished callback panic");
-            }
-            let _ = self.normal_completion_tx.send(event);
-        }
-        Ok(())
     }
 }
 
@@ -637,9 +406,8 @@ where
     }
 }
 
-fn collect_body_on_thread(body: Body) -> (Receiver<Bytes>, JoinHandle<Result<Bytes, String>>) {
-    let (first_data_tx, first_data_rx) = mpsc::channel();
-    let join = std::thread::spawn(move || {
+fn collect_body_on_thread(body: Body) -> JoinHandle<Result<Bytes, String>> {
+    std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -647,28 +415,19 @@ fn collect_body_on_thread(body: Body) -> (Receiver<Bytes>, JoinHandle<Result<Byt
         runtime.block_on(async move {
             let mut body = body;
             let mut output = BytesMut::new();
-            let mut first = true;
             while let Some(frame) = body.frame().await {
                 let frame = frame.map_err(|error| error.to_string())?;
                 if let Ok(data) = frame.into_data() {
-                    if first {
-                        first = false;
-                        let _ = first_data_tx.send(data.clone());
-                    }
                     output.extend_from_slice(&data);
                 }
             }
             Ok(output.freeze())
         })
-    });
-    (first_data_rx, join)
+    })
 }
 
-fn take_first_frame_and_drop_on_thread(
-    body: Body,
-) -> (Receiver<()>, JoinHandle<Result<Bytes, String>>) {
-    let (body_dropped_tx, body_dropped_rx) = mpsc::channel();
-    let join = std::thread::spawn(move || {
+fn take_first_frame_and_drop_on_thread(body: Body) -> JoinHandle<Result<Bytes, String>> {
+    std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -684,11 +443,9 @@ fn take_first_frame_and_drop_on_thread(
                 .into_data()
                 .map_err(|_| "first response frame was not data".to_owned())?;
             drop(body);
-            let _ = body_dropped_tx.send(());
             Ok(data)
         })
-    });
-    (body_dropped_rx, join)
+    })
 }
 
 async fn receive_terminal(
@@ -736,30 +493,6 @@ async fn receive_final(
     })
     .await
     .map_err(|_| "timed out waiting for final request event".to_owned())?
-}
-
-fn assert_finished_event(
-    event: ObserveEvent,
-    expected_status: StatusCode,
-    expected_input_tokens: Option<u64>,
-    expected_output_tokens: Option<u64>,
-) {
-    let ObserveEvent::RequestFinished {
-        status,
-        input_tokens,
-        output_tokens,
-        cache_creation_input_tokens,
-        cache_read_input_tokens,
-        ..
-    } = event
-    else {
-        panic!("expected RequestFinished callback payload");
-    };
-    assert_eq!(status, expected_status);
-    assert_eq!(input_tokens, expected_input_tokens);
-    assert_eq!(output_tokens, expected_output_tokens);
-    assert_eq!(cache_creation_input_tokens, Some(0));
-    assert_eq!(cache_read_input_tokens, Some(0));
 }
 
 async fn sqlite_storage(dir: &tempfile::TempDir, file_name: &str) -> SqliteStorage {

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
+use crate::cache::{call_filter_hook, call_shape_hook};
 use crate::{PluginCell, RuntimeSlotKey, SlotKind, WasmtimeRuntime, WasmtimeRuntimeError};
 
 impl WasmtimeRuntime {
@@ -47,16 +47,6 @@ impl WasmtimeRuntime {
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
         self.dispatch(slot_key, SlotKind::Shape, |cell| {
             call_shape_hook(cell, input)
-        })
-    }
-
-    pub fn call_observe(
-        &self,
-        slot_key: &RuntimeSlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Observe, |cell| {
-            call_observe_hook(cell, input)
         })
     }
 }

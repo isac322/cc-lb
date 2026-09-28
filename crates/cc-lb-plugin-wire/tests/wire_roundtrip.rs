@@ -9,13 +9,12 @@
 //! borrowed encoding stops producing bytes the guest can parse.
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest, CachePricingSummary,
-    CachePricingSummaryRef, Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef,
-    ObserveEvent, Principal, PrincipalRef, QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse,
-    SseEvent, SseEventRef, TransformResponseRequest, TransformResponseRequestRef,
-    TransformResponseResult, TransformSseEventRequest, TransformSseEventRequestRef,
-    TransformSseEventResult, Upstream, UpstreamCandidate, UpstreamCandidateRef, UpstreamRef,
-    WireSchema,
+    ArchivedFilterRequest, ArchivedShapeRequest, CachePricingSummary, CachePricingSummaryRef,
+    Claim, ClaimRef, FilterRequest, FilterRequestRef, Header, HeaderRef, Principal, PrincipalRef,
+    QueryRef, ShapeRequest, ShapeRequestRef, ShapeResponse, SseEvent, SseEventRef,
+    TransformResponseRequest, TransformResponseRequestRef, TransformResponseResult,
+    TransformSseEventRequest, TransformSseEventRequestRef, TransformSseEventResult, Upstream,
+    UpstreamCandidate, UpstreamCandidateRef, UpstreamRef, WireSchema,
     schema::{HookKind, WireVersion},
 };
 use rkyv::rancor::Error;
@@ -336,84 +335,10 @@ fn transform_sse_event_result_round_trips() {
 }
 
 #[test]
-fn observe_event_request_started_round_trips() {
-    let ev = ObserveEvent::RequestStarted {
-        request_id: Box::from("req-3"),
-        downstream_user_agent: Some(Box::from("anthropic-cli/1.0")),
-    };
-    let bytes = rkyv::to_bytes::<Error>(&ev).expect("encode");
-    let archived = rkyv::access::<ArchivedObserveEvent, Error>(&bytes).expect("access");
-    let owned: ObserveEvent =
-        rkyv::deserialize::<ObserveEvent, Error>(archived).expect("deserialize");
-    match owned {
-        ObserveEvent::RequestStarted {
-            request_id,
-            downstream_user_agent,
-        } => {
-            let id: &str = &request_id;
-            assert_eq!(id, "req-3");
-            let ua: &str = downstream_user_agent.as_deref().unwrap_or("");
-            assert_eq!(ua, "anthropic-cli/1.0");
-        }
-        other => panic!("variant mismatch: {other:?}"),
-    }
-}
-
-#[test]
-fn observe_event_upstream_chosen_round_trips() {
-    let ev = ObserveEvent::UpstreamChosen {
-        upstream: Upstream::AnthropicDirect {
-            base_url: Some(Box::from("https://api.anthropic.com")),
-        },
-    };
-    let bytes = rkyv::to_bytes::<Error>(&ev).expect("encode");
-    let archived = rkyv::access::<ArchivedObserveEvent, Error>(&bytes).expect("access");
-    let owned: ObserveEvent =
-        rkyv::deserialize::<ObserveEvent, Error>(archived).expect("deserialize");
-    match owned {
-        ObserveEvent::UpstreamChosen {
-            upstream: Upstream::AnthropicDirect { base_url },
-        } => {
-            let base: &str = base_url.as_deref().unwrap_or("");
-            assert_eq!(base, "https://api.anthropic.com");
-        }
-        other => panic!("variant mismatch: {other:?}"),
-    }
-}
-
-#[test]
-fn observe_event_request_finished_round_trips() {
-    let ev = ObserveEvent::RequestFinished {
-        status: 200,
-        input_tokens: Some(1024),
-        output_tokens: Some(256),
-        cache_creation_input_tokens: Some(64),
-        cache_read_input_tokens: Some(512),
-        duration_ms: 1_234,
-    };
-    let bytes = rkyv::to_bytes::<Error>(&ev).expect("encode");
-    let archived = rkyv::access::<ArchivedObserveEvent, Error>(&bytes).expect("access");
-    let owned: ObserveEvent =
-        rkyv::deserialize::<ObserveEvent, Error>(archived).expect("deserialize");
-    match owned {
-        ObserveEvent::RequestFinished {
-            status,
-            duration_ms,
-            ..
-        } => {
-            assert_eq!(status, 200);
-            assert_eq!(duration_ms, 1234);
-        }
-        other => panic!("variant mismatch: {other:?}"),
-    }
-}
-
-#[test]
 fn schema_fingerprints_and_sections_are_distinct() {
     let fingerprints = [
         <FilterRequest as WireSchema>::FINGERPRINT,
         <ShapeRequest as WireSchema>::FINGERPRINT,
-        <ObserveEvent as WireSchema>::FINGERPRINT,
         <TransformResponseRequest as WireSchema>::FINGERPRINT,
         <TransformSseEventRequest as WireSchema>::FINGERPRINT,
     ];
@@ -434,11 +359,6 @@ fn schema_fingerprints_and_sections_are_distinct() {
         format!(
             "{}.{}",
             HookKind::Shape.section_prefix(),
-            WireVersion::V1.as_str()
-        ),
-        format!(
-            "{}.{}",
-            HookKind::Observe.section_prefix(),
             WireVersion::V1.as_str()
         ),
         format!(

@@ -11,7 +11,7 @@ use admin_test_common::spawn_admin_server;
 use axum::http::StatusCode;
 use cc_lb_plugin_wire::schema::{HookKind, WireSchema, WireVersion};
 use cc_lb_plugin_wire::{
-    FilterRequest, FilterResponse, ObserveEvent, ShapeRequest, TransformResponseRequest,
+    FilterRequest, FilterResponse, ShapeRequest, ShapeResponse, TransformResponseRequest,
     TransformSseEventRequest,
 };
 use http_body_util::BodyExt;
@@ -173,20 +173,24 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u
     .expect("encode filter response");
     let response_data = wat_data_bytes(&response);
     let packed_response = ((4096u64) << 32) | response.len() as u64;
+    let shape_response = rkyv::to_bytes::<rkyv::rancor::Error>(&ShapeResponse {
+        url: Box::from("https://example.test/v1/messages"),
+        method: Box::from("POST"),
+        headers: Box::new([]),
+        body: Box::new([]),
+    })
+    .expect("encode shape response");
+    let shape_response_data = wat_data_bytes(&shape_response);
+    let packed_shape_response = ((8192u64) << 32) | shape_response.len() as u64;
     let hook_exports = declared_hooks
         .iter()
         .map(|(hook, _)| match hook {
             HookKind::Filter => format!(
                 r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed_response})"#
             ),
-            HookKind::Shape => {
-                r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)"#
-                    .to_owned()
-            }
-            HookKind::Observe => {
-                r#"(func (export "cc_lb_observe") (param i32 i32) (result i64) i64.const 0)"#
-                    .to_owned()
-            }
+            HookKind::Shape => format!(
+                r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const {packed_shape_response})"#
+            ),
             HookKind::TransformResponse => {
                 r#"(func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)"#
                     .to_owned()
@@ -202,6 +206,7 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u
         (module
             (memory (export "memory") 1)
             (data (i32.const 4096) "{response_data}")
+            (data (i32.const 8192) "{shape_response_data}")
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
             (func (export "cc_lb_free") (param i32 i32 i32))
             {hook_exports}
@@ -213,7 +218,6 @@ fn plugin_wasm(name: &str, declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u
         let fingerprint = match hook {
             HookKind::Filter => <FilterRequest as WireSchema>::FINGERPRINT,
             HookKind::Shape => <ShapeRequest as WireSchema>::FINGERPRINT,
-            HookKind::Observe => <ObserveEvent as WireSchema>::FINGERPRINT,
             HookKind::TransformResponse => <TransformResponseRequest as WireSchema>::FINGERPRINT,
             HookKind::TransformSseEvent => <TransformSseEventRequest as WireSchema>::FINGERPRINT,
         };
@@ -556,11 +560,16 @@ async fn accepts_upload_without_slot_kind() {
 async fn registers_all_supported_slots_for_multi_hook_upload_without_slot_kind() {
     use cc_lb_storage_api::{PluginRegistryStore, PluginSlotKind};
 
-    // Given: one artifact declaring valid Filter and Observe hooks.
+    // Given: one artifact declaring valid Filter and Shape-owned hooks.
     let server = spawn_admin_server().await;
     let wasm = plugin_wasm(
         "multi-slot",
-        &[(HookKind::Filter, None), (HookKind::Observe, None)],
+        &[
+            (HookKind::Filter, None),
+            (HookKind::Shape, Some("active")),
+            (HookKind::TransformResponse, Some("noop")),
+            (HookKind::TransformSseEvent, Some("noop")),
+        ],
     );
     let body = multipart_body(&[
         ("name", b"multi-slot"),
@@ -581,7 +590,7 @@ async fn registers_all_supported_slots_for_multi_hook_upload_without_slot_kind()
         .expect("entry persisted");
     assert_eq!(
         entry.supported_slots,
-        vec![PluginSlotKind::Router, PluginSlotKind::ObservabilityHook]
+        vec![PluginSlotKind::Router, PluginSlotKind::Shape]
     );
 }
 
@@ -612,13 +621,13 @@ async fn rejects_incomplete_shape_without_slot_kind() {
 
 #[tokio::test]
 async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
-    // Given: a Filter-only artifact paired with a legacy Observe selector.
+    // Given: a Filter-only artifact paired with a legacy Shape selector.
     let server = spawn_admin_server().await;
     let wasm = filter_wasm_valid();
     let body = multipart_body(&[
         ("name", b"cache-aware-test"),
         ("original_filename", b"legacy-mismatch.wasm"),
-        ("slot_kind", b"observe"),
+        ("slot_kind", b"shape"),
         ("bytes", &wasm),
     ]);
 
@@ -628,7 +637,7 @@ async fn rejects_legacy_slot_kind_not_derived_from_artifact() {
     // Then: compatibility validation reports the typed unsupported-slot error.
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={value}");
     assert_eq!(value["error"], "unsupported_slot");
-    assert_eq!(value["slot"], "observability_hook");
+    assert_eq!(value["slot"], "shape");
 }
 
 #[tokio::test]

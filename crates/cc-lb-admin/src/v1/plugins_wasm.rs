@@ -77,7 +77,7 @@ struct UploadParts {
     expected_revision: Option<u64>,
 }
 
-const SLOT_KIND_NAMES: &str = "filter|shape|observe";
+const SLOT_KIND_NAMES: &str = "filter|shape";
 
 pub fn router() -> Router<AdminState> {
     let limiter = UploadRateLimitState::default();
@@ -731,7 +731,6 @@ fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlotKind), Response> 
     match value {
         "filter" => Ok((HookKind::Filter, PluginSlotKind::Router)),
         "shape" => Ok((HookKind::Shape, PluginSlotKind::Shape)),
-        "observe" => Ok((HookKind::Observe, PluginSlotKind::ObservabilityHook)),
         other => Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_slot_kind",
@@ -783,9 +782,6 @@ fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginS
             }
             HookKind::Shape | HookKind::TransformResponse | HookKind::TransformSseEvent => {
                 slots.insert(PluginSlotKind::Shape);
-            }
-            HookKind::Observe => {
-                slots.insert(PluginSlotKind::ObservabilityHook);
             }
         }
     }

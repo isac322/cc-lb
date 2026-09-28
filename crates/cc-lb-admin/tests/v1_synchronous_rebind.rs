@@ -57,7 +57,6 @@ impl DynamicViewRebinder for SnapshotRebinder {
         Ok(DynamicViewBuilder::new(current_generation)
             .signer_factory(Arc::new(NoopSignerFactory))
             .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
                 entries,

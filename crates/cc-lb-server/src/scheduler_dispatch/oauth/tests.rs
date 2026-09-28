@@ -419,7 +419,6 @@ impl DispatchFixture {
             DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(StubSignerFactory))
                 .global_router(Arc::new(NoRouteRouter))
-                .global_observability_hooks(Vec::new())
                 .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
                 .build(),
         ));

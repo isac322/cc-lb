@@ -129,11 +129,6 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     // IP literals can bypass the resolver, so dns_ms is covered by the hostname regression test.
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
     assert!(
-        event.observability_post_ms.is_none(),
-        "RFC-0002 Phase 6f: the handler does not persist direct observability-hook time in observability_post_ms. Got: {:?}",
-        event.observability_post_ms
-    );
-    assert!(
         event.limit_reconcile_ms.is_none(),
         "RFC-0002 H4: handler no longer measures reconcile; LimitReconcileSubscriber owns the reconcile call and does not populate this handler-side field. Got: {:?}",
         event.limit_reconcile_ms
@@ -263,7 +258,6 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .global_router(Arc::new(SelectingRouter))
-        .global_observability_hooks(Vec::new())
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![upstream_record(base_url)])
         .build();

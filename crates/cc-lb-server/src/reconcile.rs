@@ -200,9 +200,6 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
         offset += page.len();
         for principal in page {
             chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Router).await?);
-            chains.extend(
-                chain_revisions(stores, principal.id, PluginSlotKind::ObservabilityHook).await?,
-            );
             chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Shape).await?);
             principals.push((principal.id, principal.revision));
         }

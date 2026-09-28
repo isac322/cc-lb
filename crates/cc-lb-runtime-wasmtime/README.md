@@ -15,8 +15,7 @@ crates, it depends only on the wire contract; guest plugins use
   `service_tier = Some("priority")` on the V1 request.
 - `inspect_wasm(kind, wasm_bytes)` — structural-only load-time verification.
 - Wire-level dispatch primitives consumed by host adapters. The
-  `WasmtimeFilterPlugin`, `WasmtimeUpstreamDialect`, and
-  `WasmtimeObservabilityHookPlugin` adapters live in
+  `WasmtimeFilterPlugin` and `WasmtimeUpstreamDialect` adapters live in
   `cc-lb-server/src/wasm_host/`.
 
 Plugin authors should not depend on this crate directly. It is exposed for the

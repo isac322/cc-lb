@@ -587,7 +587,6 @@ mod tests {
             request_body_read_ms: timing.request_body_read_ms,
             request_body_bytes: timing.request_body_bytes,
             limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: timing.proxy_setup_ms,
             setup_timings: Default::default(),
             io_timings: timing.io_timings,

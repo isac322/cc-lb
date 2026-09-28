@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 pub enum PluginSlotKind {
     /// Router filter slot for selecting or filtering upstream candidates.
     Router,
-    /// Observability hook slot for receiving request lifecycle events.
-    ObservabilityHook,
     /// Request/response shaping slot for upstream-specific requests and response hooks.
     Shape,
 }
@@ -17,7 +15,6 @@ impl PluginSlotKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Router => "router",
-            Self::ObservabilityHook => "observability_hook",
             Self::Shape => "shape",
         }
     }
@@ -26,7 +23,6 @@ impl PluginSlotKind {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "router" => Some(Self::Router),
-            "observability_hook" => Some(Self::ObservabilityHook),
             "shape" => Some(Self::Shape),
             _ => None,
         }

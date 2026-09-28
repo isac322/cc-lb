@@ -1,23 +1,10 @@
 use crate::sse_relay_support;
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use cc_lb_engine::SseBatchConfig;
-use sse_relay_support::{
-    RecordingHook, body_with_error_after, collect_response_body, numbered_events, relay_for,
-};
+use sse_relay_support::{body_with_error_after, collect_response_body, numbered_events, relay_for};
 
 #[tokio::test]
 async fn upstream_mid_stream_error_emits_error_frame() {
-    let hook = Arc::new(RecordingHook::default());
-    let relay = relay_for(
-        Arc::clone(&hook),
-        SseBatchConfig {
-            max_events: 32,
-            max_age: Duration::from_secs(60),
-        },
-    );
+    let relay = relay_for();
     let response = relay.into_response_from_body(body_with_error_after(numbered_events(6), 3));
 
     let output = collect_response_body(response).await;

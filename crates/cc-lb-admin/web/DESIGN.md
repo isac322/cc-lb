@@ -309,7 +309,7 @@ The **Quota** section's `Reset quota` action (`LimitResetAction`) is always visi
 
 **Quota** rows (`QuotaWindowRows`) list every window the API reports for the upstream, in `QUOTA_WINDOW_ORDER`: 5h, 7d, 7d (Fable), 7d (Sonnet), 7d (Opus), Unified, Extra usage. `absent` windows are hidden; 5h and 7d show an unobserved placeholder before the first quota lookup, the others need an observation, and Extra usage shows once its switch has been reported. The rows share one subgrid — window swatch and name, a `UsageMeter`, `N% used` (severity ink), then facts — and from a 40rem section each window is one line; narrower, a row takes two lines: the name with `N% used` on the right, then the meter with the facts on the right. Facts, `·`-joined: `No reading` (unobserved); `Not started` (with a hint: the window opens on the first request or warm-up) for a timed window with no reading or no future reset; otherwise the compact reset countdown. A running timed window's meter carries the even-pace tick (see Meters). There is no limit-status text: the used % and its severity ink already say how close a window is. Extra usage meters the share of its monthly budget and reads `$N of $M`, `$N used` or `Off`, with its reset countdown and `No limit set` when enabled without a limit.
 
-The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys** (all full width), then **Access** and **Observability**, the one pair that shares a row from 56rem. Shape and Observability are plain sections, always expanded.
+The principal detail reads: **Cache keepalive**, **Recent requests**, **Router**, **Shape**, **API keys**, and **Access**, each full width. Shape is a plain section, always expanded.
 
 ### Overview
 

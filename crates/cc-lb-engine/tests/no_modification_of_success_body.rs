@@ -13,9 +13,7 @@ use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use url::Url;
 
-use common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request,
-};
+use common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
 
 #[tokio::test]
 async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
@@ -31,7 +29,6 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
-        vec![Arc::new(RecordingHook::default())],
         LifecycleConfig::default(),
     )
     .with_error_normalizer(Arc::new(ErrorNormalizer::new()));

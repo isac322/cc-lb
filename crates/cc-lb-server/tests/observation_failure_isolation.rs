@@ -595,7 +595,6 @@ fn lifecycle_with_sink(
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(FixtureSignerChain))
         .global_router(Arc::new(FixtureRouter { dialect }))
-        .global_observability_hooks(Vec::new())
         .principal_view(Arc::new(PrincipalView::for_tests(
             FIXTURE_PRINCIPAL,
             true,

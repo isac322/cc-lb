@@ -52,15 +52,6 @@ where
     call_hook_scoped(cell, input, HookFn::Shape, with_output)
 }
 
-/// Synchronous observe call. Guest returns `(0, 0)`; the returned
-/// `Vec<u8>` is always empty.
-pub fn call_observe_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook_scoped(cell, input, HookFn::Observe, <[u8]>::to_vec)
-}
-
 pub fn call_transform_response_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],

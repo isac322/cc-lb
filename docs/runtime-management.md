@@ -156,9 +156,6 @@ remove the entry or change its position among other router plugins.
   "slot": "Router",
   "wasm_registry_id": "<PLUGIN_ID>",
   "config": {},
-  "sse_per_event": false,
-  "batched_events_per_flush": 0,
-  "batched_flush_ms": 0,
   "position": null
 }
 ```
@@ -275,7 +272,7 @@ curl -X POST http://localhost:8001/admin/v1/plugins/wasm \
   -F "bytes=@path/to/plugin.wasm"
 ```
 
-`slot_kind` is required and must be one of `filter`, `shape`, or `observe`. `name` is optional legacy input; if present, it must match the plugin metadata name embedded in the Wasm. `original_filename` is optional and defaults to `<metadata-name>.wasm`.
+`slot_kind` is required and must be `filter` or `shape`. `name` is optional legacy input; if present, it must match the plugin metadata name embedded in the Wasm. `original_filename` is optional and defaults to `<metadata-name>.wasm`.
 
 Response:
 

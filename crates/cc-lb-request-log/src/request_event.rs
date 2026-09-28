@@ -161,8 +161,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_reconcile_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observability_post_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_first_chunk_ms: Option<f64>,

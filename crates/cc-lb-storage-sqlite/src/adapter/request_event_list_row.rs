@@ -122,10 +122,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .limit_reconcile_ms
             .map(|value| i64_to_u64(value, "request event list limit_reconcile_ms"))
             .transpose()?,
-        observability_post_ms: row
-            .observability_post_ms
-            .map(|value| i64_to_u64(value, "request event list observability_post_ms"))
-            .transpose()?,
         finalize_ms: row
             .finalize_ms
             .map(|value| i64_to_u64(value, "request event list finalize_ms"))

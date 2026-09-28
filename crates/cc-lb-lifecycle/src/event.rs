@@ -172,8 +172,6 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit_reconcile_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        observability_post_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         proxy_setup_ms: Option<u64>,
         #[serde(default, flatten)]
         setup_timings: RequestSetupTimings,

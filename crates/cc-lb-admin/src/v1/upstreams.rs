@@ -2096,7 +2096,6 @@ mod tests {
         RouterPlugin, RoutingContext, UpstreamStatusSnapshot,
     };
     use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-    use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
     use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
@@ -2225,14 +2224,6 @@ mod tests {
             Err(RouteError::NoRoute {
                 reason: "test router has no route".to_owned(),
             })
-        }
-    }
-
-    struct TestHook;
-
-    impl ObservabilityHook for TestHook {
-        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-            Ok(())
         }
     }
 
@@ -2457,7 +2448,6 @@ mod tests {
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))
-            .global_observability_hooks(vec![Arc::new(TestHook)])
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

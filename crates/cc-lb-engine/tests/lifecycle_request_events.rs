@@ -42,7 +42,6 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
                 .expect("fixture URL parses"),
         }),
         Arc::new(dispatcher.clone()),
-        Vec::new(),
         LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc());

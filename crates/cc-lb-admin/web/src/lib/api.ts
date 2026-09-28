@@ -723,7 +723,6 @@ export interface RequestEvent {
   connect_ms?: number;
   connection_reused?: boolean;
   limit_reconcile_ms?: number;
-  observability_post_ms?: number;
   first_body_chunk_ms?: number;
   body_chunk_count?: number;
   body_bytes?: number;

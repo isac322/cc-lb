@@ -29,7 +29,7 @@ Summary: per request, `OS thread creation + Tokio runtime creation + spawn_block
 
 ### Goals
 
-- **G1 thread hop 0**: remove all new OS thread creation, new Tokio runtime creation, and hops to the blocking pool from the filter / shape / observe / sign call hot path.
+- **G1 thread hop 0**: remove all new OS thread creation, new Tokio runtime creation, and hops to the blocking pool from the filter / shape / sign call hot path.
 - **G2 zero-downtime dynamic replacement**: atomically swap plugin code and manifest without a server restart. Preserve the existing `DynamicViewHolder = ArcSwap<DynamicView>` + per-slot `ArcSwap<PluginCell>` + two-phase stage/commit semantics as-is.
 - **G3 bidirectional compile-time type safety**: both the plugin author and the host verify the same function signature at compile time. Wire serialization mismatches fail at build or plugin registration time, not at runtime.
 - **G4 eliminate payload serialization cost**: remove JSON and base64. Body and headers pass as raw bytes at zero-copy or single-memcpy level.
@@ -64,9 +64,9 @@ These quotes are the user-side justification for the §2 goals (G1–G6), non-go
 
 ### Keep
 
-- Trait shapes in `cc-lb-plugin-api/src/traits.rs`: `FilterPlugin`, `UpstreamDialect`, `ObservabilityHook`, `Signer`, `SignerFactory`, `PluginRuntime`. The surface that callers (`Lifecycle::handle`, `attempt`, `execute_filter_pipeline`) depend on. Minimize signature changes.
+- Trait shapes in `cc-lb-plugin-api/src/traits.rs`: `FilterPlugin`, `UpstreamDialect`, `Signer`, `SignerFactory`, `PluginRuntime`. The surface that callers (`Lifecycle::handle`, `attempt`, `execute_filter_pipeline`) depend on. Minimize signature changes.
 - `cc-lb-engine/src/dynamic_view.rs::DynamicViewHolder = ArcSwap<DynamicView>`. Lock-free request path.
-- `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached` and `resolved_pipeline / resolved_dialect / resolved_hooks`.
+- `cc-lb-engine/src/api_keys/principal_view.rs::PrincipalSpecCached` and `resolved_pipeline / resolved_dialect`.
 - Per-principal staging in `cc-lb-server/src/dynamic_view_builder.rs::build_principal_chains`.
 - DB polling + revision-hash-based rebuild in `cc-lb-server/src/reconcile.rs`.
 - `data/plugins/wasm/cache/{sha256}.wasm` disk cache.
@@ -208,7 +208,7 @@ pub fn my_filter(req: FilterRequestRef<'_>) -> Result<FilterOutput, FilterError>
 
 What the proc-macro `#[cc_lb_pdk::plugin(filter)]` auto-generates:
 
-1. **Compile-time signature assertion** — verifies the user function's signature exactly matches the per-variant (filter, shape, observe, sign, etc.) definition. A mismatch fails the build.
+1. **Compile-time signature assertion** — verifies the user function's signature exactly matches the per-variant (filter, shape, sign, etc.) definition. A mismatch fails the build.
 
    ```rust
    const _: () = {
@@ -336,19 +336,6 @@ Reconciler or admin API
 
 On the next request the worker sees that `cell.version_id` differs from its `WorkerInstance.version_id` → `InstancePre.instantiate(&mut new_store)` → re-extract typed_func. The old `InstancePre`'s `Arc` drops naturally when the worker releases its last reference. No dlclose-style race.
 
-**Observability flush responsibility (not owned by PluginCell)**:
-`PluginCell` holds only the `InstancePre` and owns neither per-worker `Store`s nor ring buffers. So on ArcSwap swap, old `PluginCell::drop` alone cannot flush buffered observability events left in worker thread-locals (this was a design error — flagged in Oracle review).
-
-Correct flush model:
-- The observability buffer is owned by the **`WasmtimeObservabilityHook` body** (held by `DynamicView` as `Arc<dyn ObservabilityHook>`) or a **per-worker registry**.
-- Drain order on slot eviction/version swap:
-  1. Record the new `version_id` just before `commit_staged()`.
-  2. A separate background flush task sweeps every worker thread once and invokes `worker_drain_for_slot(slot_key, prev_version_id)` (cooperative request via per-worker channel or atomic flag).
-  3. Each worker drains → emits → drops the prev_version `Store` in its thread-local at its next await point.
-  4. Only after all drain-complete acks arrive does the old `PluginCell` Arc's last reference drop.
-- On full slot removal (`evict_slot`): same as above but the thread-local entry is deleted without a new instantiate.
-- Without this model, a plain `Drop` can lose SSE batched events.
-
 ### 5.5 Resource limits and isolation — fuel
 
 - **Memory**: per-store `Memory` page limit + `Config::max_wasm_stack`. Exceeding the limit traps the wasm.
@@ -373,9 +360,8 @@ Correct flush model:
   2. `Config::wasm_component_model(false)`, no `WasiCtx`, no `wasmtime-wasi` Linker extension.
   3. Inspect `Module::imports()` at registration — if the import set is non-empty, reject registration with `RuntimeError::InstantiateFailed`.
   4. From `Module::exports()`, allow only the hooks declared in the manifest among `cc_lb_filter`/`cc_lb_shape`/... plus `cc_lb_alloc`/`cc_lb_free`. Extra exports are harmless but warn-logged.
-  5. The signer/observability engine is separate (§5.7), so its host fns are registered on a separate Linker. Sharing module/InstancePre with the hot-path engine is forbidden.
+  5. The signer engine is separate (§5.7), so its host fns are registered on a separate Linker. Sharing module/InstancePre with the hot-path engine is forbidden.
 - Result: no plugin has any way to reach host state, network, filesystem, or clock. Attempts are rejected at instantiate.
-- The observability hook (observe) is split into a background flush model. The plugin only pushes events to an in-memory ring buffer; the host drains periodically from a separate task. Same intent as the current `sse_batch.rs`, but the wire is rkyv.
 - Signer is not on the hot path, so async + host I/O remain allowed as today. Wasmtime async support is enabled only on the signer-dedicated engine (§5.7).
 
 ### 5.7 Engine configuration
@@ -415,7 +401,6 @@ StagedSlot      { key, entry, slot }
 WasmtimeFilterPlugin   impl FilterPlugin
 WasmtimeDialectPlugin  impl UpstreamDialect
 WasmtimeSignerFactory  impl SignerFactory  (async, separate engine)
-WasmtimeObservabilityHook impl ObservabilityHook
 ```
 
 API:
@@ -449,7 +434,6 @@ Contents:
 
 - `plugins/router/cache-aware` → new PDK, logic unchanged.
 - `plugins/shape/subscription-launderer` → new PDK, logic unchanged.
-- `plugins/observe/*` → new PDK.
 
 In each plugin's `Cargo.toml`, replace the `extism-pdk` dependency with `cc-lb-pdk-wasmtime`, and replace `#[plugin_fn]` with `#[cc_lb_pdk::plugin(filter)]` etc.
 
@@ -470,9 +454,8 @@ Per-phase implementation difficulty is the estimate the user requested at m0046.
    - New conformance test (`tests/plugin-lifecycle/wasmtime_filter.rs`) verifies filter calls, hot-swap, version_id increments, fuel trips.
    - The hardest parts are the rkyv view macro design and the alignment-aware alloc helper.
 
-3. **Phase 2 — shape, observability, signer integration** (difficulty **5/10**)
+3. **Phase 2 — shape, signer integration** (difficulty **5/10**)
    - shape, normalize_error: repeat the filter pattern.
-   - observe: new implementation of the §5.4 background drain task + per-worker ring buffer.
    - signer: async engine (`Config::async_support(true)`) + epoch interrupt + separate Linker + separate InstancePre cache.
 
 4. **Phase 3 — bench + flip** (difficulty **3/10**)
@@ -504,7 +487,7 @@ Per-phase implementation difficulty is the estimate the user requested at m0046.
 - **R1 worker occupancy**: one plugin call holds its worker for the call duration. Even with fuel enforcing an instruction ceiling, a very heavy plugin holding one worker for a long time prevents that worker from processing other queued tasks. SLOs are enforced via fuel_per_call. Recommended initial values: filter 50M, shape 100M (each sub-ms to a few ms under typical Wasmtime throughput assumptions).
 - **R2 memory footprint + thread-local eviction**: `worker_threads × active_plugin_slots × memory_max_pages`. 8 workers × 20 slots × 32 pages (2 MiB) = ~320 MiB ceiling. With PoolingAllocator + CoW, actual RSS is much smaller.
    - However, when a slot is evicted (`evict_slot`) or its version swapped, the worker thread-local `SLOT_INSTANCES` map keeps the entry → the old Store leaks.
-   - Policy: (a) on each call compare `cell.version_id` and overwrite stale entries with new ones (current §5.1 flow). (b) On slot eviction, the §5.4 background drain task signals every worker with `worker_drain_for_slot(slot_key)` → the worker removes the thread-local entry at its next await point. (c) Add a periodic LRU sweep as a cc-lb-server background task to GC entries unused for N minutes.
+   - Policy: (a) on each call compare `cell.version_id` and overwrite stale entries with new ones (current §5.1 flow). (b) On slot eviction, a background drain task signals every worker with `worker_drain_for_slot(slot_key)` → the worker removes the thread-local entry at its next await point. (c) Add a periodic LRU sweep as a cc-lb-server background task to GC entries unused for N minutes.
 
 - **R2b principal removal**: when a principal is deleted, all its SlotKeys disappear at the next Reconciler rebuild. The corresponding SlotKey entries in worker thread-locals are also cleaned up by policies (a)/(b)/(c).
 - **R3 Wasmtime engine sharing scope**: one hot-path engine shared by all workers. PoolingAllocator's `total_memories` etc. are a hard cap on concurrently live instances. Exceeding the cap in operation fails instantiation. Operational policy decision needed (reconfigure the engine when slot count grows vs provision generous caps).

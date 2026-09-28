@@ -7,7 +7,6 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import type React from 'react';
 import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
@@ -292,7 +291,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   expect(detailPane.contains(detailShell)).toBe(true);
   expect(detailPane?.className).toContain('hidden');
   expect(detailPane?.className).toContain('md:flex');
-  expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(7);
+  expect(detailShell.querySelectorAll('[data-detail-section]')).toHaveLength(6);
   expect(detailShell.querySelector('details')).toBeNull();
   expect(detailShell.querySelectorAll('.skeleton').length).toBeGreaterThan(40);
 
@@ -311,7 +310,7 @@ test('pending principals keep the mobile list, desktop detail shell, and shared 
   }
 });
 
-test('principal detail reads keepalive to observability with every section expanded', () => {
+test('principal detail reads keepalive to access with every section expanded', () => {
   renderPrincipalDetail();
 
   const pane = screen
@@ -331,15 +330,11 @@ test('principal detail reads keepalive to observability with every section expan
     'Shape',
     'API keys',
     'Access',
-    'Observability',
   ]);
-  // Nothing is folded away: no disclosure, and Shape and Observability
-  // content renders without a click.
+  // Nothing is folded away: no disclosure, and Shape content renders without
+  // a click.
   expect(pane.querySelector('details')).toBeNull();
   expect(cardNamed('Shape').getByText('None')).toBeDefined();
-  expect(
-    cardNamed('Observability').getByText(/No observability plugins/),
-  ).toBeDefined();
 });
 
 test('recent requests delegates pending geometry to the structured table', () => {
@@ -1643,159 +1638,6 @@ test('router reorder locks subscription preference while its own write shows pro
   const progress = screen.getByRole('status');
   expect(progress.textContent).toContain('Turning on...');
   expect(progress.querySelector('svg.animate-spin')).not.toBeNull();
-});
-
-test('observability add pending locks its modal and shows adding progress', async () => {
-  const mutate = vi.fn();
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: {
-      entries: [
-        {
-          id: 'observability-plugin',
-          name: 'Audit Hook',
-          metadata: null,
-          sha256_hex: '',
-          supported_slots: ['observability_hook'],
-        },
-      ],
-    },
-    isLoading: false,
-  } as never);
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate,
-    isPending: false,
-  } as never);
-  const view = renderPrincipalDetail();
-
-  const observabilityCard = cardNamed('Observability');
-  fireEvent.click(observabilityCard.getByRole('button', { name: 'Add' }));
-  let dialog = screen.getByRole('dialog', {
-    name: 'Add plugin to Observability',
-  });
-  await userEvent.click(within(dialog).getByRole('combobox'));
-  await userEvent.click(
-    await screen.findByRole('option', { name: 'Audit Hook' }),
-  );
-  await userEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
-  expect(mutate).toHaveBeenCalledTimes(1);
-
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
-    mutate,
-    isPending: true,
-  } as never);
-  view.rerender(withProviders(<Component />));
-
-  dialog = screen.getByRole('dialog', {
-    name: 'Add plugin to Observability',
-  });
-  expect(within(dialog).getByRole('combobox').hasAttribute('disabled')).toBe(
-    true,
-  );
-  expect(
-    within(dialog)
-      .getByRole('button', { name: 'Cancel' })
-      .hasAttribute('disabled'),
-  ).toBe(true);
-  expect(
-    within(dialog)
-      .getByRole('button', { name: 'Close dialog' })
-      .hasAttribute('disabled'),
-  ).toBe(true);
-  const adding = within(dialog).getByRole('button', { name: 'Adding...' });
-  expect(adding.hasAttribute('disabled')).toBe(true);
-  expect(adding.getAttribute('aria-busy')).toBe('true');
-
-  fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
-  expect(
-    screen.getByRole('dialog', { name: 'Add plugin to Observability' }),
-  ).toBeDefined();
-});
-
-test('observability remove pending preserves confirmation and locks row actions', () => {
-  const mutate = vi.fn();
-  vi.mocked(queries.usePluginChain).mockImplementation(
-    (_principalId, slot) =>
-      ({
-        data: {
-          entries:
-            slot === 'observability_hook'
-              ? [
-                  {
-                    id: 'observability-entry',
-                    order: 100,
-                    wasm_registry_id: 'observability-plugin',
-                    revision: 4,
-                  },
-                ]
-              : [],
-        },
-        isLoading: false,
-      }) as never,
-  );
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({
-    data: {
-      entries: [
-        {
-          id: 'observability-plugin',
-          name: 'Audit Hook',
-          metadata: null,
-          sha256_hex: '',
-          supported_slots: ['observability_hook'],
-        },
-      ],
-    },
-    isLoading: false,
-  } as never);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate,
-    isPending: false,
-  } as never);
-  const view = renderPrincipalDetail();
-
-  const observabilityCard = cardNamed('Observability');
-  const addButton = observabilityCard.getByRole('button', { name: 'Add' });
-  const dragButton = observabilityCard.getByRole('button', {
-    name: 'Drag to reorder',
-  });
-  const removeButton = observabilityCard.getByRole('button', {
-    name: 'Remove Audit Hook',
-  });
-  fireEvent.click(removeButton);
-  let dialog = screen.getByRole('alertdialog', {
-    name: 'Remove plugin from chain?',
-  });
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }));
-  expect(mutate).toHaveBeenCalledTimes(1);
-
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
-    mutate,
-    isPending: true,
-  } as never);
-  view.rerender(withProviders(<Component />));
-
-  for (const button of [addButton, dragButton, removeButton]) {
-    expect(button.hasAttribute('disabled')).toBe(true);
-  }
-  expect(screen.queryByText('Saving order...')).toBeNull();
-  dialog = screen.getByRole('alertdialog', {
-    name: 'Remove plugin from chain?',
-  });
-  expect(
-    within(dialog)
-      .getByRole('button', { name: 'Cancel' })
-      .hasAttribute('disabled'),
-  ).toBe(true);
-  const removal = within(dialog).getByRole('button', {
-    name: 'Removing...',
-  });
-  expect(removal.hasAttribute('disabled')).toBe(true);
-  expect(removal.getAttribute('aria-busy')).toBe('true');
-  fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
-  expect(
-    screen.getByRole('alertdialog', {
-      name: 'Remove plugin from chain?',
-    }),
-  ).toBeDefined();
 });
 
 test('API-key issue pending locks actions, ignores dismissal, and submits once', () => {

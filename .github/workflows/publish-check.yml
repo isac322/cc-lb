@@ -19,9 +19,12 @@ name: publish-check
 # 1. cargo-semver-checks on every publish=true crate that already has a
 #    baseline on crates.io. It compares the current source's public API
 #    against the last published version and fails when a breaking change
-#    is not matched by a semver-appropriate version bump. This is the
-#    primary defense: it catches breakage at the SOURCE (the crate whose
-#    API changed) instead of waiting for downstream verify to fail.
+#    is not matched by a semver-appropriate version bump or declared as a
+#    breaking change (`type(scope)!:` / `BREAKING CHANGE:`) since the
+#    crate's last release tag; release-plz owns the actual version bump.
+#    This is the primary defense: it catches breakage at the SOURCE (the
+#    crate whose API changed) instead of waiting for downstream verify to
+#    fail.
 #
 # 2. cargo publish --dry-run on cc-lb-plugin-wire. Foundation crate with
 #    no in-workspace unpublished deps, so packaging is self-contained
@@ -64,6 +67,9 @@ jobs:
     runs-on: cc-lb-2
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: ./.github/actions/check-published-crates
         with:
           stable-build-metadata: "true"

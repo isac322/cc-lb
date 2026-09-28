@@ -143,10 +143,9 @@ Labels use only the fixed stage/result. Do not add principal, request ID, prefix
 
 ### 5.9 Request timeline boundary
 
-Keep the request event's `observability_post_ms` field and DB/API compatibility. However, do not display this post-response observation stage in the admin-web latency timeline or latency cell.
+The admin-web latency timeline and latency cell show only stages that delay the request.
 
 - Keep `Setup overhead` because it is time that actually delayed dispatch.
-- Remove `Observability post` from the timeline stages.
 - Do not add new prompt-cache micro timings to the timeline.
 - The timeline total keeps the existing `duration_ms`. This value is finalized before post-response observation runs, so no separate subtraction is needed.
 - Observation pipeline health is viewed only in Prometheus.
@@ -182,10 +181,9 @@ Keep the request event's `observability_post_ms` field and DB/API compatibility.
   - Timeline total keeps the existing `duration_ms`
   - Internal post computes only `limit_reconcile_ms`
 - `LatencyTimeline.tsx`
-  - Remove the `Observability post` stage
   - Stage percentages and unaccounted keep the existing `duration_ms` basis
 - `LatencyCell.tsx`
-  - Remove the Observability item; headline/popover percentages keep the existing per-phase denominator
+  - Headline/popover percentages keep the existing per-phase denominator
 
 ## 7. Failures and fallbacks
 
@@ -206,5 +204,4 @@ No fallback permits approximation or missing breakpoints.
 - Exactly 1 actual tokenization job for concurrent identical requests
 - Tokio heartbeat persists during a large analysis
 - New metrics exposed on the Prometheus endpoint
-- Observability post does not appear in the admin-web timeline
 - Full CI pass

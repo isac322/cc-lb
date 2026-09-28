@@ -3,8 +3,8 @@ use std::sync::Arc;
 use rkyv::util::AlignedVec;
 
 use crate::cache::{
-    call_filter_hook_scoped, call_observe_hook, call_shape_hook_scoped,
-    call_transform_response_hook_scoped, call_transform_sse_event_hook_scoped,
+    call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
+    call_transform_sse_event_hook_scoped,
 };
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
@@ -109,12 +109,6 @@ impl WasmPluginWireDispatch {
         call_shape_hook_scoped(&self.cell, input, with_output)
     }
 
-    /// Dispatch an observe call. `input` must be rkyv-encoded `ObserveEvent` bytes.
-    /// The guest returns `(0, 0)` for observe; the returned `Vec<u8>` is always empty.
-    pub fn call_observe(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        call_observe_hook(&self.cell, input)
-    }
-
     /// Dispatch a transform_response call. Returns aligned bytes for rkyv access.
     pub fn call_transform_response(
         &self,
@@ -178,15 +172,6 @@ impl WasmPluginWireDispatch {
             .metadata
             .hooks
             .get(cc_lb_plugin_wire::schema::HookKind::Shape.as_str())
-            .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
-    }
-
-    /// Wire version for the observe hook, if declared in plugin metadata.
-    pub fn observe_wire_version(&self) -> Option<cc_lb_plugin_wire::schema::WireVersion> {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::Observe.as_str())
             .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
     }
 

@@ -1,7 +1,7 @@
 //! Pre-build the wasm32 fixture artifacts the integration tests load.
 //!
 //! Without this, `cargo test -p cc-lb-runtime-wasmtime` silently skips
-//! `shape_round_trip` / `observe_drain` / `cache_aware_wasmtime_e2e`
+//! `shape_round_trip` / `cache_aware_wasmtime_e2e`
 //! when no human pre-built the wasm — letting broken plugins ship as
 //! "tests pass". Stage 1 protocol audit (S2 blocker) flagged this.
 //!
@@ -22,10 +22,6 @@ const FIXTURE_CRATES: &[Fixture] = &[
     Fixture {
         crate_name: "wasmtime-shape-passthrough",
         crate_path: "../../plugins/test-fixtures/wasmtime-shape-passthrough",
-    },
-    Fixture {
-        crate_name: "wasmtime-observe-noop",
-        crate_path: "../../plugins/test-fixtures/wasmtime-observe-noop",
     },
     Fixture {
         crate_name: "wasmtime-filter-service-tier",

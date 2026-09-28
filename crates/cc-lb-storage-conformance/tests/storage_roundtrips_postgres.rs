@@ -366,14 +366,6 @@ fn plugin_registry_shape_singleton_preserved_postgres() {
 }
 
 #[test]
-fn plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_postgres() {
-    run_postgres_scenario(
-        "insert_chain_entry_allows_multi_for_observability_hook",
-        plugin_registry_store::insert_chain_entry_allows_multi_for_observability_hook,
-    );
-}
-
-#[test]
 fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
