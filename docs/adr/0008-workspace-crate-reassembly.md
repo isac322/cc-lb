@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-07-10
 - Supersedes: the `cc-lb-plugin-api` published authoring surface and the `cc-lb-contract` shared-vocabulary crate
-- Implementation plan: [.omo/plans/crate-reassembly.md](../../.omo/plans/crate-reassembly.md)
+- Implementation plan: kept outside the repository
 - Related: [ADR-0001 plugin runtime vNext](0001-plugin-runtime-vnext.md), [ADR-0002 JSON library strategy](0002-json-library-strategy.md)
 
 ## Context
@@ -125,4 +125,4 @@ Three deviations from the planned module homes were made during execution. All a
 
 ## Status & follow-up
 
-Proposed. Execution is tracked in [.omo/plans/crate-reassembly.md](../../.omo/plans/crate-reassembly.md) (20 todos, single atomic PR). This ADR should move to **Accepted** when that PR merges, and the stale README/plugin-author references to `cc-lb-plugin-api` as a published surface are updated as part of it.
+Proposed. Execution is tracked in the [crate reassembly plan](../plans/crate-reassembly.md) (20 todos, single atomic PR). This ADR should move to **Accepted** when that PR merges, and the stale README/plugin-author references to `cc-lb-plugin-api` as a published surface are updated as part of it.
