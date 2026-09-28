@@ -1268,7 +1268,16 @@ function LogsTimeStrip({
     }
     return { sinceSecs, untilSecs, bucketMs: histogramBucketMs };
   }, [view, histogramBucketMs]);
-  const histogram = useEventsHistogram(historicalFilters, histogramRange, {
+  // The histogram spans the whole view, bounded by `histogramRange`; the
+  // request overwrites the selection's since/until with it. Keeping them in the
+  // query key would make every committed drag a new, empty query, blanking the
+  // bars behind the fresh selection until the refetch lands.
+  const {
+    since_unix_secs: _selectionSince,
+    until_unix_secs: _selectionUntil,
+    ...histogramFilters
+  } = historicalFilters;
+  const histogram = useEventsHistogram(histogramFilters, histogramRange, {
     poll: followRight,
   });
 

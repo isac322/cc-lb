@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Dragging across the Logs histogram to pick a time range no longer leaves trailing afterimages or flickers. The selection, its handles and the time hint now move together with the pointer.
+- Releasing a drag on the Logs histogram no longer blanks the bars for a moment, which left the selection alone on an empty strip. The histogram now keeps its data when a range is selected instead of refetching it.
 
 ## [0.8.1] - 2026-09-26
 
