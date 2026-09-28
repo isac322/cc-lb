@@ -11,6 +11,7 @@ import { Suspense, startTransition } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { EventsHistogramPayload, RecentEventsPayload } from '../lib/api';
 import type * as queries from '../lib/queries';
+import { useEventsHistogram } from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import { Route } from './logs';
 
@@ -88,10 +89,10 @@ vi.mock('../lib/queries', async () => {
         queryFn: async () => routeState.nextPage,
       }),
     ),
-    useEventsHistogram: (filters: Record<string, string | undefined>) => {
+    useEventsHistogram: vi.fn((filters: Record<string, string | undefined>) => {
       routeState.histogramCalls.push(filters);
       return routeState.histogram;
-    },
+    }),
     usePrincipalNameMap: () => new Map(),
     useRecentEventsPage: (
       filters: Record<string, string | undefined>,
@@ -150,6 +151,16 @@ vi.mock('../components/ui/RequestEventsTable', () => ({
 }));
 const LogsPage = Route.options.component as React.ComponentType;
 
+const actualQueries = await vi.importActual<typeof queries>('../lib/queries');
+
+/** The real query hook, run against a stubbed fetch. */
+function useRealEventsHistogram(
+  ...args: Parameters<typeof actualQueries.useEventsHistogram>
+) {
+  routeState.histogramCalls.push(args[0]);
+  return actualQueries.useEventsHistogram(...args);
+}
+
 function page(requestId?: string, principalId = 'principal-a') {
   const events = requestId
     ? [
@@ -159,6 +170,7 @@ function page(requestId?: string, principalId = 'principal-a') {
           principal_id: principalId,
           status: 200,
           duration_ms: 25,
+          event_kind: 'messages' as const,
         },
       ]
     : [];
@@ -187,6 +199,7 @@ function fullPage(prefix: string, principalId = 'principal-a') {
       principal_id: principalId,
       status: 200,
       duration_ms: 25,
+      event_kind: 'messages' as const,
     })),
   );
 }
@@ -233,6 +246,7 @@ describe('logs polling surfaces', () => {
     };
     routeState.recentCalls = [];
     routeState.histogramCalls = [];
+    vi.mocked(useEventsHistogram).mockReset();
     routeState.liveCalls = [];
     routeState.search = {};
     routeState.suspendInitialForPrincipal = undefined;
@@ -380,7 +394,7 @@ describe('logs polling surfaces', () => {
     expect(screen.queryByText('principal-a-request')).toBeNull();
   });
 
-  test('uses the initial cursor and resets scroll for a changed filter identity', async () => {
+  test('uses the initial cursor and keeps scroll for a changed filter identity', async () => {
     const firstPage = fullPage('principal-a-request');
     const secondPage = page('principal-a-next');
     routeState.recent = {
@@ -431,7 +445,8 @@ describe('logs polling surfaces', () => {
     await waitFor(() =>
       expect(screen.getByText('principal-b-request')).toBeDefined(),
     );
-    expect(scrollContainer.scrollTop).toBe(0);
+    // A filter change re-scopes the rows in place; the scroller stays.
+    expect(scrollContainer.scrollTop).toBe(120);
     const changedFilterCalls = routeState.recentCalls.filter(
       ({ filters }) => filters.principal_id === 'principal-b',
     );
@@ -523,6 +538,8 @@ describe('logs polling surfaces', () => {
   });
 
   test('keeps visible page, count, and export in the same merged order', () => {
+    // Kind-less fixtures: lift the default messages filter.
+    routeState.search = { event_kind: 'all' };
     routeState.recent = {
       data: pageFromEvents([
         {
@@ -713,8 +730,52 @@ describe('logs polling surfaces', () => {
     expect(routeState.liveCalls.length).toBeGreaterThan(0);
   });
 
+  test('lists only messages requests when the URL names no kind', async () => {
+    routeState.search = {};
+    routeState.recent = {
+      data: pageFromEvents([
+        {
+          ts: 1_700_000_000,
+          request_id: 'count-tokens-request',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'count_tokens',
+        },
+        {
+          ts: 1_700_000_001,
+          request_id: 'messages-request',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'messages',
+        },
+      ]),
+      isPlaceholderData: false,
+      isPending: false,
+      refetch: vi.fn(),
+    };
+
+    renderLogs();
+
+    await waitFor(() =>
+      expect(screen.getByText('messages-request')).toBeDefined(),
+    );
+    expect(screen.queryByText('count-tokens-request')).toBeNull();
+    expect(routeState.recentCalls.length).toBeGreaterThan(0);
+    for (const call of routeState.recentCalls) {
+      expect(call.filters.event_kind).toBe('messages');
+    }
+    expect(routeState.liveCalls.length).toBeGreaterThan(0);
+    for (const filters of routeState.liveCalls) {
+      expect(filters.event_kind).toBe('messages');
+    }
+    // The default kind is not an applied filter: no chip.
+    expect(
+      screen.queryByRole('button', { name: 'Remove kind filter' }),
+    ).toBeNull();
+  });
+
   test('removes a live error row promptly when its partial corrects to 200', async () => {
-    routeState.search = { status: 'errors' };
+    routeState.search = { status: 'errors', event_kind: 'all' };
     const partialAt = (status: number) => ({
       eventsMap: new Map([
         [
@@ -742,5 +803,72 @@ describe('logs polling surfaces', () => {
     routeState.live = { ...routeState.live, ...partialAt(200), version: 2 };
     rerenderLogs();
     await waitFor(() => expect(screen.queryByText('live-retry')).toBeNull());
+  });
+
+  test('keeps the histogram bars when a strip selection is committed', async () => {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    vi.mocked(useEventsHistogram).mockImplementation(useRealEventsHistogram);
+    routeState.recent = {
+      data: pageFromEvents([
+        {
+          ts: nowSecs - 1_800,
+          request_id: 'recent-request',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'messages',
+        },
+      ]),
+      isPlaceholderData: false,
+      isPending: false,
+      refetch: vi.fn(),
+    };
+    const histogramUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (!url.includes('/admin/v1/events/histogram')) {
+          return new Promise<Response>(() => {});
+        }
+        histogramUrls.push(url);
+        // Only the first load answers; any later request stays in flight, as
+        // a refetch does while the user looks at the strip.
+        if (histogramUrls.length > 1) return new Promise<Response>(() => {});
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              buckets: [
+                {
+                  bucket_start_unix_secs: nowSecs - 1_800,
+                  total_count: 4,
+                  error_count: 1,
+                },
+              ],
+              bucket_count: 1,
+              bucket_ms: 60_000,
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          ),
+        );
+      }),
+    );
+
+    const view = renderLogs();
+    await waitFor(() => expect(histogramUrls).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.queryByTestId('time-range-strip-loading')).toBeNull(),
+    );
+
+    // What a drag release commits: the URL gains the selection's bounds.
+    routeState.search = {
+      since_unix_secs: nowSecs - 2_400,
+      until_unix_secs: nowSecs - 1_200,
+    };
+    view.rerenderLogs();
+
+    // The strip still covers the same view, so the bars it already has stay
+    // on screen instead of blanking behind the new selection.
+    expect(screen.queryByTestId('time-range-strip-loading')).toBeNull();
+    expect(histogramUrls).toHaveLength(1);
   });
 });

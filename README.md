@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/readme/cc-lb-hero-dark.svg">
+    <img alt="cc-lb" src="assets/brand/readme/cc-lb-hero-light.svg" width="100%">
+  </picture>
+</p>
+
 # cc-lb
 
 cc-lb is a Rust workspace for an Anthropic-compatible multi-principal reverse proxy with a static `cc-lb` musl binary, a wasmtime + rkyv plugin runtime, and a layered server/runtime split. Build it with `cargo build --workspace` or `cargo build --release --target x86_64-unknown-linux-musl -p cc-lb-server`.

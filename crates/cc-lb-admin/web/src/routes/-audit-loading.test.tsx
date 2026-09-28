@@ -6,6 +6,7 @@ import {
   screen,
   within,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type React from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
@@ -40,7 +41,12 @@ vi.mock('../lib/queries', async () => {
 const AuditComponent = AuditRoute.options.component as React.ComponentType;
 
 function renderAudit(
-  search: { principal_id?: string; since?: number; until?: number } = {},
+  search: {
+    principal_id?: string;
+    since?: number;
+    until?: number;
+    type?: string;
+  } = {},
 ) {
   Object.assign(AuditRoute, { useSearch: () => search });
   return render(<AuditComponent />);
@@ -74,22 +80,33 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-test('audit loading reserves the resolved count width and keeps the nine-column table', () => {
-  const { rerender } = renderAudit();
+function mockEntries(entries: unknown[]) {
+  vi.mocked(queries.useAudit).mockReturnValue({
+    data: { entries },
+    isFetching: false,
+    isLoading: false,
+    isPending: false,
+    refetch: vi.fn(),
+  } as never);
+}
 
-  const subtitle = screen
-    .getByText(/admin actions · unfiltered/)
-    .closest('[data-slot="section-subtitle"]');
-  expect(subtitle?.querySelectorAll('.skeleton')).toHaveLength(1);
-  expect(subtitle?.textContent).not.toContain('0 admin actions');
-  expect(screen.getByTestId('audit-count-slot').className).toContain('min-w-5');
-  expect(screen.getByLabelText('Principal').className).toContain('w-full');
-  expect(screen.getByLabelText('Range start')).toBeDefined();
-  expect(screen.getByLabelText('Range end')).toBeDefined();
-  expect(screen.getByRole('button', { name: 'Apply' })).toBeDefined();
-  expect(screen.queryByLabelText('Upstream')).toBeNull();
-  expect(screen.queryByLabelText('Route')).toBeNull();
-  expect(screen.queryByLabelText('Status')).toBeNull();
+function tableRows(): HTMLTableRowElement[] {
+  const table = screen.getByRole('table') as HTMLTableElement;
+  return Array.from(table.tBodies[0]?.rows ?? []).filter(
+    (row) => row.cells.length > 1,
+  );
+}
+
+function applyLastSearch(prev: Record<string, unknown>) {
+  const call = routerMocks.navigate.mock.lastCall?.[0] as {
+    search: (p: Record<string, unknown>) => Record<string, unknown>;
+  };
+  return call.search(prev);
+}
+
+test('audit loads admin entries with supported filters and no native select', () => {
+  renderAudit();
+
   expect(queries.useAudit).toHaveBeenLastCalledWith({
     limit: '200',
     admin_only: 'true',
@@ -97,47 +114,21 @@ test('audit loading reserves the resolved count width and keeps the nine-column 
     since: undefined,
     until: undefined,
   });
-
-  const table = screen.getByRole('table') as HTMLTableElement;
-  expect(table.className).toContain('table-fixed');
-  expect(within(table).getAllByRole('columnheader')).toHaveLength(9);
-
-  const rows: HTMLTableRowElement[] = Array.from(table.tBodies[0]?.rows ?? []);
-  expect(rows).toHaveLength(5);
-  for (const row of rows) {
-    const cells: HTMLTableCellElement[] = Array.from(row.cells);
-    expect(cells).toHaveLength(9);
-    expect(cells.every((cell) => cell.colSpan === 1)).toBe(true);
-  }
-  const auditWidths = [
-    'w-36',
-    'w-40',
-    'w-36',
-    'w-40',
-    'w-44',
-    'w-72',
-    'w-40',
-    'w-20',
-    'w-20',
-  ];
-  auditWidths.forEach((width, index) => {
-    expect(rows[0]?.cells[index]?.className).toContain(width);
-  });
-
-  vi.mocked(queries.useAudit).mockReturnValue({
-    data: { entries: [] },
-    isFetching: false,
-    isLoading: false,
-    isPending: false,
-    refetch: vi.fn(),
-  } as never);
-  rerender(<AuditComponent />);
-  const resolvedCountSlot = screen.getByTestId('audit-count-slot');
-  expect(resolvedCountSlot.className).toContain('min-w-5');
-  expect(resolvedCountSlot.textContent).toBe('0');
+  expect(
+    screen.getByTestId('audit-summary').querySelectorAll('.skeleton'),
+  ).toHaveLength(1);
+  expect(screen.getByLabelText('Range start')).toBeDefined();
+  expect(screen.getByLabelText('Range end')).toBeDefined();
+  expect(screen.getByRole('button', { name: 'Apply' })).toBeDefined();
+  expect(document.querySelector('select')).toBeNull();
+  expect(
+    within(screen.getByRole('radiogroup', { name: 'Action type' }))
+      .getByRole('radio', { name: 'Writes' })
+      .getAttribute('aria-checked'),
+  ).toBe('true');
 });
 
-test('audit sends only supported principal and time filters and clears them together', () => {
+test('audit sends principal and time filters and reset clears them together', () => {
   renderAudit({
     principal_id: 'principal-1',
     since: 1_718_665_200,
@@ -151,13 +142,171 @@ test('audit sends only supported principal and time filters and clears them toge
     since: '1718665200',
     until: '1718668800',
   });
-  expect(screen.getByText(/3 filters active/)).toBeDefined();
-  expect(screen.queryByLabelText('Upstream')).toBeNull();
-  expect(screen.queryByLabelText('Route')).toBeNull();
-  expect(screen.queryByLabelText('Status')).toBeNull();
+  expect(screen.getByRole('button', { name: 'Filters (2)' })).toBeDefined();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Reset filters' }));
   expect(routerMocks.navigate).toHaveBeenCalledWith({ search: {} });
+});
+
+test('audit offers the shared presets in order with All time last, and 6h sets since', () => {
+  renderAudit();
+
+  const group = screen.getByRole('radiogroup', { name: 'Time range' });
+  expect(
+    within(group)
+      .getAllByRole('radio')
+      .map((radio) => radio.textContent),
+  ).toEqual(['1h', '6h', '24h', '7d', 'All time']);
+
+  fireEvent.click(within(group).getByRole('radio', { name: '6h' }));
+  const nowSecs = Math.floor(Date.now() / 1000);
+  expect(applyLastSearch({})).toEqual({
+    since: nowSecs - 6 * 3600,
+    until: undefined,
+    range: '6h',
+  });
+  // A preset re-scopes the trail in place: the reader keeps their place.
+  expect(routerMocks.navigate).toHaveBeenLastCalledWith(
+    expect.objectContaining({ resetScroll: false }),
+  );
+});
+
+test('audit shows writes by default and one click switches to all actions', () => {
+  mockEntries([
+    {
+      request_id: 'w1',
+      ts: 1_750_204_800,
+      status: 201,
+      principal_id: '',
+      route: '/admin/v1/principals',
+      upstream: 'admin',
+      admin_action: 'principal_key_issue',
+    },
+    {
+      request_id: 'r1',
+      ts: 1_750_204_801,
+      status: 200,
+      principal_id: '',
+      route: '/admin/v1/config/draft',
+      upstream: 'admin',
+      admin_action: 'config_draft_read',
+    },
+    {
+      request_id: 'a1',
+      ts: 1_750_204_802,
+      status: 401,
+      principal_id: '',
+      route: '/admin/v1/status',
+      upstream: 'admin',
+      admin_action: 'auth_rejected',
+    },
+  ]);
+
+  const { rerender } = renderAudit();
+  expect(tableRows().map((row) => row.cells[1]?.textContent)).toEqual([
+    'Principal key issuedprincipal_key_issue',
+  ]);
+  expect(screen.getByTestId('audit-summary').textContent).toBe(
+    'Showing 1 write of 3 loaded entries',
+  );
+
+  fireEvent.click(screen.getByRole('radio', { name: 'All' }));
+  expect(applyLastSearch({ principal_id: 'p' })).toEqual({
+    principal_id: 'p',
+    type: 'all',
+  });
+
+  Object.assign(AuditRoute, { useSearch: () => ({ type: 'all' }) });
+  rerender(<AuditComponent />);
+  expect(tableRows()).toHaveLength(3);
+
+  fireEvent.click(screen.getByRole('radio', { name: 'Writes' }));
+  expect(applyLastSearch({ type: 'all' })).toEqual({ type: undefined });
+});
+
+test('audit rows open their entry from the keyboard and name entities', async () => {
+  const upstreamId = '0348c6a6-374c-4df9-8cf4-374e8d26f70a';
+  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(
+    new Map([
+      [upstreamId, 'isac-max'],
+      ['isac-max', 'isac-max'],
+    ]),
+  );
+  mockEntries([
+    {
+      request_id: 'u1',
+      ts: 1_750_204_800,
+      status: 200,
+      principal_id: '',
+      route: `/admin/v1/upstreams/${upstreamId}`,
+      upstream: 'isac-max',
+      actor: 'static-token/local',
+      admin_action: `upstream_update(id=${upstreamId}, fields=weight,enabled)`,
+    },
+  ]);
+  const user = userEvent.setup();
+
+  renderAudit();
+  const [row] = tableRows();
+  const time = row?.cells[0]?.querySelector('[title]');
+  expect(time?.textContent).toBe('1y ago');
+  expect(time?.getAttribute('title')).toContain('2025');
+  expect(row?.cells[1]?.textContent).toBe(
+    'Upstream updatedupstream_update· fields: weight, enabled',
+  );
+  expect(row?.cells[2]?.textContent).toBe('upstream isac-max');
+  expect(
+    within(row?.cells[2] as HTMLElement)
+      .getByRole('link', { name: 'isac-max' })
+      .getAttribute('href'),
+  ).toBe(`/upstreams?selectedId=${upstreamId}`);
+  expect(row?.cells[3]?.textContent).toBe('2 fields: weight, enabled');
+  expect(row?.cells[5]?.textContent).toBe('200/upstreams/isac-max');
+
+  const open = within(row as HTMLElement).getByRole('button', {
+    name: /^Open Upstream updated entry from /,
+  });
+  open.focus();
+  await user.keyboard('{Enter}');
+
+  const dialog = screen.getByRole('dialog', { name: 'Upstream updated' });
+  expect(dialog.textContent).toContain('upstream_update');
+  expect(dialog.textContent).toContain(
+    'This entry records which fields changed, not their previous or new values.',
+  );
+  expect(dialog.textContent).toContain(`isac-max (${upstreamId.slice(0, 8)})`);
+});
+
+test('audit details leave out the target and unbounded query limits', () => {
+  const principalId = '7fb023cf-180a-4738-9cc8-79c0d6572182';
+  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
+    new Map([[principalId, 'local-traffic']]),
+  );
+  mockEntries([
+    {
+      request_id: 'r1',
+      ts: 1_750_204_800,
+      status: 200,
+      principal_id: principalId,
+      route: `/admin/v1/principals/${principalId}/keys`,
+      upstream: 'admin',
+      actor: 'static-token/local',
+      admin_action: 'principal_keys_list',
+      payload: {
+        principal_id: principalId,
+        status: 'active',
+        since: 0,
+        // u64::MAX as the JSON parser delivers it.
+        until: 2 ** 64,
+        actor_subject: null,
+      },
+    },
+  ]);
+
+  renderAudit({ type: 'all' });
+  const [row] = tableRows();
+  expect(row?.cells[2]?.textContent).toBe('principal local-traffic');
+  expect(row?.cells[3]?.textContent).toBe('status: active · since: 0');
 });
 
 test('audit preserves duplicate request-id events across filter result transitions', () => {
@@ -229,17 +378,22 @@ test('audit preserves duplicate request-id events across filter result transitio
   );
 
   const expectAuditRows = (expectedActions: readonly string[]) => {
-    const table = screen.getByRole('table') as HTMLTableElement;
-    const dataRows: HTMLTableRowElement[] = Array.from(
-      table.tBodies[0]?.rows ?? [],
-    ).filter((row) => row.cells.length === 9);
-    expect(screen.getByTestId('audit-count-slot').textContent).toBe(
-      String(expectedActions.length),
+    const dataRows = tableRows();
+    expect(screen.getByTestId('audit-summary').textContent).toContain(
+      `Showing ${expectedActions.length} writes`,
     );
     expect(dataRows).toHaveLength(expectedActions.length);
-    expect(dataRows.map((row) => row.cells[5]?.textContent)).toEqual(
-      expectedActions,
-    );
+    expect(
+      dataRows.map(
+        (row) => row.cells[1]?.querySelector('.font-mono')?.textContent,
+      ),
+    ).toEqual(expectedActions);
+  };
+  const openRow = (action: string, index = 0) => {
+    const table = screen.getByRole('table');
+    const cell = within(table).getAllByText(action)[index];
+    fireEvent.click(cell?.closest('tr') as HTMLElement);
+    return screen.getByRole('dialog');
   };
 
   const { rerender } = renderAudit();
@@ -258,16 +412,11 @@ test('audit preserves duplicate request-id events across filter result transitio
   });
   expectAuditRows(principalRows.map((entry) => entry.admin_action));
 
-  const repeatedActionCells = screen.getAllByText('principal.set_scopes');
-  expect(repeatedActionCells).toHaveLength(2);
-  repeatedActionCells.forEach((cell, index) => {
-    fireEvent.click(cell.closest('tr')!);
-    const dialog = screen.getByRole('dialog', {
-      name: `Audit entry ${duplicateRequestIds[1]}`,
-    });
+  for (const index of [0, 1]) {
+    const dialog = openRow('principal.set_scopes', index);
     expect(dialog.textContent).toContain(`"revision": ${index + 1}`);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
-  });
+  }
 
   Object.assign(AuditRoute, {
     useSearch: () => ({
@@ -287,10 +436,7 @@ test('audit preserves duplicate request-id events across filter result transitio
   expectAuditRows(timeRows.map((entry) => entry.admin_action));
 
   for (const entry of timeRows) {
-    fireEvent.click(screen.getByText(entry.admin_action).closest('tr')!);
-    const dialog = screen.getByRole('dialog', {
-      name: `Audit entry ${duplicateRequestIds[0]}`,
-    });
+    const dialog = openRow(entry.admin_action);
     expect(dialog.textContent).toContain(
       `"admin_action": "${entry.admin_action}"`,
     );

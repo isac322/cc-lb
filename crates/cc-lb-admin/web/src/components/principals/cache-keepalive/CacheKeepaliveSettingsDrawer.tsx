@@ -1,6 +1,5 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
 import {
@@ -8,11 +7,19 @@ import {
   usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
 } from '../../../lib/queries';
-import { Button, cx, INPUT_CLASS } from '../../ui/primitives';
+import {
+  Button,
+  cx,
+  Drawer,
+  Field,
+  INPUT_CLASS,
+  ToggleSwitch,
+} from '../../ui/primitives';
 
 // INPUT_CLASS carries no disabled affordance of its own; a control locked by an
 // in-flight write must read as unavailable, not merely inert.
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS =
+  'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
 
 interface Props {
   open: boolean;
@@ -76,6 +83,8 @@ export function CacheKeepaliveSettingsDrawer({
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
   const [newTool, setNewTool] = useState('');
+  const toolInputId = useId();
+  const toolHintId = useId();
   const initialDraftRef = useRef<CacheKeepaliveDraftSnapshot | null>(null);
   const [editingRevision, setEditingRevision] = useState(principal.revision);
 
@@ -192,251 +201,219 @@ export function CacheKeepaliveSettingsDrawer({
     setExtraTools(extraTools.filter((t) => t !== tool));
   };
 
+  // The tool field is a framed token box: a tap anywhere inside the frame —
+  // padding, gaps, a chip's text — should put the caret in the input, so the
+  // whole frame is the touch target. Buttons inside keep their own behavior.
+  const focusToolInput = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('input, button')) return;
+    e.preventDefault();
+    e.currentTarget.querySelector('input')?.focus();
+  };
+
   return (
-    <BaseDialog.Root open={open} onOpenChange={handleOpenChange}>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <BaseDialog.Popup
-          className="fixed right-0 top-0 bottom-0 w-full max-w-md bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full"
-          data-testid="cache-keepalive-settings-drawer"
-        >
-          <BaseDialog.Title className="sr-only">
-            Cache keepalive settings
-          </BaseDialog.Title>
-          <BaseDialog.Description className="sr-only">
-            Advanced settings for cache keepalive.
-          </BaseDialog.Description>
-
-          <header className="flex items-center justify-between gap-3 px-4 py-3 border-b border-subtle shrink-0">
-            <div className="min-w-0">
-              <h3 className="text-sm font-medium text-text">
-                Cache keepalive settings
-              </h3>
-              <p className="text-[11px] text-text-faint font-mono truncate">
-                {principal.name}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => handleOpenChange(false)}
-              aria-label="Close settings"
-              disabled={saving}
-              aria-disabled={saving || undefined}
-              className={cx(
-                'inline-flex items-center justify-center w-7 h-7 rounded-sm text-text-muted hover:text-text hover:bg-overlay-5 shrink-0',
-                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted',
-              )}
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </header>
-
-          <fieldset
-            aria-busy={saving}
-            className="flex-1 min-w-0 overflow-y-auto p-4 space-y-6"
-            data-testid="cache-keepalive-settings-form"
+    <Drawer
+      open={open}
+      onOpenChange={handleOpenChange}
+      title="Cache keepalive settings"
+      description={principal.name}
+      width="md"
+      footer={
+        <>
+          <Button variant="ghost" onClick={reset} disabled={busy}>
+            Reset
+          </Button>
+          <Button
+            variant="primary"
+            loading={saving}
             disabled={busy}
+            onClick={handleSave}
           >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                Enabled
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={enabled}
-                aria-label="Enable cache keepalive"
-                onClick={() => setEnabled(!enabled)}
+            {saving ? 'Saving...' : 'Save changes'}
+          </Button>
+        </>
+      }
+    >
+      <fieldset
+        aria-busy={saving}
+        className="min-w-0 p-4 space-y-10"
+        data-testid="cache-keepalive-settings-form"
+        disabled={busy}
+      >
+        <ToggleSwitch
+          role="switch"
+          label="Cache keepalive enabled"
+          description="Renew the prompt-cache TTL for this principal's sessions."
+          aria-label="Cache keepalive enabled"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+          disabled={busy}
+        />
+
+        <div className="space-y-5">
+          <h3 className="text-title-section text-text">Renewal</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-5">
+            <Field
+              label="Renewal lead time · 5m TTL"
+              hint={`Seconds. Renews ${formatSecs(lead5m)} before the 5m cache expires.`}
+            >
+              <input
+                type="number"
+                min={0}
+                value={lead5m}
+                onChange={(e) => setLead5m(Number(e.target.value))}
                 disabled={busy}
-                className={cx(
-                  'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40',
-                  PENDING_INPUT_CLASS,
-                  enabled
-                    ? 'bg-[var(--color-ok)] border-[var(--color-ok)]'
-                    : 'bg-overlay-5 border-subtle-strong hover:border-text-muted disabled:hover:border-subtle-strong',
-                )}
-              >
+                className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              />
+            </Field>
+
+            <Field
+              label="Renewal lead time · 1h TTL"
+              hint={`Seconds. Renews ${formatSecs(lead1h)} before the 1h cache expires.`}
+            >
+              <input
+                type="number"
+                min={0}
+                value={lead1h}
+                onChange={(e) => setLead1h(Number(e.target.value))}
+                disabled={busy}
+                className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              />
+            </Field>
+
+            <Field label="Max renewals per session">
+              <input
+                type="number"
+                min={0}
+                value={maxRenewals}
+                onChange={(e) => setMaxRenewals(Number(e.target.value))}
+                disabled={busy}
+                className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              />
+            </Field>
+
+            <Field
+              label="Max total duration"
+              hint={`Seconds. = ${formatSecs(maxDuration)}`}
+            >
+              <input
+                type="number"
+                min={0}
+                value={maxDuration}
+                onChange={(e) => setMaxDuration(Number(e.target.value))}
+                disabled={busy}
+                className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              />
+            </Field>
+
+            <Field
+              label="Snapshot max bytes"
+              hint={`= ${formatBytes(snapshotBytes)}`}
+            >
+              <input
+                type="number"
+                min={0}
+                value={snapshotBytes}
+                onChange={(e) => setSnapshotBytes(Number(e.target.value))}
+                disabled={busy}
+                className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+              />
+            </Field>
+          </div>
+        </div>
+
+        <div className="space-y-5">
+          <h3 className="text-title-section text-text">Classifier</h3>
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor={toolInputId} className="text-label text-text-muted">
+              Extra wait-for-user tools
+            </label>
+            <div
+              onPointerDown={focusToolInput}
+              className="flex flex-wrap gap-1.5 p-1.5 min-h-9 max-md:min-h-10 cursor-text bg-input-bg border border-subtle-strong rounded-sm focus-within:outline-2 focus-within:outline-accent focus-within:outline-offset-1"
+            >
+              {extraTools.map((tool) => (
                 <span
-                  className={cx(
-                    'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                    enabled ? 'translate-x-4' : 'translate-x-0.5',
-                  )}
-                />
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Renewal lead time · 5m TTL
-                </span>
-                <input
-                  type="number"
-                  value={lead5m}
-                  onChange={(e) => setLead5m(Number(e.target.value))}
-                  disabled={busy}
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                />
-                <span className="text-[11px] text-text-faint">
-                  → renews 30s before the 5m cache expires
-                </span>
-              </label>
-
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Renewal lead time · 1h TTL
-                </span>
-                <input
-                  type="number"
-                  value={lead1h}
-                  onChange={(e) => setLead1h(Number(e.target.value))}
-                  disabled={busy}
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                />
-              </label>
-
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Max renewals per session
-                </span>
-                <input
-                  type="number"
-                  value={maxRenewals}
-                  onChange={(e) => setMaxRenewals(Number(e.target.value))}
-                  disabled={busy}
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                />
-              </label>
-
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Max total duration
-                </span>
-                <input
-                  type="number"
-                  value={maxDuration}
-                  onChange={(e) => setMaxDuration(Number(e.target.value))}
-                  disabled={busy}
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                />
-                <span className="text-[11px] text-text-faint">= 4h</span>
-              </label>
-
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Snapshot max bytes
-                </span>
-                <input
-                  type="number"
-                  value={snapshotBytes}
-                  onChange={(e) => setSnapshotBytes(Number(e.target.value))}
-                  disabled={busy}
-                  className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                />
-                <span className="text-[11px] text-text-faint">= 512 KiB</span>
-              </label>
-            </div>
-
-            <div className="space-y-4">
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  extra_wait_for_user_tools
-                </span>
-                <div className="flex flex-wrap gap-2 p-2 min-h-9 bg-bg border border-subtle rounded-sm">
-                  {extraTools.map((tool) => (
-                    <span
-                      key={tool}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-sm bg-overlay-4 text-text border border-subtle"
-                    >
-                      {tool}
-                      <button
-                        type="button"
-                        onClick={() => removeTool(tool)}
-                        aria-label={`Remove ${tool}`}
-                        disabled={busy}
-                        className={cx(
-                          'inline-flex items-center justify-center rounded-sm text-text hover:text-text-muted',
-                          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
-                          PENDING_INPUT_CLASS,
-                        )}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
-                  <input
-                    type="text"
-                    value={newTool}
-                    onChange={(e) => setNewTool(e.target.value)}
-                    onKeyDown={handleAddTool}
+                  key={tool}
+                  className="inline-flex h-6 items-center gap-0.5 pl-2 font-mono text-data rounded-xs bg-overlay-4 text-text"
+                >
+                  {tool}
+                  <button
+                    type="button"
+                    onClick={() => removeTool(tool)}
+                    aria-label={`Remove ${tool}`}
                     disabled={busy}
                     className={cx(
-                      'flex-1 min-w-[100px] bg-transparent outline-none text-sm text-text',
+                      'relative inline-flex h-6 w-6 items-center justify-center rounded-xs text-text-muted transition-colors hover:bg-overlay-5 hover:text-text disabled:hover:bg-transparent disabled:hover:text-text-muted',
+                      // Phones: a ::before pad extends the 24px glyph button to a
+                      // 40px tap target without growing the chip's layout.
+                      'max-md:before:absolute max-md:before:-inset-2 max-md:before:content-[""]',
+                      'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
                       PENDING_INPUT_CLASS,
                     )}
-                    placeholder="Add tool..."
-                  />
-                </div>
-              </label>
-
-              <div className="flex items-center justify-between">
-                <div className="flex flex-col">
-                  <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                    treat end_turn as ambiguous
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={treatAmbiguous}
-                  aria-label="Treat end_turn as ambiguous"
-                  onClick={() => setTreatAmbiguous(!treatAmbiguous)}
-                  disabled={busy}
-                  className={cx(
-                    'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40',
-                    PENDING_INPUT_CLASS,
-                    treatAmbiguous
-                      ? 'bg-[var(--color-ok)] border-[var(--color-ok)]'
-                      : 'bg-overlay-5 border-subtle-strong hover:border-text-muted disabled:hover:border-subtle-strong',
-                  )}
-                >
-                  <span
-                    className={cx(
-                      'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
-                      treatAmbiguous ? 'translate-x-4' : 'translate-x-0.5',
-                    )}
-                  />
-                </button>
-              </div>
-
-              <div className="flex items-center justify-between opacity-50">
-                <div className="flex flex-col">
-                  <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                    LLM Judge
-                  </span>
-                </div>
-                <span className="inline-flex items-center px-2 py-0.5 text-[11px] rounded-sm border bg-overlay-4 text-text border-subtle">
-                  Reserved for a future release
+                  >
+                    <X className="w-3 h-3" aria-hidden="true" />
+                  </button>
                 </span>
-              </div>
+              ))}
+              <input
+                id={toolInputId}
+                type="text"
+                value={newTool}
+                onChange={(e) => setNewTool(e.target.value)}
+                onKeyDown={handleAddTool}
+                disabled={busy}
+                aria-describedby={toolHintId}
+                className={cx(
+                  'flex-1 min-w-[100px] px-1 bg-transparent outline-none text-body text-text placeholder:text-text-faint',
+                  // Phones: fill the field frame's 40px so the input's box is
+                  // the tap target, matching the frame's 6px padding top/bottom.
+                  'max-md:h-10 max-md:-my-1.5',
+                  PENDING_INPUT_CLASS,
+                )}
+                placeholder="Add tool..."
+              />
             </div>
-          </fieldset>
-
-          <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2 shrink-0">
-            <Button variant="ghost" onClick={reset} disabled={busy}>
-              Reset
-            </Button>
-            <Button
-              variant="primary"
-              loading={saving}
-              disabled={busy}
-              onClick={handleSave}
-            >
-              {saving ? 'Saving...' : 'Save changes'}
-            </Button>
+            <span id={toolHintId} className="text-caption text-text-faint">
+              Press Enter to add a tool name. Config key{' '}
+              <code className="font-mono text-data">
+                extra_wait_for_user_tools
+              </code>
+            </span>
           </div>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+
+          <ToggleSwitch
+            role="switch"
+            label="Treat end of turn as ambiguous"
+            description={
+              <>
+                Config key{' '}
+                <code className="font-mono text-data">
+                  treat_end_turn_as_ambiguous
+                </code>
+              </>
+            }
+            aria-label="Treat end of turn as ambiguous"
+            checked={treatAmbiguous}
+            onChange={(e) => setTreatAmbiguous(e.target.checked)}
+            disabled={busy}
+          />
+        </div>
+      </fieldset>
+    </Drawer>
   );
+}
+
+function formatSecs(secs: number): string {
+  if (!Number.isFinite(secs) || secs < 0) return '—';
+  if (secs >= 3600 && secs % 3600 === 0) return `${secs / 3600}h`;
+  if (secs >= 60 && secs % 60 === 0) return `${secs / 60}m`;
+  return `${secs}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes >= 1024 * 1024 && bytes % (1024 * 1024) === 0)
+    return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes >= 1024 && bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes.toLocaleString('en-US')} B`;
 }

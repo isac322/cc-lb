@@ -14,137 +14,373 @@
   --color-green-500: #22c55e;
   --color-green-600: #16a34a;
 
-  --font-sans: "Geist Variable", "Geist", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Hanken Grotesk for everything; Geist Mono only for IDs, hashes, error
+     codes and model IDs — never for times, dates or prose. */
+  --font-sans: "Hanken Grotesk Variable", "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, "JetBrains Mono", monospace;
 
-  --radius-sm: 0.125rem;
+  /* Radii: xs for meters and tiny tags; sm (4px) for controls, badges and
+     in-card wells; md (6px) for cards, overlays and page banners.
+     `rounded-full` is for status dots, switches and the theme pill only. */
+  --radius-xs: 0.125rem;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+
+  /* Type roles. Every step is rem so the browser font-size preference
+     scales it. Nothing renders below 12px except `text-2xs` (11px), which
+     is reserved for the sidebar footer meta. Each `text-<role>` utility
+     sets size, line height, weight and tracking together. Display numerals
+     are the only light (300) weight. */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-display-hero: 3.5rem;
+  --text-display-hero--line-height: 3.75rem;
+  --text-display-hero--font-weight: 300;
+  --text-display-hero--letter-spacing: -0.03em;
+  --text-display: 2rem;
+  --text-display--line-height: 2.25rem;
+  --text-display--font-weight: 300;
+  --text-display--letter-spacing: -0.02em;
+  --text-title-page: 1.5rem;
+  --text-title-page--line-height: 2rem;
+  --text-title-page--font-weight: 600;
+  --text-title-page--letter-spacing: -0.01em;
+  --text-title-section: 0.9375rem;
+  --text-title-section--line-height: 1.375rem;
+  --text-title-section--font-weight: 600;
+  --text-title-section--letter-spacing: 0em;
+  --text-title-card: 0.875rem;
+  --text-title-card--line-height: 1.25rem;
+  --text-title-card--font-weight: 600;
+  --text-title-card--letter-spacing: 0em;
+  --text-body: 0.875rem;
+  --text-body--line-height: 1.3125rem;
+  --text-body--font-weight: 400;
+  --text-body-sm: 0.8125rem;
+  --text-body-sm--line-height: 1.25rem;
+  --text-body-sm--font-weight: 400;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.125rem;
+  --text-label--font-weight: 500;
+  --text-label--letter-spacing: 0em;
+  --text-caption: 0.75rem;
+  --text-caption--line-height: 1rem;
+  --text-caption--font-weight: 400;
+  --text-data: 0.75rem;
+  --text-data--line-height: 1rem;
+  --text-data--font-weight: 400;
+
+  /* Single overlay elevation (popover, menu, dialog, drawer). No glow. */
+  --shadow-overlay: 0 8px 24px -12px var(--color-overlay-shadow);
+}
+
+/* Semantic color tokens registered with Tailwind so variants (`hover:`,
+   `focus-visible:`, `divide-`, `ring-`, `outline-`) and opacity modifiers
+   (`bg-accent/15`) generate CSS. `inline` makes utilities reference the
+   runtime `var(--color-…)` defined per theme in `@layer base`; `reference`
+   keeps Tailwind from re-declaring (and shadowing) those variables. */
+@theme inline reference {
+  --color-bg: var(--color-bg);
+  --color-bg-sub: var(--color-bg-sub);
+  --color-panel: var(--color-panel);
+  --color-panel-strong: var(--color-panel-strong);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-border-row: var(--color-border-row);
+  --color-subtle: var(--color-border);
+  --color-subtle-strong: var(--color-border-strong);
+  --color-row: var(--color-border-row);
+  --color-text: var(--color-text);
+  --color-text-muted: var(--color-text-muted);
+  --color-text-faint: var(--color-text-faint);
+  --color-text-disabled: var(--color-text-disabled);
+  --color-border-disabled: var(--color-border-disabled);
+  --color-accent: var(--color-accent);
+  --color-accent-dim: var(--color-accent-dim);
+  --color-accent-hover: var(--color-accent-hover);
+  --color-accent-text: var(--color-accent-text);
+  --color-accent-ink: var(--color-accent-ink);
+  --color-ok: var(--color-ok);
+  --color-warn: var(--color-warn);
+  --color-danger: var(--color-danger);
+  --color-danger-solid: var(--color-danger-solid);
+  --color-danger-solid-hover: var(--color-danger-solid-hover);
+  --color-neutral: var(--color-neutral);
+  --color-success-text: var(--color-success-text);
+  --color-warn-text: var(--color-warn-text);
+  --color-danger-text: var(--color-danger-text);
+  --color-hover-bg: var(--color-hover-bg);
+  --color-selected: var(--color-selected);
+  --color-overlay-1: var(--color-overlay-1);
+  --color-overlay-2: var(--color-overlay-2);
+  --color-overlay-3: var(--color-overlay-3);
+  --color-overlay-4: var(--color-overlay-4);
+  --color-overlay-5: var(--color-overlay-5);
+  --color-overlay-6: var(--color-overlay-6);
+  --color-progress-track: var(--color-progress-track);
+  --color-modal-backdrop: var(--color-modal-backdrop);
+  --color-drawer-backdrop: var(--color-drawer-backdrop);
+  /* Aliases for class names already in use that never had a token. Owning
+     slices should migrate to the canonical name (right-hand side). */
+  --color-surface-raised: var(--color-overlay-4);
+  --color-overlay-10: var(--color-overlay-6);
+  --color-input-bg: var(--color-input-bg);
+  --color-series-5h: var(--color-series-5h);
+  --color-series-7d: var(--color-series-7d);
+  --color-series-fable: var(--color-series-fable);
+  --color-series-sonnet: var(--color-series-sonnet);
+  --color-series-opus: var(--color-series-opus);
+  --color-series-overage: var(--color-series-overage);
+  --color-series-unified: var(--color-series-unified);
+  --color-series-latency-downstream: var(--color-series-latency-downstream);
+  --color-series-latency-cclb: var(--color-series-latency-cclb);
+  --color-series-latency-net: var(--color-series-latency-net);
+  --color-series-latency-wait: var(--color-series-latency-wait);
+}
+
+/* `dark:` follows the app theme (data-theme on <html>), not only the OS. */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where([data-theme="system"], [data-theme="system"] *) {
+      @slot;
+    }
+  }
 }
 
 @layer base {
+  /* Shell geometry: 48px top bar everywhere; below `lg` the 56px bottom tab
+     bar (plus the home-indicator inset) also takes viewport height.
+     `h-shell` = the viewport minus both, for viewport-fit consoles. */
+  :root {
+    --shell-top: 3rem;
+    --shell-bottom: calc(3.5rem + env(safe-area-inset-bottom, 0px));
+    --shell-chrome: calc(var(--shell-top) + var(--shell-bottom));
+  }
+  @media (min-width: 64rem) {
+    :root {
+      --shell-bottom: 0px;
+    }
+  }
+  /* Graphite. Night (neutral graphite) is the default; Day (pale graphite)
+     via data-theme or the OS preference under "system". Contrast (WCAG):
+     text ≥ 13:1, text-muted ≥ 6.9:1, text-faint ≥ 5.4:1 on every surface;
+     accent-text, warn-text, danger-text ≥ 4.5:1 on ground, surfaces, their
+     own /12 badge fill and the selected-row fill; white on danger-solid
+     ≥ 5.2:1. `text-disabled` is deliberately 2.6–3.1:1: legible, but a clear
+     step below `text-faint`, so an unavailable control reads as such. */
   :root,
   :root[data-theme="dark"] {
     color-scheme: dark;
-    --color-bg: #000000;
-    --color-bg-sub: #050505;
-    --color-panel: rgba(255, 255, 255, 0.02);
-    --color-panel-strong: rgba(255, 255, 255, 0.04);
-    --color-border: rgba(255, 255, 255, 0.08);
-    --color-border-strong: rgba(255, 255, 255, 0.14);
-    --color-border-row: rgba(255, 255, 255, 0.04);
-    --color-text: #ededed;
-    --color-text-muted: #9ca3af;
-    --color-text-faint: #7d858f;
-    --color-accent: #00d4ff;
-    --color-accent-dim: rgba(0, 212, 255, 0.12);
-    --color-accent-text: #00d4ff;
-    --color-ok: #10b981;
-    --color-warn: #f59e0b;
-    --color-danger: #ef4444;
-    --color-info-text: #93c5fd;
-    --color-success-text: #6ee7b7;
-    --color-warn-text: #fcd34d;
-    --color-danger-text: #fca5a5;
-    --color-neutral: #6b7280;
-    --color-scrollbar: rgba(255, 255, 255, 0.08);
-    --color-scrollbar-hover: rgba(255, 255, 255, 0.18);
-    --color-hover-bg: rgba(255, 255, 255, 0.04);
-    --color-overlay-1: rgba(255, 255, 255, 0.02);
-    --color-overlay-2: rgba(255, 255, 255, 0.03);
-    --color-overlay-3: rgba(255, 255, 255, 0.04);
-    --color-overlay-4: rgba(255, 255, 255, 0.05);
-    --color-overlay-5: rgba(255, 255, 255, 0.06);
-    --color-overlay-6: rgba(255, 255, 255, 0.08);
-    --color-overlay-skeleton-base: rgba(255, 255, 255, 0.03);
-    --color-overlay-skeleton-shimmer: rgba(255, 255, 255, 0.08);
-    --color-progress-track: rgba(255, 255, 255, 0.16);
-    --color-progress-track-border: rgba(255, 255, 255, 0.24);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.70);
-    --color-drawer-backdrop: rgba(0, 0, 0, 0.60);
-    --color-toast-bg: #0a0a0a;
-    --color-recharts-tooltip-bg: #0a0a0a;
+    /* Graphite night: a neutral graphite ground, then flat surfaces one
+       step up; 1px lines. */
+    --color-bg: #161719;
+    --color-bg-sub: #232527;
+    --color-panel: #1c1e20;
+    --color-panel-strong: #232527;
+    --color-border: #2f3033;
+    --color-border-strong: #6a6c6f;
+    --color-border-row: #26282a;
+    --color-text: #edeeee;
+    --color-text-muted: #c0c1c3;
+    --color-text-faint: #9d9ea0;
+    /* Disabled controls: dim ink and a dashed line (`control-disabled`). */
+    --color-text-disabled: #626365;
+    --color-border-disabled: #4a4c4e;
+    /* Near-monochrome silver with a faint blue whisper: the brand mark,
+       focus, the switch "on" track, links and the one primary action.
+       `accent-ink` is text on a solid accent fill. Selection is neutral
+       (`--color-selected`). */
+    --color-accent: #ccddee;
+    --color-accent-hover: #dceaf8;
+    --color-accent-dim: rgb(204 221 238 / 0.14);
+    --color-accent-text: #779cc2;
+    --color-accent-ink: #181a1c;
+    /* Healthy is neutral: warn and danger are the only other hues. */
+    --color-ok: #c0c1c3;
+    --color-warn: #f0b429;
+    --color-danger: #ff6f61;
+    --color-danger-solid: #c7372c;
+    --color-danger-solid-hover: #b02f25;
+    --color-success-text: #c0c1c3;
+    --color-warn-text: #f0b429;
+    --color-danger-text: #ff8a7e;
+    --color-neutral: #939495;
+    --color-scrollbar: #2f3033;
+    --color-scrollbar-hover: #6a6c6f;
+    --color-hover-bg: rgb(255 255 255 / 0.04);
+    /* Selected row / nav item: a neutral fill a clear step above hover. */
+    --color-selected: rgb(255 255 255 / 0.08);
+    --color-overlay-1: rgb(255 255 255 / 0.02);
+    --color-overlay-2: rgb(255 255 255 / 0.03);
+    --color-overlay-3: rgb(255 255 255 / 0.04);
+    --color-overlay-4: rgb(255 255 255 / 0.05);
+    --color-overlay-5: rgb(255 255 255 / 0.06);
+    --color-overlay-6: rgb(255 255 255 / 0.08);
+    --color-overlay-skeleton-base: rgb(255 255 255 / 0.03);
+    --color-overlay-skeleton-shimmer: rgb(255 255 255 / 0.07);
+    --color-progress-track: #2c2d2f;
+    --color-modal-backdrop: rgb(6 7 8 / 0.72);
+    --color-drawer-backdrop: rgb(6 7 8 / 0.6);
+    --color-toast-bg: #232527;
+    /* Series. Tokens: cache read (the good outcome) is green, cache
+       creation (the costly miss) is amber/orange, uncached input is a quiet
+       slate, output violet. Quota windows: the three live windows (5h, 7d,
+       7d Fable) are sky, magenta and lime, at least OKLab ΔE 0.12 apart under
+       protan/deutan/tritan simulation; legacy Sonnet/Opus windows are muted.
+       Latency responsibility groups have their own tokens. */
+    --color-series-input: #96a6bb;
+    --color-series-output: #997fde;
+    --color-series-cache-create-5m: #e48d28;
+    --color-series-cache-create-1h: #cc612e;
+    --color-series-cache-read: #24c27d;
+    --color-series-5h: #63b1f9;
+    --color-series-7d: #cd5cac;
+    --color-series-fable: #bbe75f;
+    --color-series-sonnet: #629092;
+    --color-series-opus: #91745d;
+    --color-series-overage: #a3a5a8;
+    --color-series-unified: #777a80;
+    --color-series-latency-downstream: #1c989e;
+    --color-series-latency-cclb: #64bced;
+    --color-series-latency-net: #67bb6b;
+    --color-series-latency-wait: #5cadb6;
+    --chart-fill-opacity: 0.12;
+    --color-input-bg: #161719;
+    --color-overlay-shadow: rgb(0 0 0 / 0.5);
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    --color-bg: #ffffff;
-    --color-bg-sub: #fafafa;
-    --color-panel: rgba(0, 0, 0, 0.018);
-    --color-panel-strong: rgba(0, 0, 0, 0.04);
-    --color-border: rgba(0, 0, 0, 0.10);
-    --color-border-strong: rgba(0, 0, 0, 0.18);
-    --color-border-row: rgba(0, 0, 0, 0.05);
-    --color-text: #0a0a0a;
-    --color-text-muted: #4b5563;
-    --color-text-faint: #5b636f;
-    --color-accent: #0086d4;
-    --color-accent-dim: rgba(0, 134, 212, 0.10);
-    --color-accent-text: #00629b;
-    --color-ok: #059669;
-    --color-warn: #d97706;
-    --color-danger: #dc2626;
-    --color-info-text: #1d4ed8;
-    --color-success-text: #046049;
-    --color-warn-text: #92400e;
-    --color-danger-text: #b91c1c;
-    --color-neutral: #6b7280;
-    --color-scrollbar: rgba(0, 0, 0, 0.12);
-    --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
-    --color-hover-bg: rgba(0, 0, 0, 0.04);
-    --color-overlay-1: rgba(0, 0, 0, 0.02);
-    --color-overlay-2: rgba(0, 0, 0, 0.03);
-    --color-overlay-3: rgba(0, 0, 0, 0.04);
-    --color-overlay-4: rgba(0, 0, 0, 0.05);
-    --color-overlay-5: rgba(0, 0, 0, 0.06);
-    --color-overlay-6: rgba(0, 0, 0, 0.08);
-    --color-overlay-skeleton-base: rgba(0, 0, 0, 0.03);
-    --color-overlay-skeleton-shimmer: rgba(0, 0, 0, 0.08);
-    --color-progress-track: rgba(0, 0, 0, 0.13);
-    --color-progress-track-border: rgba(0, 0, 0, 0.22);
-    --color-modal-backdrop: rgba(0, 0, 0, 0.40);
-    --color-drawer-backdrop: rgba(0, 0, 0, 0.35);
-    --color-toast-bg: #ffffff;
-    --color-recharts-tooltip-bg: #ffffff;
+    /* Pale graphite daylight. Surfaces lighten one step at a time. */
+    --color-bg: #e3e5e7;
+    --color-bg-sub: #f7f8f9;
+    --color-panel: #eeeff1;
+    --color-panel-strong: #f7f8f9;
+    --color-border: #cacccf;
+    --color-border-strong: #7e8084;
+    --color-border-row: #d7d9dc;
+    --color-text: #18191c;
+    --color-text-muted: #484a4e;
+    --color-text-faint: #595b5e;
+    --color-text-disabled: #8a8c90;
+    --color-border-disabled: #afb1b4;
+    --color-accent: #1f2c3d;
+    --color-accent-hover: #142030;
+    --color-accent-dim: rgb(31 44 61 / 0.1);
+    --color-accent-text: #0a345a;
+    --color-accent-ink: #ffffff;
+    --color-ok: #484a4e;
+    --color-warn: #8a5a00;
+    --color-danger: #a61e30;
+    --color-danger-solid: #a61e30;
+    --color-danger-solid-hover: #8e1828;
+    --color-success-text: #484a4e;
+    --color-warn-text: #7a4f00;
+    --color-danger-text: #a61e30;
+    --color-neutral: #6d6f72;
+    --color-scrollbar: #cacccf;
+    --color-scrollbar-hover: #7e8084;
+    --color-hover-bg: rgb(24 25 28 / 0.04);
+    --color-selected: rgb(24 25 28 / 0.07);
+    --color-overlay-1: rgb(24 25 28 / 0.02);
+    --color-overlay-2: rgb(24 25 28 / 0.03);
+    --color-overlay-3: rgb(24 25 28 / 0.04);
+    --color-overlay-4: rgb(24 25 28 / 0.05);
+    --color-overlay-5: rgb(24 25 28 / 0.06);
+    --color-overlay-6: rgb(24 25 28 / 0.08);
+    --color-overlay-skeleton-base: rgb(24 25 28 / 0.04);
+    --color-overlay-skeleton-shimmer: rgb(24 25 28 / 0.09);
+    --color-progress-track: #d1d3d5;
+    --color-modal-backdrop: rgb(24 25 28 / 0.4);
+    --color-drawer-backdrop: rgb(24 25 28 / 0.32);
+    --color-toast-bg: #f7f8f9;
+    --color-series-input: #657689;
+    --color-series-output: #613ea6;
+    --color-series-cache-create-5m: #cc8d16;
+    --color-series-cache-create-1h: #bf5b0d;
+    --color-series-cache-read: #278a47;
+    --color-series-5h: #0c82bf;
+    --color-series-7d: #8d1071;
+    --color-series-fable: #486a00;
+    --color-series-sonnet: #39555c;
+    --color-series-opus: #6a5647;
+    --color-series-overage: #616366;
+    --color-series-unified: #83868c;
+    --color-series-latency-downstream: #00525c;
+    --color-series-latency-cclb: #0070ab;
+    --color-series-latency-net: #34823b;
+    --color-series-latency-wait: #5191a1;
+    --chart-fill-opacity: 0.1;
+    --color-input-bg: #f7f8f9;
+    --color-overlay-shadow: rgb(24 25 28 / 0.16);
   }
   @media (prefers-color-scheme: light) {
     :root[data-theme="system"] {
       color-scheme: light;
-      --color-bg: #ffffff;
-      --color-bg-sub: #fafafa;
-      --color-panel: rgba(0, 0, 0, 0.018);
-      --color-panel-strong: rgba(0, 0, 0, 0.04);
-      --color-border: rgba(0, 0, 0, 0.10);
-      --color-border-strong: rgba(0, 0, 0, 0.18);
-      --color-border-row: rgba(0, 0, 0, 0.05);
-      --color-text: #0a0a0a;
-      --color-text-muted: #4b5563;
-      --color-text-faint: #5b636f;
-      --color-accent: #0086d4;
-      --color-accent-dim: rgba(0, 134, 212, 0.10);
-      --color-accent-text: #00629b;
-      --color-ok: #059669;
-      --color-warn: #d97706;
-      --color-danger: #dc2626;
-      --color-info-text: #1d4ed8;
-      --color-success-text: #046049;
-      --color-warn-text: #92400e;
-      --color-danger-text: #b91c1c;
-      --color-neutral: #6b7280;
-      --color-scrollbar: rgba(0, 0, 0, 0.12);
-      --color-scrollbar-hover: rgba(0, 0, 0, 0.22);
-      --color-hover-bg: rgba(0, 0, 0, 0.04);
-      --color-overlay-1: rgba(0, 0, 0, 0.02);
-      --color-overlay-2: rgba(0, 0, 0, 0.03);
-      --color-overlay-3: rgba(0, 0, 0, 0.04);
-      --color-overlay-4: rgba(0, 0, 0, 0.05);
-      --color-overlay-5: rgba(0, 0, 0, 0.06);
-      --color-overlay-6: rgba(0, 0, 0, 0.08);
-      --color-overlay-skeleton-base: rgba(0, 0, 0, 0.03);
-      --color-overlay-skeleton-shimmer: rgba(0, 0, 0, 0.08);
-      --color-progress-track: rgba(0, 0, 0, 0.13);
-      --color-progress-track-border: rgba(0, 0, 0, 0.22);
-      --color-modal-backdrop: rgba(0, 0, 0, 0.40);
-      --color-drawer-backdrop: rgba(0, 0, 0, 0.35);
-      --color-toast-bg: #ffffff;
-      --color-recharts-tooltip-bg: #ffffff;
+      /* Pale graphite daylight. Surfaces lighten one step at a time. */
+      --color-bg: #e3e5e7;
+      --color-bg-sub: #f7f8f9;
+      --color-panel: #eeeff1;
+      --color-panel-strong: #f7f8f9;
+      --color-border: #cacccf;
+      --color-border-strong: #7e8084;
+      --color-border-row: #d7d9dc;
+      --color-text: #18191c;
+      --color-text-muted: #484a4e;
+      --color-text-faint: #595b5e;
+      --color-text-disabled: #8a8c90;
+      --color-border-disabled: #afb1b4;
+      --color-accent: #1f2c3d;
+      --color-accent-hover: #142030;
+      --color-accent-dim: rgb(31 44 61 / 0.1);
+      --color-accent-text: #0a345a;
+      --color-accent-ink: #ffffff;
+      --color-ok: #484a4e;
+      --color-warn: #8a5a00;
+      --color-danger: #a61e30;
+      --color-danger-solid: #a61e30;
+      --color-danger-solid-hover: #8e1828;
+      --color-success-text: #484a4e;
+      --color-warn-text: #7a4f00;
+      --color-danger-text: #a61e30;
+      --color-neutral: #6d6f72;
+      --color-scrollbar: #cacccf;
+      --color-scrollbar-hover: #7e8084;
+      --color-hover-bg: rgb(24 25 28 / 0.04);
+      --color-selected: rgb(24 25 28 / 0.07);
+      --color-overlay-1: rgb(24 25 28 / 0.02);
+      --color-overlay-2: rgb(24 25 28 / 0.03);
+      --color-overlay-3: rgb(24 25 28 / 0.04);
+      --color-overlay-4: rgb(24 25 28 / 0.05);
+      --color-overlay-5: rgb(24 25 28 / 0.06);
+      --color-overlay-6: rgb(24 25 28 / 0.08);
+      --color-overlay-skeleton-base: rgb(24 25 28 / 0.04);
+      --color-overlay-skeleton-shimmer: rgb(24 25 28 / 0.09);
+      --color-progress-track: #d1d3d5;
+      --color-modal-backdrop: rgb(24 25 28 / 0.4);
+      --color-drawer-backdrop: rgb(24 25 28 / 0.32);
+      --color-toast-bg: #f7f8f9;
+      --color-series-input: #657689;
+      --color-series-output: #613ea6;
+      --color-series-cache-create-5m: #cc8d16;
+      --color-series-cache-create-1h: #bf5b0d;
+      --color-series-cache-read: #278a47;
+      --color-series-5h: #0c82bf;
+      --color-series-7d: #8d1071;
+      --color-series-fable: #486a00;
+      --color-series-sonnet: #39555c;
+      --color-series-opus: #6a5647;
+      --color-series-overage: #616366;
+      --color-series-unified: #83868c;
+      --color-series-latency-downstream: #00525c;
+      --color-series-latency-cclb: #0070ab;
+      --color-series-latency-net: #34823b;
+      --color-series-latency-wait: #5191a1;
+      --chart-fill-opacity: 0.1;
+      --color-input-bg: #f7f8f9;
+      --color-overlay-shadow: rgb(24 25 28 / 0.16);
     }
   }
   html, body, #root { height: 100%; min-height: 100%; }
@@ -152,7 +388,9 @@
     background-color: var(--color-bg);
     color: var(--color-text);
     font-family: var(--font-sans);
-    font-variant-numeric: tabular-nums;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums lining-nums;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
     transition: background-color 0.15s ease, color 0.15s ease;
@@ -160,7 +398,10 @@
   *:focus-visible {
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
-    border-radius: 2px;
+  }
+  /* The UA renders `th` bold; the type system has no 700. */
+  th {
+    font-weight: 500;
   }
   ::selection {
     background-color: var(--color-accent-dim);
@@ -191,63 +432,90 @@
   }
 }
 
-@layer utilities {
-  .glass {
-    background-color: var(--color-panel);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--color-border);
-  }
-  .glass-strong {
-    background-color: var(--color-panel-strong);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--color-border-strong);
-  }
-  .table-header {
-    background-color: var(--color-panel-strong);
-    -webkit-backdrop-filter: blur(12px);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--color-border-strong);
-  }
-  .border-subtle { border-color: var(--color-border); }
-  .border-subtle-strong { border-color: var(--color-border-strong); }
-  .border-row { border-color: var(--color-border-row); }
-  .bg-bg { background-color: var(--color-bg); }
-  .bg-bg-sub { background-color: var(--color-bg-sub); }
-  .bg-overlay-1 { background-color: var(--color-overlay-1); }
-  .bg-overlay-2 { background-color: var(--color-overlay-2); }
-  .bg-overlay-3 { background-color: var(--color-overlay-3); }
-  .bg-overlay-4 { background-color: var(--color-overlay-4); }
-  .bg-overlay-5 { background-color: var(--color-overlay-5); }
-  .bg-overlay-6 { background-color: var(--color-overlay-6); }
-  .bg-progress-track {
-    background-color: var(--color-progress-track);
-    box-shadow: inset 0 0 0 1px var(--color-progress-track-border);
-  }
-  .hover\:bg-overlay-3:hover { background-color: var(--color-overlay-3); }
-  .hover\:bg-bg-sub:hover { background-color: var(--color-bg-sub); }
-  .hover\:bg-overlay-5:hover { background-color: var(--color-overlay-5); }
-  .bg-modal-backdrop { background-color: var(--color-modal-backdrop); }
-  .bg-drawer-backdrop { background-color: var(--color-drawer-backdrop); }
-  .bg-panel-strong { background-color: var(--color-panel-strong); }
-  .text-text { color: var(--color-text); }
-  .text-text-muted { color: var(--color-text-muted); }
-  .text-text-faint { color: var(--color-text-faint); }
-  .tabular-nums { font-variant-numeric: tabular-nums; }
-  .font-mono { font-family: var(--font-mono); }
-  .text-accent { color: var(--color-accent); }
-  .bg-accent { background-color: var(--color-accent); }
-  .border-accent { border-color: var(--color-accent); }
+/* Card surface: flat panel one step above the ground, 1px line. Radius
+   comes from the caller (`Card` uses `rounded-md`). No blur, no glow; the
+   name is historical. */
+@utility glass {
+  background-color: var(--color-panel);
+  border: 1px solid var(--color-border);
+}
+/* Overlay surface (popover, menu, select popup): opaque raised surface,
+   strong 1px line and the single overlay shadow. No blur. */
+@utility glass-strong {
+  background-color: var(--color-bg-sub);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: var(--shadow-overlay);
+}
+/* Well: a sub-group inside a card. Fill only, never a border. */
+@utility well {
+  background-color: var(--color-overlay-3);
+  border-radius: var(--radius-sm);
+}
+/* Disabled control: `text-disabled` ink (2.6–3.1:1, legible but a clear step
+   below `text-faint`) on no fill with a dashed `border-disabled` line (only
+   where the control draws a border), and no hover or press response. Use as
+   `disabled:control-disabled` on native controls, or as a plain class on
+   elements that carry `aria-disabled`. Never dim with opacity. A loading
+   (`aria-busy`) button keeps its normal look instead. The paint is
+   `!important` because the utility is the element's final state: as a plain
+   class it would otherwise lose to the chrome it sits beside (`text-text`,
+   `border-subtle-strong`, `hover:bg-*`) by sort order. The cursor is not, so
+   a caller can still add `cursor-progress`. */
+@utility control-disabled {
+  cursor: not-allowed;
+  color: var(--color-text-disabled) !important;
+  background-color: transparent !important;
+  border-color: var(--color-border-disabled) !important;
+  border-style: dashed !important;
+}
+/* Sticky table header (`thead`): opaque panel so rows scrolling underneath
+   never show through; 12px/500 `text-faint`, sentence case, 1px line. */
+@utility table-header {
+  background-color: var(--color-panel);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-faint);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  letter-spacing: 0em;
+  text-transform: none;
+}
+/* Header cell geometry: 36px tall, 12px inset, left-aligned. */
+@utility table-th {
+  height: 2.25rem;
+  padding-inline: 0.75rem;
+  text-align: left;
+  vertical-align: middle;
+  font-weight: 500;
+  white-space: nowrap;
+}
+/* Meter / bar track: flat fill, no border. */
+@utility bg-progress-track {
+  background-color: var(--color-progress-track);
+}
+/* Uppercase is reserved for sidebar and command-palette group headings. */
+@utility text-overline {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+/* Viewport-fit height under the shell chrome (top bar + mobile tab bar). */
+@utility h-shell {
+  height: calc(100dvh - var(--shell-chrome));
 }
 
-/* ── Status dots ── */
-.status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
-.status-dot.ok { background: var(--color-ok); box-shadow: 0 0 6px color-mix(in oklab, var(--color-ok) 65%, transparent); }
-.status-dot.warn { background: var(--color-warn); box-shadow: 0 0 6px color-mix(in oklab, var(--color-warn) 65%, transparent); }
-.status-dot.danger { background: var(--color-danger); box-shadow: 0 0 6px color-mix(in oklab, var(--color-danger) 65%, transparent); }
+/* ── Status dots ── 6px, 8px with `.lg` in lists. Flat and static: no pulse,
+   no glow; state is also carried by text. */
+.status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
+.status-dot.lg { width: 8px; height: 8px; }
+.status-dot.ok { background: var(--color-ok); }
+.status-dot.warn { background: var(--color-warn); }
+.status-dot.danger { background: var(--color-danger); }
 .status-dot.neutral { background: var(--color-neutral); }
-.status-dot.live { background: var(--color-accent); box-shadow: 0 0 8px color-mix(in oklab, var(--color-accent) 70%, transparent); }
+.status-dot.live { background: var(--color-accent); }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -255,59 +523,115 @@
 ::-webkit-scrollbar-thumb { background: var(--color-scrollbar); border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-scrollbar-hover); }
 
-/* ── Horizontal scroll affordance ── */
-.scroll-fade-right {
-  -webkit-mask-image: linear-gradient(to right, black 0, black calc(100% - 24px), transparent 100%);
-  mask-image: linear-gradient(to right, black 0, black calc(100% - 24px), transparent 100%);
+/* ── Horizontal scroll affordance (md+ only: tables stack into cards below md) ── */
+@media (min-width: 48rem) {
+  .scroll-fade-right {
+    -webkit-mask-image: linear-gradient(to right, black 0, black calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, black 0, black calc(100% - 24px), transparent 100%);
+  }
 }
 
 /* ── cmdk overrides ── */
 [cmdk-input] { outline: none; background: transparent; width: 100%; }
 [cmdk-list] { overflow-y: auto; padding: 4px; }
 [cmdk-group-heading] {
-  font-size: 10px;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--color-text-faint);
-  padding: 6px 10px 3px;
+  padding: 8px 10px 4px;
 }
 [cmdk-item] {
+  position: relative;
+  min-height: 36px;
   padding: 6px 10px;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 20px;
   display: flex;
   align-items: center;
   gap: 10px;
 }
+/* Selected: the shared neutral selection fill, no edge rule. */
 [cmdk-item][data-selected='true'] {
-  background: var(--color-overlay-5);
+  background: var(--color-selected);
   color: var(--color-text);
 }
-[cmdk-empty] { padding: 16px; color: var(--color-text-faint); font-size: 13px; }
+[cmdk-item][data-disabled='true'] {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+/* Phones: 44px rows so every command is a comfortable touch target. */
+@media (max-width: 47.99rem) {
+  [cmdk-item] { min-height: 44px; }
+}
+[cmdk-empty] { padding: 16px; color: var(--color-text-muted); font-size: 14px; }
 
-/* ── Sonner overrides ── */
+/* ── Sonner overrides ──
+   Sonner injects its own theme palette (#000 / #fff) at runtime; the extra
+   `html` raises specificity so the toast sits on the raised surface. */
+html [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: var(--color-toast-bg);
+  --normal-bg-hover: var(--color-panel-strong);
+  --normal-border: var(--color-border-strong);
+  --normal-border-hover: var(--color-border-strong);
+  --normal-text: var(--color-text);
+}
 [data-sonner-toaster] [data-sonner-toast] {
   background: var(--color-toast-bg);
   border: 1px solid var(--color-border-strong);
   color: var(--color-text);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-overlay);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 14px;
 }
 
-/* ── Recharts overrides ── */
+/* ── Recharts overrides ──
+   Tooltip and ticks are sans with tabular numerals; numbers are never mono.
+   Axis and tick lines are off everywhere: 1px crisp horizontal gridlines in
+   the line color carry scale, whatever stroke a caller passes. */
 .recharts-tooltip-wrapper { outline: none !important; }
 .recharts-default-tooltip {
-  background: var(--color-recharts-tooltip-bg) !important;
+  background: var(--color-bg-sub) !important;
   border: 1px solid var(--color-border-strong) !important;
-  border-radius: 4px !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: var(--shadow-overlay);
   padding: 8px 10px !important;
-  font-family: var(--font-mono) !important;
-  font-size: 11px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 0.75rem !important;
+  line-height: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.recharts-cartesian-axis-tick text,
+.recharts-cartesian-axis-tick-value {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  fill: var(--color-text-faint);
+}
+.recharts-cartesian-axis-line,
+.recharts-cartesian-axis-tick-line {
+  display: none;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--color-border);
+  stroke-width: 1px;
+  shape-rendering: crispEdges;
+}
+.recharts-reference-line line {
+  shape-rendering: crispEdges;
+}
+.recharts-curve.recharts-line-curve,
+.recharts-area-curve {
+  stroke-linejoin: round;
 }
 .recharts-tooltip-label {
   color: var(--color-text-muted) !important;
+  margin-bottom: 4px !important;
 }
 .recharts-tooltip-item {
   color: var(--color-text) !important;
@@ -321,8 +645,8 @@
 .flash-in { animation: flash-in 1.2s ease-out; }
 
 @keyframes flash-text {
-  0%   { opacity: 0.55; text-shadow: 0 0 8px var(--color-accent); }
-  100% { opacity: 1; text-shadow: none; }
+  0%   { opacity: 0.55; }
+  100% { opacity: 1; }
 }
 .flash-text-active { animation: flash-text 1s ease-out; }
 
@@ -335,7 +659,7 @@
   background: linear-gradient(90deg, var(--color-overlay-skeleton-base) 0%, var(--color-overlay-skeleton-shimmer) 50%, var(--color-overlay-skeleton-base) 100%);
   background-size: 800px 100%;
   animation: shimmer 1.8s linear infinite;
-  border-radius: 2px;
+  border-radius: var(--radius-xs);
 }
 
 /* ── Visually hidden ── */
@@ -344,9 +668,15 @@
   overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
 }
 
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.6); }
-  50% { box-shadow: 0 0 0 5px rgba(34, 197, 94, 0); }
+/* ── Reduced motion ──
+   Unlayered so it wins over Tailwind utilities. Each looping or attention
+   animation settles on its static end state; transitions elsewhere stay
+   (drawers switch slide→fade in the Drawer primitive itself). */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .flash-in,
+  .flash-text-active { animation: none; }
+  .animate-pulse { animation: none; }
 }
 
 /* ── react-day-picker (Custom time-range calendar helper) ──
@@ -370,4 +700,18 @@
 }
 .rdp-root.cclb-calendar .rdp-day_button:hover:not(:disabled) {
   background-color: var(--color-overlay-5);
+}
+.rdp-root.cclb-calendar .rdp-caption_label {
+  font-size: var(--text-title-card);
+  line-height: var(--text-title-card--line-height);
+  font-weight: var(--text-title-card--font-weight);
+}
+.rdp-root.cclb-calendar .rdp-weekday {
+  font-size: var(--text-label);
+  font-weight: var(--text-label--font-weight);
+  color: var(--color-text-faint);
+  opacity: 1;
+}
+.rdp-root.cclb-calendar .rdp-chevron {
+  fill: var(--color-text-muted);
 }

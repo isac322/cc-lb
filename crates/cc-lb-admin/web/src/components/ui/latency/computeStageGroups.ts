@@ -87,7 +87,6 @@ export type LatencyResponsibilityKey =
 export interface LatencyResponsibilityMeta {
   label: string;
   color: string;
-  textColor: string;
   description: string;
 }
 
@@ -97,44 +96,38 @@ export const LATENCY_RESPONSIBILITY_META: Record<
 > = {
   downstream: {
     label: 'Downstream',
-    color: 'bg-cyan-400',
-    textColor: 'text-cyan-300',
+    color: 'bg-series-latency-downstream',
     description:
       'Combines client pacing and downstream transit with runtime scheduling after handler entry. It is not a network RTT measurement.',
   },
   'cc-lb': {
     label: 'cc-lb',
-    color: 'bg-sky-400',
-    textColor: 'text-sky-300',
+    color: 'bg-series-latency-cclb',
     description:
       'Local request handling, routing, cache analysis, queueing, relay processing, and finalization.',
   },
   'upstream-net': {
     label: 'Upstream net',
-    color: 'bg-amber-400',
-    textColor: 'text-amber-300',
+    color: 'bg-series-latency-net',
     description:
       'DNS resolution and TCP/TLS connection establishment. Reused connections report no connector timing.',
   },
   'upstream-wait': {
     label: 'Upstream wait',
-    color: 'bg-violet-400',
-    textColor: 'text-violet-300',
+    color: 'bg-series-latency-wait',
     description:
       'Combines provider generation, upstream transit, and runtime scheduling. Those parts cannot be separated.',
   },
   unattributed: {
     label: 'Unattributed',
     color:
-      'bg-slate-700/30 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_rgba(255,255,255,0.05)_4px_8px)]',
-    textColor: 'text-slate-400',
+      'bg-overlay-6 bg-[repeating-linear-gradient(45deg,_transparent_0_4px,_var(--color-border-strong)_4px_8px)]',
     description:
       'Time that cannot be assigned to one responsibility with the available timing witnesses.',
   },
   renewal: {
     label: 'Renewal cycle',
-    color: 'bg-blue-400',
-    textColor: 'text-blue-300',
+    color: 'bg-series-latency-cclb',
     description:
       'The complete cache-keepalive renewal cycle performed by the scheduler.',
   },

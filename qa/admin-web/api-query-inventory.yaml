@@ -29,10 +29,10 @@
     - "It does not verify rendered reachability, runtime entity counts, pagination termination, polling cycles, SSE behavior, latency, or the deployed commit."
     - "TanStack Query cache hits and request coalescing can suppress a potential request occurrence at runtime; each item records the condition."
   "counts":
-    "total": 426
-    "ui_action": 219
-    "network_request": 161
-    "backend_endpoint": 46
+    "total": 422
+    "ui_action": 218
+    "network_request": 159
+    "backend_endpoint": 45
 "coverage_dimensions":
   - "id": "theme"
     "kind": "finite_enum"
@@ -13527,104 +13527,6 @@
     "production_applicability":
       "status": "available"
       "reason": null
-  - "id": "UI-SRC-2351FFDF6073"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis"
-    "category": "upstreams"
-    "page": "Upstreams"
-    "component": "Quota Analysis Query"
-    "name": "Subscription Quota Analysis Query"
-    "trigger_steps":
-      - "Select an OAuth upstream or change quota range"
-    "preconditions":
-      - "OAuth upstream selected"
-    "variants":
-      - "Loading burn skeletons"
-      - "Rendered burn rates and ETA to limit"
-      - "Quota deficit warning card"
-      - "Analysis caveats box"
-    "scope": "each_upstream"
-    "iteration_source": "Each selected OAuth upstream"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "Each selected OAuth upstream"
-      "variants":
-        - "Loading burn skeletons"
-        - "Rendered burn rates and ETA to limit"
-        - "Quota deficit warning card"
-        - "Analysis caveats box"
-    "atomic_request_ids":
-      - "UI-UP-08B"
-    "risk_tier": "read"
-    "expected_ui": "Fills in snapshot burn stats, deficit multiplier, shortfall tokens, and caveat bullets"
-    "polling": "not_applicable"
-    "client_only_reason": null
-    "source":
-      "file": "crates/cc-lb-admin/web/src/routes/upstreams.tsx"
-      "symbol": "DetailView"
-      "line": 869
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-UP-08B"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-SRC-2351FFDF6073"
-    "source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis"
-    "category": "upstreams"
-    "page": "Upstreams"
-    "component": "Quota Analysis Query"
-    "name": "Subscription Quota Analysis Query — useSubscriptionQuotaAnalysis"
-    "trigger_steps":
-      - "Select an OAuth upstream or change quota range"
-    "preconditions":
-      - "OAuth upstream selected"
-    "variants":
-      - "Loading burn skeletons"
-      - "Rendered burn rates and ETA to limit"
-      - "Quota deficit warning card"
-      - "Analysis caveats box"
-    "scope": "each_upstream"
-    "iteration_source": "Each selected OAuth upstream"
-    "risk_tier": "read"
-    "expected_ui": "Fills in snapshot burn stats, deficit multiplier, shortfall tokens, and caveat bullets"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useSubscriptionQuotaAnalysis"
-      "line": 876
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/subscription-quotas/analysis"
-      "path_bindings": []
-      "query_fields":
-        - "upstream_ids"
-        - "windows"
-        - "source"
-        - "range_secs"
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "useSubscriptionQuotaAnalysis"
-    "api_handler": "handle_analysis"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-      - "sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range"
-      - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints"
-      - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
-    "cache_or_no_query": "Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
   - "id": "UI-UP-09"
     "aliases": []
     "entry_type": "ui_action"
@@ -13654,9 +13556,8 @@
         - "7d (1800s buckets)"
     "atomic_request_ids":
       - "UI-UP-09A"
-      - "UI-UP-09B"
     "risk_tier": "read"
-    "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis"
+    "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
@@ -13689,7 +13590,7 @@
     "scope": "each_upstream"
     "iteration_source": "Each selected OAuth upstream × 4 ranges"
     "risk_tier": "read"
-    "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis"
+    "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
@@ -13717,62 +13618,6 @@
       - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints"
       - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
     "cache_or_no_query": "Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-UP-09B"
-    "aliases": []
-    "entry_type": "network_request"
-    "parent_action_id": "UI-UP-09"
-    "source_id": "routes/upstreams.tsx#DetailView:rangeToggle"
-    "category": "upstreams"
-    "page": "Upstreams"
-    "component": "Quota History Range Toggle"
-    "name": "Toggle Quota History Range — useSubscriptionQuotaAnalysis"
-    "trigger_steps":
-      - "Click 1h, 6h, 24h, or 7d button in Quota History header"
-    "preconditions":
-      - "OAuth upstream selected"
-    "variants":
-      - "1h (60s buckets)"
-      - "6h (60s buckets)"
-      - "24h (300s buckets)"
-      - "7d (1800s buckets)"
-    "scope": "each_upstream"
-    "iteration_source": "Each selected OAuth upstream × 4 ranges"
-    "risk_tier": "read"
-    "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis"
-    "polling": "not_applicable"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/lib/queries.ts"
-      "symbol": "useSubscriptionQuotaAnalysis"
-      "line": 876
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/subscription-quotas/analysis"
-      "path_bindings": []
-      "query_fields":
-        - "upstream_ids"
-        - "windows"
-        - "source"
-        - "range_secs"
-      "body_fields": []
-      "header_fields": []
-      "condition": null
-    "client_symbol": "useSubscriptionQuotaAnalysis"
-    "api_handler": "handle_analysis"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-      - "sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range"
-      - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints"
-      - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
-    "cache_or_no_query": "Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -18450,7 +18295,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:57"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:50"
     "api_handler": "handle_latest"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18494,7 +18339,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:59"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:52"
     "api_handler": "handle_series"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18537,7 +18382,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:64"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:57"
     "api_handler": "handle_aggregate"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -18552,52 +18397,6 @@
       - "sqlite:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:SqliteStorage::sum_usage_tokens_for_intervals"
       - "postgres:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:PostgresStorage::sum_usage_tokens_for_intervals"
     "cache_or_no_query": "Reads upstreams, subscription/organization metadata, provider-lot checkpoint history, and usage-rollup token sums for generated intervals; current quota candidates also come from the in-memory dynamic cache."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-1CD1FD9DEBA0"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_analysis"
-    "name": "GET /admin/subscription-quotas/analysis"
-    "http":
-      "method": "GET"
-      "path": "/admin/subscription-quotas/analysis"
-      "parameters":
-        "path": []
-        "query":
-          - "upstream_ids"
-          - "windows"
-          - "since_unix_secs"
-          - "until_unix_secs"
-          - "source"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:72"
-    "api_handler": "handle_analysis"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-      - "sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range"
-      - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints"
-      - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
-    "cache_or_no_query": "Reads upstreams, usage rollups, and slim subscription-quota checkpoints through the admin-local series helper; latest quota state comes from the in-memory dynamic cache."
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -18633,7 +18432,7 @@
     "iteration_source": "not_applicable"
     "risk_tier": "read"
     "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:77"
+    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:65"
     "api_handler": "handle_pool_history"
     "auth": "require_admin_auth middleware"
     "storage_operation_ids":
@@ -20174,11 +19973,8 @@
   - "UI-UP-07"
   - "UI-SRC-224914630CC5"
   - "UI-UP-08A"
-  - "UI-SRC-2351FFDF6073"
-  - "UI-UP-08B"
   - "UI-UP-09"
   - "UI-UP-09A"
-  - "UI-UP-09B"
   - "UI-UP-10"
   - "UI-SRC-0D929B471D7A"
   - "UI-UP-11"
@@ -20282,7 +20078,6 @@
   - "API-SRC-FC8E60B994F7"
   - "API-SRC-063C7455BC4D"
   - "API-SRC-B19EB1F130F2"
-  - "API-SRC-1CD1FD9DEBA0"
   - "API-SRC-155F19B11A2E"
   - "API-SYS-04"
   - "API-SYS-03"
@@ -22112,45 +21907,22 @@
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
       "symbol": "PostgresStorage::query_overview_excluded_error_buckets_in_range"
-      "line_start": 204
-      "line_end": 240
-      "sha256": "b73a6723e98a67d0ff1576622268c70ba2c9b064f59c000909af6cf663979eea"
+      "line_start": 168
+      "line_end": 204
+      "sha256": "0599397a620823c1c151daa7df1f47ad1652cb0917162bda3ac172548d20ca5c"
     "statements":
       - "kind": "literal"
         "text": "SELECT bucket_start_unix_secs, error_count FROM overview_excluded_error_rollups_v1 WHERE resolution = $1 AND bucket_start_unix_secs >= $2 AND bucket_start_unix_secs < $3 ORDER BY bucket_start_unix_secs ASC"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
           "symbol": "query_overview_excluded_error_buckets_in_range"
-          "line_start": 214
-          "line_end": 217
+          "line_start": 178
+          "line_end": 181
         "branches": []
         "bind_parameters":
-          - "219: .bind(resolution.as_str())"
-          - "220: .bind(u64_to_i64("
-          - "224: .bind(u64_to_i64("
-  - "id": "postgres:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:PostgresStorage::query_usage_rollups_for_upstreams_in_range"
-    "engine": "postgres"
-    "trait_method": "UsageRollupStore::query_usage_rollups_for_upstreams_in_range"
-    "source":
-      "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
-      "symbol": "PostgresStorage::query_usage_rollups_for_upstreams_in_range"
-      "line_start": 168
-      "line_end": 203
-      "sha256": "b73a6723e98a67d0ff1576622268c70ba2c9b064f59c000909af6cf663979eea"
-    "statements":
-      - "kind": "literal"
-        "text": "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, request_count, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, error_count, latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros FROM usage_rollups_v2 WHERE upstream_id = ANY($1::uuid[]) AND resolution = $2 AND bucket_start_unix_secs >= $3 AND bucket_start_unix_secs < $4 ORDER BY upstream_id ASC, bucket_start_unix_secs ASC"
-        "source":
-          "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
-          "symbol": "query_usage_rollups_for_upstreams_in_range"
-          "line_start": 180
-          "line_end": 192
-        "branches": []
-        "bind_parameters":
-          - "194: .bind(upstream_ids)"
-          - "195: .bind(resolution.as_str())"
-          - "196: .bind(u64_to_i64(window_start_unix_secs, \"usage rollup range start\")?)"
-          - "197: .bind(u64_to_i64(window_end_unix_secs, \"usage rollup range end\")?)"
+          - "183: .bind(resolution.as_str())"
+          - "184: .bind(u64_to_i64("
+          - "188: .bind(u64_to_i64("
   - "id": "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
     "engine": "postgres"
     "trait_method": "UsageRollupStore::query_usage_rollups_in_range"
@@ -22159,7 +21931,7 @@
       "symbol": "PostgresStorage::query_usage_rollups_in_range"
       "line_start": 136
       "line_end": 166
-      "sha256": "b73a6723e98a67d0ff1576622268c70ba2c9b064f59c000909af6cf663979eea"
+      "sha256": "0599397a620823c1c151daa7df1f47ad1652cb0917162bda3ac172548d20ca5c"
     "statements":
       - "kind": "literal"
         "text": "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, request_count, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, error_count, latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros FROM usage_rollups_v2 WHERE resolution = $1 AND bucket_start_unix_secs >= $2 AND bucket_start_unix_secs < $3 ORDER BY bucket_start_unix_secs ASC"
@@ -22179,20 +21951,20 @@
     "source":
       "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
       "symbol": "PostgresStorage::usage_rollup_checkpoint"
-      "line_start": 242
-      "line_end": 254
-      "sha256": "b73a6723e98a67d0ff1576622268c70ba2c9b064f59c000909af6cf663979eea"
+      "line_start": 206
+      "line_end": 218
+      "sha256": "0599397a620823c1c151daa7df1f47ad1652cb0917162bda3ac172548d20ca5c"
     "statements":
       - "kind": "literal"
         "text": "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = $1"
         "source":
           "file": "crates/cc-lb-storage-postgres/src/adapter/usage_rollups.rs"
           "symbol": "usage_rollup_checkpoint"
-          "line_start": 244
-          "line_end": 244
+          "line_start": 208
+          "line_end": 208
         "branches": []
         "bind_parameters":
-          - "246: .bind(CHECKPOINT_ID)"
+          - "210: .bind(CHECKPOINT_ID)"
   - "id": "postgres:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:PostgresStorage::sum_usage_tokens_for_intervals"
     "engine": "postgres"
     "trait_method": "UsageTokenIntervalStore::sum_usage_tokens_for_intervals"
@@ -23756,80 +23528,22 @@
     "source":
       "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
       "symbol": "SqliteStorage::query_overview_excluded_error_buckets_in_range"
-      "line_start": 211
-      "line_end": 247
-      "sha256": "546e2c005aa7e7ae630097d27c1006a4ef2b1e172e2d2e76d40ba37f378cd6cb"
+      "line_start": 165
+      "line_end": 201
+      "sha256": "81e0d54862c977be0928dd032f23e04cbb141b9730c8b682c379c23e5fd01f99"
     "statements":
       - "kind": "literal"
         "text": "SELECT bucket_start_unix_secs, error_count FROM overview_excluded_error_rollups_v1 WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? ORDER BY bucket_start_unix_secs ASC"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
           "symbol": "query_overview_excluded_error_buckets_in_range"
-          "line_start": 221
-          "line_end": 224
+          "line_start": 175
+          "line_end": 178
         "branches": []
         "bind_parameters":
-          - "226: .bind(resolution.as_str())"
-          - "227: .bind(u64_to_i64("
-          - "231: .bind(u64_to_i64("
-  - "id": "sqlite:UsageRollupStore::query_usage_rollups_for_upstreams_in_range:SqliteStorage::query_usage_rollups_for_upstreams_in_range"
-    "engine": "sqlite"
-    "trait_method": "UsageRollupStore::query_usage_rollups_for_upstreams_in_range"
-    "source":
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-      "symbol": "SqliteStorage::query_usage_rollups_for_upstreams_in_range"
-      "line_start": 165
-      "line_end": 210
-      "sha256": "546e2c005aa7e7ae630097d27c1006a4ef2b1e172e2d2e76d40ba37f378cd6cb"
-    "statements":
-      - "kind": "builder"
-        "source":
-          "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-          "symbol": "query_usage_rollups_for_upstreams_in_range"
-          "line_start": 165
-          "line_end": 210
-        "branches":
-          - "text": "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, request_count, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, error_count, latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros FROM usage_rollups_v2 WHERE upstream_id IN ("
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 177
-              "line_end": 184
-          - "text": ")"
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 190
-              "line_end": 190
-          - "text": "AND resolution ="
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 192
-              "line_end": 192
-          - "text": "AND bucket_start_unix_secs >="
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 194
-              "line_end": 194
-          - "text": "AND bucket_start_unix_secs <"
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 199
-              "line_end": 199
-          - "text": "ORDER BY upstream_id ASC, bucket_start_unix_secs ASC"
-            "source":
-              "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
-              "symbol": "query_usage_rollups_for_upstreams_in_range"
-              "line_start": 201
-              "line_end": 201
-        "bind_parameters":
-          - "188: upstreams.push_bind(upstream_id.to_string());"
-          - "193: .push_bind(resolution.as_str())"
-          - "195: .push_bind(u64_to_i64("
-          - "200: .push_bind(u64_to_i64(window_end_unix_secs, \"usage rollup range end\")?)"
+          - "180: .bind(resolution.as_str())"
+          - "181: .bind(u64_to_i64("
+          - "185: .bind(u64_to_i64("
   - "id": "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
     "engine": "sqlite"
     "trait_method": "UsageRollupStore::query_usage_rollups_in_range"
@@ -23838,7 +23552,7 @@
       "symbol": "SqliteStorage::query_usage_rollups_in_range"
       "line_start": 133
       "line_end": 163
-      "sha256": "546e2c005aa7e7ae630097d27c1006a4ef2b1e172e2d2e76d40ba37f378cd6cb"
+      "sha256": "81e0d54862c977be0928dd032f23e04cbb141b9730c8b682c379c23e5fd01f99"
     "statements":
       - "kind": "literal"
         "text": "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, request_count, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, error_count, latency_count, latency_ms_sum, latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, upstream_body_ms_sum, virtual_cost_micros FROM usage_rollups_v2 WHERE resolution = ? AND bucket_start_unix_secs >= ? AND bucket_start_unix_secs < ? ORDER BY bucket_start_unix_secs ASC"
@@ -23858,43 +23572,43 @@
     "source":
       "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
       "symbol": "SqliteStorage::usage_rollup_checkpoint"
-      "line_start": 249
-      "line_end": 251
-      "sha256": "546e2c005aa7e7ae630097d27c1006a4ef2b1e172e2d2e76d40ba37f378cd6cb"
+      "line_start": 203
+      "line_end": 205
+      "sha256": "81e0d54862c977be0928dd032f23e04cbb141b9730c8b682c379c23e5fd01f99"
     "statements":
       - "kind": "literal"
         "text": "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = ?"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
           "symbol": "read_checkpoint"
-          "line_start": 557
-          "line_end": 557
+          "line_start": 511
+          "line_end": 511
         "branches": []
         "bind_parameters":
-          - "558: .bind(CHECKPOINT_ID)"
+          - "512: .bind(CHECKPOINT_ID)"
   - "id": "sqlite:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:SqliteStorage::sum_usage_tokens_for_intervals"
     "engine": "sqlite"
     "trait_method": "UsageTokenIntervalStore::sum_usage_tokens_for_intervals"
     "source":
       "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
       "symbol": "SqliteStorage::sum_usage_tokens_for_intervals"
-      "line_start": 263
-      "line_end": 327
-      "sha256": "546e2c005aa7e7ae630097d27c1006a4ef2b1e172e2d2e76d40ba37f378cd6cb"
+      "line_start": 217
+      "line_end": 281
+      "sha256": "81e0d54862c977be0928dd032f23e04cbb141b9730c8b682c379c23e5fd01f99"
     "statements":
       - "kind": "builder"
         "source":
           "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
           "symbol": "SqliteStorage::sum_usage_tokens_for_intervals"
-          "line_start": 263
-          "line_end": 327
+          "line_start": 217
+          "line_end": 281
         "branches":
           - "text": "WITH intervals(ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs) AS (VALUES {values}) SELECT intervals.interval_id AS interval_id, COALESCE(SUM(rollup.input_tokens + rollup.output_tokens + rollup.cache_creation_input_tokens + rollup.cache_read_input_tokens), 0) AS tokens FROM intervals LEFT JOIN usage_rollups_v2 rollup ON rollup.upstream_id = intervals.upstream_id AND rollup.resolution = 'minute' AND rollup.bucket_start_unix_secs >= intervals.start_unix_secs AND rollup.bucket_start_unix_secs <= intervals.end_unix_secs GROUP BY intervals.ordinal, intervals.interval_id ORDER BY intervals.ordinal ASC"
             "source":
               "file": "crates/cc-lb-storage-sqlite/src/adapter/usage_rollups.rs"
               "symbol": "sum_usage_tokens_for_intervals format SQL"
-              "line_start": 273
-              "line_end": 286
+              "line_start": 227
+              "line_end": 240
         "bind_parameters":
           - "299-310: per interval, bind ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs"
         "text": "WITH intervals(ordinal, interval_id, upstream_id, start_unix_secs, end_unix_secs) AS (VALUES {values}) SELECT intervals.interval_id AS interval_id, COALESCE(SUM(rollup.input_tokens + rollup.output_tokens + rollup.cache_creation_input_tokens + rollup.cache_read_input_tokens), 0) AS tokens FROM intervals LEFT JOIN usage_rollups_v2 rollup ON rollup.upstream_id = intervals.upstream_id AND rollup.resolution = 'minute' AND rollup.bucket_start_unix_secs >= intervals.start_unix_secs AND rollup.bucket_start_unix_secs <= intervals.end_unix_secs GROUP BY intervals.ordinal, intervals.interval_id ORDER BY intervals.ordinal ASC"

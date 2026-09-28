@@ -1,4 +1,10 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { PluginEntry } from '../../lib/queries';
 import { PluginCatalog } from './PluginCatalog';
@@ -100,8 +106,6 @@ describe('plugin loading geometry', () => {
     const detailShell = screen.getByRole('status', {
       name: 'Loading plugin details',
     });
-    expect(detailShell.className).toContain('space-y-6');
-    expect(detailShell.className).toContain('mt-6');
 
     const detailGrid = detailShell.querySelector('.grid');
     expect(detailGrid?.className).toContain('grid-cols-1');
@@ -167,6 +171,26 @@ describe('plugin loading geometry', () => {
     );
   });
 
+  test('asks for confirmation before deleting orphaned uploads', () => {
+    registryState = {
+      data: { entries: [pluginEntry('used-plugin', 'Used plugin')] },
+      isLoading: false,
+    };
+
+    render(<PluginCatalog onSelectPlugin={vi.fn()} />);
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Clean orphaned uploads' }),
+    );
+    expect(gcMutate).not.toHaveBeenCalled();
+    expect(screen.getByRole('alertdialog')).toBeDefined();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Delete orphaned uploads' }),
+    );
+    expect(gcMutate).toHaveBeenCalledTimes(1);
+  });
+
   test('keeps catalog geometry stable while counts and rows load', () => {
     registryState = { data: undefined, isLoading: true };
 
@@ -174,7 +198,8 @@ describe('plugin loading geometry', () => {
 
     const countSlot = screen.getByTestId('plugin-count-slot');
     expect(countSlot.className).toContain('min-h-5');
-    expect(countSlot.className).toContain('min-w-56');
+    // Fixed from `sm`; phones let the count wrap beside the cleanup action.
+    expect(countSlot.className).toContain('sm:min-w-56');
     const countSkeleton =
       countSlot.querySelector<HTMLSpanElement>('span.skeleton');
     expect(countSkeleton?.tagName).toBe('SPAN');
@@ -184,7 +209,7 @@ describe('plugin loading geometry', () => {
     expect(countSkeleton?.className).toContain('w-48');
     expect(
       countSlot
-        .closest('[data-slot="card-subtitle"]')
+        .closest('[data-slot="section-subtitle"]')
         ?.querySelector('div.skeleton'),
     ).toBeNull();
     expect(countSlot.textContent).not.toContain('0 available');
@@ -193,8 +218,6 @@ describe('plugin loading geometry', () => {
     expect(table.className).toContain('min-w-[960px]');
     expect(table.className).toContain('table-fixed');
     const catalogViewport = table.parentElement;
-    expect(catalogViewport?.classList.contains('min-h-72')).toBe(true);
-    expect(catalogViewport?.classList.contains('h-72')).toBe(false);
     expect(catalogViewport?.classList.contains('overflow-y-auto')).toBe(false);
     expect(screen.getAllByRole('columnheader')).toHaveLength(7);
 
@@ -214,7 +237,7 @@ describe('plugin loading geometry', () => {
     expect(loadingRows).toHaveLength(3);
     for (const row of loadingRows) {
       expect(row.className).toContain('border-b');
-      expect(row.className).toContain('h-20');
+      expect(row.className).toContain('h-14');
       expect(row.cells).toHaveLength(7);
       for (const cell of Array.from(row.cells)) {
         expect(cell.hasAttribute('colspan')).toBe(false);
@@ -225,12 +248,12 @@ describe('plugin loading geometry', () => {
         (cell) => cell.querySelector('.skeleton')?.className,
       );
       expect(skeletonClassNames).toEqual([
-        expect.stringContaining('h-16 w-4/5'),
-        expect.stringContaining('h-5 w-20'),
+        expect.stringContaining('h-9 w-4/5'),
+        expect.stringContaining('h-5 w-16'),
         expect.stringContaining('h-4 w-28'),
         expect.stringContaining('ml-auto h-4 w-16'),
-        expect.stringContaining('mx-auto h-5 w-10'),
-        expect.stringContaining('h-4 w-20'),
+        expect.stringContaining('ml-auto h-4 w-6'),
+        expect.stringContaining('h-4 w-16'),
         expect.stringContaining('ml-auto h-4 w-24'),
       ]);
     }
@@ -245,11 +268,11 @@ describe('plugin loading geometry', () => {
     const loadedRows = Array.from(loadedTable.tBodies[0]?.rows ?? []);
     expect(loadedRows).toHaveLength(PLUGIN_ENTRIES.length);
     for (const row of loadedRows) {
-      expect(row.className).toContain('h-20');
+      expect(row.className).toContain('h-14');
     }
     expect(loadedTable.parentElement).toBe(catalogViewport);
     expect(
-      screen.getByTestId('plugin-count-slot').classList.contains('min-w-56'),
+      screen.getByTestId('plugin-count-slot').classList.contains('sm:min-w-56'),
     ).toBe(true);
     expect(screen.getByTestId('plugin-count-slot').textContent).toContain(
       '2 available · 0 not used anywhere',
@@ -260,11 +283,12 @@ describe('plugin loading geometry', () => {
 
     const emptyTable = screen.getByRole('table') as HTMLTableElement;
     expect(emptyTable.parentElement).toBe(catalogViewport);
-    expect(emptyTable.parentElement?.classList.contains('min-h-72')).toBe(true);
     expect(emptyTable.tBodies[0]?.rows).toHaveLength(1);
     expect(screen.getByTestId('plugin-count-slot').textContent).toContain(
       '0 available · 0 not used anywhere',
     );
-    expect(screen.getByText('No plugins uploaded.')).toBeDefined();
+    expect(
+      within(screen.getByRole('table')).getByText('No plugins uploaded.'),
+    ).toBeDefined();
   });
 });

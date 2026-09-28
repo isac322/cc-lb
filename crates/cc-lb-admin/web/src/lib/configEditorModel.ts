@@ -668,6 +668,115 @@ export function classifyConfigLeaf(
   };
 }
 
+/** What a scalar leaf's local on-blur check enforces. */
+export type ConfigScalarCheck =
+  | { kind: 'address' }
+  | {
+      kind: 'integer' | 'number';
+      minimum?: number;
+      maximum?: number;
+    }
+  | { kind: 'string'; required: boolean };
+
+const HOSTNAME_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+function isValidIpv6(host: string): boolean {
+  if (!/^[0-9A-Fa-f:.]+$/.test(host) || !host.includes(':')) return false;
+  try {
+    new URL(`http://[${host}]/`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidHost(host: string): boolean {
+  if (/^[\d.]+$/.test(host)) {
+    const octets = host.split('.');
+    return (
+      octets.length === 4 &&
+      octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255)
+    );
+  }
+  return (
+    host.length <= 253 &&
+    host.split('.').every((label) => HOSTNAME_LABEL.test(label))
+  );
+}
+
+const ADDRESS_FORMAT_MESSAGE =
+  'Enter host:port, e.g. 127.0.0.1:8080, [::1]:8080, or localhost:8080.';
+
+/**
+ * Local check for a `host:port` socket address: IPv4, bracketed IPv6, or a
+ * hostname, with a port in 1–65535. Returns an error message, or null.
+ */
+export function checkSocketAddress(input: string): string | null {
+  let host: string;
+  let port: string;
+  if (input.startsWith('[')) {
+    const match = /^\[([^\]]*)\]:([^:]*)$/.exec(input);
+    if (!match) return ADDRESS_FORMAT_MESSAGE;
+    host = match[1] ?? '';
+    port = match[2] ?? '';
+    if (!isValidIpv6(host)) return ADDRESS_FORMAT_MESSAGE;
+  } else {
+    const separator = input.lastIndexOf(':');
+    if (separator <= 0) return ADDRESS_FORMAT_MESSAGE;
+    host = input.slice(0, separator);
+    port = input.slice(separator + 1);
+    if (!isValidHost(host)) return ADDRESS_FORMAT_MESSAGE;
+  }
+  if (!/^\d{1,5}$/.test(port)) return ADDRESS_FORMAT_MESSAGE;
+  const portNumber = Number(port);
+  if (portNumber < 1 || portNumber > 65535) {
+    return 'Port must be between 1 and 65535.';
+  }
+  return null;
+}
+
+/**
+ * The local, pre-Validate check a scalar field runs on blur. Unset values
+ * inherit and are never flagged here; the server validation owns the rest.
+ */
+export function checkConfigScalar(
+  value: unknown,
+  check: ConfigScalarCheck,
+): string | null {
+  if (value === undefined || value === null) return null;
+  switch (check.kind) {
+    case 'address':
+      return typeof value === 'string'
+        ? checkSocketAddress(value)
+        : ADDRESS_FORMAT_MESSAGE;
+    case 'string':
+      return check.required && (typeof value !== 'string' || !value.trim())
+        ? 'Enter a value.'
+        : null;
+    case 'integer':
+    case 'number': {
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return 'Enter a number.';
+      }
+      if (check.kind === 'integer' && !Number.isInteger(value)) {
+        return 'Enter a whole number.';
+      }
+      const { minimum, maximum } = check;
+      if (
+        (minimum !== undefined && value < minimum) ||
+        (maximum !== undefined && value > maximum)
+      ) {
+        return minimum !== undefined && maximum !== undefined
+          ? `Enter a value between ${minimum} and ${maximum}.`
+          : minimum !== undefined
+            ? `Enter a value of at least ${minimum}.`
+            : `Enter a value of at most ${maximum}.`;
+      }
+      return null;
+    }
+  }
+}
+
 export type ConfigImpactDimension =
   | 'availability'
   | 'cost'
@@ -1903,14 +2012,89 @@ export function isConfigLeafActive(
   );
 }
 
+/**
+ * Whole-key labels where word-by-word humanizing reads poorly (a bare unit
+ * suffix would leave "Drain" or "Tick"). Units are dropped because the control
+ * shows them beside the input.
+ */
+const CONFIG_KEY_LABELS: Record<string, string> = {
+  drain_secs: 'Shutdown drain period',
+  tick_secs: 'Tick interval',
+  writer_flush_ms: 'Writer flush interval',
+  upstream_total_secs: 'Upstream total timeout',
+  half_open_after_secs: 'Half-open after',
+  files_cap_bytes: 'Files size cap',
+  messages_cap_bytes: 'Messages size cap',
+  memory_guard_bytes: 'Memory guard',
+  memory_reservation_bytes: 'Memory reservation',
+  pg_notify_channel: 'PostgreSQL notify channel',
+  sslmode: 'SSL mode',
+  dlq_retention_days: 'Dead-letter retention',
+  cloudflare_access: 'Cloudflare Access',
+  ondemand: 'On demand',
+  sqlite: 'SQLite',
+  postgres: 'PostgreSQL',
+};
+
+/** Words that are acronyms, proper names, or abbreviations in config keys. */
+const CONFIG_KEY_WORDS: Record<string, string> = {
+  addr: 'address',
+  aead: 'AEAD',
+  api: 'API',
+  cert: 'certificate',
+  conns: 'connections',
+  dir: 'directory',
+  dlq: 'dead-letter',
+  env: 'environment variable',
+  http: 'HTTP',
+  id: 'ID',
+  jwt: 'JWT',
+  oauth: 'OAuth',
+  otlp: 'OTLP',
+  sighup: 'SIGHUP',
+  sql: 'SQL',
+  tls: 'TLS',
+  ttl: 'TTL',
+  uri: 'URI',
+  url: 'URL',
+  wasmtime: 'Wasmtime',
+};
+
+/** Trailing unit words: the control renders the unit, so the label omits it. */
+const CONFIG_KEY_UNIT_WORDS: Record<string, true> = {
+  secs: true,
+  ms: true,
+  days: true,
+};
+
+/**
+ * Sentence-case label for a raw config key (`admin_addr` → "Admin address",
+ * `idle_timeout_secs` → "Idle timeout", `max_header_value_bytes` → "Max header
+ * value size"). The raw key stays available in the field details.
+ */
+export function configKeyLabel(key: string): string {
+  const bare = key.replace(/\[\d+\]$/, '');
+  const known = CONFIG_KEY_LABELS[bare];
+  if (known) return known;
+  const words = bare.split('_').filter(Boolean);
+  if (words.length > 1) {
+    const last = words.at(-1) as string;
+    if (CONFIG_KEY_UNIT_WORDS[last]) words.pop();
+    else if (last === 'bytes') words[words.length - 1] = 'size';
+  }
+  const text = words.map((word) => CONFIG_KEY_WORDS[word] ?? word).join(' ');
+  if (!text) return 'Value';
+  return /^[a-z]/.test(text)
+    ? text.charAt(0).toUpperCase() + text.slice(1)
+    : text;
+}
+
 export function configLeafLabel(
   leaf: Pick<ConfigSchemaLeaf, 'path' | 'schema'>,
 ): string {
   const title = leaf.schema.title;
   if (typeof title === 'string' && title) return title;
-  const segment = leaf.path.at(-1);
-  const text = String(segment ?? 'value').replaceAll('_', ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
+  return configKeyLabel(String(leaf.path.at(-1) ?? 'value'));
 }
 
 export interface ConfigSearchResult {

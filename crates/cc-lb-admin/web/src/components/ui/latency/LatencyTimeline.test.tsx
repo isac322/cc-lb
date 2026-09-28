@@ -910,12 +910,11 @@ describe('LatencyTimeline', () => {
     );
 
     expect(screen.getAllByText('Renewal cycle').length).toBeGreaterThan(0);
-    const renewalResponsibility = screen.getByRole('button', {
-      name: 'Renewal cycle, 500 ms, 100% of total',
-    });
     expect(
-      renewalResponsibility.querySelector('.text-blue-300'),
-    ).not.toBeNull();
+      screen.getByRole('button', {
+        name: 'Renewal cycle, 500 ms, 100% of total',
+      }),
+    ).toBeDefined();
     expect(screen.queryByText('Internal pre')).toBeNull();
     expect(screen.queryByText('Body')).toBeNull();
     expect(screen.queryByText('Finalize')).toBeNull();

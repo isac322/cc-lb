@@ -1,3 +1,4 @@
+import { Link, useRouter } from '@tanstack/react-router';
 import { Copy } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { eventTime } from '../../lib/api';
@@ -6,14 +7,56 @@ import {
   type RequestOutcome,
   requestOutcomeTone,
 } from '../../lib/format';
+import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { reasoningBadgeText } from '../../lib/reasoningTier';
+import {
+  type ErrorCodeTarget,
+  explainErrorCode,
+  PRINCIPAL_LIMITS_ANCHOR,
+  PRINCIPAL_ROUTER_ANCHOR,
+} from '../../lib/requestErrorCodes';
+import { requestKindBadgeText } from '../../lib/requestKind';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { Badge, cx, Hint, Skeleton } from './primitives';
 import { RelativeTime } from './RelativeTime';
+import { RequestKindBadge } from './RequestKindBadge';
 import { SessionChip } from './SessionChip';
 
 const DASH = '—';
+
+/**
+ * A 12px copy glyph whose padding is pulled back by a matching negative
+ * margin, so the hit area grows without moving the row: 24px on desktop,
+ * 40px tall on phones (touch).
+ */
+export const COPY_BUTTON_CLASS =
+  'shrink-0 -m-1.5 p-1.5 max-md:-my-3.5 max-md:py-3.5 rounded-sm text-text-faint hover:text-text focus-visible:outline-2 focus-visible:outline-accent';
+
+const PRINCIPAL_KIND_LABEL: Record<string, string> = {
+  human: 'Human',
+  machine: 'Machine',
+  admin: 'Admin',
+  api_key: 'API key',
+  o_auth_subject: 'OAuth subject',
+  oauth_subject: 'OAuth subject',
+  internal_key: 'Internal key',
+  workload_identity: 'Workload identity',
+  subscription_bearer: 'Subscription bearer',
+};
+
+/** The provider an event's upstream speaks (`event.upstream`). */
+const UPSTREAM_PROVIDER_LABEL: Record<string, string> = {
+  anthropic_direct: 'Anthropic',
+};
+
+/** Sentence-case label for a server enum value; unknown values keep their words. */
+function enumLabel(labels: Record<string, string>, value: string): string {
+  const known = labels[value];
+  if (known) return known;
+  const words = value.replaceAll('_', ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
   if (outcome.type === 'partial') {
@@ -51,6 +94,21 @@ export function RequestOutcomeBadge({ outcome }: { outcome: RequestOutcome }) {
     >
       {outcome.status}
     </Badge>
+  );
+}
+
+/** Absolute time in the configured timezone, with the relative age under it. */
+function AbsoluteTime({ ts }: { ts: Date | null }) {
+  const { effective: locale } = useLocale();
+  const { effective: timezone } = useTimezone();
+  if (ts == null) return <span className="text-text-faint">{DASH}</span>;
+  return (
+    <span className="flex flex-col items-end min-w-0">
+      <span className="tabular-nums break-all">
+        {formatAbsolute(ts, locale, timezone)}
+      </span>
+      <RelativeTime ts={ts} className="text-caption text-text-faint" />
+    </span>
   );
 }
 
@@ -110,21 +168,21 @@ export function RequestEventIdentity({
       <div className="space-y-1.5">
         <KvRow
           label="Timestamp"
-          value={<RelativeTime ts={eventTime(event)} />}
+          value={<AbsoluteTime ts={eventTime(event)} />}
         />
         <KvRow
           label="Principal"
           value={
             <div className="flex min-h-5 items-center gap-2 justify-end flex-wrap min-w-0">
               <span
-                className="font-mono break-all min-w-0"
+                className="break-all min-w-0"
                 title={event.principal_id ?? ''}
               >
                 {principalLabel}
               </span>
               {event.principal_kind ? (
-                <Badge tone="mono" className="shrink-0">
-                  {event.principal_kind}
+                <Badge className="shrink-0">
+                  {enumLabel(PRINCIPAL_KIND_LABEL, event.principal_kind)}
                 </Badge>
               ) : isDetailPending ? (
                 <Skeleton className="h-5 w-14 shrink-0" />
@@ -138,14 +196,14 @@ export function RequestEventIdentity({
             event.key_id ? (
               <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
                 <Hint label={event.key_id}>
-                  <span className="font-mono break-all cursor-help min-w-0">
+                  <span className="font-mono text-data break-all cursor-help min-w-0">
                     {truncateMid(event.key_id, 16)}
                   </span>
                 </Hint>
                 <button
                   type="button"
                   aria-label="Copy key id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.key_id ?? '', 'Key ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -161,10 +219,12 @@ export function RequestEventIdentity({
         <KvRow
           label="Upstream"
           value={
-            <span className="font-mono break-all min-w-0">
+            <span className="break-all min-w-0">
               {event.upstream_name ?? DASH}
               {event.upstream && event.upstream !== event.upstream_name ? (
-                <span className="text-text-faint ml-2">({event.upstream})</span>
+                <span className="text-text-faint ml-2">
+                  {enumLabel(UPSTREAM_PROVIDER_LABEL, event.upstream)}
+                </span>
               ) : null}
             </span>
           }
@@ -178,7 +238,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy session id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.thread_id ?? '', 'Session ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -193,9 +253,14 @@ export function RequestEventIdentity({
           label="Request kind"
           value={
             requestKind ? (
-              <Badge tone="mono" className="font-mono">
-                {requestKind}
-              </Badge>
+              <span className="flex min-h-5 items-center gap-2 justify-end flex-wrap min-w-0">
+                <RequestKindBadge requestKind={requestKind} />
+                {requestKindBadgeText(requestKind) !== requestKind ? (
+                  <span className="font-mono text-data text-text-faint break-all min-w-0">
+                    {requestKind}
+                  </span>
+                ) : null}
+              </span>
             ) : (
               DASH
             )
@@ -210,7 +275,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy observed session id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.observed_session_id ?? '', 'Observed session ID')
                   }
@@ -227,7 +292,7 @@ export function RequestEventIdentity({
           <KvRow
             label="Session source"
             value={
-              <span className="font-mono break-all min-w-0">
+              <span className="font-mono text-data break-all min-w-0">
                 {event.session_id_source}
               </span>
             }
@@ -242,7 +307,7 @@ export function RequestEventIdentity({
                 <button
                   type="button"
                   aria-label="Copy parent session id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.parent_session_id ?? '', 'Parent session ID')
                   }
@@ -258,13 +323,13 @@ export function RequestEventIdentity({
             label="Agent"
             value={
               <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
-                <span className="font-mono break-all min-w-0">
+                <span className="font-mono text-data break-all min-w-0">
                   {event.claude_agent_id}
                 </span>
                 <button
                   type="button"
                   aria-label="Copy agent id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() => copy(event.claude_agent_id ?? '', 'Agent ID')}
                 >
                   <Copy className="w-3 h-3" />
@@ -278,13 +343,13 @@ export function RequestEventIdentity({
             label="Parent agent"
             value={
               <span className="flex items-center gap-1 justify-end flex-wrap min-w-0">
-                <span className="font-mono break-all min-w-0">
+                <span className="font-mono text-data break-all min-w-0">
                   {event.claude_parent_agent_id}
                 </span>
                 <button
                   type="button"
                   aria-label="Copy parent agent id"
-                  className="text-text-faint hover:text-text shrink-0"
+                  className={COPY_BUTTON_CLASS}
                   onClick={() =>
                     copy(event.claude_parent_agent_id ?? '', 'Parent agent ID')
                   }
@@ -298,17 +363,13 @@ export function RequestEventIdentity({
         {event.client_app != null && (
           <KvRow
             label="Client app"
-            value={
-              <Badge tone="mono" className="font-mono">
-                {event.client_app}
-              </Badge>
-            }
+            value={<Badge tone="mono">{event.client_app}</Badge>}
           />
         )}
         <KvRow
           label="Model"
           value={
-            <span className="font-mono break-all min-w-0">
+            <span className="font-mono text-data break-all min-w-0">
               {event.model ?? DASH}
             </span>
           }
@@ -316,20 +377,14 @@ export function RequestEventIdentity({
         {reasoningText != null && (
           <KvRow
             label="Reasoning"
-            value={
-              <span className="font-mono break-all min-w-0">
-                {reasoningText}
-              </span>
-            }
+            value={<span className="break-all min-w-0">{reasoningText}</span>}
           />
         )}
         {event.service_tier != null && event.service_tier !== '' && (
           <KvRow
             label="Service tier"
             value={
-              <span className="font-mono break-all min-w-0">
-                {event.service_tier}
-              </span>
+              <span className="break-all min-w-0">{event.service_tier}</span>
             }
           />
         )}
@@ -339,9 +394,9 @@ export function RequestEventIdentity({
         />
         {outcome.type === 'client_disconnected' ? (
           <KvRow
-            label="Status Code"
+            label="Status code"
             value={
-              <span className="font-mono break-all min-w-0">
+              <span className="tabular-nums break-all min-w-0">
                 {outcome.status}
               </span>
             }
@@ -349,33 +404,123 @@ export function RequestEventIdentity({
         ) : null}
         {outcome.type === 'semantic_error' ? (
           <KvRow
-            label="HTTP Status"
+            label="HTTP status"
             value={
-              <span className="font-mono break-all min-w-0">
+              <span className="tabular-nums break-all min-w-0">
                 {outcome.status}
               </span>
             }
           />
         ) : null}
         {event._phase === 'final' && event.error_code ? (
-          <KvRow
-            label="Error"
-            value={
-              <span
-                className={cx(
-                  'font-mono break-all min-w-0',
-                  outcome.type === 'client_disconnected'
-                    ? 'text-[color:var(--color-warn)]'
-                    : 'text-danger',
-                )}
-              >
-                {event.error_code}
-              </span>
-            }
-          />
+          // Prose reads left-aligned on its own full-width row under the key.
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-text-muted">Error</span>
+            <ErrorExplanation
+              code={event.error_code}
+              warn={outcome.type === 'client_disconnected'}
+              principalId={event.principal_id ?? null}
+              upstreamId={event.upstream_id ?? null}
+            />
+          </div>
         ) : null}
       </div>
     </DetailSection>
+  );
+}
+
+const TARGET_LABEL: Record<ErrorCodeTarget, string> = {
+  'principal-router': 'Open principal router',
+  'principal-limits': 'Open principal limits',
+  upstream: 'Open upstream',
+};
+
+function ErrorExplanation({
+  code,
+  warn,
+  principalId,
+  upstreamId,
+}: {
+  code: string;
+  warn: boolean;
+  principalId: string | null;
+  upstreamId: string | null;
+}) {
+  const explanation = explainErrorCode(code);
+  const target = explanation.target;
+  const link =
+    target === 'upstream'
+      ? upstreamId
+        ? { to: '/upstreams' as const, search: { selectedId: upstreamId } }
+        : null
+      : target && principalId
+        ? {
+            to: '/principals' as const,
+            search: { selectedId: principalId },
+            hash:
+              target === 'principal-router'
+                ? PRINCIPAL_ROUTER_ANCHOR
+                : PRINCIPAL_LIMITS_ANCHOR,
+          }
+        : null;
+  return (
+    <span className="flex flex-col items-start gap-0.5 min-w-0 text-left">
+      <span
+        className={cx(
+          'break-words min-w-0',
+          warn ? 'text-warn-text' : 'text-danger-text',
+        )}
+      >
+        {explanation.summary}
+      </span>
+      {explanation.nextStep ? (
+        <span className="text-text-muted break-words min-w-0">
+          {explanation.nextStep}
+        </span>
+      ) : null}
+      {link && target ? (
+        <ConfigLink {...link}>{TARGET_LABEL[target]}</ConfigLink>
+      ) : null}
+      <span
+        className="font-mono text-data text-text-faint break-all min-w-0"
+        data-testid="request-error-code"
+      >
+        {code}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * In-app link that also renders outside a router (component tests mount the
+ * drawer bare): falls back to a plain anchor with the same href.
+ */
+function ConfigLink({
+  to,
+  search,
+  hash,
+  children,
+}: {
+  to: '/upstreams' | '/principals';
+  search: { selectedId: string };
+  hash?: string;
+  children: ReactNode;
+}) {
+  const router = useRouter({ warn: false });
+  const className =
+    'text-text underline decoration-border-strong underline-offset-2 hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 rounded-sm';
+  if (!router) {
+    const href = `${to}?selectedId=${encodeURIComponent(search.selectedId)}${hash ? `#${hash}` : ''}`;
+    return (
+      <a href={href} className={className}>
+        {children}
+      </a>
+    );
+  }
+  return (
+    <Link to={to} search={search} hash={hash} className={className}>
+      {children}
+    </Link>
   );
 }
 
@@ -388,9 +533,7 @@ export function DetailSection({
 }) {
   return (
     <div className="min-w-0">
-      <h3 className="text-[10px] uppercase tracking-wider text-text-faint mb-2 border-b border-subtle pb-1 truncate">
-        {title}
-      </h3>
+      <h3 className="text-title-card text-text mb-3 truncate">{title}</h3>
       {children}
     </div>
   );
@@ -398,8 +541,8 @@ export function DetailSection({
 
 export function KvRow({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="flex items-start justify-between gap-3 min-h-[18px] min-w-0">
-      <span className="text-text-faint shrink-0 mt-[1px]">{label}</span>
+    <div className="flex items-start justify-between gap-3 min-h-5 min-w-0">
+      <span className="text-text-muted shrink-0">{label}</span>
       <div className="text-right flex-1 min-w-0 break-words">{value}</div>
     </div>
   );

@@ -11,6 +11,7 @@ import {
   CONFIG_EDITOR_UNASSIGNED_SECTION_ID,
   CONFIG_RECURRING_JOBS,
   type ConfigSchema,
+  checkConfigScalar,
   classifyConfigLeaf,
   expandConfigSchema,
   getConfigSchemaVariants,
@@ -936,5 +937,112 @@ describe('downloadConfigDraft', () => {
     );
     expect(click).toHaveBeenCalledTimes(1);
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:config');
+  });
+});
+
+describe('checkConfigScalar', () => {
+  const address = { kind: 'address' } as const;
+
+  it.each([
+    '127.0.0.1:8080',
+    '0.0.0.0:1',
+    '255.255.255.255:65535',
+    '[::]:8080',
+    '[::1]:9090',
+    '[2001:db8::1]:443',
+    '[::ffff:192.0.2.1]:80',
+    'localhost:8080',
+    'admin.internal-host.example:9090',
+  ])('accepts %s', (value) => {
+    expect(checkConfigScalar(value, address)).toBeNull();
+  });
+
+  it.each([
+    'not-an-address',
+    '',
+    '127.0.0.1',
+    ':8080',
+    '127.0.0.1:',
+    '127.0.0.1:http',
+    '256.0.0.1:80',
+    '1.2.3:80',
+    '::1:8080',
+    '[::1]',
+    '[::1]8080',
+    '[not-ipv6]:80',
+    '[127.0.0.1]:80',
+    'bad_host:80',
+    '-leading.example:80',
+    ' 127.0.0.1:80',
+  ])('rejects %j as malformed', (value) => {
+    expect(checkConfigScalar(value, address)).toMatch(/^Enter host:port/);
+  });
+
+  it.each([
+    '127.0.0.1:0',
+    '127.0.0.1:65536',
+    '[::1]:0',
+    '[::1]:65536',
+    'localhost:99999',
+  ])('rejects the out-of-range port in %s', (value) => {
+    expect(checkConfigScalar(value, address)).toBe(
+      'Port must be between 1 and 65535.',
+    );
+  });
+
+  it('never flags an unset value, which inherits', () => {
+    expect(checkConfigScalar(undefined, address)).toBeNull();
+    expect(checkConfigScalar(null, { kind: 'integer', minimum: 1 })).toBeNull();
+    expect(
+      checkConfigScalar(undefined, { kind: 'string', required: true }),
+    ).toBe(null);
+  });
+
+  it('enforces schema bounds inclusively', () => {
+    const bounded = { kind: 'integer', minimum: 1, maximum: 64 } as const;
+    expect(checkConfigScalar(1, bounded)).toBeNull();
+    expect(checkConfigScalar(64, bounded)).toBeNull();
+    expect(checkConfigScalar(0, bounded)).toBe(
+      'Enter a value between 1 and 64.',
+    );
+    expect(checkConfigScalar(65, bounded)).toBe(
+      'Enter a value between 1 and 64.',
+    );
+    expect(checkConfigScalar(0, { kind: 'number', minimum: 1 })).toBe(
+      'Enter a value of at least 1.',
+    );
+    expect(checkConfigScalar(10.5, { kind: 'number', maximum: 10 })).toBe(
+      'Enter a value of at most 10.',
+    );
+    expect(checkConfigScalar(-1e9, { kind: 'number' })).toBeNull();
+  });
+
+  it('rejects non-finite and fractional numbers', () => {
+    expect(checkConfigScalar(Number.NaN, { kind: 'number' })).toBe(
+      'Enter a number.',
+    );
+    expect(
+      checkConfigScalar(Number.POSITIVE_INFINITY, { kind: 'number' }),
+    ).toBe('Enter a number.');
+    expect(checkConfigScalar('5', { kind: 'number' })).toBe('Enter a number.');
+    expect(checkConfigScalar(1.5, { kind: 'integer' })).toBe(
+      'Enter a whole number.',
+    );
+    expect(checkConfigScalar(1.5, { kind: 'number' })).toBeNull();
+  });
+
+  it('requires non-blank text only when the schema demands it', () => {
+    expect(checkConfigScalar('', { kind: 'string', required: true })).toBe(
+      'Enter a value.',
+    );
+    expect(checkConfigScalar('   ', { kind: 'string', required: true })).toBe(
+      'Enter a value.',
+    );
+    expect(
+      checkConfigScalar('x', { kind: 'string', required: true }),
+    ).toBeNull();
+    expect(
+      checkConfigScalar('', { kind: 'string', required: false }),
+    ).toBeNull();
   });
 });

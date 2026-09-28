@@ -1,7 +1,6 @@
 import { Field as BaseField } from '@base-ui/react/field';
 import { Form as BaseForm } from '@base-ui/react/form';
 import { Input as BaseInput } from '@base-ui/react/input';
-import { Lock } from 'lucide-react';
 import {
   type ReactNode,
   useCallback,
@@ -24,12 +23,23 @@ import {
   setAdminToken,
 } from '../lib/auth';
 import { AuthSessionProvider } from '../lib/authSession';
-import { Button, Card, cx, INPUT_CLASS, Spinner } from './ui/primitives';
+import { BrandMark } from './layout/Sidebar';
+import { Button, cx, INPUT_CLASS, Spinner } from './ui/primitives';
+
+/**
+ * The signed-out panel: a flat card from `sm`; phones drop the frame and its
+ * padding so the copy and the token field use the full width.
+ */
+const GATE_PANEL_CLASS = 'rounded-md sm:glass sm:p-6';
+
+/** Phones: the one action spans the panel width. */
+const GATE_ACTION_CLASS = 'max-sm:w-full';
 
 type SessionState =
   | { status: 'loading' }
   | { status: 'authenticated'; session: AuthSession }
-  | { status: 'required' }
+  /** `storedTokenRejected`: a saved token existed and the server refused it. */
+  | { status: 'required'; storedTokenRejected: boolean }
   | { status: 'external_required' }
   | { status: 'error' };
 
@@ -42,8 +52,19 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const requestSequence = useRef(0);
 
+  const showRequired = useCallback((storedTokenRejected: boolean) => {
+    setSessionState({ status: 'required', storedTokenRejected });
+    if (storedTokenRejected) {
+      setValue('');
+      setErrors({ token: 'Saved token no longer works' });
+    }
+  }, []);
+
   const loadSession = useCallback(
-    async (showLoading: boolean): Promise<SessionState['status']> => {
+    async (
+      showLoading: boolean,
+      tokenSource: 'stored' | 'submitted' = 'stored',
+    ): Promise<SessionState['status']> => {
       const requestId = ++requestSequence.current;
       let sentStoredToken = Boolean(getAdminToken());
       let retriedWithoutToken = false;
@@ -74,7 +95,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
 
             clearAdminToken();
             if (authMode === 'static_token') {
-              setSessionState({ status: 'required' });
+              showRequired(sentStoredToken && tokenSource === 'stored');
               return 'required';
             }
             if (authMode === 'external') {
@@ -87,7 +108,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
         }
       }
     },
-    [],
+    [showRequired],
   );
 
   useEffect(() => {
@@ -109,7 +130,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
         return;
       }
       if (detail?.authMode === 'static_token') {
-        setSessionState({ status: 'required' });
+        showRequired(detail.hadToken);
         return;
       }
       setSessionState({ status: 'error' });
@@ -124,7 +145,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
       window.removeEventListener('storage', onStorage);
       window.removeEventListener(AUTH_REQUIRED_EVENT, onAuthRequired);
     };
-  }, [loadSession]);
+  }, [loadSession, showRequired]);
 
   if (sessionState.status === 'authenticated') {
     return (
@@ -137,14 +158,17 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'loading') {
     return (
       <AuthGateFrame>
-        <Card
+        <div
           aria-label="Checking admin session"
-          className="p-6 flex items-center gap-3 text-sm text-text-muted"
+          className={cx(
+            GATE_PANEL_CLASS,
+            'flex items-center gap-3 text-body text-text-muted',
+          )}
           role="status"
         >
           <Spinner />
           Checking admin session…
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -152,19 +176,23 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'error') {
     return (
       <AuthGateFrame>
-        <Card className="p-6">
-          <div className="flex flex-col gap-2 mb-5">
-            <h1 className="text-base font-medium text-text leading-tight">
-              Unable to verify admin session
-            </h1>
-            <p className="text-xs text-text-faint">
-              Check the admin service connection, then try again.
-            </p>
+        <div className={GATE_PANEL_CLASS}>
+          <h1 className="text-title-section text-text">
+            Unable to verify admin session
+          </h1>
+          <p className="mt-1.5 text-body text-text-muted">
+            Check the admin service connection, then try again.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <Button
+              variant="primary"
+              className={GATE_ACTION_CLASS}
+              onClick={() => void loadSession(true)}
+            >
+              Retry
+            </Button>
           </div>
-          <Button fullWidth onClick={() => void loadSession(true)}>
-            Retry
-          </Button>
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -172,19 +200,23 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   if (sessionState.status === 'external_required') {
     return (
       <AuthGateFrame>
-        <Card className="p-6">
-          <div className="flex flex-col gap-2 mb-5">
-            <h1 className="text-base font-medium text-text leading-tight">
-              External authentication required
-            </h1>
-            <p className="text-xs text-text-faint">
-              Sign in with the configured identity provider, then try again.
-            </p>
+        <div className={GATE_PANEL_CLASS}>
+          <h1 className="text-title-section text-text">
+            External authentication required
+          </h1>
+          <p className="mt-1.5 text-body text-text-muted">
+            Sign in with the configured identity provider, then try again.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <Button
+              variant="primary"
+              className={GATE_ACTION_CLASS}
+              onClick={() => void loadSession(true)}
+            >
+              Retry
+            </Button>
           </div>
-          <Button fullWidth onClick={() => void loadSession(true)}>
-            Retry
-          </Button>
-        </Card>
+        </div>
       </AuthGateFrame>
     );
   }
@@ -201,7 +233,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     try {
       setErrors({});
       setAdminToken(trimmed);
-      const result = await loadSession(false);
+      const result = await loadSession(false, 'submitted');
       if (result === 'authenticated') {
         setValue('');
       } else if (result === 'required' || result === 'loading') {
@@ -212,36 +244,31 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     }
   }
 
+  const rejected = sessionState.storedTokenRejected;
   return (
     <AuthGateFrame>
-      <Card className="p-6">
-        <div className="flex flex-col gap-2 mb-5">
-          <div className="flex items-center gap-2 text-text-faint">
-            <Lock className="w-3.5 h-3.5" />
-            <span className="text-[11px] uppercase tracking-wider font-mono">
-              cc-lb admin
-            </span>
-          </div>
-          <h1 className="text-base font-medium text-text leading-tight">
-            Admin token required
-          </h1>
-          <p className="text-xs text-text-faint">
-            Paste the admin Bearer token to continue.
-          </p>
-        </div>
+      <div className={GATE_PANEL_CLASS}>
+        <h1 className="text-title-section text-text">
+          {rejected ? 'Saved admin token was rejected' : 'Admin token required'}
+        </h1>
+        <p className="mt-1.5 text-body text-text-muted">
+          {rejected
+            ? 'The admin token saved in this browser no longer works. It may have been rotated. Paste the current admin Bearer token to continue.'
+            : 'Paste the admin Bearer token to continue.'}
+        </p>
         <BaseForm
-          className="flex flex-col gap-4"
+          className="mt-5 flex flex-col gap-5"
           errors={errors}
           onSubmit={handleSubmit}
         >
           <BaseField.Root className="flex flex-col gap-1.5" name="token">
-            <BaseField.Label className="text-[11px] uppercase tracking-wider text-text-faint">
+            <BaseField.Label className="text-label text-text-muted">
               Bearer token
             </BaseField.Label>
             <BaseField.Control
               autoComplete="current-password"
               autoFocus
-              className={cx(INPUT_CLASS, 'font-mono')}
+              className={cx(INPUT_CLASS, 'font-mono max-sm:h-11')}
               onChange={(event) => setValue(event.target.value)}
               placeholder="paste token"
               render={<BaseInput />}
@@ -249,27 +276,39 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
               type="password"
               value={value}
             />
-            <BaseField.Error className="text-[11px] text-red-400" />
+            <BaseField.Error className="text-caption text-danger-text" />
           </BaseField.Root>
-          <Button
-            disabled={submitting || !value.trim()}
-            fullWidth
-            loading={submitting}
-            type="submit"
-            variant="primary"
-          >
-            Sign in
-          </Button>
+          <div className="flex justify-end">
+            <Button
+              disabled={submitting || !value.trim()}
+              loading={submitting}
+              className={GATE_ACTION_CLASS}
+              type="submit"
+              variant="primary"
+            >
+              Sign in
+            </Button>
+          </div>
         </BaseForm>
-      </Card>
+      </div>
     </AuthGateFrame>
   );
 }
 
+/**
+ * Signed-out frame: the brand mark and name on the ground, then one flat
+ * panel. The page's single primary action lives inside the panel.
+ */
 function AuthGateFrame({ children }: { children: ReactNode }) {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-bg text-text px-4 py-8">
-      <div className="w-full max-w-sm">{children}</div>
+    <div className="min-h-dvh w-full flex items-center justify-center bg-bg text-text px-4 py-8">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <BrandMark size={28} />
+          <span className="text-title-section text-text">cc-lb admin</span>
+        </div>
+        {children}
+      </div>
     </div>
   );
 }

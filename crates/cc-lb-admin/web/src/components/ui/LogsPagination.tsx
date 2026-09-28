@@ -32,11 +32,12 @@ export function LogsPagination({
     <nav
       aria-label="Log pagination"
       aria-busy={loading || showNextPending}
-      className="h-14 shrink-0 flex items-center justify-between gap-4 px-4 py-3 border-t border-subtle bg-bg-sub"
+      // Phones get 40px buttons (Button's touch height), so the bar grows too.
+      className="h-12 max-md:h-14 shrink-0 flex items-center justify-between gap-4 px-4 border-t border-row"
     >
       <div
         aria-live="polite"
-        className="text-xs text-text-muted flex items-center gap-4"
+        className="text-body-sm text-text-muted tabular-nums flex items-center gap-4"
       >
         {loading ? (
           <div className="w-28 sm:w-36">
@@ -55,7 +56,7 @@ export function LogsPagination({
           onClick={onPrev}
           disabled={loading || page <= 0}
           aria-label="Previous page"
-          iconLeft={<ChevronLeft className="w-4 h-4" />}
+          iconLeft={<ChevronLeft />}
         >
           Prev
         </Button>
@@ -71,10 +72,10 @@ export function LogsPagination({
           iconRight={
             showNextPending ? (
               <span aria-hidden="true" className="inline-flex h-4 w-4">
-                <Spinner className="w-4 h-4 text-text-muted" />
+                <Spinner className="size-3.5 text-text-muted" />
               </span>
             ) : (
-              <ChevronRight className="w-4 h-4" />
+              <ChevronRight />
             )
           }
         >

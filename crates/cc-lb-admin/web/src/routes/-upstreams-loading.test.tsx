@@ -43,7 +43,6 @@ vi.mock('../lib/queries', async () => {
     useRecentEvents: vi.fn(),
     useStartOauthDraft: vi.fn(),
     useStatus: vi.fn(),
-    useSubscriptionQuotaAnalysis: vi.fn(),
     useSubscriptionQuotaLatest: vi.fn(),
     useSubscriptionQuotaSeries: vi.fn(),
     useTriggerSubscriptionMetadataRefresh: vi.fn(),
@@ -204,52 +203,6 @@ function quotaSeriesData(
           },
         ],
         markers: [],
-      },
-    ],
-  };
-}
-
-function quotaAnalysisData(target: Upstream, utilization: number) {
-  const burn = {
-    utilization_per_second: 0.0001,
-    utilization_per_hour: 0.36,
-    eta_to_limit_secs: 3_600,
-    resets_before_limit: false,
-    confidence: 'high',
-    sample_count: 2,
-    reason: null,
-  };
-  return {
-    since_unix_secs: NOW_UNIX_SECS - 604_800,
-    until_unix_secs: NOW_UNIX_SECS,
-    now_unix_secs: NOW_UNIX_SECS,
-    max_staleness_secs: 300,
-    upstreams: [
-      {
-        upstream_id: target.id,
-        upstream_name: target.name,
-        windows: [
-          {
-            window: '5h',
-            current_utilization: utilization,
-            resets_at_unix_secs: NOW_UNIX_SECS + 3_600,
-            data_state: 'fresh',
-            actual_account_burn: burn,
-            proxy_projected_burn: {
-              proxy_tokens_per_second: 10,
-              proxy_tokens_per_hour: 36_000,
-              effective_limit_tokens_estimate: 100_000,
-              utilization_per_hour: 0.36,
-              eta_to_limit_secs: 3_600,
-              resets_before_limit: false,
-              confidence: 'high',
-              sample_count: 2,
-              reason: null,
-            },
-            deficit: null,
-            caveats: [],
-          },
-        ],
       },
     ],
   };
@@ -440,7 +393,7 @@ function subscriptionMetadataResponse(
 // The dialog pre-fetches the authorize URL so "Sign in with Claude" is a plain
 // link, then waits for the pasted code on the next step.
 async function openCreateToSignIn() {
-  fireEvent.click(screen.getByRole('button', { name: 'New' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
   const dialog = screen.getByRole('dialog', { name: 'New upstream' });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   // The 'Link valid for' timer only renders once the draft session is ready.
@@ -481,12 +434,6 @@ beforeEach(() => {
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue({
-    data: undefined,
-    isLoading: true,
-    isPending: true,
-    isPlaceholderData: false,
-  } as never);
-  vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
     data: undefined,
     isLoading: true,
     isPending: true,
@@ -569,15 +516,12 @@ afterEach(() => {
 });
 
 describe('/upstreams quota request cadence', () => {
-  test('keeps stable series and analysis range identities across wall-clock ticks', () => {
+  test('keeps a stable series range identity across wall-clock ticks', () => {
     vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
     renderRoute();
 
     const firstSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
-      .mock.calls.at(-1)?.[0];
-    const firstAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
       .mock.calls.at(-1)?.[0];
 
     cleanup();
@@ -588,36 +532,27 @@ describe('/upstreams quota request cadence', () => {
     const secondSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
       .mock.calls.at(-1)?.[0];
-    const secondAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
-      .mock.calls.at(-1)?.[0];
 
     expect(firstSeriesParams).toMatchObject({
       rangeSecs: 604800,
       bucketSecs: 1800,
     });
-    expect(firstAnalysisParams).toMatchObject({ rangeSecs: 604800 });
     expect(secondSeriesParams).toEqual(firstSeriesParams);
-    expect(secondAnalysisParams).toEqual(firstAnalysisParams);
   });
 
-  test('updates both stable range identities when the visible range changes', () => {
+  test('updates the series range identity when the visible range changes', () => {
     renderRoute();
 
-    fireEvent.click(screen.getByRole('button', { name: '1h' }));
+    fireEvent.click(screen.getByRole('radio', { name: '1h' }));
 
     const seriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
-      .mock.calls.at(-1)?.[0];
-    const analysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
       .mock.calls.at(-1)?.[0];
 
     expect(seriesParams).toMatchObject({
       rangeSecs: 3600,
       bucketSecs: 60,
     });
-    expect(analysisParams).toMatchObject({ rangeSecs: 3600 });
   });
 });
 
@@ -634,7 +569,6 @@ describe('/upstreams cold-load geometry', () => {
     renderRoute();
 
     const shell = screen.getByTestId('upstream-detail-loading-shell');
-    expect(shell.className).toContain('contents');
     expect(
       within(shell).getByTestId('upstream-detail-loading-metadata').className,
     ).toContain('min-h-9');
@@ -642,15 +576,17 @@ describe('/upstreams cold-load geometry', () => {
       within(shell).getByTestId('quota-history-legend-slot').className,
     ).toContain('min-h-5');
     expect(
-      within(shell).getByTestId('quota-snapshot-grid').className,
-    ).toContain('min-h-[203px]');
+      within(within(shell).getByTestId('quota-snapshot-grid')).getAllByTestId(
+        'quota-snapshot-skeleton-card',
+      ),
+    ).toHaveLength(3);
     const rangeControl = within(shell).getByTestId(
       'quota-history-range-control',
     );
     expect(rangeControl.className).toContain('p-0.5');
     expect(rangeControl.children).toHaveLength(4);
     for (const rangeItem of rangeControl.children) {
-      expect(rangeItem.className).toContain('h-7');
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
     expect(within(shell).queryByText('Timestamp')).toBeNull();
     expect(
@@ -658,7 +594,7 @@ describe('/upstreams cold-load geometry', () => {
     ).toBeNull();
     expect(within(shell).queryByTestId('warmup-card')).toBeNull();
     expect(within(shell).queryByTestId('oauth-status-card-body')).toBeNull();
-    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(3);
+    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(4);
     expect(screen.queryByText('Select an upstream')).toBeNull();
   });
 
@@ -670,25 +606,22 @@ describe('/upstreams cold-load geometry', () => {
     const metadataLoading = within(metadata).getByTestId(
       'upstream-metadata-loading',
     );
-    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(5);
+    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(8);
 
     const legend = screen.getByTestId('quota-history-legend-slot');
     expect(legend.className).toContain('min-h-5');
     expect(legend.querySelectorAll('.skeleton')).toHaveLength(2);
 
     const snapshotGrid = screen.getByTestId('quota-snapshot-grid');
-    expect(snapshotGrid.className).toContain('min-h-[203px]');
     expect(
       within(snapshotGrid).getAllByTestId('quota-snapshot-skeleton-card'),
     ).toHaveLength(3);
     expect(screen.queryByText(/No subscription quota data/)).toBeNull();
 
     const oauthBody = screen.getByTestId('oauth-status-card-body');
-    expect(oauthBody.className).toContain('min-h-28');
     const oauthGrid = within(oauthBody).getByTestId(
       'oauth-status-loading-grid',
     );
-    expect(oauthGrid.className).toContain('min-h-20');
     expect(oauthGrid.className).toContain('space-y-3');
 
     const requestSlot = screen.getByTestId('recent-requests-table-slot');
@@ -697,18 +630,19 @@ describe('/upstreams cold-load geometry', () => {
     expect(requestSlot.querySelectorAll('tbody tr')).toHaveLength(5);
     expect(screen.queryByText(/Loading/)).toBeNull();
     expect(screen.queryByText('—%')).toBeNull();
+    // Pending quota reserves the row's usage figures; an API-key row has
+    // no subscription quota to wait for and reads as its kind at once.
     const oauthListRow = screen.getByRole('button', {
       name: /OAuth Primary/,
     });
     expect(
       oauthListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(5);
+    ).toBeGreaterThanOrEqual(2);
     const apiKeyListRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(
-      apiKeyListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(2);
+    expect(apiKeyListRow.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(within(apiKeyListRow).getByText('API key')).toBeDefined();
   });
 
   test('retains the reserved slots after empty and loaded queries resolve', () => {
@@ -724,12 +658,6 @@ describe('/upstreams cold-load geometry', () => {
     } as never);
     vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue({
       data: { series: [] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
-      data: { upstreams: [] },
       isLoading: false,
       isPending: false,
       isPlaceholderData: false,
@@ -776,24 +704,53 @@ describe('/upstreams cold-load geometry', () => {
     expect(screen.getByTestId('quota-history-legend-slot').className).toContain(
       'min-h-5',
     );
-    expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
-      'min-h-[203px]',
-    );
     const rangeControl = screen.getByTestId('quota-history-range-control');
-    expect(rangeControl.className).toContain('p-0.5');
-    expect(rangeControl.querySelectorAll('button')).toHaveLength(4);
-    for (const rangeItem of rangeControl.querySelectorAll('button')) {
-      expect(rangeItem.className).toContain('h-7');
+    const rangeItems = within(rangeControl).getAllByRole('radio');
+    expect(rangeItems).toHaveLength(4);
+    for (const rangeItem of rangeItems) {
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
-    expect(screen.getByTestId('oauth-status-card-body').className).toContain(
-      'min-h-28',
-    );
     const loadedOauthGrid = screen.getByTestId('oauth-status-loaded-grid');
-    expect(loadedOauthGrid.className).toContain('min-h-20');
     expect(loadedOauthGrid.className).toContain('space-y-3');
     expect(
       screen.getByTestId('recent-requests-table-slot').className,
     ).toContain('min-h-48');
+  });
+});
+
+describe('/upstreams desktop auto-select', () => {
+  test('waits for quota before picking the first row of the usage-ranked list', () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockReturnValue({ matches: true }),
+    });
+    try {
+      searchState = {};
+      vi.mocked(queries.useStatus).mockReturnValue(
+        queryResult({ upstreams: [] }),
+      );
+
+      const view = renderRoute();
+      // Quota still loading: the ranking is not final, so nothing is picked.
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+        queryResult(quotaLatestData(upstream, 0.42)),
+      );
+      view.rerender(routeElement());
+
+      expect(navigateMock).toHaveBeenCalledTimes(1);
+      const { search } = navigateMock.mock.calls[0][0] as {
+        search: (previous: object) => { selectedId?: string };
+      };
+      expect(search({}).selectedId).toBe(upstream.id);
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        value: originalMatchMedia,
+      });
+    }
   });
 });
 
@@ -850,11 +807,6 @@ describe('/upstreams refresh retention', () => {
         { isPlaceholderData },
       ),
     );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(() =>
-      queryResult(quotaAnalysisData(upstream, phaseData[phase].utilization), {
-        isPlaceholderData,
-      }),
-    );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(() =>
       queryResult(
         metadataData(
@@ -882,7 +834,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     const oauthSidebarRow = screen.getByRole('button', {
       name: /OAuth Primary/,
@@ -893,15 +845,15 @@ describe('/upstreams refresh retention', () => {
     ).toContain('5h');
 
     isPlaceholderData = true;
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     expect(screen.getByText(/old@example\.com/)).toBeDefined();
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     expect(
       screen.getByTestId('quota-history-legend-slot').textContent,
@@ -942,11 +894,11 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('new-scope')).toBeDefined();
     expect(screen.getByText('new-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '68.0%',
+      '68%',
     );
   });
 
-  test('keeps API usage, sidebar totals, and recent rows during placeholder refresh', () => {
+  test('keeps API usage, the list row, and recent rows during placeholder refresh', () => {
     searchState = { selectedId: apiKeyUpstream.id };
     let phase: 'old' | 'new' = 'old';
     let isPlaceholderData = false;
@@ -1007,14 +959,12 @@ describe('/upstreams refresh retention', () => {
     const apiSidebarRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
 
     isPlaceholderData = true;
-    fireEvent.click(screen.getByRole('button', { name: '7d' }));
+    fireEvent.click(screen.getByRole('radio', { name: '7d' }));
 
     expect(screen.getByText('old-usage-model')).toBeDefined();
     expect(screen.getByText('old-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
     expect(
       screen.getByTestId('api-usage-card').querySelectorAll('.skeleton'),
     ).toHaveLength(0);
@@ -1033,7 +983,6 @@ describe('/upstreams refresh retention', () => {
     expect(screen.queryByText('old-request-model')).toBeNull();
     expect(screen.getByText('new-usage-model')).toBeDefined();
     expect(screen.getByText('new-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$2.50 · 200 tok');
   });
 
   test('resets detail-local state and never renders the previous OAuth identity after selection changes', () => {
@@ -1065,12 +1014,6 @@ describe('/upstreams refresh retention', () => {
           ? queryResult(quotaSeriesData(upstream, 0.42))
           : queryResult(undefined, { isLoading: true, isPending: true }),
     );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(
-      (options) =>
-        options.upstreamIds === upstream.id
-          ? queryResult(quotaAnalysisData(upstream, 0.42))
-          : queryResult(undefined, { isLoading: true, isPending: true }),
-    );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(
       (upstreamId) =>
         upstreamId === upstream.id
@@ -1100,9 +1043,9 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('identity-old-scope')).toBeDefined();
     expect(screen.getByText('identity-old-model')).toBeDefined();
 
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     searchState = { selectedId: secondOauthUpstream.id };
     view.rerender(routeElement());
@@ -1110,18 +1053,20 @@ describe('/upstreams refresh retention', () => {
     const resetRangeControl = screen.getByTestId('quota-history-range-control');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '7d' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '7d' })
+        .getAttribute('aria-checked'),
     ).toBe('true');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '1h' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '1h' })
+        .getAttribute('aria-checked'),
     ).toBe('false');
     expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
     expect(screen.queryByText('identity-old-scope')).toBeNull();
     expect(screen.queryByText('identity-old-model')).toBeNull();
-    expect(screen.queryByText('42.0%')).toBeNull();
+    expect(
+      screen.queryByTestId('quota-snapshot-grid')?.textContent ?? '',
+    ).not.toContain('42%');
     expect(screen.getByTestId('upstream-metadata-loading')).toBeDefined();
     expect(
       screen
@@ -1153,7 +1098,7 @@ describe('/upstreams mutation pending UX', () => {
     } as never);
 
     const view = renderRoute();
-    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
     fireEvent.click(
@@ -1336,7 +1281,7 @@ describe('/upstreams mutation pending UX', () => {
     expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
   });
 
-  test('toggle pending shows the requested progress and prevents a second change', () => {
+  test('toggle asks for confirmation, then shows progress and prevents a second change', () => {
     const mutate = vi.fn();
     vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue({
       mutate,
@@ -1348,6 +1293,16 @@ describe('/upstreams mutation pending UX', () => {
     const view = renderRoute();
     const toggle = screen.getByRole('switch', { name: 'Enabled' });
     fireEvent.click(toggle);
+
+    // The switch alone never changes the pool: it opens a confirmation that
+    // names the impact, including the warm-up side effect.
+    expect(mutate).not.toHaveBeenCalled();
+    const confirm = screen.getByRole('alertdialog', {
+      name: 'Disable upstream?',
+    });
+    expect(confirm.textContent).toContain('will stop receiving requests.');
+    expect(confirm.textContent).toContain('Warm-up is turned off too.');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Disable' }));
 
     expect(mutate).toHaveBeenCalledTimes(1);
     expect(mutate).toHaveBeenCalledWith(
@@ -1369,7 +1324,7 @@ describe('/upstreams mutation pending UX', () => {
 
     const pendingToggle = screen.getByRole('switch', { name: 'Enabled' });
     expect(pendingToggle.hasAttribute('disabled')).toBe(true);
-    const status = screen.getByTestId('upstream-enabled-pending');
+    const status = screen.getByTestId('detail-enabled-pending');
     expect(status.getAttribute('role')).toBe('status');
     expect(status.textContent).toContain('Disabling...');
     expect(status.querySelector('svg.animate-spin')).not.toBeNull();
@@ -1612,7 +1567,7 @@ describe('/upstreams OAuth card', () => {
     renderRoute();
 
     const expiry = screen.getByTestId('oauth-refresh-token-expiry');
-    expect(expiry.textContent).toContain('expires');
+    expect(expiry.textContent).toContain('Expires');
     expect(expiry.textContent).toMatch(/in \d+ (weeks?|months?|days?)/);
   });
 
@@ -1693,7 +1648,7 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
     const refreshRow = screen.getByText('Refresh token')
       .parentElement as HTMLElement;
-    expect(within(refreshRow).getByText('stored, unused')).toBeDefined();
+    expect(within(refreshRow).getByText('Stored, unused')).toBeDefined();
   });
 
   test('keeps the healthy Long-lived badge when the stored refresh-token clock has lapsed', () => {
@@ -1909,7 +1864,8 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(
       within(notice).getByRole('button', { name: 'Reconnect' }),
     ).toBeDefined();
-    expect(screen.getByText('Login expiring')).toBeDefined();
+    // The notice owns the problem; the credential section does not repeat it.
+    expect(screen.queryByText('Login expiring')).toBeNull();
 
     cleanup();
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(

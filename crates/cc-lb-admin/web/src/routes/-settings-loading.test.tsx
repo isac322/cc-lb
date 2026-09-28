@@ -81,17 +81,8 @@ vi.mock('@tanstack/react-router', async () => {
 const SettingsComponent = SettingsRoute.options
   .component as React.ComponentType;
 
-const loadedStatus = {
-  version: '1.2.3',
-  git_sha: 'abc1234',
-  uptime_secs: 120,
-  build: {
-    rust_version: '1.90.0',
-    profile: 'release',
-    target: 'aarch64-unknown-linux-gnu',
-  },
-  generation: 7,
-};
+// The editor reads only the process uptime (restart drift) from status.
+const loadedStatus = { uptime_secs: 120 };
 
 const configSchema = {
   type: 'object',
@@ -512,19 +503,24 @@ function showCategory(_view: RenderResult, name: string) {
 }
 
 function categoryNavItems(nav: HTMLElement) {
-  return Array.from(
-    nav.querySelectorAll<HTMLElement>('[data-config-category]'),
-  );
+  return Array.from(nav.querySelectorAll<HTMLElement>('button[data-value]'));
 }
 
 // Resolves whether a section element effectively renders a top separator.
-// Sections carry `border-t`/`pt-*` with `first:`-resets so the panel's first
-// child sits flush under the card header; a `divide-y` parent would supply
-// the separator instead. Returns what the reader actually sees.
+// Sections carry no chrome of their own: the parent's `space-y-*` gap
+// separates sibling sections. A `border-t`/`pt-*` on the section or a
+// `divide-y` parent would draw a rule or padding instead. An intro line
+// before the first section is not a section, so the first section stays
+// flush. Returns what the reader sees.
 function sectionTopSeparator(
   section: HTMLElement,
-): 'border' | 'padding' | 'divide' | 'none' {
+): 'border' | 'padding' | 'divide' | 'space' | 'none' {
   const isFirst = section.parentElement?.firstElementChild === section;
+  let previous = section.previousElementSibling;
+  while (previous && previous.tagName !== section.tagName) {
+    previous = previous.previousElementSibling;
+  }
+  const isFirstSection = previous === null;
   const tokens = section.className.split(/\s+/);
   const hasToken = (re: RegExp) => tokens.some((token) => re.test(token));
   const firstReset = (suffix: string) =>
@@ -533,14 +529,19 @@ function sectionTopSeparator(
   const padding = hasToken(/^pt-(?!0\b)/);
   if (border && !(isFirst && firstReset(':border-t-0'))) return 'border';
   if (padding && !(isFirst && firstReset(':pt-0'))) return 'padding';
+  const parentTokens =
+    section.parentElement?.className.split(/\s+/) ?? ([] as string[]);
   if (
-    !isFirst &&
-    (section.parentElement?.className
-      .split(/\s+/)
-      .some((token) => /^divide-y/.test(token)) ??
-      false)
+    !isFirstSection &&
+    parentTokens.some((token) => /^divide-y/.test(token))
   ) {
     return 'divide';
+  }
+  if (
+    !isFirstSection &&
+    parentTokens.some((token) => /^space-y-(?!0\b)/.test(token))
+  ) {
+    return 'space';
   }
   return 'none';
 }
@@ -646,14 +647,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test('settings cold load reserves version, editor, and history heights without a wide table', () => {
+test('settings cold load shows skeletons for the editor and history', () => {
   render(<SettingsComponent />);
 
-  const versionCard = screen.getByTestId('version-card');
-  expect(versionCard.querySelectorAll('.skeleton')).toHaveLength(5);
   // The status zone sits above the editor card; its facts strip is a
-  // borderless, low-emphasis inline row — no panel chrome, divider, or
-  // reserved min-height.
+  // borderless, low-emphasis list — no panel chrome or divider.
   const statusZone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -662,58 +660,39 @@ test('settings cold load reserves version, editor, and history heights without a
       0,
   ).toBe(true);
   const metadata = within(statusZone).getByTestId('config-editor-metadata');
-  const factsStrip = metadata.parentElement as HTMLElement;
-  expect(factsStrip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
-  const editorSkeleton = screen.getByTestId('config-editor-skeleton');
-  expect(editorSkeleton.className).toMatch(/min-h-/);
-  expect(editorSkeleton.children.length).toBeGreaterThan(0);
-  // The skeleton mirrors the loaded layout: one inline category grid that
-  // reflows 2/3/4/7 columns across viewports — no drawer trigger, no
-  // breakpoint-gated side column — followed by flat divider-separated
-  // sections instead of boxed cards.
-  expect(editorSkeleton.innerHTML).not.toContain('xl:hidden');
-  const navGrid = editorSkeleton.querySelector<HTMLElement>(
-    '[class~="xl:grid-cols-7"]',
+  expect(metadata.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
+  // Until categories load, one placeholder per category stands in the tab
+  // row — no real navigation that could be clicked before data arrives.
+  const tabsSkeleton = within(editorCard).getByTestId(
+    'config-category-nav-skeleton',
   );
-  expect(navGrid).not.toBeNull();
-  expect(navGrid?.className).toContain('grid-cols-2');
-  expect(navGrid?.className).toContain('sm:grid-cols-3');
-  expect(navGrid?.className).toContain('lg:grid-cols-4');
-  expect(navGrid?.className).toContain('gap-px');
-  expect(navGrid?.className).not.toMatch(/(^|\s)hidden(\s|$)/);
-  expect(navGrid?.querySelectorAll('.skeleton')).toHaveLength(
+  expect(tabsSkeleton.querySelectorAll('.skeleton')).toHaveLength(
     CONFIG_EDITOR_CATEGORIES.length,
   );
-  // The last tile mirrors the real nav's last cell: it spans the leftover
-  // columns at each breakpoint so the skeleton grid never leaves a gap.
-  const lastTile = navGrid?.lastElementChild as HTMLElement | null;
-  expect(lastTile?.className).toContain('last:col-span-2');
-  expect(lastTile?.className).toContain('sm:last:col-span-3');
-  expect(lastTile?.className).toContain('lg:last:col-span-2');
-  expect(lastTile?.className).toContain('xl:last:col-span-1');
-  const skeletonSectionWrap = editorSkeleton.querySelector<HTMLElement>(
-    '[class~="space-y-6"]',
-  );
-  const skeletonSections = Array.from(
-    skeletonSectionWrap?.children ?? [],
-  ).slice(1) as HTMLElement[];
+  expect(within(editorCard).queryByTestId('config-category-nav')).toBeNull();
+  // The body skeleton mirrors the loaded layout: flat space-separated
+  // sections instead of boxed cards.
+  const editorSkeleton = screen.getByTestId('config-editor-skeleton');
+  const skeletonSections = Array.from(editorSkeleton.children).slice(
+    1,
+  ) as HTMLElement[];
   expect(skeletonSections.length).toBeGreaterThan(0);
   skeletonSections.forEach((section, index) => {
-    // Mirrors the loaded contract: the first section is flush (no top
-    // border/padding), later siblings carry the divider.
-    expect(sectionTopSeparator(section)).toBe(index === 0 ? 'none' : 'border');
+    // Mirrors the loaded contract: the first section is flush, later
+    // siblings are separated by space only — no rule, no padding.
+    expect(sectionTopSeparator(section)).toBe(index === 0 ? 'none' : 'space');
     expect(section.className).not.toMatch(/(^|\s)rounded/);
     expect(section.className).not.toMatch(/(^|\s)bg-/);
   });
 
   const historySlot = screen.getByTestId('config-history-slot');
-  expect(historySlot.className).toContain('min-h-[173px]');
-  expect(historySlot.className).toContain('sm:min-h-[163px]');
-  expect(historySlot.querySelector('table')).toBeNull();
   expect(historySlot.querySelectorAll('.skeleton')).toHaveLength(8);
+  expect(
+    within(historySlot).queryByText('No saved config history available.'),
+  ).toBeNull();
 });
 
-test('settings preserves version, localization, metadata history, and database backups', () => {
+test('settings keeps localization, metadata history, and database backups without a version card or visible page header', () => {
   setSettingsLoaded();
   queryMocks.useConfigHistory.mockReturnValue(
     loadedResult({
@@ -723,10 +702,19 @@ test('settings preserves version, localization, metadata history, and database b
 
   render(<SettingsComponent />);
 
-  expect(screen.getByText('Version')).toBeDefined();
+  // The page's one h1 stays for assistive tech; no description line or
+  // Version section repeats what the top bar and sidebar already show.
+  expect(
+    screen.getByRole('heading', { level: 1, name: 'Settings' }),
+  ).toBeDefined();
+  expect(
+    screen.queryByText(/configuration drafts, and data backups/),
+  ).toBeNull();
+  expect(screen.queryByRole('heading', { name: 'Version' })).toBeNull();
+  expect(screen.queryByText(/not embedded in this binary/)).toBeNull();
   expect(screen.getByText('Localization')).toBeDefined();
-  expect(screen.getByText('Saved Config History')).toBeDefined();
-  expect(screen.getByText('Data & Backups')).toBeDefined();
+  expect(screen.getByText('Saved config history')).toBeDefined();
+  expect(screen.getByText('Data & backups')).toBeDefined();
   expect(screen.getByText('Database resources snapshot')).toBeDefined();
   expect(
     within(screen.getByTestId('config-history-slot')).getByText('7'),
@@ -756,10 +744,6 @@ test('category navigation landmark lists seven categories and renders only the s
   items.forEach((item, index) => {
     const meta = CONFIG_EDITOR_CATEGORIES[index];
     expect(item.textContent).toContain(meta?.label);
-    // The full description stays accessible as sr-only text on the button;
-    // the visible copy lives once in the editor card header.
-    const description = item.querySelector('.sr-only');
-    expect(description?.textContent).toBe(meta?.description);
     expect(item.getAttribute('role')).toBeNull();
     expect(item.getAttribute('aria-selected')).toBeNull();
   });
@@ -777,32 +761,18 @@ test('category navigation landmark lists seven categories and renders only the s
   expect(screen.queryByTestId('config-search-results')).toBeNull();
   expect(searchInput.getAttribute('aria-expanded')).toBe('false');
 
-  // The nav is the editor card's immediate previous sibling — attached above
-  // it, not inside it or below the header — and the two surfaces join: the
-  // nav carries the top rounding and border while the card drops its top
-  // corners and its own top border so the seam renders a single line. The
-  // nav wrapper itself stays off the strong panel surface — the cells and
-  // the gap-px separator grid own the backgrounds.
-  // The card header still owns the active category: its h3 names the panel
-  // (via aria-labelledby) and the description sits under it exactly once —
-  // the panel itself repeats no heading or description.
+  // The nav is the editor card's own top row: it sits inside the card,
+  // after the status zone and before the panel it drives. The active
+  // category's h3 names the panel (via aria-labelledby) and its description
+  // is visible exactly once, above the panel rather than inside it.
   const editorCard = screen.getByTestId('config-editor-card');
   const panel = screen.getByRole('region', { name: 'Network & requests' });
-  expect(editorCard.contains(nav)).toBe(false);
-  expect(editorCard.previousElementSibling).toBe(nav);
-  // DOM order is status zone → category nav → editor card.
+  expect(editorCard.contains(nav)).toBe(true);
   expect(
     (screen.getByTestId('config-status-zone').compareDocumentPosition(nav) &
       Node.DOCUMENT_POSITION_FOLLOWING) !==
       0,
   ).toBe(true);
-  expect(nav.className).toMatch(/(^|\s)rounded-t/);
-  expect(nav.className).toMatch(/(^|\s)border(\s|$|-)/);
-  expect(nav.className).not.toMatch(/(^|\s)bg-panel-strong(\s|$)/);
-  expect(editorCard.className).toContain('rounded-t-none');
-  // No double border at the seam: the card drops its top edge (the nav
-  // already drops its bottom edge).
-  expect(editorCard.className).toMatch(/(^|\s)border-t-0/);
   expect(
     (nav.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING) !==
       0,
@@ -826,9 +796,9 @@ test('category navigation landmark lists seven categories and renders only the s
   expect(visibleDescriptions).toHaveLength(1);
   expect(editorCard.contains(visibleDescriptions[0] as Node)).toBe(true);
   expect(
-    within(panel).getByRole('textbox', { name: 'Proxy Addr' }),
+    within(panel).getByRole('textbox', { name: 'Proxy address' }),
   ).toBeDefined();
-  expect(screen.queryByLabelText('Tracing Level')).toBeNull();
+  expect(screen.queryByLabelText('Tracing level')).toBeNull();
 
   fireEvent.click(
     within(nav).getByRole('button', { name: /^Runtime & observability/ }),
@@ -875,11 +845,11 @@ test('category navigation landmark lists seven categories and renders only the s
   );
   expect(runtimeHeading.contains(runtimeLabelTarget)).toBe(true);
   expect(within(runtimePanel).queryByRole('heading', { level: 3 })).toBeNull();
-  expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
-  expect(screen.getByLabelText('Tracing Level')).toBeDefined();
+  expect(screen.queryByLabelText('Proxy address')).toBeNull();
+  expect(screen.getByLabelText('Tracing level')).toBeDefined();
 });
 
-test('one inline category grid serves every viewport — no drawer or select', () => {
+test('one underline tab row serves every viewport — no drawer or select', () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
@@ -895,81 +865,23 @@ test('one inline category grid serves every viewport — no drawer or select', (
     screen.queryByRole('combobox', { name: 'Configuration category' }),
   ).toBeNull();
 
-  // The nav strip is a full-bleed surface: it carries the outer border but
-  // no padding of its own — each button is the whole tab surface, edge to
-  // edge.
+  // All seven categories are always rendered — none hidden at a breakpoint;
+  // narrow screens scroll the one row instead.
   const nav = screen.getByTestId('config-category-nav');
   expect(nav.className).not.toMatch(/(^|\s)hidden(\s|$)/);
-  expect(nav.className).not.toMatch(/(^|\s|:)p[xytrbl]?-/);
-  // The strip clips to its rounded top corners, so a button's focus outline
-  // would be cut off at the cell edges unless it draws inside the cell.
-  expect(nav.className).toContain('overflow-hidden');
-
-  // The grid is always rendered — no hidden/breakpoint-gated copy — and
-  // reflows 2 → 3 → 4 → 7 columns so all seven categories stay visible.
-  // Cells share 1px separators: a gap-px grid whose own background is the
-  // separator color, never a multi-pixel gap.
-  const grid = nav.querySelector('ul');
-  expect(grid).not.toBeNull();
-  expect(grid?.className).toContain('grid-cols-2');
-  expect(grid?.className).toContain('sm:grid-cols-3');
-  expect(grid?.className).toContain('lg:grid-cols-4');
-  expect(grid?.className).toContain('xl:grid-cols-7');
-  expect(grid?.className).toContain('gap-px');
-  expect(grid?.className).not.toMatch(/(^|\s)gap-[xy]?-[1-9]/);
-  expect(grid?.className).toMatch(/(^|\s)bg-/);
-  const lastCell = grid?.lastElementChild as HTMLElement | null;
-  expect(lastCell?.className).toMatch(/(^|\s)last:col-span-/);
-  for (const item of categoryNavItems(nav)) {
+  const items = categoryNavItems(nav);
+  expect(items).toHaveLength(CONFIG_EDITOR_CATEGORIES.length);
+  for (const item of items) {
     expect(item.className).not.toMatch(/(^|\s)hidden(\s|$)/);
     expect(item.className).not.toMatch(/(^|\s)[a-z0-9]+:hidden(\s|$)/);
-    // Each button is the whole tab surface — it fills its cell, carries its
-    // own background, and keeps a touch-sized target. No card chrome (ring,
-    // shadow) beyond the flat surface.
-    expect(item.className).not.toMatch(/(^|\s)shadow/);
-    expect(item.className).not.toMatch(/(^|\s)ring-/);
-    expect(minHeightPx(item)).toBeGreaterThanOrEqual(44);
-    expect(item.className).toContain('h-full');
-    expect(item.className).toContain('w-full');
-    expect(item.className).toMatch(/(^|\s)bg-/);
-    // …so the focus ring uses a negative outline-offset to stay fully
-    // visible inside the clipped cell instead of overflowing it.
-    expect(item.className).toContain('focus-visible:outline-2');
-    expect(item.className).toMatch(
-      /focus-visible:(-outline-offset-\d|outline-offset-\[-)/,
-    );
   }
-  const items = categoryNavItems(nav);
-  const active = items.find(
-    (item) => item.getAttribute('aria-current') === 'page',
-  );
-  const inactive = items.filter(
-    (item) => item.getAttribute('aria-current') !== 'page',
-  );
-  expect(inactive.length).toBeGreaterThan(0);
-  // The nav wrapper itself carries no panel surface — the gap-px grid's own
-  // background supplies the 1px separators. The active tab sits on the
-  // subdued surface with an accent top edge; inactive tabs rest on the base
-  // background and lift to the subdued surface on hover.
-  expect(nav.className).not.toMatch(/(^|\s)bg-panel-strong(\s|$)/);
-  expect(active?.className).toMatch(/(^|\s)bg-bg-sub(\s|$)/);
-  expect(active?.className).toContain('border-accent');
-  for (const item of inactive) {
-    expect(item.className).toMatch(/(^|\s)bg-bg(\s|$)/);
-    expect(item.className).not.toMatch(/(^|\s)bg-bg-sub(\s|$)/);
-    expect(item.className).toContain('hover:bg-bg-sub');
-  }
-
-  // The nav is attached to the top of the editor card as its previous
-  // sibling — same width, shared border, no gap — rather than living inside
-  // the card or floating free. The seam renders one border, not two.
-  const editorCard = screen.getByTestId('config-editor-card');
-  expect(editorCard.contains(nav)).toBe(false);
-  expect(editorCard.previousElementSibling).toBe(nav);
-  expect(nav.className).toMatch(/(^|\s)rounded-t/);
-  expect(nav.className).toMatch(/(^|\s)border-b-0(\s|$)/);
-  expect(editorCard.className).toContain('rounded-t-none');
-  expect(editorCard.className).toMatch(/(^|\s)border-t-0/);
+  expect(
+    items.filter((item) => item.getAttribute('aria-current') === 'page'),
+  ).toHaveLength(1);
+  // Status travels with the tab name for assistive tech, not only as dots.
+  expect(
+    within(nav).getByRole('button', { name: /^Network & requests$/ }),
+  ).toBeDefined();
 
   // The same nav drives the panel directly — no intermediate disclosure.
   fireEvent.click(within(nav).getByRole('button', { name: /^Scheduling/ }));
@@ -992,7 +904,7 @@ test('one inline category grid serves every viewport — no drawer or select', (
   expect(
     within(schedulingPanel).queryByRole('heading', { level: 3 }),
   ).toBeNull();
-  expect(screen.queryByLabelText('Proxy Addr')).toBeNull();
+  expect(screen.queryByLabelText('Proxy address')).toBeNull();
   expect(screen.getByText('custom_job')).toBeDefined();
 });
 
@@ -1036,14 +948,14 @@ test('sections stay flat on the category canvas and keep advanced fields behind 
   );
   expect(cards.length).toBeGreaterThan(1);
   cards.forEach((card, index) => {
-    // The first section sits flush under the card header — no top border or
-    // top padding. Every later sibling is separated by a top divider and
-    // spacing only; the wrapper itself carries no card chrome (rounded
-    // border, tinted background, or inset padding).
+    // The first section sits flush under the card header. Every later
+    // sibling is separated by space only — no top rule or padding; the
+    // wrapper itself carries no card chrome (rounded border, tinted
+    // background, or inset padding).
     expect(
       sectionTopSeparator(card),
       `section ${card.getAttribute('data-config-section')} separator`,
-    ).toBe(index === 0 ? 'none' : 'border');
+    ).toBe(index === 0 ? 'none' : 'space');
     expect(card.className).not.toMatch(/(^|\s)rounded/);
     expect(card.className).not.toMatch(/(^|\s)bg-/);
     expect(card.className).not.toMatch(/(^|\s)p[xy]?-\d/);
@@ -1191,7 +1103,13 @@ test('single-root compound sections let the section heading own the label', () =
   // Routing & resilience: the affinity section renders its leaf directly —
   // a scalar root keeps its own field label.
   showCategory(view, 'Routing & resilience');
-  expect(screen.getByLabelText('Ttl Days')).toBeDefined();
+  expect(
+    within(
+      document.querySelector(
+        '[data-config-path="upstream_affinity.ttl_days"]',
+      ) as HTMLElement,
+    ).getByRole('spinbutton', { name: 'TTL' }),
+  ).toBeDefined();
 
   // Multi-root sections keep per-root headings: the OAuth section renders
   // the nullable anthropic object and the github object side by side, each
@@ -1214,7 +1132,7 @@ test('single-root compound sections let the section heading own the label', () =
 
   // Field labels are always kept — scalar roots still show their labels.
   showCategory(view, 'Network & requests');
-  expect(screen.getByLabelText('Proxy Addr')).toBeDefined();
+  expect(screen.getByLabelText('Proxy address')).toBeDefined();
 });
 
 test('a deep-linked advanced field opens its disclosure and receives focus', async () => {
@@ -1257,44 +1175,41 @@ test('a deep link into a disabled TLS object focuses its hoisted enable switch',
   expect(document.activeElement).toBe(tlsSwitch);
 });
 
-test('settings search lives in the card header and overlays results without shifting the panel', async () => {
+test('settings search leads the editor toolbar and overlays results without shifting the panel', async () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
-  // The search control is the first action in the editor card header —
-  // before the save/validate/download buttons — not a field inside the
-  // panel. It spans the header row on mobile and a 256–320px column on
-  // larger screens.
+  // The search control leads the editor card's toolbar — before the
+  // save/validate/download actions — not a field inside the panel. It spans
+  // the toolbar on mobile and a 256–320px column on larger screens.
   const editorCard = screen.getByTestId('config-editor-card');
   const search = screen.getByRole('combobox', { name: /search/i });
   expect(editorCard.contains(search)).toBe(true);
   const panel = screen.getByRole('region', { name: 'Network & requests' });
   expect(panel.contains(search)).toBe(false);
   const searchWrapper = search.parentElement as HTMLElement;
-  const saveDraftButton = screen.getByRole('button', { name: 'Save draft' });
-  const innerActionRow = searchWrapper.parentElement as HTMLElement;
-  const cardHeaderActionWrapper = innerActionRow.parentElement as HTMLElement;
-  expect(innerActionRow).toBe(saveDraftButton.parentElement);
+  const toolbar = screen.getByTestId('config-editor-toolbar');
+  const actions = screen.getByTestId('config-editor-actions');
+  expect(searchWrapper.parentElement).toBe(toolbar);
+  expect(actions.parentElement).toBe(toolbar);
   expect(
-    searchWrapper.compareDocumentPosition(saveDraftButton) &
+    searchWrapper.compareDocumentPosition(actions) &
       Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
   expect(searchWrapper.className).toContain('w-full');
   expect(searchWrapper.className).toMatch(
     /(?:sm|md|lg|xl|2xl):w-(?:64|72|80|\[(?:2[5-9]\d|3[0-2]\d)px\])/,
   );
-
-  // The header stacks its title block above the action wrapper below the sm
-  // breakpoint. The CardHeader action wrapper can shrink and wrap, while
-  // the inner custom action row owns the controls.
-  const headerRow = cardHeaderActionWrapper.parentElement as HTMLElement;
-  expect(headerRow.className).toContain('flex-col');
-  expect(headerRow.className).toContain('sm:flex-row');
-  expect(cardHeaderActionWrapper.className).toContain('flex-wrap');
-  expect(cardHeaderActionWrapper.className).toContain('min-w-0');
-  expect(cardHeaderActionWrapper.className).not.toMatch(
-    /(?:^|\s)(?:\w+:)?shrink-0(?:\s|$)/,
-  );
+  // Draft, validate, and download actions share the toolbar.
+  expect(
+    within(actions).getByRole('button', { name: 'Save draft' }),
+  ).toBeDefined();
+  expect(
+    within(actions).getByRole('button', { name: 'Validate' }),
+  ).toBeDefined();
+  expect(
+    within(actions).getByRole('button', { name: 'Download TOML' }),
+  ).toBeDefined();
 
   // Combobox semantics: the input autocompletes against a listbox popup.
   expect(search.getAttribute('aria-autocomplete')).toBe('list');
@@ -1619,13 +1534,13 @@ test('history load failures stay distinct from empty history and offer retry', (
   expect(history.refetch).toHaveBeenCalledTimes(1);
 });
 
-test('status zone gathers metadata, running facts, and only abnormal alerts', () => {
+test('status zone gathers draft metadata and only abnormal alerts, without repeating running values', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
   // One compact zone above the editor card carries a single borderless
-  // low-emphasis facts strip — metadata and running facts as inline
-  // label/value pairs — plus the alerts that actually apply.
+  // low-emphasis facts list — the draft metadata — plus the alerts that
+  // actually apply.
   const zone = screen.getByTestId('config-status-zone');
   const editorCard = screen.getByTestId('config-editor-card');
   expect(
@@ -1635,19 +1550,18 @@ test('status zone gathers metadata, running facts, and only abnormal alerts', ()
   ).toBe(true);
   const metadata = within(zone).getByTestId('config-editor-metadata');
   expect(metadata.textContent).toContain('/etc/cc-lb/cc-lb.toml');
-  expect(metadata.textContent).toContain('Draft revision');
-  const summary = within(zone).getByTestId('config-running-summary');
-  expect(summary.textContent).toContain('127.0.0.1:9090');
-  expect(summary.textContent).toMatch(/postgres/i);
-  // Metadata and running facts share one strip element directly inside the
-  // zone — no panel chrome, no metadata/run divider, no reserved height,
-  // no uppercase label styling.
-  const strip = metadata.parentElement as HTMLElement;
-  expect(strip.parentElement).toBe(zone);
-  expect(strip.contains(summary)).toBe(true);
-  expect(strip.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
-  expect(strip.querySelector('.border-t')).toBeNull();
-  expect(strip.querySelector('.uppercase')).toBeNull();
+  expect(metadata.textContent).toContain('Revision');
+  expect(metadata.parentElement).toBe(zone);
+  expect(metadata.className).not.toMatch(/(^|\s)(border|bg-|rounded|min-h-)/);
+  expect(metadata.querySelector('.uppercase')).toBeNull();
+  // Listener addresses and the storage backend are edited (with their
+  // effective values) in the editor below; the zone does not repeat them.
+  expect(zone.textContent).not.toContain('127.0.0.1:9090');
+  expect(zone.textContent).not.toMatch(/postgres/i);
+  expect(within(zone).queryByText('Running')).toBeNull();
+  expect(
+    within(editorCard).getAllByDisplayValue(/127\.0\.0\.1:9090/).length,
+  ).toBeGreaterThan(0);
   // The fixture saved after process start, so the pending-restart drift
   // banner is a real abnormal alert and lives in the zone. It is announced
   // once by that timestamped notice — there is no separate
@@ -1687,12 +1601,12 @@ test('an environment-overridden field keeps its file value editable and shows ef
   render(<SettingsComponent />);
 
   const field = revealField('listener.proxy_addr');
-  const input = screen.getByLabelText('Proxy Addr') as HTMLInputElement;
+  const input = screen.getByLabelText('Proxy address') as HTMLInputElement;
   expect(input.value).toBe('0.0.0.0:8080');
   expect(input.hasAttribute('disabled')).toBe(false);
   expect(field.textContent).toMatch(/Effective[: ]*127\.0\.0\.1:8181/);
 
-  fireEvent.click(within(field).getByText('Value details'));
+  fireEvent.click(within(field).getByText('Details'));
   const details = within(field).getByTestId('config-value-details');
   // The details list provenance only — File, Default, Source — and never
   // repeats the Effective value already shown beside the control.
@@ -1746,7 +1660,7 @@ test('admin provider fields inherit provenance from the array override', () => {
   ).toBeGreaterThan(0);
 });
 
-test('admin providers flatten to one neutral surface per provider', () => {
+test('admin providers render as divider-separated rows without nested boxes', () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
   showCategory(view, 'Identity & access');
@@ -1769,24 +1683,20 @@ test('admin providers flatten to one neutral surface per provider', () => {
     'Environment-backed tokens are referenced by name and never displayed.',
   );
 
-  // Each provider is one neutral surface — and the only boxed surface inside
-  // the editor. Nested field containers render embedded, without their own
-  // field-card chrome.
+  // Providers are divider-separated rows on the editor canvas: no provider,
+  // and nothing inside one, draws a box of its own.
   const provider = document.querySelector<HTMLElement>(
     '[data-config-path="admin.auth.providers[0]"]',
   ) as HTMLElement;
   expect(provider).not.toBeNull();
-  expect(provider.className).toContain('rounded-sm');
-  expect(provider.className).toContain('border-subtle');
-  expect(provider.className).toContain('bg-panel-strong');
   const boxed = Array.from(
     providers.querySelectorAll<HTMLElement>('div[data-config-path]'),
   ).filter(
     (element) =>
-      /(^|\s)border/.test(element.className) &&
+      /(^|\s)border(\s|$)/.test(element.className) ||
       /(^|\s)bg-/.test(element.className),
   );
-  expect(boxed).toEqual([provider]);
+  expect(boxed).toEqual([]);
   const nestedFieldContainers = Array.from(
     provider.querySelectorAll<HTMLElement>('div[data-config-path]'),
   );
@@ -1798,9 +1708,11 @@ test('admin providers flatten to one neutral surface per provider', () => {
     expect(field.className).not.toMatch(/(^|\s)p[xytrbl]?-\d/);
   }
   // The leaf controls themselves still render and stay editable.
-  expect(within(provider).getByLabelText('Id')).toBeDefined();
-  // Embedded drops only the outer chrome — the leaf keeps its own Reset/Unset
-  // actions (suppression is a separate contract owned by row headers).
+  expect(within(provider).getByLabelText('ID')).toBeDefined();
+  // Embedded drops only the outer chrome — the leaf keeps its own field
+  // actions (suppression is a separate contract owned by row headers). The
+  // saved values are configured but unchanged, so only Unset shows until the
+  // draft diverges from the file.
   const idField = provider.querySelector<HTMLElement>(
     '[data-config-path="admin.auth.providers[0].id"]',
   ) as HTMLElement;
@@ -1810,9 +1722,59 @@ test('admin providers flatten to one neutral surface per provider', () => {
   for (const field of [idField, tokenEnvField]) {
     expect(field).not.toBeNull();
     expect(field.hasAttribute('data-field-embedded')).toBe(true);
-    expect(within(field).getByRole('button', { name: 'Reset' })).toBeDefined();
+    expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
     expect(within(field).getByRole('button', { name: 'Unset' })).toBeDefined();
   }
+  fireEvent.change(within(idField).getByLabelText('ID'), {
+    target: { value: 'renamed' },
+  });
+  expect(within(idField).getByRole('button', { name: 'Reset' })).toBeDefined();
+});
+
+test('field actions appear only when they would change something', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  // Saved and unchanged: nothing to reset, but the explicit value can be unset.
+  const field = revealField('listener.admin_addr');
+  expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
+  expect(within(field).getByRole('button', { name: 'Unset' })).toBeDefined();
+
+  // Unset: inherited from defaults, the saved value differs — Reset restores it.
+  fireEvent.click(within(field).getByRole('button', { name: 'Unset' }));
+  expect(within(field).queryByRole('button', { name: 'Unset' })).toBeNull();
+  fireEvent.click(within(field).getByRole('button', { name: 'Reset' }));
+  const input = within(field).getByLabelText(
+    'Admin address',
+  ) as HTMLInputElement;
+  expect(input.value).toBe('127.0.0.1:9090');
+  expect(within(field).queryByRole('button', { name: 'Reset' })).toBeNull();
+});
+
+test('an invalid address shows an inline error on blur that clears once valid', () => {
+  setSettingsLoaded();
+  render(<SettingsComponent />);
+
+  const field = revealField('listener.admin_addr');
+  const input = within(field).getByLabelText(
+    'Admin address',
+  ) as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'not-an-address' } });
+  // No error while still typing — the check runs on blur.
+  expect(within(field).queryByText(/Enter host:port/)).toBeNull();
+  fireEvent.blur(input);
+  const message = within(field).getByText(/Enter host:port/);
+  expect(message.className).toContain('text-danger-text');
+  expect(input.getAttribute('aria-invalid')).toBe('true');
+  expect(input.getAttribute('aria-describedby')).toBe(message.id);
+
+  fireEvent.change(input, { target: { value: '127.0.0.1:9191' } });
+  expect(within(field).queryByText(/Enter host:port/)).toBeNull();
+  expect(input.getAttribute('aria-invalid')).toBe('false');
+
+  // Unmodified neighbours carry no Reset action.
+  const proxy = revealField('listener.proxy_addr');
+  expect(within(proxy).queryByRole('button', { name: 'Reset' })).toBeNull();
 });
 
 test('dirty edits require save draft and validation before file save or download', () => {
@@ -1831,7 +1793,7 @@ test('dirty edits require save draft and validation before file save or download
   expect(downloadButton.hasAttribute('disabled')).toBe(false);
   expect(screen.getByText('Configuration validated')).toBeDefined();
 
-  fireEvent.change(screen.getByLabelText('Proxy Addr'), {
+  fireEvent.change(screen.getByLabelText('Proxy address'), {
     target: { value: '0.0.0.0:8181' },
   });
 
@@ -1965,7 +1927,7 @@ test('storage URL stays opaque and replacement is attached only to validate', ()
   expect(within(urlField).getByRole('button', { name: 'Unset' })).toBeDefined();
 
   fireEvent.click(screen.getByRole('button', { name: 'Replace URL' }));
-  const urlInput = screen.getByLabelText('Url') as HTMLInputElement;
+  const urlInput = screen.getByLabelText('URL') as HTMLInputElement;
   expect(urlInput.type).toBe('password');
   fireEvent.change(urlInput, {
     target: { value: 'postgres://new-secret@db/cc_lb' },
@@ -2102,7 +2064,7 @@ test('switching storage backend clears a pending URL replacement', () => {
   // the variant cutover drops the pending replacement, so the URL field
   // returns to its opaque badge state instead of the password input.
   fireEvent.click(screen.getByRole('button', { name: 'Replace URL' }));
-  const urlInput = screen.getByLabelText('Url') as HTMLInputElement;
+  const urlInput = screen.getByLabelText('URL') as HTMLInputElement;
   fireEvent.change(urlInput, {
     target: { value: 'postgres://new-secret@db/cc_lb' },
   });
@@ -2281,12 +2243,15 @@ test('clean validated read-only config can download on initial load', () => {
   );
   render(<SettingsComponent />);
 
-  // The read-only state is a compact chip in the status zone; the reason is
-  // visible text beside it — readable by keyboard and touch, not hover-only.
+  // The read-only state is a status line under the config file path in the
+  // Draft facts; the reason is visible text beside it — readable by keyboard
+  // and touch, not hover-only.
   const zone = screen.getByTestId('config-status-zone');
-  const summary = within(zone).getByTestId('config-running-summary');
-  expect(within(summary).getByText('Config file read-only')).toBeDefined();
-  expect(within(summary).getByText('Bind mount is read-only.')).toBeDefined();
+  const draftFacts = within(zone).getByTestId('config-editor-metadata');
+  expect(within(draftFacts).getByText('Read-only')).toBeDefined();
+  expect(
+    within(draftFacts).getByText('Bind mount is read-only.'),
+  ).toBeDefined();
   expect(screen.queryByTitle(/Bind mount is read-only/)).toBeNull();
   expect(screen.getByText('Configuration validated')).toBeDefined();
   expect(
@@ -2320,10 +2285,12 @@ test('writable missing config can be created directly on initial load', () => {
   );
   render(<SettingsComponent />);
 
+  const draftFacts = within(
+    screen.getByTestId('config-status-zone'),
+  ).getByTestId('config-editor-metadata');
+  expect(within(draftFacts).getByText('Missing')).toBeDefined();
   expect(
-    within(screen.getByTestId('config-status-zone')).getByText(
-      'Config file missing',
-    ),
+    within(draftFacts).getByText('Saving will create this file.'),
   ).toBeDefined();
   const saveFileButton = screen.getByRole('button', {
     name: 'Save to config file',
@@ -2358,12 +2325,10 @@ test('read-only missing config can download but cannot be created', () => {
   render(<SettingsComponent />);
 
   const zone = screen.getByTestId('config-status-zone');
-  const summary = within(zone).getByTestId('config-running-summary');
+  const draftFacts = within(zone).getByTestId('config-editor-metadata');
+  expect(within(draftFacts).getByText('Missing and read-only')).toBeDefined();
   expect(
-    within(summary).getByText('Config file missing — read-only'),
-  ).toBeDefined();
-  expect(
-    within(summary).getByText('Parent directory is not writable.'),
+    within(draftFacts).getByText('Parent directory is not writable.'),
   ).toBeDefined();
   expect(screen.queryByTitle(/Parent directory is not writable/)).toBeNull();
   expect(
@@ -2464,6 +2429,10 @@ test('config file save exposes pending state and keeps failures in the editor', 
     ...mutationResult(saveFileMutate),
     isPending: true,
   });
+  // The editor is memoized, so a bare parent rerender no longer reaches it;
+  // in the app the mutation hook's own subscription re-renders it. Change a
+  // prop (the URL search) to make the mocked hook value observable here.
+  routerMocks.search = { category: 'network' };
   view.rerender(<SettingsComponent />);
   const pendingButton = screen.getByRole('button', {
     name: 'Save to config file',
@@ -2627,23 +2596,22 @@ test('database pool renders each field once with advanced controls behind the di
   ).toHaveLength(1);
 });
 
-test('numeric fields surface schema bounds as a range hint', () => {
+test('numeric fields surface schema bounds as a hint in the details', () => {
   setSettingsLoaded();
   const view = render(<SettingsComponent />);
 
   const cap = revealField('body.messages_cap_bytes');
-  expect(cap.textContent).toMatch(/range/i);
-  expect(cap.textContent).toMatch(/range[^\d]*1\D*no max/i);
+  expect(cap.textContent).toMatch(/Minimum 1\./);
 
   const address = revealField('listener.proxy_addr');
-  expect(address.textContent).not.toMatch(/range/i);
+  expect(address.textContent).not.toMatch(/Minimum|Maximum|Allowed range/);
 
   showCategory(view, 'Storage & data');
   const maxConnections = revealField('storage.pool.max_connections');
-  expect(maxConnections.textContent).toMatch(/range[^\d]*1\D*64/i);
+  expect(maxConnections.textContent).toMatch(/Allowed range 1–64\./);
 
   const capacity = revealField('event_bus.broadcast_capacity');
-  expect(capacity.textContent).not.toMatch(/range/i);
+  expect(capacity.textContent).not.toMatch(/Minimum|Maximum|Allowed range/);
 });
 
 test('unassigned leaves land in their own category Other settings and stay searchable', async () => {
@@ -2699,11 +2667,11 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(
     dataOther?.querySelector('[data-config-path="event_bus.mystery_flag"]'),
   ).not.toBeNull();
-  // The unassigned section is flattened like every other section: a subtle
-  // top divider, no card chrome, and no amber warning border — the warning
-  // lives in a badge/text instead. As a non-first sibling it keeps its
-  // separator; the panel's first section carries none.
-  expect(sectionTopSeparator(dataOther as HTMLElement)).toBe('border');
+  // The unassigned section is flattened like every other section: space
+  // above it, no card chrome, and no amber warning border — the warning
+  // lives in a badge/text instead. As a non-first sibling it is separated by
+  // space; the panel's first section is flush.
+  expect(sectionTopSeparator(dataOther as HTMLElement)).toBe('space');
   const dataSections = Array.from(
     dataPanel?.querySelectorAll<HTMLElement>('[data-config-section]') ?? [],
   );
@@ -2712,7 +2680,7 @@ test('unassigned leaves land in their own category Other settings and stay searc
   expect(dataOther?.className).not.toMatch(/amber/);
   expect(dataOther?.className).not.toMatch(/(^|\s)rounded/);
   expect(dataOther?.className).not.toMatch(/(^|\s)bg-/);
-  expect(dataOther?.innerHTML).toMatch(/--color-warn/);
+  expect(dataOther?.innerHTML).toMatch(/text-warn-text/);
   // Schema-known and unknown unassigned leaves get distinct explanations.
   expect(dataOther?.textContent).toMatch(/not covered by a settings section/i);
   expect(dataOther?.textContent).toMatch(/not recognized by the schema/i);
@@ -2807,7 +2775,7 @@ test('search results are listbox options announced through a status region', () 
   expect(emptyOption.getAttribute('aria-disabled')).toBe('true');
 });
 
-test('value details is a quiet chevron disclosure listing provenance only', () => {
+test('field details is a quiet chevron disclosure without the effective value', () => {
   setSettingsLoaded();
   render(<SettingsComponent />);
 
@@ -2815,7 +2783,7 @@ test('value details is a quiet chevron disclosure listing provenance only', () =
   const details = within(field).getByTestId('config-value-details');
   const summary = details.querySelector('summary');
   expect(summary).not.toBeNull();
-  expect(summary?.textContent).toMatch(/value details/i);
+  expect(summary?.textContent).toMatch(/^details$/i);
   expect(minHeightPx(summary as HTMLElement)).toBeGreaterThanOrEqual(44);
   // Quiet affordance: the summary hugs its label instead of spanning the
   // field, and carries no button chrome (border, background, or padding).
@@ -2826,11 +2794,12 @@ test('value details is a quiet chevron disclosure listing provenance only', () =
   expect(chevron).not.toBeNull();
   fireEvent.click(summary as HTMLElement);
   expect(chevron?.getAttribute('class')).toContain('rotate-90');
-  // Provenance only: File, Default, and Source — the Effective value already
-  // visible beside the control is not repeated inside.
-  expect(details.textContent).toMatch(/File[: ]/);
-  expect(details.textContent).toMatch(/Default[: ]/);
-  expect(details.textContent).toMatch(/Source[: ]/);
+  // Provenance (file, default, source) and the raw key live inside; the
+  // Effective value already visible beside the control is not repeated.
+  for (const label of ['File', 'Default', 'Source', 'Key']) {
+    expect(within(details).getByText(label).tagName).toBe('DT');
+  }
+  expect(within(details).getByText('listener.proxy_addr')).toBeDefined();
   expect(details.textContent).not.toMatch(/Effective/);
 });
 
@@ -2907,10 +2876,10 @@ test('recurring jobs render one flat card per key with the enabled switch in the
   );
   expect(editor).not.toBeNull();
   // Flattened: the editor sits directly in the section grid and spans it,
-  // without its own card chrome.
+  // separating jobs with dividers rather than a surface of its own.
   expect(editor?.parentElement?.className).toContain('grid');
   expect(editor?.className).toContain('col-span-full');
-  expect(editor?.className).not.toMatch(/border|bg-panel|bg-bg/);
+  expect(editor?.className).not.toMatch(/rounded|bg-/);
 
   // Exactly one job card per configured key — no nested job containers.
   const jobCards = [...(editor?.querySelectorAll('[data-config-path]') ?? [])]
@@ -2991,7 +2960,8 @@ test('recurring jobs render one flat card per key with the enabled switch in the
   expect(within(interval as HTMLElement).getByText('Lower')).toBeDefined();
   expect(within(interval as HTMLElement).getByText('Higher')).toBeDefined();
   // The job header owns Reset/Unset for the whole job — embedded leaves
-  // suppress their own copies so the actions never duplicate.
+  // suppress their own copies so the actions never duplicate. The toggle above
+  // diverged the draft, so Reset shows alongside Unset.
   expect(within(job).getAllByRole('button', { name: 'Reset' })).toHaveLength(1);
   expect(within(job).getAllByRole('button', { name: 'Unset' })).toHaveLength(1);
   for (const field of [interval, jitter]) {
@@ -3002,6 +2972,19 @@ test('recurring jobs render one flat card per key with the enabled switch in the
       within(field as HTMLElement).queryByRole('button', { name: 'Unset' }),
     ).toBeNull();
   }
+  // Reset restores the saved job; with nothing left to reset only Unset stays.
+  fireEvent.click(within(job).getByRole('button', { name: 'Reset' }));
+  expect(within(job).queryByRole('button', { name: 'Reset' })).toBeNull();
+  expect(within(job).getByRole('button', { name: 'Unset' })).toBeDefined();
+  expect(
+    job.querySelector<HTMLInputElement>(
+      '[data-config-path="scheduler.recurring_jobs.usage_rollup.enabled"]',
+    )?.checked,
+  ).toBe(true);
+  // Unset leaves nothing explicit to unset.
+  fireEvent.click(within(job).getByRole('button', { name: 'Unset' }));
+  expect(within(job).queryByRole('button', { name: 'Unset' })).toBeNull();
+  expect(within(job).getByRole('button', { name: 'Reset' })).toBeDefined();
   // The enabled switch is self-explanatory: no On/Off effect rows repeat the
   // obvious enqueue/stop outcome anywhere in the job card.
   expect(enabledGuidance.enabled).toBeFalsy();
@@ -3381,7 +3364,7 @@ test('nullable objects keep one compact switch in both enabled and disabled stat
   ).toBeNull();
 });
 
-test('field chrome reserves red for errors and marks risk with badge and warn text', () => {
+test('field errors mark only the failing control and risk is flagged by a badge', () => {
   const issueReport = {
     ...validReport,
     file: {
@@ -3400,72 +3383,53 @@ test('field chrome reserves red for errors and marks risk with badge and warn te
     editorResponse({ last_validation: issueReport }),
     draftResponse({ last_validation: issueReport }),
   );
-  const view = render(<SettingsComponent />);
+  render(<SettingsComponent />);
 
-  // Only the field with a validation error gets a red border; its issue text
-  // uses the theme-aware danger token, not a raw palette shade.
+  // Only the field with a validation error marks its control invalid and
+  // shows the issue text.
   const cap = document.querySelector<HTMLElement>(
     '[data-config-path="body.messages_cap_bytes"]',
   );
-  expect(cap?.className).toMatch(/border-red/);
-  const issueText = within(cap as HTMLElement).getByText(
-    'Cap is below the minimum.',
+  expect(cap?.querySelector('input')?.getAttribute('aria-invalid')).toBe(
+    'true',
   );
-  expect(issueText.className).toContain('--color-danger-text');
-  expect(issueText.className).not.toMatch(/text-red-\d/);
+  expect(
+    within(cap as HTMLElement).getByText('Cap is below the minimum.'),
+  ).toBeDefined();
 
-  // Dangerous fields keep the same subtle border as normal fields; the risk
-  // is communicated by a badge plus warn-token impact text, not amber chrome.
+  // Dangerous fields carry a risk badge and impact text; they are not
+  // marked invalid.
   const proxy = document.querySelector<HTMLElement>(
     '[data-config-path="listener.proxy_addr"]',
   );
-  expect(proxy?.className).toContain('border-subtle');
-  expect(proxy?.className).not.toMatch(/amber|border-red/);
-  const riskBadge = within(proxy as HTMLElement).getByText(/operational risk/i);
-  // Badge text sits on a tinted surface, so it uses the semantic text token
-  // that keeps ≥4.5:1 contrast — never a raw palette shade.
-  expect(riskBadge.className).toContain('--color-warn-text');
-  expect(riskBadge.className).not.toMatch(/text-amber-\d/);
-  const impact = within(proxy as HTMLElement).getByText(
-    /moves every client-facing endpoint/,
+  expect(proxy?.querySelector('input')?.getAttribute('aria-invalid')).toBe(
+    'false',
   );
-  expect(impact.className).toContain('--color-warn-text');
-  expect(impact.className).not.toMatch(/text-amber-\d/);
+  expect(
+    within(proxy as HTMLElement).getByText(/operational risk/i),
+  ).toBeDefined();
+  expect(
+    within(proxy as HTMLElement).getByText(
+      /moves every client-facing endpoint/,
+    ),
+  ).toBeDefined();
 
-  // A normal field: subtle border, no risk badge, no amber anywhere.
+  // A normal field: no risk badge.
   const metrics = document.querySelector<HTMLElement>(
     '[data-config-path="listener.metrics_addr"]',
   );
-  expect(metrics?.className).toContain('border-subtle');
-  expect(metrics?.className).not.toMatch(/amber|border-red/);
   expect(
     within(metrics as HTMLElement).queryByText(/operational risk/i),
   ).toBeNull();
 
-  // The validation summary's error/ok badges follow the same rule: semantic
-  // text tokens on their tinted surfaces, no raw palette shades.
   const summary = screen.getByTestId('config-validation-summary');
-  const errorBadge = within(summary).getByText('1 errors');
-  expect(errorBadge.className).toContain('--color-danger-text');
-  expect(errorBadge.className).not.toMatch(/text-red-\d/);
-  const okBadge = within(summary).getByText('Effective valid');
-  expect(okBadge.className).toContain('--color-success-text');
-  expect(okBadge.className).not.toMatch(/text-emerald-\d/);
+  expect(within(summary).getByText('1 error')).toBeDefined();
+  // Only exceptions are listed: a valid effective config adds no status.
+  expect(within(summary).queryByText(/Effective/)).toBeNull();
 
-  // A dirty field marks itself with a Modified badge whose text uses the
-  // accent text token on the accent-tinted surface.
-  fireEvent.change(screen.getByLabelText('Proxy Addr'), {
+  // A dirty field marks itself with a Modified badge.
+  fireEvent.change(screen.getByLabelText('Proxy address'), {
     target: { value: '0.0.0.0:8181' },
   });
-  const modifiedBadge = within(proxy as HTMLElement).getByText('Modified');
-  expect(modifiedBadge.className).toContain('--color-accent-text');
-  expect(modifiedBadge.className).not.toMatch(/text-cyan-\d/);
-
-  // Composite containers share one neutral surface — no black-tinted variant.
-  showCategory(view, 'Storage & data');
-  const storage = document.querySelector<HTMLElement>(
-    '[data-config-path="storage"]',
-  );
-  expect(storage?.className).toContain('bg-panel-strong');
-  expect(storage?.className).not.toMatch(/(^|\s)bg-bg/);
+  expect(within(proxy as HTMLElement).getByText('Modified')).toBeDefined();
 });

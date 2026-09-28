@@ -3,7 +3,7 @@ import { useId } from 'react';
 import { parseDatePart } from '../../lib/calendarDate';
 import { parseInTimezone } from '../../lib/timezone';
 import { CalendarPopover } from './CalendarPopover';
-import { cx, Field, INPUT_CLASS } from './primitives';
+import { cx, Field, INPUT_SM_CLASS } from './primitives';
 
 export function parseBound(
   str: string,
@@ -47,6 +47,7 @@ export function DateTimeField({
   onChange,
   onPickDate,
   onEscape,
+  placeholder = 'YYYY-MM-DD HH:mm',
   'aria-label': ariaLabel,
 }: {
   readonly label: string;
@@ -55,6 +56,8 @@ export function DateTimeField({
   readonly onChange: (value: string) => void;
   readonly onPickDate: (isoDate: string) => void;
   readonly onEscape?: () => void;
+  /** Shown while empty; defaults to the accepted format. */
+  readonly placeholder?: string;
   readonly 'aria-label'?: string;
 }) {
   const errorId = useId();
@@ -66,9 +69,12 @@ export function DateTimeField({
           aria-label={ariaLabel}
           type="text"
           inputMode="numeric"
-          placeholder="YYYY-MM-DD HH:mm"
+          placeholder={placeholder}
           autoComplete="off"
-          className={cx(INPUT_CLASS, '!w-44 font-mono tabular-nums pl-8')}
+          className={cx(
+            INPUT_SM_CLASS,
+            '!w-48 max-md:!w-full tabular-nums pl-8',
+          )}
           value={value}
           aria-invalid={error != null ? true : undefined}
           aria-describedby={error != null ? errorId : undefined}

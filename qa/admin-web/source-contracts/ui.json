@@ -17,8 +17,8 @@
     ],
     "imported_action_count": 202,
     "imported_request_occurrence_count": 148,
-    "canonical_action_count": 209,
-    "canonical_request_occurrence_count": 148,
+    "canonical_action_count": 208,
+    "canonical_request_occurrence_count": 146,
     "source_reconciled": true,
     "source_reconciliation_status": "source_reconciled_by_current_generator",
     "runtime_status": "runtime_pending",
@@ -2067,10 +2067,8 @@
     },
     {
       "legacy_id": "UI-UP-08B",
-      "status": "preserved",
-      "canonical_id": "UI-UP-08B",
-      "source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "Subscription quota analysis endpoint was removed; no UI action requests it."
     },
     {
       "legacy_id": "UI-UP-09A",
@@ -2081,10 +2079,8 @@
     },
     {
       "legacy_id": "UI-UP-09B",
-      "status": "preserved",
-      "canonical_id": "UI-UP-09B",
-      "source_id": "routes/upstreams.tsx#DetailView:rangeToggle",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "Subscription quota analysis endpoint was removed; no UI action requests it."
     },
     {
       "legacy_id": "UI-UP-30",
@@ -14233,94 +14229,13 @@
       }
     },
     {
-      "id": "UI-SRC-2351FFDF6073",
-      "source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis",
-      "contract_source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis",
-      "contract_area": "upstreams",
-      "legacy_ids": [
-        "UI-UP-08B"
-      ],
-      "page": "Upstreams",
-      "component": "Quota Analysis Query",
-      "source": {
-        "file": "crates/cc-lb-admin/web/src/routes/upstreams.tsx",
-        "symbol": "DetailView",
-        "line": 869
-      },
-      "name": "Subscription Quota Analysis Query",
-      "trigger_steps": [
-        "Select an OAuth upstream or change quota range"
-      ],
-      "preconditions": [
-        "OAuth upstream selected"
-      ],
-      "variants": [
-        "Loading burn skeletons",
-        "Rendered burn rates and ETA to limit",
-        "Quota deficit warning card",
-        "Analysis caveats box"
-      ],
-      "scope": "each_upstream",
-      "iteration_source": "Each selected OAuth upstream",
-      "coverage": {
-        "kind": "runtime_population",
-        "source": "Each selected OAuth upstream",
-        "variants": [
-          "Loading burn skeletons",
-          "Rendered burn rates and ETA to limit",
-          "Quota deficit warning card",
-          "Analysis caveats box"
-        ]
-      },
-      "risk_tier": "read",
-      "expected_ui": "Fills in snapshot burn stats, deficit multiplier, shortfall tokens, and caveat bullets",
-      "polling": "not_applicable",
-      "client_only_reason": null,
-      "atomic_request_ids": [
-        "UI-UP-08B"
-      ],
-      "requests": [
-        {
-          "method": "GET",
-          "path": "/admin/v1/subscription-quotas/analysis",
-          "query_fields": [
-            "upstream_ids",
-            "windows",
-            "source",
-            "range_secs"
-          ],
-          "body_fields": [],
-          "client_symbol": "useSubscriptionQuotaAnalysis",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useSubscriptionQuotaAnalysis",
-            "line": 876
-          },
-          "side_effect_notes": "None (read-only)",
-          "id": "UI-UP-08B",
-          "parent_action_id": "UI-SRC-2351FFDF6073",
-          "path_bindings": [],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        }
-      ],
-      "applicability": {
-        "latest_source": true,
-        "production": "pending_deployed_delta"
-      }
-    },
-    {
       "id": "UI-UP-09",
       "source_id": "routes/upstreams.tsx#DetailView:rangeToggle",
       "contract_source_id": "routes/upstreams.tsx#DetailView:rangeToggle",
       "contract_area": "upstreams",
       "legacy_ids": [
         "UI-UP-09",
-        "UI-UP-09A",
-        "UI-UP-09B"
+        "UI-UP-09A"
       ],
       "page": "Upstreams",
       "component": "Quota History Range Toggle",
@@ -14355,12 +14270,11 @@
         ]
       },
       "risk_tier": "read",
-      "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series and analysis",
+      "expected_ui": "Updates range state, recalculates bucketSecs and rangeSecs, and refetches series",
       "polling": "not_applicable",
       "client_only_reason": null,
       "atomic_request_ids": [
-        "UI-UP-09A",
-        "UI-UP-09B"
+        "UI-UP-09A"
       ],
       "requests": [
         {
@@ -14382,32 +14296,6 @@
           },
           "side_effect_notes": "None",
           "id": "UI-UP-09A",
-          "parent_action_id": "UI-UP-09",
-          "path_bindings": [],
-          "risk_tier": "read",
-          "applicability": {
-            "latest_source": true,
-            "production": "pending_deployed_delta"
-          }
-        },
-        {
-          "method": "GET",
-          "path": "/admin/v1/subscription-quotas/analysis",
-          "query_fields": [
-            "upstream_ids",
-            "windows",
-            "source",
-            "range_secs"
-          ],
-          "body_fields": [],
-          "client_symbol": "useSubscriptionQuotaAnalysis",
-          "source": {
-            "file": "crates/cc-lb-admin/web/src/lib/queries.ts",
-            "symbol": "useSubscriptionQuotaAnalysis",
-            "line": 876
-          },
-          "side_effect_notes": "None",
-          "id": "UI-UP-09B",
           "parent_action_id": "UI-UP-09",
           "path_bindings": [],
           "risk_tier": "read",

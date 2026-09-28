@@ -1,48 +1,28 @@
 import type { UsageBucket } from '../../../lib/api';
-import { SLICE_COLORS } from './sliceColors';
+import { USAGE_CATEGORIES, type UsageCategoryKey } from './sliceColors';
 
-/**
- * Cost categories in request-log order. The log table, its cost popover and the
- * Overview principal meters all read this list, so a bar drawn in one view
- * cannot disagree with a breakdown shown in another.
- */
-export const COST_CATEGORIES = [
-  { key: 'input', label: 'Input', color: SLICE_COLORS.input },
-  { key: 'output', label: 'Output', color: SLICE_COLORS.output },
-  {
-    key: 'cache_create_5m',
-    label: 'Cache create 5m',
-    color: SLICE_COLORS.cache_create_5m,
-  },
-  {
-    key: 'cache_create_1h',
-    label: 'Cache create 1h',
-    color: SLICE_COLORS.cache_create_1h,
-  },
-  { key: 'cache_read', label: 'Cache read', color: SLICE_COLORS.cache_read },
-] as const;
-
-export type CostCategoryKey = (typeof COST_CATEGORIES)[number]['key'];
+// Cost categories are the token categories (`USAGE_CATEGORIES`), in the same
+// order and colors: the log table, its cost popover, the request drawer and
+// the Overview principal meters all read that list, so a cost bar drawn in one
+// view cannot disagree with a token bar or a breakdown shown in another.
 
 /**
  * Cost an authoritative total reports that no category accounts for — windows
  * rolled up before per-category cost was persisted. Neutral on purpose: it is
- * missing bookkeeping, not a sixth kind of token. The literal is the value
- * `--color-neutral` carries in both themes (gray-500), so a bar segment and a
- * breakdown dot can paint it the same way the categories paint theirs.
+ * missing bookkeeping, not a sixth kind of token.
  */
 export const UNATTRIBUTED_CATEGORY = {
   key: 'unattributed',
   label: 'Unattributed',
-  color: '#6b7280',
+  color: 'var(--color-neutral)',
 } as const;
 
 /** Per-category cost in integer micros. */
-export type CostComponentMicros = Record<CostCategoryKey, number>;
+export type CostComponentMicros = Record<UsageCategoryKey, number>;
 
 /** One ordered slice of a cost bar or breakdown popover. */
 export interface CostSegment {
-  key: CostCategoryKey | typeof UNATTRIBUTED_CATEGORY.key;
+  key: UsageCategoryKey | typeof UNATTRIBUTED_CATEGORY.key;
   label: string;
   color: string;
   value: number;
@@ -55,7 +35,7 @@ const USAGE_COST_FIELD = {
   cache_create_5m: 'cost_cache_creation_5m_micros',
   cache_create_1h: 'cost_cache_creation_1h_micros',
   cache_read: 'cost_cache_read_micros',
-} as const satisfies Record<CostCategoryKey, keyof UsageBucket>;
+} as const satisfies Record<UsageCategoryKey, keyof UsageBucket>;
 
 export function emptyCostComponents(): CostComponentMicros {
   return {
@@ -77,7 +57,7 @@ export function addBucketCostMicros(
   into: CostComponentMicros,
 ): boolean {
   let recorded = false;
-  for (const category of COST_CATEGORIES) {
+  for (const category of USAGE_CATEGORIES) {
     const micros = bucket[USAGE_COST_FIELD[category.key]];
     if (micros == null) continue;
     into[category.key] += micros;
@@ -88,20 +68,21 @@ export function addBucketCostMicros(
 
 export function sumCostMicros(components: CostComponentMicros): number {
   let total = 0;
-  for (const category of COST_CATEGORIES) total += components[category.key];
+  for (const category of USAGE_CATEGORIES) total += components[category.key];
   return total;
 }
 
 /**
- * Ordered segments for a cost bar or breakdown popover: the five categories,
- * then whatever an authoritative total reports on top of them. A remainder of
- * zero or less drops the tail, so a fully attributed window shows five rows.
+ * Ordered segments for a cost bar or breakdown popover: the five categories
+ * in `USAGE_CATEGORIES` order, then whatever an authoritative total reports on
+ * top of them. A remainder of zero or less drops the tail, so a fully
+ * attributed window shows five rows.
  */
 export function costCategorySegments(
   components: CostComponentMicros,
   unattributedMicros = 0,
 ): CostSegment[] {
-  const segments: CostSegment[] = COST_CATEGORIES.map((category) => ({
+  const segments: CostSegment[] = USAGE_CATEGORIES.map((category) => ({
     key: category.key,
     label: category.label,
     color: category.color,

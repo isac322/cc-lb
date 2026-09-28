@@ -22,7 +22,6 @@ describe('LogsPagination', () => {
     );
 
     const nav = screen.getByRole('navigation', { name: 'Log pagination' });
-    expect(nav.className).toContain('h-14');
     expect(nav.className).toContain('shrink-0');
     expect(nav.getAttribute('aria-busy')).toBe('true');
     expect(nav.querySelectorAll('.skeleton')).toHaveLength(1);
@@ -87,7 +86,6 @@ describe('LogsPagination', () => {
 
     const nav = screen.getByRole('navigation', { name: 'Log pagination' });
     expect(nav).toBeDefined();
-    expect(nav.className).toContain('h-14');
     expect(nav.className).toContain('shrink-0');
 
     const statusText = screen.getByText('Showing 1–50 of 450');
@@ -214,7 +212,6 @@ describe('LogsPagination', () => {
 
     expect(screen.getByText('Showing 0–0 of 0')).toBeDefined();
     const nav = screen.getByRole('navigation', { name: 'Log pagination' });
-    expect(nav.className).toContain('h-14');
     expect(nav.className).toContain('shrink-0');
 
     const prevButton = screen.getByRole('button', { name: 'Previous page' });

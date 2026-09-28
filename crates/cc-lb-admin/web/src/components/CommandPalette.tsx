@@ -3,17 +3,16 @@ import { useNavigate } from '@tanstack/react-router';
 import { Command } from 'cmdk';
 import {
   ArrowUpDown,
-  Box,
   CornerDownLeft,
-  LayoutDashboard,
   Plus,
   Server,
-  Settings,
   Users,
   X,
 } from 'lucide-react';
 import { useEffect } from 'react';
 import { usePrincipals, useUpstreams } from '../lib/queries';
+import { NAV_ITEMS } from './layout/navItems';
+import { UpstreamPlanCaption } from './upstreams/UpstreamPlanCaption';
 
 export interface CommandPaletteProps {
   open: boolean;
@@ -44,11 +43,11 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   return (
     <BaseDialog.Root onOpenChange={onOpenChange} open={open}>
       <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm" />
-        <BaseDialog.Popup
-          className="fixed top-[5vh] left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-xl outline-none"
-          style={{ maxHeight: 'min(700px, 80vh)' }}
-        >
+        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop" />
+        {/* Phones: a full-screen sheet (input on top, results to the bottom
+            edge) so the keyboard never hides the list under a floating card.
+            From `md`: a centred 36rem panel near the top. */}
+        <BaseDialog.Popup className="fixed inset-x-0 top-0 z-50 h-dvh outline-none md:inset-x-auto md:top-[5vh] md:left-1/2 md:h-auto md:w-[calc(100%-2rem)] md:max-w-xl md:-translate-x-1/2">
           <BaseDialog.Title className="sr-only">
             Command palette
           </BaseDialog.Title>
@@ -57,22 +56,22 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           </BaseDialog.Description>
           <Command
             label="Command palette"
-            className="bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl grid grid-rows-[auto_minmax(0,1fr)_auto] max-h-full overflow-hidden"
+            className="glass-strong grid h-full grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden max-md:rounded-none max-md:border-0 md:h-auto md:max-h-[min(700px,80vh)] md:rounded-md"
           >
-            <div className="flex items-center gap-2 px-3 h-11 border-b border-subtle">
+            <div className="flex items-center gap-2 px-4 h-12 border-b border-subtle">
               <Command.Input
                 placeholder="Search resources or run commands…"
                 autoFocus
-                className="flex-1 bg-transparent text-sm text-text outline-none"
+                className="flex-1 self-stretch bg-transparent text-body text-text placeholder:text-text-faint outline-none"
               />
-              <kbd className="font-mono text-[10px] text-text-faint bg-overlay-3 px-1.5 py-0.5 rounded-sm border border-subtle">
-                ESC
+              <kbd className="hidden md:inline font-sans text-caption text-text-faint border border-subtle px-1.5 rounded-sm">
+                Esc
               </kbd>
               <BaseDialog.Close
                 aria-label="Close"
-                className="text-text-muted hover:text-text"
+                className="-mr-2 md:mr-0 inline-flex shrink-0 items-center justify-center rounded-sm text-text-muted transition-colors h-11 w-11 md:h-8 md:w-8 hover:bg-overlay-5 hover:text-text focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </BaseDialog.Close>
             </div>
             <Command.List
@@ -81,30 +80,15 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             >
               <Command.Empty>No matches found.</Command.Empty>
               <Command.Group heading="Pages">
-                <Command.Item onSelect={() => go('/')}>
-                  <LayoutDashboard className="w-4 h-4 text-text-faint" />
-                  Go to Overview
-                </Command.Item>
-                <Command.Item onSelect={() => go('/upstreams')}>
-                  <Server className="w-4 h-4 text-text-faint" />
-                  Go to Upstreams
-                </Command.Item>
-                <Command.Item onSelect={() => go('/principals')}>
-                  <Users className="w-4 h-4 text-text-faint" />
-                  Go to Principals
-                </Command.Item>
-                <Command.Item onSelect={() => go('/plugins')}>
-                  <Box className="w-4 h-4 text-text-faint" />
-                  Go to Plugins
-                </Command.Item>
-                <Command.Item onSelect={() => go('/logs')}>
-                  <Box className="w-4 h-4 text-text-faint" />
-                  Go to Logs
-                </Command.Item>
-                <Command.Item onSelect={() => go('/settings')}>
-                  <Settings className="w-4 h-4 text-text-faint" />
-                  Go to Settings
-                </Command.Item>
+                {NAV_ITEMS.map(({ path, label, Icon }) => (
+                  <Command.Item key={path} onSelect={() => go(path)}>
+                    <Icon
+                      className="w-4 h-4 text-text-faint"
+                      aria-hidden="true"
+                    />
+                    Go to {label}
+                  </Command.Item>
+                ))}
               </Command.Group>
               <Command.Group heading="Actions">
                 <Command.Item onSelect={() => go('/upstreams?action=new')}>
@@ -131,9 +115,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       onSelect={() => go(`/upstreams?selectedId=${u.id}`)}
                     >
                       <Server className="w-4 h-4 text-text-faint" />
-                      <span>{u.name}</span>
-                      <span className="ml-auto text-[10px] text-text-faint font-mono">
-                        {u.kind}
+                      <span className="min-w-0 truncate">{u.name}</span>
+                      <span className="ml-auto shrink-0 text-caption text-text-faint">
+                        <UpstreamPlanCaption upstream={u} />
                       </span>
                     </Command.Item>
                   ))
@@ -150,8 +134,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                       onSelect={() => go(`/principals?selectedId=${p.id}`)}
                     >
                       <Users className="w-4 h-4 text-text-faint" />
-                      <span>{p.name}</span>
-                      <span className="ml-auto text-[10px] text-text-faint font-mono">
+                      <span className="min-w-0 truncate">{p.name}</span>
+                      <span className="ml-auto shrink-0 font-mono text-data text-text-faint">
                         {p.kind}
                       </span>
                     </Command.Item>
@@ -159,16 +143,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                 )}
               </Command.Group>
             </Command.List>
-            <div className="flex items-center justify-between px-3 h-9 border-t border-subtle bg-overlay-1 text-[10px] text-text-faint">
+            <div className="hidden md:flex items-center justify-between px-4 h-9 border-t border-subtle text-caption text-text-faint">
               <div className="flex items-center gap-3">
                 <span className="inline-flex items-center gap-1">
-                  <ArrowUpDown className="w-3 h-3" /> Navigate
+                  <ArrowUpDown className="size-3" aria-hidden="true" /> Navigate
                 </span>
                 <span className="inline-flex items-center gap-1">
-                  <CornerDownLeft className="w-3 h-3" /> Select
+                  <CornerDownLeft className="size-3" aria-hidden="true" />{' '}
+                  Select
                 </span>
               </div>
-              <span className="inline-flex items-center gap-1">ESC Close</span>
+              <span>Esc to close</span>
             </div>
           </Command>
         </BaseDialog.Popup>

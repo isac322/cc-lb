@@ -5,6 +5,7 @@ import {
   buildLiveFilters,
   getLogsRouteState,
   logsSearchSchema,
+  presetFor,
 } from './logs';
 
 describe('logsSearchSchema', () => {
@@ -28,7 +29,7 @@ describe('logsSearchSchema', () => {
     expect(parsed.event_kind).toBeUndefined();
   });
 
-  it('leaves the kind filter unset by default and keeps explicit kinds', () => {
+  it('leaves the kind param unset by default and keeps explicit kinds and all', () => {
     expect(logsSearchSchema.parse({}).event_kind).toBeUndefined();
     expect(logsSearchSchema.parse({ event_kind: 'renewal' }).event_kind).toBe(
       'renewal',
@@ -36,6 +37,9 @@ describe('logsSearchSchema', () => {
     expect(
       logsSearchSchema.parse({ event_kind: 'unclassified' }).event_kind,
     ).toBe('unclassified');
+    expect(logsSearchSchema.parse({ event_kind: 'all' }).event_kind).toBe(
+      'all',
+    );
   });
 
   it('ignores legacy source_kind params and invalid kind values', () => {
@@ -171,5 +175,28 @@ describe('buildHistoricalFilters', () => {
     expect(buildLiveFilters(filters)).toEqual(live);
     expect(buildLiveFilters(filters)).not.toHaveProperty('status');
     expect(buildLiveFilters(filters)).not.toHaveProperty('session');
+  });
+
+  it('lists messages when the URL names no kind and every kind for all', () => {
+    expect(buildHistoricalFilters({})).toEqual({ event_kind: 'messages' });
+    expect(buildLiveFilters({})).toEqual({ event_kind: 'messages' });
+    expect(buildHistoricalFilters({ event_kind: 'all' })).toEqual({});
+    expect(buildLiveFilters({ event_kind: 'all' })).toEqual({});
+  });
+});
+
+describe('presetFor', () => {
+  const now = 1_700_000_000;
+
+  it('treats an unbounded range as All time and a fixed end as custom', () => {
+    expect(presetFor(undefined, undefined, now)).toBe('all');
+    expect(presetFor(now - 3600, now - 60, now)).toBeNull();
+  });
+
+  it('keeps a preset selected while its window has only grown slightly', () => {
+    expect(presetFor(now - 3600, undefined, now)).toBe('1h');
+    expect(presetFor(now - 3600 - 72, undefined, now)).toBe('1h');
+    expect(presetFor(now - 3600 - 73, undefined, now)).toBeNull();
+    expect(presetFor(now - 7 * 86_400 - 3 * 3600, undefined, now)).toBe('7d');
   });
 });

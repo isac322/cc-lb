@@ -9,10 +9,10 @@
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
   "source_reconciliation": {
     "status": "source_reconciled",
-    "ui_actions": 209,
-    "ui_request_occurrences": 148,
-    "api_endpoints": 104,
-    "registered_backend_routes": 104,
+    "ui_actions": 208,
+    "ui_request_occurrences": 146,
+    "api_endpoints": 102,
+    "registered_backend_routes": 102,
     "production_ui_source_files": 97,
     "ui_routes": 8,
     "unknown_ui_requests": [],
@@ -96,11 +96,6 @@
         "method": "GET",
         "path": "/admin/subscription-quotas/aggregate",
         "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/aggregate."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/subscription-quotas/analysis",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/analysis."
       },
       {
         "method": "GET",
@@ -1776,10 +1771,8 @@
     },
     {
       "legacy_id": "UI-UP-08B",
-      "status": "preserved",
-      "canonical_id": "UI-UP-08B",
-      "source_id": "routes/upstreams.tsx#DetailView:quotaAnalysis",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "Subscription quota analysis endpoint was removed; no UI action requests it."
     },
     {
       "legacy_id": "UI-UP-09A",
@@ -1790,10 +1783,8 @@
     },
     {
       "legacy_id": "UI-UP-09B",
-      "status": "preserved",
-      "canonical_id": "UI-UP-09B",
-      "source_id": "routes/upstreams.tsx#DetailView:rangeToggle",
-      "reason": "Same method/path and source-backed request occurrence."
+      "status": "retired",
+      "retired_reason": "Subscription quota analysis endpoint was removed; no UI action requests it."
     },
     {
       "legacy_id": "UI-UP-30",

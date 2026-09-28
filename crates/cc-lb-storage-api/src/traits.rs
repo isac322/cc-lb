@@ -240,24 +240,6 @@ pub trait UsageRollupStore: Send + Sync {
         window_end_unix_secs: u64,
     ) -> StorageResult<Vec<UsageRollup>>;
 
-    /// Reads usage rollups for analysis while limiting the storage scan to the requested
-    /// upstreams. Backends should override this to push the upstream predicate into SQL.
-    async fn query_usage_rollups_for_upstreams_in_range(
-        &self,
-        upstream_ids: &[uuid::Uuid],
-        resolution: UsageRollupResolution,
-        window_start_unix_secs: u64,
-        window_end_unix_secs: u64,
-    ) -> StorageResult<Vec<UsageRollup>> {
-        if upstream_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut rollups = self
-            .query_usage_rollups_in_range(resolution, window_start_unix_secs, window_end_unix_secs)
-            .await?;
-        rollups.retain(|rollup| upstream_ids.contains(&rollup.upstream_id));
-        Ok(rollups)
-    }
     async fn query_overview_excluded_error_buckets_in_range(
         &self,
         resolution: UsageRollupResolution,

@@ -1,26 +1,29 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Download } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ConfigEditorSection } from '../components/settings-config';
 import {
   Button,
   Card,
-  CardBody,
-  CardHeader,
   Field,
-  INPUT_CLASS,
   PageContainer,
+  PageHeader,
   Section,
   Skeleton,
 } from '../components/ui/primitives';
+import { RelativeTime } from '../components/ui/RelativeTime';
+import { Select } from '../components/ui/Select';
 import {
-  RelativeOffsetTime,
-  RelativeTime,
-} from '../components/ui/RelativeTime';
+  Table,
+  TableCell,
+  TableHead,
+  TableHeadCell,
+  TableRow,
+} from '../components/ui/Table';
 import { type ConfigHistoryResponse, downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
-import { useConfigHistory, useStatus } from '../lib/queries';
+import { useConfigHistory } from '../lib/queries';
 
 const ALL_BCP47_LOCALES = [
   'af-ZA',
@@ -198,21 +201,36 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsPage() {
-  const status = useStatus();
   const configHistory = useConfigHistory();
   const [downloadingDatabaseSnapshot, setDownloadingDatabaseSnapshot] =
     useState(false);
   const downloadingDatabaseSnapshotRef = useRef(false);
   const { locale, effective, setLocale } = useLocale();
   const { timezone, effective: effectiveTz, setTimezone } = useTimezone();
-  const [now, setNow] = useState(new Date());
   const search = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
 
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
+  // ConfigEditorSection is memoized; hand it props that only change when the
+  // data it reads changes. The query result object itself is rebuilt on every
+  // render, so pick the two fields the editor uses.
+  const historyData = configHistory.data;
+  const historyError = configHistory.isError;
+  const editorHistory = useMemo(
+    () => ({ data: historyData, isError: historyError }),
+    [historyData, historyError],
+  );
+  const handleEditorNavigate = useCallback(
+    (next: { category?: string; field?: string; q?: string }) =>
+      navigate({
+        search: {
+          category: next.category,
+          field: next.field,
+          q: next.q,
+        },
+        resetScroll: false,
+      }),
+    [navigate],
+  );
 
   // The snapshot is a plain download rather than a mutation, so its in-flight
   // state is local. The ref rejects a second click landing in the same tick,
@@ -231,199 +249,124 @@ function SettingsPage() {
 
   return (
     <PageContainer>
+      {/* The top bar already names the page: the h1 stays for assistive
+      tech only, with no visible header block above the first section. */}
+      <PageHeader title="Settings" />
+
       <Section
-        title="Settings"
-        subtitle="Version, localization, configuration drafts, and data backups."
+        title="Localization"
+        subtitle="Locale and timezone for absolute timestamp display (stored locally in your browser)."
       >
-        {/* Version card */}
-        <Card data-testid="version-card">
-          <CardHeader
-            title="Version"
-            subtitle={
-              status.isLoading ? (
-                <Skeleton
-                  as="span"
-                  className="block h-8 w-72 max-w-full sm:h-4"
-                />
-              ) : (
-                <span className="block min-h-8 sm:min-h-4">
-                  {status.data ? (
-                    <>
-                      cc-lb {status.data.version} · {status.data.git_sha} ·
-                      started{' '}
-                      <RelativeOffsetTime
-                        offsetSeconds={-status.data.uptime_secs}
-                      />
-                    </>
-                  ) : (
-                    '—'
-                  )}
-                </span>
-              )
-            }
-          />
-          <CardBody
-            data-testid="version-metadata"
-            className="space-y-3 text-xs"
+        <div>
+          <div className="grid max-w-3xl gap-4 md:grid-cols-2">
+            <Field label="Locale">
+              <Select
+                className="max-md:h-10"
+                value={locale}
+                onChange={setLocale}
+                options={[
+                  { value: 'auto', label: 'Auto (browser)' },
+                  ...getAvailableLocales(effective).map((loc) => ({
+                    value: loc.tag,
+                    label: loc.label,
+                  })),
+                ]}
+              />
+            </Field>
+            <Field label="Timezone">
+              <Select
+                className="max-md:h-10"
+                value={timezone}
+                onChange={setTimezone}
+                options={[
+                  { value: 'auto', label: 'Auto (browser)' },
+                  ...(Intl.supportedValuesOf
+                    ? Intl.supportedValuesOf('timeZone')
+                    : FALLBACK_TIMEZONES
+                  ).map((tz) => ({ value: tz, label: tz })),
+                ]}
+              />
+            </Field>
+          </div>
+          <LivePreviewClock locale={effective} timezone={effectiveTz} />
+        </div>
+      </Section>
+
+      <ConfigEditorSection
+        history={editorHistory}
+        category={search.category}
+        field={search.field}
+        query={search.q}
+        onNavigate={handleEditorNavigate}
+      />
+
+      <ConfigHistorySection history={configHistory} />
+
+      <Section
+        title="Data & backups"
+        subtitle="Export resources stored in the cc-lb database."
+      >
+        <div>
+          <h3 className="text-title-card text-text">
+            Database resources snapshot
+          </h3>
+          <p className="mt-1 max-w-[70ch] text-body text-text-muted">
+            Download a JSON snapshot of upstreams, principals, plugins, and
+            chains stored in the database.
+          </p>
+          <Button
+            className="mt-4 max-md:h-11 max-md:w-full"
+            iconLeft={<Download className="w-4 h-4" />}
+            loading={downloadingDatabaseSnapshot}
+            onClick={handleDownloadDatabaseSnapshot}
           >
-            <div className="grid grid-cols-3 gap-3">
-              <Row
-                label="Rust"
-                value={
-                  status.isLoading ? (
-                    <Skeleton className="h-4 w-16" />
-                  ) : (
-                    (status.data?.build.rust_version ?? '—')
-                  )
-                }
-              />
-              <Row
-                label="Profile"
-                value={
-                  status.isLoading ? (
-                    <Skeleton className="h-4 w-12" />
-                  ) : (
-                    (status.data?.build.profile ?? '—')
-                  )
-                }
-              />
-              <Row
-                label="Generation"
-                value={
-                  status.isLoading ? (
-                    <Skeleton className="h-4 w-8" />
-                  ) : (
-                    (status.data?.generation ?? '—')
-                  )
-                }
-              />
-            </div>
-            <div className="pt-2 border-t border-subtle/40">
-              <div className="text-text-faint text-[10px] uppercase tracking-wider mb-0.5">
-                Build target
-              </div>
-              <div className="min-h-4 font-mono break-all">
-                {status.isLoading ? (
-                  <Skeleton className="h-4 w-64 max-w-full" />
-                ) : (
-                  (status.data?.build.target ?? '—')
-                )}
-              </div>
-            </div>
-          </CardBody>
-        </Card>
-
-        {/* Localization */}
-        <Card>
-          <CardHeader
-            title="Localization"
-            subtitle="Locale and timezone for absolute timestamp display (stored locally in your browser)."
-          />
-          <CardBody>
-            <div className="flex flex-col md:flex-row gap-4">
-              <div className="flex-1 min-w-0">
-                <Field label="Locale">
-                  <select
-                    className={INPUT_CLASS}
-                    value={locale}
-                    onChange={(e) => setLocale(e.target.value)}
-                  >
-                    <option value="auto">Auto (browser)</option>
-                    {getAvailableLocales(effective).map((loc) => (
-                      <option key={loc.tag} value={loc.tag}>
-                        {loc.label}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </div>
-              <div className="flex-1 min-w-0">
-                <Field label="Timezone">
-                  <select
-                    className={INPUT_CLASS}
-                    value={timezone}
-                    onChange={(e) => setTimezone(e.target.value)}
-                  >
-                    <option value="auto">Auto (browser)</option>
-                    {Intl.supportedValuesOf ? (
-                      Intl.supportedValuesOf('timeZone').map((tz) => (
-                        <option key={tz} value={tz}>
-                          {tz}
-                        </option>
-                      ))
-                    ) : (
-                      <>
-                        <option value="UTC">UTC</option>
-                        <option value="Asia/Seoul">Asia/Seoul</option>
-                        <option value="Asia/Tokyo">Asia/Tokyo</option>
-                        <option value="Asia/Shanghai">Asia/Shanghai</option>
-                        <option value="Europe/London">Europe/London</option>
-                        <option value="Europe/Berlin">Europe/Berlin</option>
-                        <option value="America/New_York">
-                          America/New_York
-                        </option>
-                        <option value="America/Los_Angeles">
-                          America/Los_Angeles
-                        </option>
-                      </>
-                    )}
-                  </select>
-                </Field>
-              </div>
-            </div>
-            <div className="mt-3 text-xs text-text-muted">
-              Current preview: {formatAbsolute(now, effective, effectiveTz)}
-            </div>
-          </CardBody>
-        </Card>
-
-        <ConfigEditorSection
-          history={configHistory}
-          category={search.category}
-          field={search.field}
-          query={search.q}
-          onNavigate={(next) =>
-            navigate({
-              search: {
-                category: next.category,
-                field: next.field,
-                q: next.q,
-              },
-              resetScroll: false,
-            })
-          }
-        />
-
-        {/* History */}
-        <ConfigHistorySection history={configHistory} />
-
-        {/* Database export */}
-        <Section
-          title="Data & Backups"
-          subtitle="Export resources stored in the cc-lb database."
-        >
-          <Card>
-            <CardHeader
-              title="Database resources snapshot"
-              subtitle="Download a JSON snapshot of upstreams, principals, plugins, and chains stored in the database."
-            />
-            <CardBody>
-              <Button
-                iconLeft={<Download className="w-4 h-4" />}
-                loading={downloadingDatabaseSnapshot}
-                onClick={handleDownloadDatabaseSnapshot}
-              >
-                {downloadingDatabaseSnapshot
-                  ? 'Downloading...'
-                  : 'Download database snapshot'}
-              </Button>
-            </CardBody>
-          </Card>
-        </Section>
+            {downloadingDatabaseSnapshot
+              ? 'Downloading...'
+              : 'Download database snapshot'}
+          </Button>
+        </div>
       </Section>
     </PageContainer>
   );
 }
+
+/**
+ * Owns the 1 Hz tick so only this line re-renders each second, not the page
+ * (and with it the configuration editor).
+ */
+const LivePreviewClock = memo(function LivePreviewClock({
+  locale,
+  timezone,
+}: {
+  locale: string;
+  timezone: string;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <p className="mt-3 text-body-sm text-text-muted">
+      Preview:{' '}
+      <span className="text-text tabular-nums">
+        {formatAbsolute(now, locale, timezone)}
+      </span>
+    </p>
+  );
+});
+
+/** Used when the runtime cannot enumerate IANA zones. */
+const FALLBACK_TIMEZONES = [
+  'UTC',
+  'Asia/Seoul',
+  'Asia/Tokyo',
+  'Asia/Shanghai',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Los_Angeles',
+];
 
 const HISTORY_LOADING_ROW_IDS = [0, 1, 2, 3] as const;
 
@@ -440,82 +383,75 @@ function ConfigHistorySection({
 }: {
   history: ConfigHistoryQueryResult;
 }) {
+  const entries = history.data?.entries ?? [];
+  const empty = !history.isError && !history.isLoading && !entries.length;
   return (
-    <Section title="Saved Config History" subtitle="Last 20 saved revisions">
-      <Card>
-        <div
+    <Section title="Saved config history" subtitle="Last 20 saved revisions">
+      {/* An empty history is a sentence, not a bordered box. */}
+      {empty ? (
+        <p
           data-testid="config-history-slot"
-          className="min-h-[173px] sm:min-h-[163px]"
+          className="text-body text-text-muted"
         >
-          <div
-            className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] border-b border-subtle px-4 py-2 text-[10px] uppercase tracking-wider text-text-faint"
-            role="row"
-          >
-            <span role="columnheader">Rev</span>
-            <span role="columnheader">Saved</span>
-          </div>
-          <div className="font-mono text-xs">
-            {history.isError ? (
-              <div
-                role="alert"
-                className="flex min-h-20 flex-col items-center justify-center gap-2 border-b border-row px-4 py-4 text-center"
+          No saved config history available.
+        </p>
+      ) : (
+        <Card data-testid="config-history-slot">
+          {history.isError ? (
+            <div
+              role="alert"
+              className="flex flex-col items-center gap-3 px-4 py-6 text-center"
+            >
+              <p className="max-w-md text-body text-text-muted">
+                Saved config history could not be loaded. Restart status may be
+                incomplete until this request succeeds.
+              </p>
+              <Button
+                size="sm"
+                loading={history.isFetching}
+                onClick={() => void history.refetch()}
               >
-                <span className="text-text-muted">
-                  Saved config history could not be loaded. Restart status may
-                  be incomplete until this request succeeds.
-                </span>
-                <Button
-                  size="sm"
-                  loading={history.isFetching}
-                  onClick={() => void history.refetch()}
-                >
-                  Retry history
-                </Button>
-              </div>
-            ) : null}
-            {history.isLoading ? (
-              HISTORY_LOADING_ROW_IDS.map((id) => (
-                <div
-                  key={id}
-                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
-                >
-                  <Skeleton className="h-4 w-8" />
-                  <Skeleton className="h-4 w-24 max-w-full" />
-                </div>
-              ))
-            ) : history.data?.entries.length ? (
-              history.data.entries.map((entry) => (
-                <div
-                  key={entry.revision}
-                  className="grid grid-cols-[minmax(4rem,auto)_minmax(0,1fr)] items-center gap-3 border-b border-row px-4 py-2"
-                  role="row"
-                >
-                  <span role="cell">{entry.revision}</span>
-                  <span className="min-w-0" role="cell">
-                    <RelativeTime
-                      ts={new Date(entry.saved_at_unix_secs * 1000)}
-                    />
-                  </span>
-                </div>
-              ))
-            ) : !history.isError ? (
-              <div className="px-4 py-12 text-center text-xs text-text-faint">
-                No saved config history available.
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </Card>
+                Retry history
+              </Button>
+            </div>
+          ) : history.isLoading || entries.length ? (
+            <Table>
+              <TableHead sticky={false}>
+                <tr>
+                  <TableHeadCell className="w-32">Revision</TableHeadCell>
+                  <TableHeadCell>Saved</TableHeadCell>
+                </tr>
+              </TableHead>
+              <tbody>
+                {history.isLoading
+                  ? HISTORY_LOADING_ROW_IDS.map((id) => (
+                      <TableRow key={id} dense aria-hidden="true">
+                        <TableCell>
+                          <Skeleton className="h-3 w-8" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-3 w-24 max-w-full" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : entries.map((entry) => (
+                      <TableRow key={entry.revision} dense>
+                        <TableCell className="tabular-nums">
+                          {entry.revision}
+                        </TableCell>
+                        <TableCell className="text-text-muted">
+                          <RelativeTime
+                            ts={new Date(entry.saved_at_unix_secs * 1000)}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+              </tbody>
+            </Table>
+          ) : null}
+        </Card>
+      )}
     </Section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-text-faint">{label}</span>
-      <div className="text-right">{value}</div>
-    </div>
   );
 }
 

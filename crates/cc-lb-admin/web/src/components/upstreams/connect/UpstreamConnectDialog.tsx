@@ -34,6 +34,7 @@ import {
   Field,
   INPUT_CLASS,
   Modal,
+  Notice,
 } from '../../ui/primitives';
 import {
   AccountCard,
@@ -54,7 +55,8 @@ import {
 type StepId = 'kind' | 'signin' | 'paste' | 'finish' | 'apikey';
 type UpstreamKind = 'anthropic_oauth' | 'anthropic_api_key';
 
-const PENDING_INPUT_CLASS = 'disabled:opacity-50 disabled:cursor-not-allowed';
+const PENDING_INPUT_CLASS =
+  'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint';
 
 /** What the dialog is opened for; `null` keeps it closed. */
 export type UpstreamConnectTarget =
@@ -230,18 +232,14 @@ function ConnectDialogBody({
             ? 'Sign in with the Claude account this upstream should use.'
             : 'The current connection keeps working until you paste the new code.';
 
+  // Back and Cancel are sibling actions: same variant and size.
   const backButton = (to: StepId) => (
-    <Button
-      variant="ghost"
-      className="mr-auto"
-      disabled={busy}
-      onClick={() => setStep(to)}
-    >
+    <Button className="mr-auto" disabled={busy} onClick={() => setStep(to)}>
       Back
     </Button>
   );
   const cancelButton = (
-    <Button variant="ghost" disabled={busy} onClick={requestClose}>
+    <Button disabled={busy} onClick={requestClose}>
       Cancel
     </Button>
   );
@@ -333,7 +331,7 @@ function ConnectDialogBody({
             activeIndex={stepIndex}
           />
           <div className="min-w-0 flex-1">
-            <div className="sm:hidden text-[11px] uppercase tracking-wider text-text-faint mb-3">
+            <div className="sm:hidden text-caption text-text-faint mb-3">
               Step {stepIndex + 1} of {steps.length}
             </div>
 
@@ -407,7 +405,7 @@ function ConnectDialogBody({
                 )}
                 <button
                   type="button"
-                  className="-mt-1 w-fit text-xs text-text-faint underline underline-offset-2 hover:text-text disabled:opacity-50"
+                  className="-mt-1 w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:control-disabled"
                   disabled={saving}
                   onClick={() => setUseEnvVar((v) => !v)}
                 >
@@ -435,13 +433,13 @@ function ConnectDialogBody({
                 {upstream && !firstConnect && previousAccount ? (
                   <div className="flex flex-col gap-1.5">
                     <AccountCard account={previousAccount} label="Sign in as" />
-                    <p className="text-xs text-text-faint">
+                    <p className="text-body-sm text-text-muted">
                       If Claude shows a different account, switch accounts there
                       first.
                     </p>
                   </div>
                 ) : null}
-                <p className="text-xs text-text-faint">
+                <p className="text-body-sm text-text-muted">
                   A new Claude tab opens and asks you to approve access. When it
                   finishes it shows a code — that code is how cc-lb proves the
                   sign-in.
@@ -456,7 +454,7 @@ function ConnectDialogBody({
                   <button
                     type="button"
                     onClick={() => setStep('paste')}
-                    className="text-xs text-text-faint underline underline-offset-2 hover:text-text"
+                    className="text-caption text-text-faint underline underline-offset-2 hover:text-text max-md:min-h-10"
                   >
                     I already have a code
                   </button>
@@ -481,9 +479,9 @@ function ConnectDialogBody({
                     href={session.authorizeUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex w-fit items-center gap-1 text-xs text-text-faint underline underline-offset-2 hover:text-text"
+                    className="inline-flex w-fit items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
                   >
-                    <ExternalLink className="w-3 h-3" />
+                    <ExternalLink className="w-3 h-3" strokeWidth={1.75} />
                     Open the sign-in page again
                   </a>
                 ) : null}
@@ -520,15 +518,12 @@ function ConnectDialogBody({
                     />
                   </Field>
                   {draftExpired ? (
-                    <div
-                      role="alert"
-                      className="rounded-sm border border-[color:var(--color-warn)]/30 bg-[color:var(--color-warn)]/10 p-3 text-xs text-[color:var(--color-warn-text)]"
-                    >
+                    <Notice tone="warning" role="alert">
                       This sign-in expired before the upstream was added. Sign
                       in again to continue — it only takes a moment.
-                    </div>
+                    </Notice>
                   ) : session.remainingMs < 300_000 ? (
-                    <p className="text-xs text-[color:var(--color-warn-text)] tabular-nums">
+                    <p className="text-body-sm text-warn-text tabular-nums">
                       Add the upstream within{' '}
                       {formatRemaining(session.remainingMs)} — the sign-in
                       expires after that.
@@ -623,7 +618,7 @@ function KindStep({
         <KindOption
           value="anthropic_oauth"
           selected={kind === 'anthropic_oauth'}
-          icon={<UserRound className="w-4 h-4" />}
+          icon={<UserRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Claude subscription"
           badge="Recommended"
           description="Sign in with a Claude Pro, Max, Team or Enterprise account. cc-lb detects the plan and tracks its quota automatically."
@@ -632,7 +627,7 @@ function KindStep({
         <KindOption
           value="anthropic_api_key"
           selected={kind === 'anthropic_api_key'}
-          icon={<KeyRound className="w-4 h-4" />}
+          icon={<KeyRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Anthropic API key"
           description="Use a workspace API key (sk-ant-…). Billed per token."
           onActivate={onContinue}
@@ -665,34 +660,34 @@ function KindOption({
       className={cx(
         'flex items-start gap-3 p-3 rounded-sm border cursor-pointer transition-colors',
         selected
-          ? 'border-[color:var(--color-accent)] bg-[color:var(--color-accent-dim)]'
-          : 'border-subtle hover:bg-overlay-1',
+          ? 'border-accent bg-overlay-2'
+          : 'border-subtle hover:bg-overlay-2',
       )}
     >
       <span
         className={cx(
-          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors',
           selected
-            ? 'bg-[color:var(--color-accent)] text-black'
-            : 'bg-overlay-2 text-text-muted',
+            ? 'bg-accent-dim text-accent-text'
+            : 'bg-overlay-3 text-text-muted',
         )}
       >
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-2">
-          <span className="text-sm font-medium text-text">{title}</span>
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-body font-medium text-text">{title}</span>
           {badge ? <Badge tone="accent">{badge}</Badge> : null}
         </span>
-        <span className="mt-0.5 block text-xs text-text-faint">
+        <span className="mt-0.5 block text-body-sm text-text-muted">
           {description}
         </span>
       </span>
       <BaseRadio.Root
         value={value}
-        className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle-strong bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--color-accent)]"
+        className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle-strong bg-bg transition-colors data-[checked]:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       >
-        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-accent" />
       </BaseRadio.Root>
     </label>
   );
@@ -707,9 +702,9 @@ function StepHeading({
 }) {
   return (
     <div>
-      <h3 className="text-sm font-medium text-text">{title}</h3>
+      <h3 className="text-title-card text-text">{title}</h3>
       {subtitle ? (
-        <p className="mt-1 text-xs text-text-faint">{subtitle}</p>
+        <p className="mt-1 text-body-sm text-text-muted">{subtitle}</p>
       ) : null}
     </div>
   );
@@ -734,26 +729,30 @@ function StepRail({
                 aria-hidden="true"
                 className={cx(
                   'absolute left-[9px] top-5 bottom-0 w-px',
-                  done ? 'bg-[color:var(--color-ok)]/50' : 'bg-overlay-4',
+                  done ? 'bg-ok/50' : 'bg-overlay-4',
                 )}
               />
             ) : null}
             <span
               className={cx(
-                'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-medium',
+                'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-caption font-medium tabular-nums',
                 done
-                  ? 'border-[color:var(--color-ok)]/50 bg-[color:var(--color-ok)]/15 text-[color:var(--color-success-text)]'
+                  ? 'border-ok/50 bg-ok/15 text-success-text'
                   : active
-                    ? 'border-[color:var(--color-accent)] text-[color:var(--color-accent-text)]'
+                    ? 'border-accent text-accent-text'
                     : 'border-subtle-strong text-text-faint',
               )}
             >
-              {done ? <Check className="w-3 h-3" /> : index + 1}
+              {done ? (
+                <Check className="w-3 h-3" strokeWidth={1.75} />
+              ) : (
+                index + 1
+              )}
             </span>
             <span className="min-w-0">
               <span
                 className={cx(
-                  'block text-xs font-medium leading-5',
+                  'block text-label leading-5',
                   active
                     ? 'text-text'
                     : done
@@ -763,7 +762,7 @@ function StepRail({
               >
                 {s.title}
               </span>
-              <span className="block text-[11px] leading-4 text-text-faint">
+              <span className="block text-caption text-text-faint">
                 {s.hint}
               </span>
             </span>
@@ -783,10 +782,10 @@ function SuccessHeader({
 }) {
   return (
     <div className="flex items-center gap-2.5">
-      <CheckCircle2 className="w-5 h-5 shrink-0 text-[color:var(--color-ok)]" />
+      <CheckCircle2 className="w-5 h-5 shrink-0 text-ok" strokeWidth={1.75} />
       <div>
-        <h3 className="text-sm font-medium text-text">{title}</h3>
-        <p className="text-xs text-text-faint">{subtitle}</p>
+        <h3 className="text-title-card text-text">{title}</h3>
+        <p className="text-body-sm text-text-muted">{subtitle}</p>
       </div>
     </div>
   );
@@ -798,9 +797,7 @@ function SuccessHeader({
 function WhatYouWillSee() {
   return (
     <div>
-      <div className="mb-1.5 text-[11px] uppercase tracking-wider text-text-faint">
-        What you'll see
-      </div>
+      <div className="mb-1.5 text-label text-text-muted">What you'll see</div>
       <div
         aria-hidden="true"
         className="overflow-hidden rounded-sm border border-subtle bg-overlay-1"
@@ -812,30 +809,28 @@ function WhatYouWillSee() {
             <span className="h-1.5 w-1.5 rounded-full bg-overlay-4" />
             <span className="h-1.5 w-1.5 rounded-full bg-overlay-4" />
           </span>
-          <span className="flex-1 truncate rounded-sm bg-overlay-2 px-2 py-0.5 font-mono text-[10px] text-text-faint">
+          <span className="flex-1 truncate rounded-sm bg-overlay-2 px-2 py-0.5 text-caption text-text-faint">
             claude.ai — authentication
           </span>
         </div>
         {/* Miniature callback page */}
         <div className="flex flex-col gap-1.5 p-3">
-          <div className="text-[12px] font-semibold text-text">
-            Authentication Code
-          </div>
-          <div className="text-[10px] text-text-faint">
+          <div className="text-label text-text">Authentication code</div>
+          <div className="text-caption text-text-faint">
             Paste this into Claude Code
           </div>
-          <div className="rounded-sm border border-subtle bg-bg px-2 py-1.5 font-mono text-[10px] text-text-muted">
+          <div className="rounded-sm border border-subtle bg-bg px-2 py-1.5 font-mono text-data text-text-muted">
             aB3x…#eyJ1…
           </div>
           <div className="mt-0.5">
-            <span className="inline-flex items-center rounded-sm bg-[color:var(--color-text)] px-2 py-1 text-[10px] font-medium text-[color:var(--color-bg)] ring-1 ring-[color:var(--color-accent)] ring-offset-1 ring-offset-[color:var(--color-bg)]">
+            <span className="inline-flex items-center rounded-sm bg-text px-2 py-1 text-caption font-medium text-bg">
               Copy Code
             </span>
           </div>
         </div>
       </div>
-      <p className="mt-1.5 flex items-center gap-1 text-xs text-[color:var(--color-accent-text)]">
-        <CornerUpLeft className="w-3 h-3" />
+      <p className="mt-1.5 flex items-center gap-1 text-caption text-text-muted">
+        <CornerUpLeft className="w-3 h-3" strokeWidth={1.75} />
         Click Copy Code, then come back here
       </p>
     </div>

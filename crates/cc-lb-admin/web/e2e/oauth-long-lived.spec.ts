@@ -160,9 +160,6 @@ async function installAppFixtures(
     if (pathname === '/admin/v1/subscription-quotas/series') {
       return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
     }
-    if (pathname === '/admin/v1/subscription-quotas/analysis') {
-      return json(200, { since_unix_secs: 0, until_unix_secs: 0, now_unix_secs: 0, max_staleness_secs: 300, upstreams: [] });
-    }
     return json(200, {});
   });
 }
