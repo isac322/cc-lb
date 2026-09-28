@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
 
 - The admin endpoint `GET /admin/v1/subscription-quotas/analysis` (and its unversioned alias `/admin/subscription-quotas/analysis`) has been removed, along with its burn-rate, projected-burn, deficit, and ETA estimates. The admin dashboard no longer calls it. Scripts that queried it now receive 404; use `/admin/v1/subscription-quotas/series` for quota history and `/admin/v1/subscription-quotas/aggregate` for current pool state.
 
+### Changed
+
+- The admin dashboard uses a new neutral graphite colour scheme in both Night and Day. Colour now comes from data (charts, meters, session and request-kind chips). Controls such as the primary button, the on switch and the focus ring are neutral silver (Night) or ink (Day), and session chips cycle through nine hues instead of seven.
+- The Docs link at the foot of the dashboard sidebar has been removed until a dedicated documentation page exists.
+
+### Fixed
+
+- Dragging across the Logs histogram to pick a time range no longer leaves trailing afterimages or flickers. The selection, its handles and the time hint now move together with the pointer.
+
 ## [0.8.1] - 2026-09-26
 
 ### Fixed

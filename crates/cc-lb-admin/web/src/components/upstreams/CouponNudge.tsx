@@ -54,7 +54,7 @@ const TONE: Record<
     stroke: 'stroke-[color-mix(in_oklab,var(--color-warn)_50%,transparent)]',
   },
   // A usable reset is news, not a warning: ink and the strong line, no
-  // brand hue (the accent is reserved for gauges and the one primary action).
+  // accent (it is reserved for focus, the switch and the one primary action).
   limit: {
     icon: 'text-text',
     text: 'text-text',

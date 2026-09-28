@@ -5,6 +5,7 @@ import {
   render,
   screen,
 } from '@testing-library/react';
+import { Profiler } from 'react';
 import {
   afterEach,
   beforeEach,
@@ -293,6 +294,59 @@ describe('TimeRangeStrip', () => {
     rectSpy.mockClear();
     fireEvent.mouseMove(window, { clientX: 250, clientY: 20 });
     expect(rectSpy).not.toHaveBeenCalled();
+  });
+
+  it('paints a drag once per animation frame, in step with the hint, without re-rendering per mousemove', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const onRender = vi.fn();
+    const { container } = render(
+      <Profiler id="strip" onRender={onRender}>
+        <TimeRangeStrip
+          {...makeProps({
+            buckets: [
+              { bucket_start_unix_secs: 0, total_count: 3, error_count: 0 },
+            ],
+          })}
+        />
+      </Profiler>,
+    );
+    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+    vi.spyOn(canvas, 'getBoundingClientRect').mockImplementation(
+      () => new DOMRect(0, 0, clientWidth, 88),
+    );
+    const commits = onRender.mock.calls.length;
+    const clears = context.clearRect.mock.calls.length;
+
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 20, button: 0 });
+    for (const clientX of [150, 200, 250, 300]) {
+      fireEvent.mouseMove(window, { clientX, clientY: 20 });
+    }
+
+    // The hint already describes the latest pointer, but nothing re-rendered
+    // and the canvas has not been repainted once per event.
+    const hint = screen.getByText('1m · ~3 requests');
+    expect(hint.style.left).toBe('300px');
+    expect(hint.hidden).toBe(false);
+    expect(onRender).toHaveBeenCalledTimes(commits);
+    expect(context.clearRect).toHaveBeenCalledTimes(clears);
+
+    act(() => {
+      for (const callback of frames.splice(0)) callback(16);
+    });
+
+    // One complete repaint for the frame, showing the draft the hint shows.
+    expect(context.clearRect).toHaveBeenCalledTimes(clears + 1);
+    expect(context.fillRect).toHaveBeenLastCalledWith(298, 22, 4, 20);
+    expect(context.fillRect).toHaveBeenCalledWith(100, 0, 200, 64);
+
+    fireEvent.mouseUp(window, { clientX: 300, clientY: 20 });
+    expect(hint.hidden).toBe(true);
+    expect(onRender).toHaveBeenCalledTimes(commits);
   });
 
   it('preserves non-passive wheel, zoom, pan, keyboard, and active-drag cleanup contracts', () => {

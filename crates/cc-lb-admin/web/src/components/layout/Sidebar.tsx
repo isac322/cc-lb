@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { BookOpen, MoreHorizontal, PanelLeft } from 'lucide-react';
+import { MoreHorizontal, PanelLeft } from 'lucide-react';
 import { useId, useMemo } from 'react';
 import {
   type OAuthReconnectNudge,
@@ -13,8 +13,6 @@ import {
   type NavGroup,
   navItemForPath,
 } from './navItems';
-
-const DOCS_URL = 'https://github.com/isac322/cc-lb#readme';
 
 /**
  * Reconnect nudges for enabled OAuth upstreams: the one source for the
@@ -85,7 +83,7 @@ function UpstreamOAuthAttentionBadge({ collapsed }: { collapsed: boolean }) {
 }
 
 /**
- * The mark: an open 240° dial with an accent (teal) sweep. `size` in px.
+ * The mark: an open 240° dial with an accent sweep. `size` in px.
  */
 export function BrandMark({ size = 24 }: { size?: number }) {
   return (
@@ -273,7 +271,7 @@ export function SidebarNav({
   );
 }
 
-/** Docs link and version at the foot of the rail and the phone sheet. */
+/** Version at the foot of the rail and the phone sheet. */
 export function SidebarFooter({
   collapsed,
   version,
@@ -289,26 +287,6 @@ export function SidebarFooter({
         collapsed ? 'items-center px-2 text-center' : 'items-start px-5',
       )}
     >
-      <a
-        href={DOCS_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={collapsed ? 'Docs (opens in a new tab)' : undefined}
-        title={collapsed ? 'Docs' : undefined}
-        className="inline-flex items-center gap-1.5 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
-      >
-        <BookOpen
-          size={14}
-          strokeWidth={1.75}
-          className="shrink-0"
-          aria-hidden="true"
-        />
-        {collapsed ? null : (
-          <>
-            Docs<span className="sr-only"> (opens in a new tab)</span>
-          </>
-        )}
-      </a>
       <div
         className="text-2xs max-md:text-caption text-text-faint truncate"
         title={collapsed ? label : undefined}

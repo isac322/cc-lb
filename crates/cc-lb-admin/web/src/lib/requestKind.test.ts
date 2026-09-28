@@ -53,27 +53,28 @@ describe('requestKindTone', () => {
     expect(requestKindTone('unknown').kind).toBe('unknown');
   });
 
-  it('gives every other known kind its own hue, clear of warn, danger and accent', () => {
+  it('gives every other known kind its own hue, clear of warn and danger', () => {
     const hues = hued.map(hueOf);
     for (let i = 0; i < hues.length; i++) {
       for (let j = i + 1; j < hues.length; j++) {
         expect(circularGap(hues[i]!, hues[j]!)).toBeGreaterThanOrEqual(21);
       }
-      // danger ~20–28, warn ~73–83: at least 20° away. Accent teal ~185–192:
-      // at least 40° away (closer hues read teal next to accent elements).
+      // danger ~20–28, warn ~73–83: at least 20° away. The accent is
+      // near-achromatic, so there is no brand hue to keep clear of.
       for (const status of [24, 78]) {
         expect(circularGap(hues[i]!, status)).toBeGreaterThanOrEqual(20);
       }
-      expect(circularGap(hues[i]!, 188)).toBeGreaterThanOrEqual(40);
     }
   });
 
-  it('hashes custom kinds to hues clear of warn, danger and accent', () => {
+  it('hashes custom kinds into the severity-free arcs', () => {
     for (const kind of ['future_kind', 'review', 'planner', 'x', 'tool_use']) {
+      const hue = hueOf(kind);
+      const inArcs = (hue >= 108 && hue <= 170) || (hue >= 195 && hue <= 358);
+      expect(inArcs).toBe(true);
       for (const status of [24, 78]) {
-        expect(circularGap(hueOf(kind), status)).toBeGreaterThanOrEqual(20);
+        expect(circularGap(hue, status)).toBeGreaterThanOrEqual(20);
       }
-      expect(circularGap(hueOf(kind), 188)).toBeGreaterThanOrEqual(40);
     }
   });
 });

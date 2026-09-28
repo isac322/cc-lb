@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { HistogramBucket } from '../../lib/api';
 import { useTimezone } from '../../lib/locale';
 import { formatInTimezone } from '../../lib/timezone';
@@ -93,6 +93,113 @@ function formatDuration(ms: number): string {
   return `${(ms / 86_400_000).toFixed(1)}d`;
 }
 
+function timeToX(t: number, w: number, domain: { a: number; b: number }) {
+  return ((t - domain.a) / Math.max(1, domain.b - domain.a)) * w;
+}
+
+interface DrawInput {
+  width: number;
+  dpr: number;
+  palette: Palette;
+  buckets: HistogramBucket[];
+  bucketMs: number;
+  view: { a: number; b: number };
+  active: { a: number; b: number } | null;
+  tz: string;
+}
+
+/** Clears and repaints the whole strip, so every frame is complete. */
+function drawStrip(
+  ctx: CanvasRenderingContext2D,
+  { width, dpr, palette, buckets, bucketMs, view, active, tz }: DrawInput,
+) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, STRIP_H);
+
+  const span = Math.max(1, view.b - view.a);
+  const t2x = (t: number) => timeToX(t, width, view);
+
+  ctx.strokeStyle = palette.grid;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, BASELINE_Y + 0.5);
+  ctx.lineTo(width, BASELINE_Y + 0.5);
+  ctx.stroke();
+
+  // Ticks: widest ladder step that keeps labels at least 96px apart. Only
+  // the labels are drawn; the chart keeps horizontal rules only.
+  const tickMs =
+    TICK_LADDER_MS.find((ms) => (ms / span) * width >= 96) ??
+    TICK_LADDER_MS[TICK_LADDER_MS.length - 1];
+  const showDateOnly = tickMs >= 6 * 3_600_000;
+  ctx.font = `12px ${palette.font}`;
+  ctx.fillStyle = palette.text;
+  for (let t = Math.ceil(view.a / tickMs) * tickMs; t < view.b; t += tickMs) {
+    const x = Math.round(t2x(t));
+    const label = formatInTimezone(t, tz);
+    const text = showDateOnly ? label.slice(5, 10) : label.slice(11);
+    // A label that would run past the right edge is dropped, not clipped.
+    if (x + 2 + ctx.measureText(text).width > width) continue;
+    ctx.fillText(text, x + 2, AXIS_TEXT_Y);
+  }
+
+  if (buckets.length > 0) {
+    let maxTotal = 1;
+    for (const bucket of buckets) {
+      if (bucket.total_count > maxTotal) maxTotal = bucket.total_count;
+    }
+    const slot = width / buckets.length;
+    const barW = Math.max(2, slot - 0.6);
+    const inSelection = (startMs: number) =>
+      active == null ||
+      (startMs + bucketMs / 2 >= active.a && startMs + bucketMs / 2 < active.b);
+
+    // Neutral bars on a sqrt scale so short spikes survive next to a peak;
+    // the bucket's errors are stacked at the bottom of its bar in danger.
+    for (let i = 0; i < buckets.length; i++) {
+      const bucket = buckets[i];
+      if (bucket.total_count === 0) continue;
+      const startMs = bucket.bucket_start_unix_secs * 1000;
+      const selected = inSelection(startMs);
+      const x = t2x(startMs);
+      const h = Math.max(
+        MIN_ERROR_PX,
+        Math.sqrt(bucket.total_count / maxTotal) * (BASELINE_Y - 4),
+      );
+      ctx.fillStyle = selected ? palette.total : palette.totalMuted;
+      ctx.globalAlpha = selected ? 0.6 : 1;
+      ctx.fillRect(x, BASELINE_Y - h, barW, h);
+      if (bucket.error_count > 0) {
+        const errorH = Math.min(
+          h,
+          Math.max(MIN_ERROR_PX, (bucket.error_count / bucket.total_count) * h),
+        );
+        ctx.fillStyle = palette.danger;
+        ctx.globalAlpha = selected ? 0.9 : 0.4;
+        ctx.fillRect(x, BASELINE_Y - errorH, barW, errorH);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (active != null) {
+    const xa = t2x(active.a);
+    const xb = t2x(active.b);
+    ctx.fillStyle = palette.accentWash;
+    ctx.fillRect(xa, 0, xb - xa, BASELINE_Y);
+    for (const x of [xa, xb]) {
+      const px = Math.round(x) + 0.5;
+      ctx.strokeStyle = palette.accent;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, BASELINE_Y);
+      ctx.stroke();
+      ctx.fillStyle = palette.accent;
+      ctx.fillRect(Math.round(x) - 2, BASELINE_Y / 2 - 10, 4, 20);
+    }
+  }
+}
+
 export function TimeRangeStrip({
   buckets,
   bucketMs,
@@ -106,179 +213,144 @@ export function TimeRangeStrip({
   const { effective: tz } = useTimezone();
   const shellRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hintRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const widthRef = useRef(0);
+  const dprRef = useRef(0);
+  const paletteRef = useRef<Palette | null>(null);
   const lastPointerXRef = useRef(0);
   const bucketsRef = useRef(buckets);
   const bucketMsRef = useRef(bucketMs);
   const viewRef = useRef(view);
   const selectionRef = useRef(selection);
+  const tzRef = useRef(tz);
+  /**
+   * Non-null only while dragging; the committed selection stays authoritative.
+   * A ref, not state: the drag repaints the canvas and the hint directly, once
+   * per animation frame, instead of re-rendering the component per mousemove.
+   */
   const draftRef = useRef<{ a: number; b: number } | null>(null);
   const onViewChangeRef = useRef(onViewChange);
   const onSelectionCommitRef = useRef(onSelectionCommit);
-  const [palette, setPalette] = useState<Palette | null>(null);
-  const [width, setWidth] = useState(0);
-  const [dpr, setDpr] = useState(1);
-  /** Non-null only while dragging; the committed selection stays authoritative. */
-  const [draft, setDraft] = useState<{ a: number; b: number } | null>(null);
-  const [hint, setHint] = useState<{ x: number; text: string } | null>(null);
 
-  // Latest values for listeners that are attached once.
+  // Latest values for the painter and for listeners that are attached once.
   bucketsRef.current = buckets;
   bucketMsRef.current = bucketMs;
   viewRef.current = view;
   selectionRef.current = selection;
-  draftRef.current = draft;
+  tzRef.current = tz;
   onViewChangeRef.current = onViewChange;
   onSelectionCommitRef.current = onSelectionCommit;
-  useEffect(() => {
-    setPalette(readPalette());
-    const observer = new MutationObserver(() => setPalette(readPalette()));
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    });
-    return () => observer.disconnect();
-  }, []);
 
-  useEffect(() => {
-    const shell = shellRef.current;
-    if (shell == null) return;
-    const apply = () => {
-      const nextWidth = shell.clientWidth;
-      const nextDpr = window.devicePixelRatio || 1;
-      widthRef.current = nextWidth;
-      setWidth((current) => (current === nextWidth ? current : nextWidth));
-      setDpr((current) => (current === nextDpr ? current : nextDpr));
-    };
-    apply();
-    const observer = new ResizeObserver(apply);
-    observer.observe(shell);
-    window.addEventListener('resize', apply);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', apply);
-    };
-  }, []);
-
-  useEffect(() => {
+  const paint = useCallback(() => {
     const canvas = canvasRef.current;
-    if (canvas == null || width <= 0) return;
-    const pixelWidth = Math.floor(width * dpr);
-    const pixelHeight = Math.floor(STRIP_H * dpr);
-    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
-    canvas.style.height = `${STRIP_H}px`;
-  }, [dpr, width]);
-
-  const active = draft ?? selection;
-
-  const timeToX = useCallback(
-    (t: number, w: number, domain: { a: number; b: number }) =>
-      ((t - domain.a) / Math.max(1, domain.b - domain.a)) * w,
-    [],
-  );
-
-  // Draw
-  useEffect(() => {
-    const canvas = canvasRef.current;
+    const palette = paletteRef.current;
+    const width = widthRef.current;
     if (canvas == null || palette == null || width <= 0) return;
     const ctx = canvas.getContext('2d');
     if (ctx == null) return;
+    drawStrip(ctx, {
+      width,
+      dpr: dprRef.current,
+      palette,
+      buckets: bucketsRef.current,
+      bucketMs: bucketMsRef.current,
+      view: viewRef.current,
+      active: draftRef.current ?? selectionRef.current,
+      tz: tzRef.current,
+    });
+  }, []);
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, width, STRIP_H);
-
-    const span = Math.max(1, view.b - view.a);
-    const t2x = (t: number) => timeToX(t, width, view);
-
-    ctx.strokeStyle = palette.grid;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, BASELINE_Y + 0.5);
-    ctx.lineTo(width, BASELINE_Y + 0.5);
-    ctx.stroke();
-
-    // Ticks: widest ladder step that keeps labels at least 96px apart. Only
-    // the labels are drawn; the chart keeps horizontal rules only.
-    const tickMs =
-      TICK_LADDER_MS.find((ms) => (ms / span) * width >= 96) ??
-      TICK_LADDER_MS[TICK_LADDER_MS.length - 1];
-    const showDateOnly = tickMs >= 6 * 3_600_000;
-    ctx.font = `12px ${palette.font}`;
-    ctx.fillStyle = palette.text;
-    for (let t = Math.ceil(view.a / tickMs) * tickMs; t < view.b; t += tickMs) {
-      const x = Math.round(t2x(t));
-      const label = formatInTimezone(t, tz);
-      const text = showDateOnly ? label.slice(5, 10) : label.slice(11);
-      // A label that would run past the right edge is dropped, not clipped.
-      if (x + 2 + ctx.measureText(text).width > width) continue;
-      ctx.fillText(text, x + 2, AXIS_TEXT_Y);
-    }
-
-    if (buckets.length > 0) {
-      let maxTotal = 1;
-      for (const bucket of buckets) {
-        if (bucket.total_count > maxTotal) maxTotal = bucket.total_count;
+  // Size and palette are read before the first paint. Assigning a canvas
+  // dimension clears its bitmap, so the backing store is only touched when the
+  // CSS width or the device pixel ratio actually changes, and a real change is
+  // repainted in the same task.
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    const canvas = canvasRef.current;
+    if (shell == null || canvas == null) return;
+    paletteRef.current = readPalette();
+    const applySize = () => {
+      const nextWidth = shell.clientWidth;
+      const nextDpr = window.devicePixelRatio || 1;
+      if (nextWidth === widthRef.current && nextDpr === dprRef.current) {
+        return false;
       }
-      const slot = width / buckets.length;
-      const barW = Math.max(2, slot - 0.6);
-      const inSelection = (startMs: number) =>
-        active == null ||
-        (startMs + bucketMs / 2 >= active.a &&
-          startMs + bucketMs / 2 < active.b);
+      widthRef.current = nextWidth;
+      dprRef.current = nextDpr;
+      if (nextWidth <= 0) return false;
+      const pixelWidth = Math.floor(nextWidth * nextDpr);
+      const pixelHeight = Math.floor(STRIP_H * nextDpr);
+      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+      return true;
+    };
+    applySize();
+    const onResize = () => {
+      if (applySize()) paint();
+    };
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(shell);
+    window.addEventListener('resize', onResize);
+    const themeObserver = new MutationObserver(() => {
+      paletteRef.current = readPalette();
+      paint();
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', onResize);
+      themeObserver.disconnect();
+    };
+  }, [paint]);
 
-      // Neutral bars on a sqrt scale so short spikes survive next to a peak;
-      // the bucket's errors are stacked at the bottom of its bar in danger.
-      for (let i = 0; i < buckets.length; i++) {
-        const bucket = buckets[i];
-        if (bucket.total_count === 0) continue;
-        const startMs = bucket.bucket_start_unix_secs * 1000;
-        const selected = inSelection(startMs);
-        const x = t2x(startMs);
-        const h = Math.max(
-          MIN_ERROR_PX,
-          Math.sqrt(bucket.total_count / maxTotal) * (BASELINE_Y - 4),
-        );
-        ctx.fillStyle = selected ? palette.total : palette.totalMuted;
-        ctx.globalAlpha = selected ? 0.6 : 1;
-        ctx.fillRect(x, BASELINE_Y - h, barW, h);
-        if (bucket.error_count > 0) {
-          const errorH = Math.min(
-            h,
-            Math.max(
-              MIN_ERROR_PX,
-              (bucket.error_count / bucket.total_count) * h,
-            ),
-          );
-          ctx.fillStyle = palette.danger;
-          ctx.globalAlpha = selected ? 0.9 : 0.4;
-          ctx.fillRect(x, BASELINE_Y - errorH, barW, errorH);
-        }
-      }
-      ctx.globalAlpha = 1;
-    }
+  // Prop changes repaint inside the commit, before the browser paints, so the
+  // canvas never trails the DOM it sits beside.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the painter reads these through refs; they are listed so a change repaints.
+  useLayoutEffect(() => {
+    paint();
+  }, [paint, buckets, bucketMs, view, selection, tz]);
 
-    if (active != null) {
-      const xa = t2x(active.a);
-      const xb = t2x(active.b);
-      ctx.fillStyle = palette.accentWash;
-      ctx.fillRect(xa, 0, xb - xa, BASELINE_Y);
-      for (const x of [xa, xb]) {
-        const px = Math.round(x) + 0.5;
-        ctx.strokeStyle = palette.accent;
-        ctx.beginPath();
-        ctx.moveTo(px, 0);
-        ctx.lineTo(px, BASELINE_Y);
-        ctx.stroke();
-        ctx.fillStyle = palette.accent;
-        ctx.fillRect(Math.round(x) - 2, BASELINE_Y / 2 - 10, 4, 20);
-      }
-    }
-  }, [buckets, bucketMs, view, active, palette, width, dpr, tz, timeToX]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (canvas == null) return;
+    const canvasElement = canvas;
+    let frame: number | null = null;
 
-  const hitKind = useCallback(
-    (x: number, y: number): DragKind => {
+    // Coalesces drag updates: however many mousemoves arrive, the canvas is
+    // repainted once, in the animation frame that also shows the moved hint.
+    const schedulePaint = () => {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        paint();
+      });
+    };
+
+    const showHint = (x: number, text: string) => {
+      const hint = hintRef.current;
+      if (hint == null) return;
+      hint.textContent = text;
+      hint.style.left = `${x}px`;
+      hint.hidden = false;
+    };
+
+    const hideHint = () => {
+      const hint = hintRef.current;
+      if (hint != null) hint.hidden = true;
+    };
+
+    const xToTime = (x: number) => {
+      const domain = viewRef.current;
+      return (
+        domain.a + (x / Math.max(1, widthRef.current)) * (domain.b - domain.a)
+      );
+    };
+
+    const hitKind = (x: number, y: number): DragKind => {
       if (y > BASELINE_Y) return 'pan';
       const sel = draftRef.current ?? selectionRef.current;
       if (sel != null) {
@@ -290,38 +362,24 @@ export function TimeRangeStrip({
         if (x > xa && x < xb) return 'move';
       }
       return 'new';
-    },
-    [timeToX],
-  );
+    };
 
-  /**
-   * Approximate count for the in-flight drag. Whole buckets only, so it is
-   * labelled with a tilde: the committed range is what the table counts.
-   */
-  const approximateCount = useCallback((a: number, b: number) => {
-    let total = 0;
-    let errors = 0;
-    const currentBucketMs = bucketMsRef.current;
-    for (const bucket of bucketsRef.current) {
-      const mid = bucket.bucket_start_unix_secs * 1000 + currentBucketMs / 2;
-      if (mid >= a && mid < b) {
-        total += bucket.total_count;
-        errors += bucket.error_count;
+    /**
+     * Approximate count for the in-flight drag. Whole buckets only, so it is
+     * labelled with a tilde: the committed range is what the table counts.
+     */
+    const approximateCount = (a: number, b: number) => {
+      let total = 0;
+      let errors = 0;
+      const currentBucketMs = bucketMsRef.current;
+      for (const bucket of bucketsRef.current) {
+        const mid = bucket.bucket_start_unix_secs * 1000 + currentBucketMs / 2;
+        if (mid >= a && mid < b) {
+          total += bucket.total_count;
+          errors += bucket.error_count;
+        }
       }
-    }
-    return { total, errors };
-  }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (canvas == null) return;
-    const canvasElement = canvas;
-
-    const xToTime = (x: number) => {
-      const domain = viewRef.current;
-      return (
-        domain.a + (x / Math.max(1, widthRef.current)) * (domain.b - domain.a)
-      );
+      return { total, errors };
     };
 
     const onMouseDown = (event: MouseEvent) => {
@@ -341,7 +399,10 @@ export function TimeRangeStrip({
       };
       lastPointerXRef.current = x;
       attachDragListeners();
-      if (kind === 'new') setDraft({ a: t, b: t });
+      if (kind === 'new') {
+        draftRef.current = { a: t, b: t };
+        schedulePaint();
+      }
       canvas.style.cursor = kind === 'new' ? 'crosshair' : 'grabbing';
       event.preventDefault();
     };
@@ -371,14 +432,15 @@ export function TimeRangeStrip({
         next = { a: drag.selA + delta, b: drag.selB + delta };
       }
       lastPointerXRef.current = x;
-      setDraft(next);
+      draftRef.current = next;
+      schedulePaint();
       const stats = approximateCount(next.a, next.b);
-      setHint({
-        x: Math.max(52, Math.min(Math.max(52, widthRef.current - 52), x)),
-        text: `${formatDuration(next.b - next.a)} · ~${stats.total} requests${
+      showHint(
+        Math.max(52, Math.min(Math.max(52, widthRef.current - 52), x)),
+        `${formatDuration(next.b - next.a)} · ~${stats.total} requests${
           stats.errors > 0 ? ` · ~${stats.errors} errors` : ''
         }`,
-      });
+      );
     };
 
     const onCanvasMouseMove = (event: MouseEvent) => {
@@ -418,10 +480,11 @@ export function TimeRangeStrip({
       if (drag == null) return;
       dragRef.current = null;
       canvasElement.style.cursor = 'crosshair';
-      setHint(null);
+      hideHint();
       if (drag.kind === 'pan') return;
       const next = draftRef.current;
-      setDraft(null);
+      draftRef.current = null;
+      schedulePaint();
       if (next == null) return;
       if (drag.kind === 'new' && next.b - next.a < MIN_DRAG_MS) {
         onSelectionCommitRef.current(null);
@@ -476,12 +539,13 @@ export function TimeRangeStrip({
     };
 
     const onMouseLeave = () => {
-      if (dragRef.current == null) setHint(null);
+      if (dragRef.current == null) hideHint();
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && selectionRef.current != null) {
-        setDraft(null);
+        draftRef.current = null;
+        schedulePaint();
         onSelectionCommitRef.current(null);
       }
     };
@@ -494,6 +558,7 @@ export function TimeRangeStrip({
     window.addEventListener('keydown', onKeyDown);
     return () => {
       dragRef.current = null;
+      if (frame != null) cancelAnimationFrame(frame);
       detachDragListeners();
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('mousemove', onCanvasMouseMove);
@@ -502,11 +567,11 @@ export function TimeRangeStrip({
       canvas.removeEventListener('mouseleave', onMouseLeave);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [hitKind, approximateCount, timeToX]);
+  }, [paint]);
 
   const ariaLabel =
-    active != null
-      ? `Request density from ${formatInTimezone(view.a, tz)} to ${formatInTimezone(view.b, tz)}, selection ${formatInTimezone(active.a, tz)} to ${formatInTimezone(active.b, tz)}`
+    selection != null
+      ? `Request density from ${formatInTimezone(view.a, tz)} to ${formatInTimezone(view.b, tz)}, selection ${formatInTimezone(selection.a, tz)} to ${formatInTimezone(selection.b, tz)}`
       : `Request density from ${formatInTimezone(view.a, tz)} to ${formatInTimezone(view.b, tz)}, no selection`;
 
   return (
@@ -520,15 +585,14 @@ export function TimeRangeStrip({
         role="img"
         aria-label={ariaLabel}
         className="block w-full cursor-crosshair"
+        style={{ height: STRIP_H }}
       />
-      {hint != null ? (
-        <div
-          className="pointer-events-none absolute top-2 -translate-x-1/2 whitespace-nowrap rounded-sm border border-subtle-strong bg-bg-sub px-1.5 py-0.5 text-caption tabular-nums text-text-muted shadow-overlay"
-          style={{ left: hint.x }}
-        >
-          {hint.text}
-        </div>
-      ) : null}
+      {/* Written directly by the drag handler, in step with the canvas. */}
+      <div
+        ref={hintRef}
+        hidden
+        className="pointer-events-none absolute top-2 -translate-x-1/2 whitespace-nowrap rounded-sm border border-subtle-strong bg-bg-sub px-1.5 py-0.5 text-caption tabular-nums text-text-muted shadow-overlay"
+      />
       {failed ? (
         <div
           className="pointer-events-none absolute right-2 top-2 z-10"

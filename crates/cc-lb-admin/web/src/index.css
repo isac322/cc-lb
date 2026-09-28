@@ -164,7 +164,7 @@
       --shell-bottom: 0px;
     }
   }
-  /* Signal teal. Night (blue-slate) is the default; Day (cool slate daylight)
+  /* Graphite. Night (neutral graphite) is the default; Day (pale graphite)
      via data-theme or the OS preference under "system". Contrast (WCAG):
      text ≥ 13:1, text-muted ≥ 6.9:1, text-faint ≥ 5.4:1 on every surface;
      accent-text, warn-text, danger-text ≥ 4.5:1 on ground, surfaces, their
@@ -174,40 +174,42 @@
   :root,
   :root[data-theme="dark"] {
     color-scheme: dark;
-    /* Blue-slate night. Ground, then flat surfaces one step up; 1px lines. */
-    --color-bg: #11181e;
-    --color-bg-sub: #1d262d;
-    --color-panel: #171f25;
-    --color-panel-strong: #1d262d;
-    --color-border: #293139;
-    --color-border-strong: #636d77;
-    --color-border-row: #212930;
-    --color-text: #ebeef2;
-    --color-text-muted: #bbc3c9;
-    --color-text-faint: #989fa6;
+    /* Graphite night: a neutral graphite ground, then flat surfaces one
+       step up; 1px lines. */
+    --color-bg: #161719;
+    --color-bg-sub: #232527;
+    --color-panel: #1c1e20;
+    --color-panel-strong: #232527;
+    --color-border: #2f3033;
+    --color-border-strong: #6a6c6f;
+    --color-border-row: #26282a;
+    --color-text: #edeeee;
+    --color-text-muted: #c0c1c3;
+    --color-text-faint: #9d9ea0;
     /* Disabled controls: dim ink and a dashed line (`control-disabled`). */
-    --color-text-disabled: #5e6770;
-    --color-border-disabled: #414a53;
-    /* Signal teal: the brand mark, focus, the switch "on" track, links and
-       the one primary action. `accent-ink` is text on a solid accent fill.
-       Selection is neutral (`--color-selected`). */
-    --color-accent: #4cd7c8;
-    --color-accent-hover: #76e6d8;
-    --color-accent-dim: rgb(76 215 200 / 0.14);
-    --color-accent-text: #69e0d2;
-    --color-accent-ink: #11181e;
+    --color-text-disabled: #626365;
+    --color-border-disabled: #4a4c4e;
+    /* Near-monochrome silver with a faint blue whisper: the brand mark,
+       focus, the switch "on" track, links and the one primary action.
+       `accent-ink` is text on a solid accent fill. Selection is neutral
+       (`--color-selected`). */
+    --color-accent: #ccddee;
+    --color-accent-hover: #dceaf8;
+    --color-accent-dim: rgb(204 221 238 / 0.14);
+    --color-accent-text: #779cc2;
+    --color-accent-ink: #181a1c;
     /* Healthy is neutral: warn and danger are the only other hues. */
-    --color-ok: #bbc3c9;
+    --color-ok: #c0c1c3;
     --color-warn: #f0b429;
     --color-danger: #ff6f61;
     --color-danger-solid: #c7372c;
     --color-danger-solid-hover: #b02f25;
-    --color-success-text: #bbc3c9;
+    --color-success-text: #c0c1c3;
     --color-warn-text: #f0b429;
     --color-danger-text: #ff8a7e;
-    --color-neutral: #8e959b;
-    --color-scrollbar: #293139;
-    --color-scrollbar-hover: #636d77;
+    --color-neutral: #939495;
+    --color-scrollbar: #2f3033;
+    --color-scrollbar-hover: #6a6c6f;
     --color-hover-bg: rgb(255 255 255 / 0.04);
     /* Selected row / nav item: a neutral fill a clear step above hover. */
     --color-selected: rgb(255 255 255 / 0.08);
@@ -219,10 +221,10 @@
     --color-overlay-6: rgb(255 255 255 / 0.08);
     --color-overlay-skeleton-base: rgb(255 255 255 / 0.03);
     --color-overlay-skeleton-shimmer: rgb(255 255 255 / 0.07);
-    --color-progress-track: #262e36;
-    --color-modal-backdrop: rgb(3 7 12 / 0.72);
-    --color-drawer-backdrop: rgb(3 7 12 / 0.6);
-    --color-toast-bg: #1d262d;
+    --color-progress-track: #2c2d2f;
+    --color-modal-backdrop: rgb(6 7 8 / 0.72);
+    --color-drawer-backdrop: rgb(6 7 8 / 0.6);
+    --color-toast-bg: #232527;
     /* Series. Tokens: cache read (the good outcome) is green, cache
        creation (the costly miss) is amber/orange, uncached input is a quiet
        slate, output violet. Quota windows: the three live windows (5h, 7d,
@@ -241,59 +243,59 @@
     --color-series-opus: #91745d;
     --color-series-overage: #a3a5a8;
     --color-series-unified: #777a80;
-    --color-series-latency-downstream: #abe2f0;
+    --color-series-latency-downstream: #1c989e;
     --color-series-latency-cclb: #64bced;
     --color-series-latency-net: #67bb6b;
     --color-series-latency-wait: #5cadb6;
     --chart-fill-opacity: 0.12;
-    --color-input-bg: #11181e;
+    --color-input-bg: #161719;
     --color-overlay-shadow: rgb(0 0 0 / 0.5);
   }
   :root[data-theme="light"] {
     color-scheme: light;
-    /* Cool slate daylight. Surfaces lighten one step at a time. */
-    --color-bg: #dee6ec;
-    --color-bg-sub: #f5f8fb;
-    --color-panel: #ebf0f5;
-    --color-panel-strong: #f5f8fb;
-    --color-border: #c5cdd5;
-    --color-border-strong: #78828a;
-    --color-border-row: #d2dae1;
-    --color-text: #141a20;
-    --color-text-muted: #434c53;
-    --color-text-faint: #535c64;
-    --color-text-disabled: #868f97;
-    --color-border-disabled: #a9b2ba;
-    --color-accent: #007370;
-    --color-accent-hover: #006260;
-    --color-accent-dim: rgb(0 115 112 / 0.1);
-    --color-accent-text: #006563;
+    /* Pale graphite daylight. Surfaces lighten one step at a time. */
+    --color-bg: #e3e5e7;
+    --color-bg-sub: #f7f8f9;
+    --color-panel: #eeeff1;
+    --color-panel-strong: #f7f8f9;
+    --color-border: #cacccf;
+    --color-border-strong: #7e8084;
+    --color-border-row: #d7d9dc;
+    --color-text: #18191c;
+    --color-text-muted: #484a4e;
+    --color-text-faint: #595b5e;
+    --color-text-disabled: #8a8c90;
+    --color-border-disabled: #afb1b4;
+    --color-accent: #1f2c3d;
+    --color-accent-hover: #142030;
+    --color-accent-dim: rgb(31 44 61 / 0.1);
+    --color-accent-text: #0a345a;
     --color-accent-ink: #ffffff;
-    --color-ok: #434c53;
+    --color-ok: #484a4e;
     --color-warn: #8a5a00;
     --color-danger: #a61e30;
     --color-danger-solid: #a61e30;
     --color-danger-solid-hover: #8e1828;
-    --color-success-text: #434c53;
+    --color-success-text: #484a4e;
     --color-warn-text: #7a4f00;
     --color-danger-text: #a61e30;
-    --color-neutral: #677078;
-    --color-scrollbar: #c5cdd5;
-    --color-scrollbar-hover: #78828a;
-    --color-hover-bg: rgb(20 26 32 / 0.04);
-    --color-selected: rgb(20 26 32 / 0.07);
-    --color-overlay-1: rgb(20 26 32 / 0.02);
-    --color-overlay-2: rgb(20 26 32 / 0.03);
-    --color-overlay-3: rgb(20 26 32 / 0.04);
-    --color-overlay-4: rgb(20 26 32 / 0.05);
-    --color-overlay-5: rgb(20 26 32 / 0.06);
-    --color-overlay-6: rgb(20 26 32 / 0.08);
-    --color-overlay-skeleton-base: rgb(20 26 32 / 0.04);
-    --color-overlay-skeleton-shimmer: rgb(20 26 32 / 0.09);
-    --color-progress-track: #ccd4db;
-    --color-modal-backdrop: rgb(20 26 32 / 0.4);
-    --color-drawer-backdrop: rgb(20 26 32 / 0.32);
-    --color-toast-bg: #f5f8fb;
+    --color-neutral: #6d6f72;
+    --color-scrollbar: #cacccf;
+    --color-scrollbar-hover: #7e8084;
+    --color-hover-bg: rgb(24 25 28 / 0.04);
+    --color-selected: rgb(24 25 28 / 0.07);
+    --color-overlay-1: rgb(24 25 28 / 0.02);
+    --color-overlay-2: rgb(24 25 28 / 0.03);
+    --color-overlay-3: rgb(24 25 28 / 0.04);
+    --color-overlay-4: rgb(24 25 28 / 0.05);
+    --color-overlay-5: rgb(24 25 28 / 0.06);
+    --color-overlay-6: rgb(24 25 28 / 0.08);
+    --color-overlay-skeleton-base: rgb(24 25 28 / 0.04);
+    --color-overlay-skeleton-shimmer: rgb(24 25 28 / 0.09);
+    --color-progress-track: #d1d3d5;
+    --color-modal-backdrop: rgb(24 25 28 / 0.4);
+    --color-drawer-backdrop: rgb(24 25 28 / 0.32);
+    --color-toast-bg: #f7f8f9;
     --color-series-input: #657689;
     --color-series-output: #613ea6;
     --color-series-cache-create-5m: #cc8d16;
@@ -311,55 +313,55 @@
     --color-series-latency-net: #34823b;
     --color-series-latency-wait: #5191a1;
     --chart-fill-opacity: 0.1;
-    --color-input-bg: #f5f8fb;
-    --color-overlay-shadow: rgb(20 26 32 / 0.16);
+    --color-input-bg: #f7f8f9;
+    --color-overlay-shadow: rgb(24 25 28 / 0.16);
   }
   @media (prefers-color-scheme: light) {
     :root[data-theme="system"] {
       color-scheme: light;
-      /* Cool slate daylight. Surfaces lighten one step at a time. */
-      --color-bg: #dee6ec;
-      --color-bg-sub: #f5f8fb;
-      --color-panel: #ebf0f5;
-      --color-panel-strong: #f5f8fb;
-      --color-border: #c5cdd5;
-      --color-border-strong: #78828a;
-      --color-border-row: #d2dae1;
-      --color-text: #141a20;
-      --color-text-muted: #434c53;
-      --color-text-faint: #535c64;
-      --color-text-disabled: #868f97;
-      --color-border-disabled: #a9b2ba;
-      --color-accent: #007370;
-      --color-accent-hover: #006260;
-      --color-accent-dim: rgb(0 115 112 / 0.1);
-      --color-accent-text: #006563;
+      /* Pale graphite daylight. Surfaces lighten one step at a time. */
+      --color-bg: #e3e5e7;
+      --color-bg-sub: #f7f8f9;
+      --color-panel: #eeeff1;
+      --color-panel-strong: #f7f8f9;
+      --color-border: #cacccf;
+      --color-border-strong: #7e8084;
+      --color-border-row: #d7d9dc;
+      --color-text: #18191c;
+      --color-text-muted: #484a4e;
+      --color-text-faint: #595b5e;
+      --color-text-disabled: #8a8c90;
+      --color-border-disabled: #afb1b4;
+      --color-accent: #1f2c3d;
+      --color-accent-hover: #142030;
+      --color-accent-dim: rgb(31 44 61 / 0.1);
+      --color-accent-text: #0a345a;
       --color-accent-ink: #ffffff;
-      --color-ok: #434c53;
+      --color-ok: #484a4e;
       --color-warn: #8a5a00;
       --color-danger: #a61e30;
       --color-danger-solid: #a61e30;
       --color-danger-solid-hover: #8e1828;
-      --color-success-text: #434c53;
+      --color-success-text: #484a4e;
       --color-warn-text: #7a4f00;
       --color-danger-text: #a61e30;
-      --color-neutral: #677078;
-      --color-scrollbar: #c5cdd5;
-      --color-scrollbar-hover: #78828a;
-      --color-hover-bg: rgb(20 26 32 / 0.04);
-      --color-selected: rgb(20 26 32 / 0.07);
-      --color-overlay-1: rgb(20 26 32 / 0.02);
-      --color-overlay-2: rgb(20 26 32 / 0.03);
-      --color-overlay-3: rgb(20 26 32 / 0.04);
-      --color-overlay-4: rgb(20 26 32 / 0.05);
-      --color-overlay-5: rgb(20 26 32 / 0.06);
-      --color-overlay-6: rgb(20 26 32 / 0.08);
-      --color-overlay-skeleton-base: rgb(20 26 32 / 0.04);
-      --color-overlay-skeleton-shimmer: rgb(20 26 32 / 0.09);
-      --color-progress-track: #ccd4db;
-      --color-modal-backdrop: rgb(20 26 32 / 0.4);
-      --color-drawer-backdrop: rgb(20 26 32 / 0.32);
-      --color-toast-bg: #f5f8fb;
+      --color-neutral: #6d6f72;
+      --color-scrollbar: #cacccf;
+      --color-scrollbar-hover: #7e8084;
+      --color-hover-bg: rgb(24 25 28 / 0.04);
+      --color-selected: rgb(24 25 28 / 0.07);
+      --color-overlay-1: rgb(24 25 28 / 0.02);
+      --color-overlay-2: rgb(24 25 28 / 0.03);
+      --color-overlay-3: rgb(24 25 28 / 0.04);
+      --color-overlay-4: rgb(24 25 28 / 0.05);
+      --color-overlay-5: rgb(24 25 28 / 0.06);
+      --color-overlay-6: rgb(24 25 28 / 0.08);
+      --color-overlay-skeleton-base: rgb(24 25 28 / 0.04);
+      --color-overlay-skeleton-shimmer: rgb(24 25 28 / 0.09);
+      --color-progress-track: #d1d3d5;
+      --color-modal-backdrop: rgb(24 25 28 / 0.4);
+      --color-drawer-backdrop: rgb(24 25 28 / 0.32);
+      --color-toast-bg: #f7f8f9;
       --color-series-input: #657689;
       --color-series-output: #613ea6;
       --color-series-cache-create-5m: #cc8d16;
@@ -377,8 +379,8 @@
       --color-series-latency-net: #34823b;
       --color-series-latency-wait: #5191a1;
       --chart-fill-opacity: 0.1;
-      --color-input-bg: #f5f8fb;
-      --color-overlay-shadow: rgb(20 26 32 / 0.16);
+      --color-input-bg: #f7f8f9;
+      --color-overlay-shadow: rgb(24 25 28 / 0.16);
     }
   }
   html, body, #root { height: 100%; min-height: 100%; }

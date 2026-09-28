@@ -18,13 +18,15 @@ describe('getSessionColor', () => {
     colors = await import('./colors');
   });
 
-  it('gives the first seven sessions visibly different hues', () => {
-    const hues = Array.from({ length: 7 }, (_, i) =>
+  it('gives the first nine sessions visibly different hues', () => {
+    const hues = Array.from({ length: 9 }, (_, i) =>
       hueOf(colors.getSessionColor(`session-${i}`).text),
     );
+    expect(new Set(hues).size).toBe(9);
     for (const [i, a] of hues.entries()) {
       for (const b of hues.slice(i + 1)) {
-        expect(Math.abs(a - b)).toBeGreaterThanOrEqual(21);
+        const gap = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+        expect(gap).toBeGreaterThanOrEqual(21);
       }
     }
   });
@@ -35,11 +37,14 @@ describe('getSessionColor', () => {
     expect(colors.getSessionColor('session-a')).toEqual(first);
   });
 
-  it('never uses warn, danger or accent-teal hues', () => {
+  it('stays clear of the warm severity band and of warn/danger', () => {
+    const gap = (a: number, b: number) =>
+      Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
     for (let i = 0; i < 40; i++) {
       const hue = hueOf(colors.getSessionColor(`s-${i}`).text);
-      const inBands = (hue >= 135 && hue <= 142) || (hue >= 228 && hue <= 350);
-      expect(inBands).toBe(true);
+      expect(hue > 100 || hue < 5).toBe(true);
+      expect(gap(hue, 24)).toBeGreaterThanOrEqual(20);
+      expect(gap(hue, 78)).toBeGreaterThanOrEqual(20);
     }
   });
 });

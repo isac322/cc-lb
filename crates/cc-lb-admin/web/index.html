@@ -5,13 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>cc-lb</title>
     <meta name="color-scheme" content="dark light" />
-    <!-- First-frame ground (blue-slate night / cool slate day) before the CSS
-         bundle loads; mirrors --color-bg in src/index.css. -->
+    <!-- First-frame ground (graphite night / pale graphite day) before the
+         CSS bundle loads; mirrors --color-bg in src/index.css. -->
     <style>
-      html { background: #11181e; }
-      html[data-theme="light"] { background: #dee6ec; }
+      html { background: #161719; }
+      html[data-theme="light"] { background: #e3e5e7; }
       @media (prefers-color-scheme: light) {
-        html[data-theme="system"] { background: #dee6ec; }
+        html[data-theme="system"] { background: #e3e5e7; }
       }
     </style>
     <!-- Pre-paint theme: mirrors readStoredTheme() in src/lib/theme.ts so the

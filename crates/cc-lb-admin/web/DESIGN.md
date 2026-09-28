@@ -6,8 +6,8 @@ cc-lb admin is an instrument cluster for a quota pool. The question it answers f
 
 - Usage is the instrument. Every quota figure is written as what is **used** (`N% used`), the same utilization Claude reports, so it compares with Claude's own screens without conversion. Usage over time comes before any single current value.
 - Readability comes before atmosphere. When a choice trades legibility for character, legibility wins.
-- The ground is a blue-slate at night and cool slate daylight by day. Surfaces sit one flat step above it, drawn with 1px lines. No blur, no glow, no decorative gradient.
-- One brand hue, Signal teal, used at instrument scale only. Warn and danger are the only other hues; healthy is neutral ink.
+- The ground is a neutral graphite at night and a pale graphite by day. Surfaces sit one flat step above it, drawn with 1px lines. No blur, no glow, no decorative gradient.
+- One accent, near-monochrome: a silver with a faint blue whisper at night, a deep ink by day, used at instrument scale only. Hue lives in the data; warn and danger are the only other hues, and healthy is neutral ink.
 - Hanken Grotesk is the voice of the product, including every number. Geist Mono is only for strings an operator copies or compares character by character.
 - Show exceptions; let healthy states speak by omission.
 
@@ -15,71 +15,71 @@ cc-lb admin is an instrument cluster for a quota pool. The question it answers f
 
 ### Palette
 
-Night is the default (`:root`, `[data-theme="dark"]`). Day applies with `[data-theme="light"]`, or with `[data-theme="system"]` when the OS prefers light. Both are defined in `@layer base` in `index.css` and registered through `@theme inline reference`.
+Graphite is the one scheme: a near-achromatic graphite ground, a near-monochrome accent (silver with a faint blue whisper at night, deep ink by day), with hue carried only by the data — severity, series and categorical chips. Night is the default (`:root`, `[data-theme="dark"]`). Day applies with `[data-theme="light"]`, or with `[data-theme="system"]` when the OS prefers light. Both are defined in `@layer base` in `index.css` and registered through `@theme inline reference`.
 
 | Role | Token | Night | Day | Usage |
 |------|-------|-------|-----|-------|
-| Ground | `--color-bg` | `#11181e` | `#dee6ec` | Page, rail, top bar, tab bar, "More" sheet |
-| Raised surface | `--color-bg-sub` | `#1d262d` | `#f5f8fb` | Dialogs, drawers, popovers, menus, select popups, tooltips |
-| Panel | `--color-panel` | `#171f25` | `#ebf0f5` | Card fill (`.glass`), sticky table header, nav hover |
-| Panel strong | `--color-panel-strong` | `#1d262d` | `#f5f8fb` | Selected segment, secondary button and theme pill hover, pressed toolbar toggle |
-| Input | `--color-input-bg` | `#11181e` | `#f5f8fb` | Inputs and select triggers |
-| Toast | `--color-toast-bg` | `#1d262d` | `#f5f8fb` | Sonner toasts |
-| Line | `--color-border` (`border-subtle`) | `#293139` | `#c5cdd5` | Card edges, card header rule, top bar and rail edges, chart gridlines |
-| Line strong | `--color-border-strong` (`border-subtle-strong`) | `#636d77` | `#78828a` | Inputs, secondary buttons, overlays, chart cursor |
-| Row line | `--color-border-row` (`border-row`) | `#212930` | `#d2dae1` | Table and list row dividers, dividers between peers |
-| Meter track | `--color-progress-track` | `#262e36` | `#ccd4db` | Usage meter and stacked-bar tracks, switch off |
-| Overlay steps | `--color-overlay-{1..6}` | 2–8% white | 2–8% ink (`#141a20`) | Wells (`overlay-3`), neutral badges (`overlay-5`), list-row and nav hover (`overlay-2`) |
+| Ground | `--color-bg` | `#161719` | `#e3e5e7` | Page, rail, top bar, tab bar, "More" sheet |
+| Raised surface | `--color-bg-sub` | `#232527` | `#f7f8f9` | Dialogs, drawers, popovers, menus, select popups, tooltips |
+| Panel | `--color-panel` | `#1c1e20` | `#eeeff1` | Card fill (`.glass`), sticky table header, nav hover |
+| Panel strong | `--color-panel-strong` | `#232527` | `#f7f8f9` | Selected segment, secondary button and theme pill hover, pressed toolbar toggle |
+| Input | `--color-input-bg` | `#161719` | `#f7f8f9` | Inputs and select triggers |
+| Toast | `--color-toast-bg` | `#232527` | `#f7f8f9` | Sonner toasts |
+| Line | `--color-border` (`border-subtle`) | `#2f3033` | `#cacccf` | Card edges, card header rule, top bar and rail edges, chart gridlines |
+| Line strong | `--color-border-strong` (`border-subtle-strong`) | `#6a6c6f` | `#7e8084` | Inputs, secondary buttons, overlays, chart cursor |
+| Row line | `--color-border-row` (`border-row`) | `#26282a` | `#d7d9dc` | Table and list row dividers, dividers between peers |
+| Meter track | `--color-progress-track` | `#2c2d2f` | `#d1d3d5` | Usage meter and stacked-bar tracks, switch off |
+| Overlay steps | `--color-overlay-{1..6}` | 2–8% white | 2–8% ink (`#18191c`) | Wells (`overlay-3`), neutral badges (`overlay-5`), list-row and nav hover (`overlay-2`) |
 | Hover | `--color-hover-bg` | 4% white | 4% ink | Interactive table row hover |
-| Selected | `--color-selected` (`bg-selected`) | 8% white | `#141a20` at 7% | Selected list and table rows, active nav item and tab bar item, command-palette selection |
-| Text | `--color-text` | `#ebeef2` | `#141a20` | Primary text, healthy quota figures |
-| Text muted | `--color-text-muted` | `#bbc3c9` | `#434c53` | Secondary text, labels, used %, notice bodies |
-| Text faint | `--color-text-faint` | `#989fa6` | `#535c64` | Captions, table headers, chart ticks, placeholders |
-| Text disabled | `--color-text-disabled` | `#5e6770` | `#868f97` | Disabled control labels and icons (`control-disabled`) |
-| Border disabled | `--color-border-disabled` | `#414a53` | `#a9b2ba` | The dashed line of a disabled bordered control |
-| Accent (Signal teal) | `--color-accent` | `#4cd7c8` | `#007370` | See "Brand teal" below |
-| Accent hover | `--color-accent-hover` | `#76e6d8` | `#006260` | Fill and line of a hovered `primary` button |
-| Accent dim | `--color-accent-dim` | `#4cd7c8` at 14% | `#007370` at 10% | Text selection, live-row flash, calendar day selection, time-strip wash |
-| Accent text | `--color-accent-text` | `#69e0d2` | `#006563` | Links, accent badge text, select check marks |
-| Accent ink | `--color-accent-ink` | `#11181e` | `#ffffff` | Text and the switch knob on a solid accent fill |
-| Healthy | `--color-ok` / `--color-success-text` | `#bbc3c9` | `#434c53` | Healthy dots and text: neutral ink, not green |
+| Selected | `--color-selected` (`bg-selected`) | 8% white | `#18191c` at 7% | Selected list and table rows, active nav item and tab bar item, command-palette selection |
+| Text | `--color-text` | `#edeeee` | `#18191c` | Primary text, healthy quota figures |
+| Text muted | `--color-text-muted` | `#c0c1c3` | `#484a4e` | Secondary text, labels, used %, notice bodies |
+| Text faint | `--color-text-faint` | `#9d9ea0` | `#595b5e` | Captions, table headers, chart ticks, placeholders |
+| Text disabled | `--color-text-disabled` | `#626365` | `#8a8c90` | Disabled control labels and icons (`control-disabled`) |
+| Border disabled | `--color-border-disabled` | `#4a4c4e` | `#afb1b4` | The dashed line of a disabled bordered control |
+| Accent (silver / ink) | `--color-accent` | `#ccddee` | `#1f2c3d` | See "Accent" below |
+| Accent hover | `--color-accent-hover` | `#dceaf8` | `#142030` | Fill and line of a hovered `primary` button |
+| Accent dim | `--color-accent-dim` | `#ccddee` at 14% | `#1f2c3d` at 10% | Text selection, live-row flash, calendar day selection, time-strip wash |
+| Accent text | `--color-accent-text` | `#779cc2` | `#0a345a` | Links, accent badge text, select check marks |
+| Accent ink | `--color-accent-ink` | `#181a1c` | `#ffffff` | Text and the switch knob on a solid accent fill |
+| Healthy | `--color-ok` / `--color-success-text` | `#c0c1c3` | `#484a4e` | Healthy dots and text: neutral ink, not green |
 | Warning | `--color-warn` / `--color-warn-text` | `#f0b429` / `#f0b429` | `#8a5a00` / `#7a4f00` | Fills, dots, lines / text |
 | Danger | `--color-danger` / `--color-danger-text` | `#ff6f61` / `#ff8a7e` | `#a61e30` / `#a61e30` | Fills, dots, lines / text |
 | Danger solid | `--color-danger-solid` / `-hover` | `#c7372c` / `#b02f25` | `#a61e30` / `#8e1828` | White-text fill of `danger-solid` buttons |
-| Neutral | `--color-neutral` | `#8e959b` | `#677078` | Pending, skipped, disabled, connecting dots |
-| Backdrops | `--color-modal-backdrop` / `--color-drawer-backdrop` | `#03070c` at 72% / 60% | ink at 40% / 32% | Behind dialogs and drawers |
+| Neutral | `--color-neutral` | `#939495` | `#6d6f72` | Pending, skipped, disabled, connecting dots |
+| Backdrops | `--color-modal-backdrop` / `--color-drawer-backdrop` | `#060708` at 72% / 60% | ink at 40% / 32% | Behind dialogs and drawers |
 | Overlay shadow | `--color-overlay-shadow` | black at 50% | ink at 16% | The one elevation shadow |
-| Scrollbar | `--color-scrollbar` / `-hover` | `#293139` / `#636d77` | `#c5cdd5` / `#78828a` | WebKit scrollbar thumb |
+| Scrollbar | `--color-scrollbar` / `-hover` | `#2f3033` / `#6a6c6f` | `#cacccf` / `#7e8084` | WebKit scrollbar thumb |
 | Window series | `--color-series-{5h,7d,fable,sonnet,opus,overage,unified}` | `#63b1f9` / `#cd5cac` / `#bbe75f` / `#629092` / `#91745d` / `#a3a5a8` / `#777a80` | `#0c82bf` / `#8d1071` / `#486a00` / `#39555c` / `#6a5647` / `#616366` / `#83868c` | Quota window series in charts, legends and window swatches |
 | Token series | `--color-series-{cache-read,cache-create-5m,cache-create-1h,input,output}` | `#24c27d` / `#e48d28` / `#cc612e` / `#96a6bb` / `#997fde` | `#278a47` / `#cc8d16` / `#bf5b0d` / `#657689` / `#613ea6` | Token and cost slices, the Tokens KPI's cache-miss line |
-| Latency series | `--color-series-latency-{downstream,cclb,net,wait}` | `#abe2f0` / `#64bced` / `#67bb6b` / `#5cadb6` | `#00525c` / `#0070ab` / `#34823b` / `#5191a1` | Latency responsibility segments (`bg-series-latency-*`) |
+| Latency series | `--color-series-latency-{downstream,cclb,net,wait}` | `#1c989e` / `#64bced` / `#67bb6b` / `#5cadb6` | `#00525c` / `#0070ab` / `#34823b` / `#5191a1` | Latency responsibility segments (`bg-series-latency-*`) |
 | Chart fill | `--chart-fill-opacity` | `0.12` | `0.10` | Sparkline area fill; quota gradients start at 2× this |
 
 Contrast (WCAG) holds on every surface in both themes: text at least 13:1, muted at least 6.9:1, faint at least 5.4:1; accent, warn and danger text at least 4.5:1 on the ground, on surfaces, on their own `/12` badge fill and on the selected-row fill; white on `danger-solid` at least 5.2:1. `border-strong` stays at least 3:1 against the ground as a non-text boundary. `text-disabled` is deliberately lower — about 2.9:1 — legible but a clear step below `text-faint`, so an unavailable control reads as such at a glance.
 
 **Token composition** (`components/ui/usage/sliceColors.ts#USAGE_CATEGORIES`) is the one category → color list for every token and cost bar, popover and breakdown: request-table cells, the request drawer, and the Overview principal cost popovers. Cache read is green, the good outcome (the prompt came from cache); cache create is amber (5m) and burnt orange (1h), the costly miss — conspicuous but never red, because it is not an error; both sit deeper than the `warn` amber so a cache write never reads as a warning. Uncached input is a quiet slate; output is violet. Segments always draw in that fixed order: cache read, cache create 5m, cache create 1h, input, output. Cache read leads so the green run from the left edge reads directly as the hit, and both cache outcomes sit side by side. A mostly green bar is a high cache hit; amber or orange is cache writes. Cost bars use the same categories, colors and order (`costCategories.ts`); cost no category accounts for is a neutral `Unattributed` slice.
 
-**Quota windows** (`lib/colors.ts#getWindowColor`, returned as `var()` references so charts follow the theme): the three live windows are 5h sky, 7d magenta and 7d (Fable) lime; the legacy 7d (Sonnet) and 7d (Opus) windows are muted teal-gray and brown-gray; `overage` (Extra usage) and `unified` are neutral grays, and unknown keys fall back to `unified`. The 5h sky sits bluer than before — clear of the teal accent, which on a quota chart would read as brand, not a window. The live three must stay apart under protan, deutan and tritan simulation (target OKLab ΔE ≥ 0.12 pairwise) and clear of the warn and danger tokens, so a window line never reads as a threshold. `ApiUsageCard` reuses these tokens for model families (Opus → opus, Sonnet → sonnet, Haiku → 5h, Fable → fable).
+**Quota windows** (`lib/colors.ts#getWindowColor`, returned as `var()` references so charts follow the theme): the three live windows are 5h sky, 7d magenta and 7d (Fable) lime; the legacy 7d (Sonnet) and 7d (Opus) windows are muted teal-gray and brown-gray; `overage` (Extra usage) and `unified` are neutral grays, and unknown keys fall back to `unified`. The 5h sky sits bluer than before, away from the warm severity band. The live three must stay apart under protan, deutan and tritan simulation (target OKLab ΔE ≥ 0.12 pairwise) and clear of the warn and danger tokens, so a window line never reads as a threshold. `ApiUsageCard` reuses these tokens for model families (Opus → opus, Sonnet → sonnet, Haiku → 5h, Fable → fable).
 
-**Latency** responsibility segments (Downstream, cc-lb, Upstream net, Upstream wait; renewals use cc-lb) have their own `--color-series-latency-*` tokens, used only by latency bars and breakdowns. The wait segment is a slate teal just off the accent hue; downstream and cc-lb stay blue and upstream net green, so on a latency bar the accent still means the brand, not a stage.
+**Latency** responsibility segments (Downstream, cc-lb, Upstream net, Upstream wait; renewals use cc-lb) have their own `--color-series-latency-*` tokens, used only by latency bars and breakdowns. The wait segment is a slate teal between the downstream and cc-lb blues; downstream and cc-lb stay blue and upstream net green.
 
-**Categorical chips** use `categoricalColor(hue)` (`lib/colors.ts`): text at OKLCH L 0.42 by day / 0.83 at night (≥ 4.5:1 on the chip's own tint over every table surface, including the selected row), a series-strength dot, and a 14% / 18% tint. Session chips draw from a fixed palette of seven hues (`SESSION_HUES`: 135, 228, 249, 270, 291, 312, 333; ≥ 21° apart) that skips pink-red through yellow-green (danger, warn and the cache-write series, and the khaki tint they create next to warn) and 143–227, where a chip's text or dot would sit within OKLab ΔE 0.08 of `accent` / `accent-text` in either theme and read teal beside accent elements. Seven, not nine: the teal-free bands hold no more hues at 21° steps. A session keeps the slot it was first given: a new session takes its hashed slot (FNV-1a), or the least-used slot along the probe order when that one is taken — the first seven sessions seen never share a hue, and past that each hue carries an even share. Assignment is per page session, so a session's chip is stable for a sitting but may change on reload. Request kinds (`lib/requestKind.ts`) have fixed hues 21° apart, every badge color at least OKLab ΔE 0.08 from warn, danger, the cache-write series, `accent` and `accent-text` in both themes — side 112, session title 133, notification 228, subagent 249, look at 270, compaction 291, auto thinking 312, advisor 333, recap 354; custom kinds hash into the same safe arcs (110–142 and 228–354). `main`, the bulk of traffic, is the quiet neutral badge (`overlay-5`, muted text) and `unknown` an outlined dashed neutral badge.
+**Categorical chips** use `categoricalColor(hue)` (`lib/colors.ts`): text at OKLCH L 0.42 by day / 0.83 at night (≥ 4.5:1 on the chip's own tint over every table surface, including the selected row), a series-strength dot, and a 14% / 18% tint. The accent is near-achromatic, so chips can use most of the wheel: session chips draw from a fixed palette of nine hues (`SESSION_HUES`: 110, 135, 200, 230, 255, 280, 305, 330, 355; ≥ 21° apart) that skips only the warm band ~5–100 (danger, warn and the cache-write series, and the khaki tint they create next to warn), with 355 as the pink end nearest danger. A session keeps the slot it was first given: a new session takes its hashed slot (FNV-1a), or the least-used slot along the probe order when that one is taken — the first nine sessions seen never share a hue, and past that each hue carries an even share. Assignment is per page session, so a session's chip is stable for a sitting but may change on reload. Request kinds (`lib/requestKind.ts`) have fixed hues ≥ 21° apart, every badge color at least OKLab ΔE 0.08 from warn, danger and the cache-write series in both themes — side 112, session title 135, notification 200, subagent 235, look at 258, compaction 281, auto thinking 304, advisor 327, recap 350; custom kinds hash into the same safe arcs (108–170 and 195–358). `main`, the bulk of traffic, is the quiet neutral badge (`overlay-5`, muted text) and `unknown` an outlined dashed neutral badge.
 
-### Brand teal
+### Accent
 
-Signal teal marks the instrument and the one thing to do next. It appears only as:
+The accent is near-monochrome — a silver with a faint blue whisper at night, a deep ink by day — so it marks the instrument by fill and position, not by hue: the solid fills (the `primary` button, the switch "on" track) and the focus ring. It appears only as:
 
 - the brand mark,
 - the one `primary` button per view,
 - focus rings, the switch "on" track, the live connection dot, tab underlines, accent badges and links (as `accent-text`).
 
-It is never a KPI color, a sparkline color, a chart series, a page decoration or a card fill. The KPI series and sparklines are `text-muted`; the Tokens KPI's second series is the cache-create amber, and the error-rate sparkline turns `danger` only with errors.
+Selection stays neutral (`--color-selected`), never an accent tint. The accent is never a KPI color, a sparkline color, a chart series, a page decoration or a card fill. The KPI series and sparklines are `text-muted`; the Tokens KPI's second series is the cache-create amber, and the error-rate sparkline turns `danger` only with errors.
 
 ### Rules
 
 - Status colors mark state only: dots, badges, severity, incident notices, destructive actions. Healthy is neutral ink; there is no green and no blue. Informational notices are neutral.
 - Status-colored text always uses the `*-text` tokens. Never use raw Tailwind palette classes (`text-red-400`, `zinc-*`) or hex literals in components.
-- Amber, orange and red mean severity. The one deliberate exception is cache create in the token series (amber 5m, orange 1h): a cache write is the costly outcome, so it should stand out, but it is never red. Quota window series, session chips and request-kind badges stay clear of warn, danger and the accent.
+- Amber, orange and red mean severity. The one deliberate exception is cache create in the token series (amber 5m, orange 1h): a cache write is the costly outcome, so it should stand out, but it is never red. Quota window series, session chips and request-kind badges stay clear of warn and danger.
 - Window identity colors appear only in chart series and legends, never on a meter or a quota numeral.
 - No glows or brand-color surfaces. The only gradient is data: the vertical fill under a quota chart's live windows (`SeriesFillGradient`).
 - Tokens are registered through `@theme inline reference`, so every utility (`text-text`, `bg-overlay-3`, `border-subtle`, `bg-series-5h`) supports `hover:`, `focus-visible:`, `dark:` and `/opacity` variants. `dark:` follows the app theme (`data-theme`), not only the OS.
@@ -183,7 +183,7 @@ Primitives live in `src/components/ui/`: `primitives.tsx` (Card, Button, Badge, 
 
 ### Shell
 
-- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B or the header toggle (the width snaps, labels fade). The brand row at the top is 48px so it lines up with the top bar: brand mark (a small 240° dial with a teal sweep) and "cc-lb", with the collapse/expand `IconButton` (`PanelLeft`; "Collapse sidebar" / "Expand sidebar", `aria-expanded`, ⌘B in the tooltip) right-aligned beside the wordmark when expanded and directly under the mark when collapsed. Then nav groups with `text-overline` headings, then the footer: Docs link and the 11px version line. The phone "More" sheet omits the toggle.
+- **Rail** (`lg`+): 208px on the ground with a 1px right line, sticky to the viewport; collapses to 56px with ⌘B or the header toggle (the width snaps, labels fade). The brand row at the top is 48px so it lines up with the top bar: brand mark (a small 240° dial with an accent sweep) and "cc-lb", with the collapse/expand `IconButton` (`PanelLeft`; "Collapse sidebar" / "Expand sidebar", `aria-expanded`, ⌘B in the tooltip) right-aligned beside the wordmark when expanded and directly under the mark when collapsed. Then nav groups with `text-overline` headings, then the footer: the 11px version line. The phone "More" sheet omits the toggle.
 - **Nav item**: 36px, 14/500 `text-muted`; hover `overlay-2` fill and full ink. Active (`data-status="active"`, `aria-current="page"`) is the `selected` fill with full ink, and stays filled on hover; no edge rule. The Upstreams item carries the reconnect count pill (`warn` / `danger` at 15% with `*-text` numerals; a 6px dot when collapsed).
 - **Top bar**: 48px, sticky, on the ground with a 1px bottom line. Left: the page name in `text-title-section`, joined by the brand mark below `lg`. Right: Search (⌘K) field, identity (name and kind from `xl`, a popover below), API connection status (dot + word; the healthy "Live" word hides on phones, other states always show their word), and the Night / Day theme pill. The rail toggle lives in the rail's brand row, not here.
 - **Bottom tab bar** (below `lg`): fixed, 56px plus the safe-area inset, on the ground with a 1px top line. Overview, Upstreams, Principals, Logs and More; 16px icons over 12px labels. The active tab (and More while one of its pages is open) takes the `selected` fill and full ink; no edge rule. More opens the full navigation as a left sheet. Page titles stay in the top bar only; `main` pads by `--shell-bottom` and toasts sit above the bar.
