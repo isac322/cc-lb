@@ -125,4 +125,4 @@ Three deviations from the planned module homes were made during execution. All a
 
 ## Status & follow-up
 
-Proposed. Execution is tracked in the [crate reassembly plan](../plans/crate-reassembly.md) (20 todos, single atomic PR). This ADR should move to **Accepted** when that PR merges, and the stale README/plugin-author references to `cc-lb-plugin-api` as a published surface are updated as part of it.
+Proposed. Execution is tracked in a plan kept outside the repository (20 todos, single atomic PR). This ADR should move to **Accepted** when that PR merges, and the stale README/plugin-author references to `cc-lb-plugin-api` as a published surface are updated as part of it.
