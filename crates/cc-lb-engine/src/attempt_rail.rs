@@ -6,8 +6,8 @@ use cc_lb_upstream::{ShapedRequest, SignedRequest, Signer, SignerError, sign_req
 use http::{HeaderMap, Method, Response};
 use url::Url;
 
-use crate::api_keys::limit_engine::Reservation;
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
+use cc_lb_control::api_keys::limit_engine::Reservation;
 
 /// Input to a proxy attempt before its reservation becomes lifecycle-owned.
 pub struct AttemptIntent {

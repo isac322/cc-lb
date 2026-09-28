@@ -1,12 +1,9 @@
 use super::*;
 
 fn principal() -> Principal {
-    let mut claims = serde_json::Map::new();
-    claims.insert("scope".to_owned(), serde_json::Value::from("inference"));
     Principal {
         id: "tenant-a".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims,
     }
 }
 

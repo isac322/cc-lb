@@ -659,7 +659,7 @@ while time.monotonic() < deadline:
         rows = connection.execute(
             """
             SELECT DISTINCT request_kind, observed_session_id, session_id_source,
-                            client_app, cache_prefix_hash
+                            client_app, json_extract(payload, '$.cache_prefix_hash')
             FROM request_events_v1
             WHERE request_kind IS NOT NULL
             ORDER BY request_kind, observed_session_id

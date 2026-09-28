@@ -1,23 +1,13 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
-use bytes::Bytes;
-use cc_lb_domain::{Principal, Upstream};
-use cc_lb_engine::{SseRelay, StreamingUsage, strip_hop_by_hop};
-use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, UpstreamDialect,
-};
+use cc_lb_engine::strip_hop_by_hop;
 use http::header::CONNECTION;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use http_body_util::BodyExt;
 use proptest::prelude::*;
 use proptest::string::string_regex;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestCaseResult, TestRunner};
-use tokio::runtime::{Builder, Runtime};
 
 const MIN_PROPTEST_CASES: u32 = 1024;
 const PRESERVED_HEADERS: [&str; 6] = [
@@ -39,41 +29,6 @@ const HOP_BY_HOP_HEADERS: [&str; 9] = [
     "upgrade",
     "proxy-connection",
 ];
-
-#[test]
-fn sse_valid_event_sequences_preserve_raw_bytes() -> Result<(), String> {
-    let runtime = runtime()?;
-    run_property(
-        "sse_valid_event_sequences_preserve_raw_bytes",
-        valid_sse_stream_strategy(),
-        |(events, split_seed)| {
-            let input = render_sse_events(&events);
-            let output = runtime
-                .block_on(relay_bytes(input.clone(), split_seed))
-                .map_err(TestCaseError::fail)?;
-            prop_assert_eq!(output.as_ref(), input.as_slice());
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn sse_random_byte_sequences_do_not_panic() -> Result<(), String> {
-    let runtime = runtime()?;
-    run_property(
-        "sse_random_byte_sequences_do_not_panic",
-        (
-            prop::collection::vec(any::<u8>(), 0..=256),
-            prop::collection::vec(0usize..=64, 0..=16),
-        ),
-        |(input, split_seed)| {
-            let _output = runtime
-                .block_on(relay_bytes(input, split_seed))
-                .map_err(TestCaseError::fail)?;
-            Ok(())
-        },
-    )
-}
 
 #[test]
 fn header_allowlist_preserves_non_hop_headers_unless_connection_listed() -> Result<(), String> {
@@ -181,140 +136,6 @@ fn proptest_case_count() -> u32 {
         .max(MIN_PROPTEST_CASES)
 }
 
-fn runtime() -> Result<Runtime, String> {
-    Builder::new_multi_thread()
-        .enable_time()
-        .build()
-        .map_err(|source| source.to_string())
-}
-
-#[derive(Clone, Debug)]
-struct SseEventCase {
-    comment: Option<String>,
-    id: Option<String>,
-    event_name: String,
-    data_lines: Vec<String>,
-}
-
-fn valid_sse_stream_strategy() -> impl Strategy<Value = (Vec<SseEventCase>, Vec<usize>)> {
-    (
-        prop::collection::vec(sse_event_strategy(), 1..=12),
-        prop::collection::vec(0usize..=64, 0..=24),
-    )
-}
-
-fn sse_event_strategy() -> impl Strategy<Value = SseEventCase> {
-    (
-        prop::option::of(ascii_line_strategy(24)),
-        prop::option::of(ascii_line_strategy(16)),
-        event_type_strategy(),
-        prop::collection::vec(ascii_line_strategy(48), 1..=4),
-    )
-        .prop_map(|(comment, id, event_name, data_lines)| SseEventCase {
-            comment,
-            id,
-            event_name,
-            data_lines,
-        })
-}
-
-fn render_sse_events(events: &[SseEventCase]) -> Vec<u8> {
-    let mut output = Vec::new();
-    for event in events {
-        if let Some(comment) = &event.comment {
-            output.extend_from_slice(b": ");
-            output.extend_from_slice(comment.as_bytes());
-            output.push(b'\n');
-        }
-        if let Some(id) = &event.id {
-            output.extend_from_slice(b"id: ");
-            output.extend_from_slice(id.as_bytes());
-            output.push(b'\n');
-        }
-        output.extend_from_slice(b"event: ");
-        output.extend_from_slice(event.event_name.as_bytes());
-        output.push(b'\n');
-        for data in &event.data_lines {
-            output.extend_from_slice(b"data: ");
-            output.extend_from_slice(data.as_bytes());
-            output.push(b'\n');
-        }
-        output.push(b'\n');
-    }
-    output
-}
-
-async fn relay_bytes(input: Vec<u8>, split_seed: Vec<usize>) -> Result<Bytes, String> {
-    let bytes = Bytes::from(input);
-    let chunks = split_bytes(bytes, split_seed);
-    let response = relay().into_response_from_body(body_from_chunks(chunks));
-    response
-        .into_body()
-        .collect()
-        .await
-        .map(|collected| collected.to_bytes())
-        .map_err(|source| source.to_string())
-}
-
-fn split_bytes(input: Bytes, split_seed: Vec<usize>) -> Vec<Bytes> {
-    if input.is_empty() {
-        return vec![input];
-    }
-
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-    for seed in split_seed {
-        if offset >= input.len() {
-            break;
-        }
-        let remaining = input.len() - offset;
-        let max_take = remaining.min(32);
-        let take = 1 + (seed % max_take);
-        let end = offset + take;
-        chunks.push(input.slice(offset..end));
-        offset = end;
-    }
-    if offset < input.len() {
-        chunks.push(input.slice(offset..input.len()));
-    }
-    chunks
-}
-
-fn body_from_chunks(chunks: Vec<Bytes>) -> Body {
-    let stream = async_stream::stream! {
-        for chunk in chunks {
-            yield Ok::<Bytes, Infallible>(chunk);
-        }
-    };
-    Body::from_stream(stream)
-}
-
-fn relay() -> SseRelay {
-    SseRelay {
-        dialect: Arc::new(NoopDialect),
-        error_normalizer: None,
-        upstream_kind: None,
-        streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
-        prompt_cache_observation_context: None,
-    }
-}
-
-struct NoopDialect;
-
-impl UpstreamDialect for NoopDialect {
-    fn shape(
-        &self,
-        _ctx: &DialectShapeContext,
-        _upstream: &Upstream,
-        _principal: &Principal,
-        _builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        Err(DialectError::UnsupportedRequest {
-            reason: "property tests use relay behavior only".to_owned(),
-        })
-    }
-}
-
 #[derive(Clone, Debug)]
 struct HeaderPreservationCase {
     required_values: Vec<String>,
@@ -378,17 +199,6 @@ fn listed_tokens(tokens: &[String]) -> BTreeSet<String> {
         .collect()
 }
 
-fn event_type_strategy() -> impl Strategy<Value = String> {
-    prop_oneof![
-        Just("message_start".to_owned()),
-        Just("content_block_delta".to_owned()),
-        Just("message_delta".to_owned()),
-        Just("message_stop".to_owned()),
-        Just("chunk".to_owned()),
-        string_regex("[a-z][a-z0-9_-]{0,31}").expect("event type regex compiles"),
-    ]
-}
-
 fn connection_token_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         Just("anthropic-version".to_owned()),
@@ -409,10 +219,5 @@ fn non_hop_header_name_strategy(prefix: &'static str) -> impl Strategy<Value = S
 
 fn header_value_strategy(max_len: usize) -> impl Strategy<Value = String> {
     prop::collection::vec(33u8..=126, 0..=max_len)
-        .prop_map(|bytes| String::from_utf8(bytes).expect("generated ASCII is valid UTF-8"))
-}
-
-fn ascii_line_strategy(max_len: usize) -> impl Strategy<Value = String> {
-    prop::collection::vec(32u8..=126, 0..=max_len)
         .prop_map(|bytes| String::from_utf8(bytes).expect("generated ASCII is valid UTF-8"))
 }

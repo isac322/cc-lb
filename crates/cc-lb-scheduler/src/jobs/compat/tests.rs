@@ -10,70 +10,24 @@ use super::*;
 const INITIAL_TIME: u64 = 1_000;
 const UPDATED_TIME: u64 = 2_000;
 
-async fn exercise_etag_deduplicates_not_modified<E>(etags: E) -> Result<()>
-where
-    E: CompatEtagRepository + Sync,
-{
-    let stored_hash = compatibility_value_hash("2.1.150");
-    etags
-        .upsert_compat_value(
-            CLAUDE_CODE_STABLE_VERSION_KEY,
-            Some("etag-1"),
-            &stored_hash,
-            INITIAL_TIME,
-        )
-        .await?;
-    let compatibility_kv = RecordingCompatibilityKv::default();
-
-    let outcome = handle_anthropic_compat_refresh_job(
-        AnthropicCompatRefreshJob::new(CLAUDE_CODE_STABLE_VERSION_KEY),
-        &etags,
-        &compatibility_kv,
-        |compatibility_key, stored_etag| async move {
-            assert_eq!(compatibility_key.name, CLAUDE_CODE_STABLE_VERSION_KEY);
-            assert_eq!(stored_etag.as_deref(), Some("etag-1"));
-            Ok(CompatFetch::NotModified {
-                etag: Some("etag-1".to_owned()),
-            })
-        },
-        UPDATED_TIME,
-    )
-    .await?;
-
-    let row = etags
-        .read_compat_etag(CLAUDE_CODE_STABLE_VERSION_KEY)
-        .await?
-        .expect("etag row");
-    assert_eq!(outcome, JobOutcome::Noop);
-    assert_eq!(row.last_applied_at_unix_secs, UPDATED_TIME);
-    assert_eq!(row.last_value_hash, stored_hash);
-    assert_eq!(compatibility_kv.value_write_count(), 0);
-    Ok(())
-}
-
 async fn exercise_unchanged_hash_skips_value_write<E>(etags: E) -> Result<()>
 where
     E: CompatEtagRepository + Sync,
 {
     let stored_hash = compatibility_value_hash("2.1.150");
-    etags
-        .upsert_compat_value(
-            CLAUDE_CODE_STABLE_VERSION_KEY,
-            Some("etag-1"),
-            &stored_hash,
-            INITIAL_TIME,
-        )
-        .await?;
+    for key in COMPATIBILITY_KEYS {
+        etags
+            .upsert_compat_value(key.name, &stored_hash, INITIAL_TIME)
+            .await?;
+    }
     let compatibility_kv = RecordingCompatibilityKv::default();
 
     let outcome = handle_anthropic_compat_refresh_job(
-        AnthropicCompatRefreshJob::new(CLAUDE_CODE_STABLE_VERSION_KEY),
         &etags,
         &compatibility_kv,
-        |_compatibility_key, _stored_etag| async move {
-            Ok(CompatFetch::Modified {
+        |_compatibility_key| async move {
+            Ok(CompatFetch {
                 value: "2.1.150".to_owned(),
-                etag: Some("etag-2".to_owned()),
                 source_url: Some("https://example.test/stable".to_owned()),
             })
         },
@@ -84,9 +38,8 @@ where
     let row = etags
         .read_compat_etag(CLAUDE_CODE_STABLE_VERSION_KEY)
         .await?
-        .expect("etag row");
+        .expect("compat row");
     assert_eq!(outcome, JobOutcome::Noop);
-    assert_eq!(row.etag.as_deref(), Some("etag-2"));
     assert_eq!(row.last_applied_at_unix_secs, UPDATED_TIME);
     assert_eq!(row.last_value_hash, stored_hash);
     assert_eq!(compatibility_kv.value_write_count(), 0);
@@ -99,13 +52,11 @@ async fn refresh_all_keys_writes_each_key_independently() {
     let compatibility_kv = RecordingCompatibilityKv::default();
 
     let outcome = handle_anthropic_compat_refresh_job(
-        AnthropicCompatRefreshJob::all(),
         &etags,
         &compatibility_kv,
-        |compatibility_key, _stored_etag| async move {
-            Ok(CompatFetch::Modified {
+        |compatibility_key| async move {
+            Ok(CompatFetch {
                 value: format!("value-for-{}", compatibility_key.name),
-                etag: Some(format!("etag-for-{}", compatibility_key.name)),
                 source_url: None,
             })
         },
@@ -127,12 +78,8 @@ async fn refresh_all_keys_writes_each_key_independently() {
         let row = etags
             .read_compat_etag(key.name)
             .await
-            .expect("etag read")
-            .unwrap_or_else(|| panic!("{} etag row", key.name));
-        assert_eq!(
-            row.etag.as_deref(),
-            Some(format!("etag-for-{}", key.name).as_str())
-        );
+            .expect("compat row read")
+            .unwrap_or_else(|| panic!("{} compat row", key.name));
         assert_eq!(
             row.last_value_hash,
             compatibility_value_hash(&format!("value-for-{}", key.name))
@@ -146,18 +93,16 @@ async fn refresh_all_keys_failed_fetch_does_not_block_other_keys() {
     let compatibility_kv = RecordingCompatibilityKv::default();
 
     let outcome = handle_anthropic_compat_refresh_job(
-        AnthropicCompatRefreshJob::all(),
         &etags,
         &compatibility_kv,
-        |compatibility_key, _stored_etag| async move {
+        |compatibility_key| async move {
             if compatibility_key.name == CLAUDE_CODE_STABLE_VERSION_KEY {
                 Err(crate::error::SchedulerError::Job(
                     "fetch blew up".to_owned(),
                 ))
             } else {
-                Ok(CompatFetch::Modified {
+                Ok(CompatFetch {
                     value: "9.9.9".to_owned(),
-                    etag: None,
                     source_url: None,
                 })
             }
@@ -200,14 +145,12 @@ async fn refresh_all_keys_starts_every_fetch_before_any_completes() {
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         handle_anthropic_compat_refresh_job(
-            AnthropicCompatRefreshJob::all(),
             &etags,
             &compatibility_kv,
-            move |compatibility_key, _stored_etag| async move {
+            move |compatibility_key| async move {
                 barrier.wait().await;
-                Ok(CompatFetch::Modified {
+                Ok(CompatFetch {
                     value: format!("value-for-{}", compatibility_key.name),
-                    etag: None,
                     source_url: None,
                 })
             },
@@ -240,13 +183,12 @@ async fn sqlite_etags() -> Result<AnthropicCompatEtagsStore<sqlx::Sqlite>> {
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/sqlite/0010_drop_anthropic_compat_etag.sql"
+    ))
+    .execute(&pool)
+    .await?;
     Ok(AnthropicCompatEtagsStore::new(pool))
-}
-
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn jobs_compat_etag_deduplicates_not_modified_sqlite() -> Result<()> {
-    exercise_etag_deduplicates_not_modified(sqlite_etags().await?).await
 }
 
 #[cfg(feature = "sqlite")]
@@ -287,20 +229,11 @@ async fn postgres_etags() -> Result<
         "../../../migrations/postgres/0002_idempotency_tables.sql"
     ))
     .await?;
+    pool.execute(include_str!(
+        "../../../migrations/postgres/0010_drop_anthropic_compat_etag.sql"
+    ))
+    .await?;
     Ok(Some((admin, schema, AnthropicCompatEtagsStore::new(pool))))
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn jobs_compat_etag_deduplicates_not_modified_postgres() -> Result<()> {
-    let Some((admin, schema, etags)) = postgres_etags().await? else {
-        return Ok(());
-    };
-    let outcome = exercise_etag_deduplicates_not_modified(etags).await;
-    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
-        .execute(&admin)
-        .await?;
-    outcome
 }
 
 #[cfg(feature = "postgres")]

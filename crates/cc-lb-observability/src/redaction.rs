@@ -503,9 +503,6 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
         len += candidate_urgency_json_len(candidate);
     }
     len += "]".len();
-    if let Some(previous_tier) = trace.previous_tier {
-        len += ",\"previous_tier\":".len() + tier_json_len(previous_tier);
-    }
     if let Some(formula_version) = &trace.formula_version {
         len += ",\"formula_version\":".len() + json_string_len(formula_version);
     }
@@ -518,17 +515,6 @@ fn subscription_preference_json_len(trace: &SubscriptionPreferenceTrace) -> usiz
     }
     if let Some(kept_upstream_id) = trace.kept_upstream_id {
         len += ",\"kept_upstream_id\":".len() + json_string_len(&kept_upstream_id.to_string());
-    }
-    if let Some(incumbent_upstream_id) = trace.incumbent_upstream_id {
-        len += ",\"incumbent_upstream_id\":".len()
-            + json_string_len(&incumbent_upstream_id.to_string());
-    }
-    if let Some(estimated_switch_cache_loss_micros) = trace.estimated_switch_cache_loss_micros {
-        len += ",\"estimated_switch_cache_loss_micros\":".len()
-            + estimated_switch_cache_loss_micros.to_string().len();
-    }
-    if let Some(cache_loss_status) = &trace.cache_loss_status {
-        len += ",\"cache_loss_status\":".len() + json_string_len(cache_loss_status);
     }
     if let Some(switch_gate_reason) = &trace.switch_gate_reason {
         len += ",\"switch_gate_reason\":".len() + json_string_len(switch_gate_reason);

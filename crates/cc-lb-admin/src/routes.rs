@@ -17,16 +17,12 @@ use crate::{
     AdminState,
     audit::{AdminAuditEvent, record_admin_audit},
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
-    principals::{principal_key_usage, principal_limits, principal_usage},
+    principals::principal_key_usage,
     static_assets::{serve_asset, serve_index},
 };
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
-        .route("/admin/principals/{id}/usage", get(principal_usage))
-        .route("/admin/principals/{id}/limits", get(principal_limits))
-        .route("/admin/v1/principals/{id}/usage", get(principal_usage))
-        .route("/admin/v1/principals/{id}/limits", get(principal_limits))
         .route("/admin/principals/{id}/keys/{key_id}", get(get_api_key))
         .route(
             "/admin/principals/{id}/keys/{key_id}/revoke",
@@ -44,7 +40,6 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin/principals/{id}/keys/{key_id}/usage",
             get(principal_key_usage),
         )
-        .route("/admin/audit", get(query_audit))
         .route("/admin/v1/audit", get(query_audit))
         .route("/admin/v1/config/editor", get(get_config_editor))
         .route(
@@ -78,10 +73,6 @@ pub fn build_router(state: AdminState) -> Router {
             get(crate::events_routes::handle_events_histogram),
         )
         .route(
-            "/admin/events/histogram",
-            get(crate::events_routes::handle_events_histogram),
-        )
-        .route(
             "/admin/v1/events/delta",
             get(crate::events_routes::handle_events_delta),
         )
@@ -89,8 +80,6 @@ pub fn build_router(state: AdminState) -> Router {
             "/admin/v1/events/stream",
             get(crate::events_routes::handle_events_stream),
         )
-        .merge(crate::dashboard_routes::router())
-        .merge(crate::events_routes::router())
         .merge(crate::events_detail_route::router())
         .merge(crate::subscription_quotas::router())
         .merge(crate::scheduler::router())
@@ -581,7 +570,6 @@ async fn save_config_file(
                         "revision": response.revision,
                         "saved_at_unix_secs": response.saved_at_unix_secs,
                         "fingerprint": response.fingerprint.clone(),
-                        "restart_required": true,
                     })),
                 },
             )

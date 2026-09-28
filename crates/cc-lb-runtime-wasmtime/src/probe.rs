@@ -19,7 +19,7 @@ use crate::error::WasmtimeRuntimeError;
 
 mod filter;
 
-use filter::probe_filter_v1;
+use filter::probe_filter;
 
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
@@ -40,7 +40,6 @@ pub(crate) fn probe_hook_dispatch(
     }
 
     let cell = Arc::new(PluginCell {
-        version_id: 0,
         instance_pre,
         metadata: metadata.clone(),
         memory_max_pages,
@@ -49,7 +48,7 @@ pub(crate) fn probe_hook_dispatch(
         content_hash: [0; 32],
     });
     match (hook, wire_version) {
-        (HookKind::Filter, WireVersion::V1) => probe_filter_v1(&cell),
+        (HookKind::Filter, WireVersion::V1) => probe_filter(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
         (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
         (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),

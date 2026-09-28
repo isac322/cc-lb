@@ -3,9 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError, StorageResult,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
-    validate_identifier,
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
+    StoredApiKeyRecord, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -515,7 +514,7 @@ fn base64_url_no_pad(value: &[u8]) -> String {
 mod tests {
     use std::{error::Error, str::FromStr, sync::Arc};
 
-    use cc_lb_storage_api::{ManagedKeyStore, types::LimitKind};
+    use cc_lb_storage_api::{LimitKind, ManagedKeyStore};
     use sqlx::{
         AssertSqlSafe,
         postgres::{PgConnectOptions, PgPoolOptions},

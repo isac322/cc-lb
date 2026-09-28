@@ -28,14 +28,14 @@ Delete `cc-lb-plugin-api` and `cc-lb-contract`. Add six **unpublished** (`publis
 
 | New crate | Cadence | Owns | Depends on (cc-lb) |
 | --- | --- | --- | --- |
-| `cc-lb-domain` | **stable leaf** | Every **pure value type**: nouns/identity (`Principal`, `Upstream`, `UpstreamCandidate`, `UpstreamKind`, `CredentialStrategy`, `GLOBAL_PRINCIPAL`, 4× `BUILTIN_*`, `ANTHROPIC_IDENTITY_HEADERS`), quota/rate values, cache values (`TtlClass` canonical, `CacheScore`, `CachePricingSummary`, breakpoints), the **entire routing-trace tree** (`RoutingTrace`/`StageDecision`/`TerminalDecision`/`SubscriptionPreferenceTrace`/`CandidateUrgency`/`WrhKeySource`/`CacheAffinityTrace`), errors (`InternalError`/`Kind`/`Stage`), `PlanInfo` (moved from control), `ReplicaIdentity` | *(none — dependency-free)* |
+| `cc-lb-domain` | **stable leaf** | Every **pure value type**: nouns/identity (`Principal`, `Upstream`, `UpstreamCandidate`, `UpstreamKind`, 4× `BUILTIN_*`, `ANTHROPIC_IDENTITY_HEADERS`), quota/rate values, cache values (`TtlClass` canonical, `CacheScore`, `CachePricingSummary`, breakpoints), the **entire routing-trace tree** (`RoutingTrace`/`StageDecision`/`TerminalDecision`/`SubscriptionPreferenceTrace`/`CandidateUrgency`/`WrhKeySource`/`CacheAffinityTrace`), errors (`InternalError`/`Kind`/`Stage`), `PlanInfo` (moved from control), `ReplicaIdentity` | *(none — dependency-free)* |
 | `cc-lb-upstream` | slow SPI | `UpstreamDialect`, `Signer`(+factories), transform hooks, `ShapedRequest`/builder, `SignedRequest`, `RetryDecision` (embeds `Arc<dyn Signer>`), new `DialectShapeContext` | domain |
-| `cc-lb-routing` | fast SPI | `FilterPlugin`, `RouterPlugin`, `RouteDecision` (embeds `Arc<dyn UpstreamDialect>`), `PerCandidateReason`, new proxy-only `RoutingContext` view | domain, upstream |
+| `cc-lb-routing` | fast SPI | `FilterPlugin`, `RouteDecision` (embeds `Arc<dyn UpstreamDialect>`), `PerCandidateReason`, new proxy-only `RoutingContext` view | domain, upstream |
 | `cc-lb-quota` | logic | `rate_limit_headers` (`UnifiedQuotaObservation`), `plan_capacity` (`TierKey`, ratios), quota-sample | domain, storage-api |
 | `cc-lb-request-log` | **stable** persisted | `RequestEvent` (embeds `domain::RoutingTrace` + `Vec<InternalError>` **directly**), `RequestEventPartial`/`Update`, cache-state records, `HeaderSnapshot`, `CostBreakdown` | domain |
 | `cc-lb-lifecycle` | volatile vocab | `LifecycleEvent` (14 variants), `EventId`, stage payloads, `PromptCacheObservationWire`, publisher sink | domain, request-log |
 
-Contract's remaining members are redistributed to their real owners: metrics hook → `cc-lb-observability`; `AuditSink`/`AuditEntry` + `Limit`/`LimitKind`/`KeyStatus` + `PluginSlotKind` → `cc-lb-storage-api`; the Tokio event-bus wiring + `ReplicaIdentityProvider` → `cc-lb-control`.
+Contract's remaining members are redistributed to their real owners: metrics hook → `cc-lb-observability`; `AuditSink`/`AuditEntry` + `Limit`/`LimitKind`/`KeyStatus` + `PluginSlotKind` → `cc-lb-storage-api`; the Tokio event-bus wiring → `cc-lb-control`.
 
 ### 2. Routing-trace lives in the stable leaf, so **no mirror machinery exists**
 

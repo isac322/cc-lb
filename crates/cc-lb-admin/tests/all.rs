@@ -20,8 +20,6 @@ mod config_admin_common;
 mod config_download;
 #[path = "config_draft.rs"]
 mod config_draft;
-#[path = "config_draft_persists.rs"]
-mod config_draft_persists;
 #[path = "config_history.rs"]
 mod config_history;
 #[path = "config_save.rs"]
@@ -36,8 +34,6 @@ mod dashboard_principal_totals_cache;
 mod dashboard_summary;
 #[path = "dashboard_usage.rs"]
 mod dashboard_usage;
-#[path = "disable_enable_key.rs"]
-mod disable_enable_key;
 #[path = "e2e_pkce_enrollment.rs"]
 mod e2e_pkce_enrollment;
 #[path = "events_delta_rest.rs"]
@@ -56,16 +52,8 @@ mod insert_chain_validates_wire_version;
 mod internal_partials;
 #[path = "new_admin_modules_smoke.rs"]
 mod new_admin_modules_smoke;
-#[path = "oauth_no_authn_fallback.rs"]
-mod oauth_no_authn_fallback;
-#[path = "principal_crud.rs"]
-mod principal_crud;
 #[path = "principal_keys.rs"]
 mod principal_keys;
-#[path = "principal_limits.rs"]
-mod principal_limits;
-#[path = "principal_usage.rs"]
-mod principal_usage;
 #[path = "principals_cache_keepalive_roundtrip.rs"]
 mod principals_cache_keepalive_roundtrip;
 #[path = "reorder_rebalance_revalidates_slot.rs"]
@@ -80,14 +68,10 @@ mod snapshot_health;
 mod static_assets_cache;
 #[path = "static_assets_served.rs"]
 mod static_assets_served;
-#[path = "status.rs"]
-mod status;
 #[path = "subscription_quota_slim_parity.rs"]
 mod subscription_quota_slim_parity;
 #[path = "subscription_quotas.rs"]
 mod subscription_quotas;
-#[path = "upstream_health.rs"]
-mod upstream_health;
 #[path = "v1_limit_resets.rs"]
 mod v1_limit_resets;
 #[path = "v1_oauth.rs"]

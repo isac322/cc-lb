@@ -25,7 +25,8 @@ expression: body
             "order": 1000,
             "wasm_registry_name": "plugin-alpha"
           }
-        ]
+        ],
+        "Shape": []
       }
     },
     "registry": [

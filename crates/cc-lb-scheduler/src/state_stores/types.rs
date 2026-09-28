@@ -50,7 +50,6 @@ impl OAuthUsagePollCursor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnthropicCompatEtag {
     pub key: String,
-    pub etag: Option<String>,
     pub last_applied_at_unix_secs: u64,
     pub last_value_hash: String,
 }

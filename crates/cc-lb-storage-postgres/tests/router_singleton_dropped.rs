@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
-    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
+    PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -35,7 +35,7 @@ async fn run_test(url: &str) -> Result<()> {
         fixture.pool.clone(),
         std::sync::Arc::new(cc_lb_clock::SystemClock),
     );
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     let principal = storage
         .create(
@@ -58,10 +58,8 @@ async fn run_test(url: &str) -> Result<()> {
                 sha256: [42u8; 32],
                 bytes: b"fake wasm bytes".to_vec(),
                 size_bytes: b"fake wasm bytes".len() as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: "test-plugin".to_owned(),
                 version: None,
                 original_filename: "test.wasm".to_owned(),

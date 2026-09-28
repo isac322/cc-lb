@@ -30,7 +30,6 @@ where
     series_source_merge_merged_collapses_both_sources(Arc::clone(&backend)).await?;
     series_source_merge_header_filters_api(Arc::clone(&backend)).await?;
     series_max_points_per_series_downsamples(Arc::clone(&backend)).await?;
-    process_start_marker_persists_with_sample_kind(Arc::clone(&backend)).await?;
     absent_replaces_latest_without_erasing_history(Arc::clone(&backend)).await?;
     absent_is_idempotent(Arc::clone(&backend)).await?;
     empty_upstream_ids_returns_empty(Arc::clone(&backend)).await?;
@@ -74,7 +73,9 @@ macro_rules! aggregate_scenario {
 scenario!(append_then_list_latest_roundtrip, |storage| async move {
     let upstream = upstream_id(1);
     let record = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.25);
-    storage.record_subscription_quota_sample(&record).await?;
+    storage
+        .record_subscription_quota_samples(std::slice::from_ref(&record))
+        .await?;
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream])
         .await?;
@@ -145,8 +146,12 @@ scenario!(latest_is_monotonic_in_millis, |storage| async move {
     let upstream = upstream_id(4);
     let newer = observation(upstream, 200, 1, SubscriptionQuotaSource::Header, 0.9);
     let older = observation(upstream, 100, 2, SubscriptionQuotaSource::Header, 0.1);
-    storage.record_subscription_quota_sample(&newer).await?;
-    storage.record_subscription_quota_sample(&older).await?;
+    storage
+        .record_subscription_quota_samples(std::slice::from_ref(&newer))
+        .await?;
+    storage
+        .record_subscription_quota_samples(std::slice::from_ref(&older))
+        .await?;
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream])
         .await?;
@@ -308,41 +313,22 @@ scenario!(
 );
 
 scenario!(
-    process_start_marker_persists_with_sample_kind,
-    |storage| async move {
-        let upstream = upstream_id(11);
-        let mut marker = observation(upstream, 100, 1, SubscriptionQuotaSource::Header, 0.0);
-        marker.sample_kind = SubscriptionQuotaSampleKind::ProcessStart;
-        storage.record_subscription_quota_sample(&marker).await?;
-        let latest = storage
-            .list_latest_subscription_quota_for_upstreams(&[upstream])
-            .await?;
-        ensure!(
-            latest[0].sample_kind == SubscriptionQuotaSampleKind::ProcessStart,
-            "marker kind should persist"
-        );
-        let sample = observation(upstream, 200, 2, SubscriptionQuotaSource::Header, 0.5);
-        storage.record_subscription_quota_sample(&sample).await?;
-        let latest = storage
-            .list_latest_subscription_quota_for_upstreams(&[upstream])
-            .await?;
-        ensure!(latest == [sample], "newer real sample should become latest");
-        Ok(())
-    }
-);
-scenario!(
     absent_replaces_latest_without_erasing_history,
     |storage| async move {
         let upstream = upstream_id(12);
         let sample = observation(upstream, 100, 1, SubscriptionQuotaSource::Api, 0.25);
-        storage.record_subscription_quota_sample(&sample).await?;
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&sample))
+            .await?;
 
         let mut absent = observation(upstream, 200, 2, SubscriptionQuotaSource::Api, 0.0);
         absent.sample_kind = SubscriptionQuotaSampleKind::Absent;
         absent.utilization = None;
         absent.status = None;
         absent.resets_at_unix_secs = None;
-        storage.record_subscription_quota_sample(&absent).await?;
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&absent))
+            .await?;
 
         let latest = storage
             .list_latest_subscription_quota_for_upstreams(&[upstream])
@@ -388,8 +374,12 @@ scenario!(absent_is_idempotent, |storage| async move {
     absent.status = None;
     absent.resets_at_unix_secs = None;
 
-    storage.record_subscription_quota_sample(&absent).await?;
-    storage.record_subscription_quota_sample(&absent).await?;
+    storage
+        .record_subscription_quota_samples(std::slice::from_ref(&absent))
+        .await?;
+    storage
+        .record_subscription_quota_samples(std::slice::from_ref(&absent))
+        .await?;
 
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream])
@@ -809,13 +799,13 @@ scenario!(checkpoint_series_anchor_merge, |storage| async move {
 
     let no_anchor_upstream = upstream_id(28);
     storage
-        .put_subscription_quota_checkpoint(&checkpoint(&observation(
+        .put_subscription_quota_checkpoints(&[checkpoint(&observation(
             no_anchor_upstream,
             180_000,
             9,
             SubscriptionQuotaSource::Header,
             0.50,
-        )))
+        ))])
         .await?;
     let no_anchor_series = storage
         .list_subscription_quota_series(series_query(
@@ -853,7 +843,9 @@ scenario!(
             SubscriptionQuotaSource::Header,
             0.42,
         ));
-        storage.put_subscription_quota_checkpoint(&anchor).await?;
+        storage
+            .put_subscription_quota_checkpoints(std::slice::from_ref(&anchor))
+            .await?;
 
         let series = storage
             .list_subscription_quota_series(series_query(
@@ -1248,7 +1240,9 @@ scenario!(
         sample.window = SubscriptionQuotaWindow::SevenDayFable;
         let checkpoint = checkpoint(&sample);
 
-        storage.record_subscription_quota_sample(&sample).await?;
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(&sample))
+            .await?;
 
         let latest_samples = storage
             .list_latest_subscription_quota_for_upstreams(&[upstream])
@@ -1303,12 +1297,12 @@ scenario!(
         duplicate.ingested_at_unix_millis = 201;
 
         let first_inserted = storage
-            .put_subscription_quota_checkpoint(&first.clone())
+            .put_subscription_quota_checkpoints(std::slice::from_ref(&first))
             .await?;
         ensure!(first_inserted == 1, "first semantic state should insert");
 
         let duplicate_inserted = storage
-            .put_subscription_quota_checkpoint(&duplicate)
+            .put_subscription_quota_checkpoints(std::slice::from_ref(&duplicate))
             .await?;
         ensure!(
             duplicate_inserted == 0,
@@ -1577,6 +1571,7 @@ fn usage_event(
     RequestEvent {
         ts_ms: Some(timestamp.saturating_mul(1_000)),
         request_id: request_id.to_owned(),
+        event_id: Some(request_id.to_owned()),
         principal_id: Some("quota-boundary-principal".to_owned()),
         key_id: Some("quota-boundary-key".to_owned()),
         upstream_id: Some(upstream_id),

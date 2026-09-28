@@ -6,13 +6,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, RateLimitKind, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DynamicView, DynamicViewBuilder, RequestKind, UpstreamRateLimitCache,
-    build_candidates,
-};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicView, DynamicViewBuilder, UpstreamRateLimitCache};
+use cc_lb_domain::{RateLimitKind, Upstream};
+use cc_lb_engine::{ApiKeyAwareSignerFactory, RequestKind, build_candidates};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RateLimitKind as StoredRateLimitKind, UpstreamRateLimitObservationRecord};
@@ -31,13 +28,20 @@ use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, mes
 fn build_candidates_populates_observations_from_dynamic_view_cache() {
     let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000101").unwrap();
     let other_upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000102").unwrap();
-    let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::from_records(
-        vec![
-            observation_record(upstream_id, StoredRateLimitKind::Requests, 77, 1234),
-            observation_record(other_upstream_id, StoredRateLimitKind::Tokens, 88, 1235),
-        ],
-        1236,
-    )));
+    let mut rate_limits = UpstreamRateLimitCache::default();
+    rate_limits.upsert_record(observation_record(
+        upstream_id,
+        StoredRateLimitKind::Requests,
+        77,
+        1234,
+    ));
+    rate_limits.upsert_record(observation_record(
+        other_upstream_id,
+        StoredRateLimitKind::Tokens,
+        88,
+        1235,
+    ));
+    let cache = Arc::new(RwLock::new(rate_limits));
     let view = test_view(
         vec![principal("principal", Vec::new())],
         vec![upstream(upstream_id), upstream(other_upstream_id)],
@@ -50,7 +54,7 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         RequestKind::AnthropicMessages,
         &[],
         &HashMap::new(),
-        &cc_lb_engine::SystemClock,
+        &cc_lb_clock::SystemClock,
     );
 
     let candidate = candidates
@@ -58,12 +62,6 @@ fn build_candidates_populates_observations_from_dynamic_view_cache() {
         .find(|candidate| candidate.upstream_id == upstream_id)
         .expect("candidate exists");
     assert_eq!(candidate.observed_at_unix_secs, 1236);
-    assert_eq!(candidate.observed_rate_limits.len(), 1);
-    assert_eq!(
-        candidate.observed_rate_limits[0].kind,
-        RateLimitKind::Requests
-    );
-    assert_eq!(candidate.observed_rate_limits[0].remaining, Some(77));
 }
 
 #[tokio::test]
@@ -123,7 +121,6 @@ fn test_view(
 ) -> Arc<DynamicView> {
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
-        .global_router(Arc::new(TestRouter))
         .principal_view(Arc::new(PrincipalView::from_db(
             &principals,
             std::collections::HashMap::new(),
@@ -142,8 +139,6 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
         allowed_upstreams,
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -252,15 +247,3 @@ impl Signer for TestSigner {
     }
 }
 
-struct TestRouter;
-
-impl RouterPlugin for TestRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        panic!("cache candidate test must not route")
-    }
-}

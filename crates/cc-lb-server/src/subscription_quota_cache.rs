@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cc_lb_control::SubscriptionQuotaCacheLike;
 use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
-use cc_lb_engine::SubscriptionQuotaCacheLike;
 use cc_lb_storage_api::{
     StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
@@ -16,7 +16,6 @@ use crate::dynamic_view_builder::Stores;
 pub enum MergedSource {
     Header,
     Api,
-    Merged,
 }
 
 impl MergedSource {
@@ -24,7 +23,6 @@ impl MergedSource {
         match self {
             Self::Header => "header",
             Self::Api => "api",
-            Self::Merged => "merged",
         }
     }
 }
@@ -38,7 +36,6 @@ pub struct MergedQuotaSnapshot {
     pub resets_at_unix_secs: Option<u64>,
     pub surpassed_threshold: Option<f64>,
     pub representative_claim: Option<String>,
-    pub fallback_percentage: Option<f64>,
     pub fallback_available: Option<bool>,
     pub overage_in_use: Option<bool>,
     pub overage_period_monthly_utilization: Option<f64>,
@@ -137,7 +134,6 @@ impl MergedQuotaSnapshot {
             resets_at_unix_secs: record.resets_at_unix_secs,
             surpassed_threshold: record.surpassed_threshold,
             representative_claim: record.representative_claim.clone(),
-            fallback_percentage: record.fallback_percentage,
             fallback_available: record.fallback_available,
             overage_in_use: record.overage_in_use,
             overage_period_monthly_utilization: record.overage_period_monthly_utilization,
@@ -185,10 +181,12 @@ fn candidate_from_sources(
         .api
         .as_ref()
         .is_some_and(|snapshot| is_fresh(snapshot, now_unix_millis, max_staleness_secs));
-    let merged = merge_sources(sources, header_fresh, api_fresh);
+    let Some(merged) = merge_sources(sources, header_fresh, api_fresh) else {
+        return unobserved_candidate(window, max_staleness_secs);
+    };
     let state = match merged.sample_kind {
         SubscriptionQuotaSampleKind::Absent => SubscriptionQuotaDataState::Absent,
-        SubscriptionQuotaSampleKind::Sample | SubscriptionQuotaSampleKind::ProcessStart => {
+        SubscriptionQuotaSampleKind::Sample => {
             if is_fresh(&merged, now_unix_millis, max_staleness_secs) {
                 SubscriptionQuotaDataState::Fresh
             } else {
@@ -203,7 +201,7 @@ fn merge_sources(
     sources: &SourceSnapshots,
     header_fresh: bool,
     api_fresh: bool,
-) -> MergedQuotaSnapshot {
+) -> Option<MergedQuotaSnapshot> {
     // Pure source selection: return exactly one source snapshot wholesale.
     // Never blend fields between sources — the returned snapshot's `source`
     // label, `utilization`, `observed_at_unix_millis`, and every other field
@@ -214,40 +212,22 @@ fn merge_sources(
     //   2. Both sources present, exactly one fresh → fresh source wins as-is.
     //   3. Both fresh or both stale → newer `observed_at_unix_millis` wins
     //      as-is (api wins on tie since it is the higher-fidelity feed).
-    //   4. Neither source has data → empty placeholder.
+    //   4. Neither source has data → `None`.
     match (sources.header.as_ref(), sources.api.as_ref()) {
         (Some(header), Some(api)) => match (header_fresh, api_fresh) {
-            (true, false) => header.clone(),
-            (false, true) => api.clone(),
+            (true, false) => Some(header.clone()),
+            (false, true) => Some(api.clone()),
             _ => {
                 if api.observed_at_unix_millis >= header.observed_at_unix_millis {
-                    api.clone()
+                    Some(api.clone())
                 } else {
-                    header.clone()
+                    Some(header.clone())
                 }
             }
         },
-        (Some(header), None) => header.clone(),
-        (None, Some(api)) => api.clone(),
-        (None, None) => MergedQuotaSnapshot {
-            source: MergedSource::Merged,
-            sample_kind: SubscriptionQuotaSampleKind::Sample,
-            utilization: None,
-            status: None,
-            resets_at_unix_secs: None,
-            surpassed_threshold: None,
-            representative_claim: None,
-            fallback_percentage: None,
-            fallback_available: None,
-            overage_in_use: None,
-            overage_period_monthly_utilization: None,
-            upgrade_paths: None,
-            disabled_reason: None,
-            extra_usage_enabled: None,
-            extra_usage_monthly_limit: None,
-            extra_usage_used_credits: None,
-            observed_at_unix_millis: 0,
-        },
+        (Some(header), None) => Some(header.clone()),
+        (None, Some(api)) => Some(api.clone()),
+        (None, None) => None,
     }
 }
 
@@ -327,7 +307,6 @@ mod tests {
             resets_at_unix_secs: Some(observed_at_unix_millis / 1_000 + 3_600),
             surpassed_threshold: None,
             representative_claim: None,
-            fallback_percentage: None,
             fallback_available: None,
             overage_in_use: None,
             overage_period_monthly_utilization: None,
@@ -379,7 +358,7 @@ mod tests {
             api: Some(api.clone()),
         };
         let result = merge_sources(&sources, true, true);
-        assert_eq!(result, api);
+        assert_eq!(result, Some(api));
     }
 
     #[test]
@@ -391,7 +370,7 @@ mod tests {
             api: Some(api),
         };
         let result = merge_sources(&sources, true, true);
-        assert_eq!(result, header);
+        assert_eq!(result, Some(header));
     }
 
     #[test]
@@ -403,7 +382,7 @@ mod tests {
             api: Some(api.clone()),
         };
         let result = merge_sources(&sources, false, true);
-        assert_eq!(result, api);
+        assert_eq!(result, Some(api));
     }
 
     #[test]
@@ -415,7 +394,7 @@ mod tests {
             api: Some(api.clone()),
         };
         let result = merge_sources(&sources, false, false);
-        assert_eq!(result, api);
+        assert_eq!(result, Some(api));
     }
 
     #[test]
@@ -426,7 +405,7 @@ mod tests {
             header: Some(stale_header),
             api: Some(fresh_api),
         };
-        let result = merge_sources(&sources, true, true);
+        let result = merge_sources(&sources, true, true).expect("api snapshot selected");
         assert_eq!(result.source, MergedSource::Api);
         assert_eq!(result.utilization, Some(0.37));
         assert_eq!(result.observed_at_unix_millis, 5_000);
@@ -440,7 +419,7 @@ mod tests {
             api: None,
         };
         let result = merge_sources(&sources, true, false);
-        assert_eq!(result, header);
+        assert_eq!(result, Some(header));
     }
 
     #[test]
@@ -451,16 +430,7 @@ mod tests {
             api: Some(api.clone()),
         };
         let result = merge_sources(&sources, false, true);
-        assert_eq!(result, api);
-    }
-
-    #[test]
-    fn neither_returns_empty_placeholder() {
-        let sources = SourceSnapshots::default();
-        let result = merge_sources(&sources, false, false);
-        assert_eq!(result.source, MergedSource::Merged);
-        assert!(result.utilization.is_none());
-        assert_eq!(result.observed_at_unix_millis, 0);
+        assert_eq!(result, Some(api));
     }
 
     #[test]

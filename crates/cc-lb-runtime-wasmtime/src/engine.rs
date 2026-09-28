@@ -1,8 +1,5 @@
 //! Hot-path wasmtime [`Engine`] construction.
 //!
-//! Phase 1 W2 — only the sync hot-path engine is set up here. The async
-//! signer engine arrives in Phase 2.
-//!
 //! ## Config invariants (RFC §Engine 구성 + review consensus)
 //!
 //! * `async_support` is deprecated in wasmtime 46 (async is selected per
@@ -56,12 +53,6 @@ impl HostState {
 
     pub fn limits(&mut self) -> &mut StoreLimits {
         &mut self.limits
-    }
-}
-
-impl Default for HostState {
-    fn default() -> Self {
-        Self::new(DEFAULT_MEMORY_MAX_PAGES)
     }
 }
 

@@ -23,14 +23,6 @@ impl UpstreamKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpstreamStatus {
-    Active,
-    Disabled,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamWarmupDialectPlugin {
     pub wasm_registry_id: Uuid,
@@ -74,16 +66,6 @@ pub struct UpstreamRecord {
 }
 
 impl UpstreamRecord {
-    pub fn status(&self) -> UpstreamStatus {
-        if !self.enabled {
-            UpstreamStatus::Disabled
-        } else if self.last_apply_error.is_some() {
-            UpstreamStatus::Error
-        } else {
-            UpstreamStatus::Active
-        }
-    }
-
     /// Fingerprint of the stored OAuth credential ciphertext. Every
     /// credential write — refresh, reauthorization, replacement — produces
     /// new ciphertext (random nonce), so this is the authoritative
@@ -129,9 +111,6 @@ pub struct UpstreamUpdate {
 pub struct UpstreamStatusUpdate {
     pub last_apply_error: Option<Option<String>>,
     pub last_apply_at_unix_secs: Option<Option<u64>>,
-    pub observed_spec_revision: Option<Option<u64>>,
-    pub observed_api_key_secret_revision: Option<Option<u64>>,
-    pub observed_oauth_token_revision: Option<Option<u64>>,
     /// When `Some(value)`, write `value` to `upstream_status_v1.last_warmup_at`.
     /// `Some(None)` clears it; `None` leaves it untouched.
     pub last_warmup_at_unix_secs: Option<Option<u64>>,

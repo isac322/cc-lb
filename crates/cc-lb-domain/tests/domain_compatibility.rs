@@ -1,13 +1,13 @@
 use cc_lb_domain::{
     ANTHROPIC_IDENTITY_HEADERS, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource,
-    CacheLookbackPrefix, CachePricingSummary, CacheScore, CandidateUrgency, CredentialStrategy,
-    GLOBAL_PRINCIPAL, InternalError, InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN,
-    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PlanInfo, Principal, PrincipalKind,
-    PrincipalKindLite, RateLimitKind, RateLimitObservation, ReplicaIdentity, RoutingTrace,
-    StageDecision, SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, SubscriptionTier, TerminalDecision, TerminalStrategy, TtlClass,
-    Upstream, UpstreamCandidate, UpstreamKind, WarmCacheEntry,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CacheBreakpoint, CacheBreakpointSource,
+    CacheLookbackPrefix, CachePricingSummary, CacheScore, CandidateUrgency, InternalError,
+    InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES,
+    MAX_STAGE_NAME_LEN, PlanInfo, Principal, PrincipalKind, PrincipalKindLite, RateLimitKind,
+    RateLimitObservation, ReplicaIdentity, RoutingTrace, StageDecision,
+    SubscriptionPreferenceTrace, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    SubscriptionTier, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    UpstreamKind, WarmCacheEntry,
 };
 use uuid::Uuid;
 
@@ -89,14 +89,12 @@ fn t1_public_value_api_exists_when_domain_is_built() {
         Upstream,
         UpstreamCandidate,
         UpstreamKind,
-        CredentialStrategy,
         RateLimitKind,
         RateLimitObservation,
         SubscriptionQuotaDataState,
         SubscriptionQuotaCandidateSnapshot,
         SubscriptionTier,
         TtlClass,
-        BreakpointOrigin,
         CacheBreakpointSource,
         CacheLookbackPrefix,
         CacheBreakpoint,
@@ -117,7 +115,6 @@ fn t1_public_value_api_exists_when_domain_is_built() {
     );
 
     // Then: the stable constants retain their established values.
-    assert_eq!(GLOBAL_PRINCIPAL, "__global__");
     assert_eq!(BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Uuid::from_u128(2));
     assert_eq!(
         BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
@@ -157,7 +154,6 @@ fn upstream_candidate_retains_current_serde_bytes_when_populated_from_t0_identit
         upstream_id: Uuid::from_u128(0x018f_2a3b_4c5d_7e6f_8123_4567_89ab_cdef),
         name: "subscription-primary".to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: Vec::new(),
         observed_at_unix_secs: 1_720_000_000,
         cache_score: None,
@@ -174,7 +170,7 @@ fn upstream_candidate_retains_current_serde_bytes_when_populated_from_t0_identit
     // Then: its established baseline byte shape is unchanged.
     assert_eq!(
         bytes,
-        br#"{"upstream_id":"018f2a3b-4c5d-7e6f-8123-456789abcdef","name":"subscription-primary","kind":"anthropic_oauth","observed_rate_limits":[],"subscription_quotas":[],"observed_at_unix_secs":1720000000}"#
+        br#"{"upstream_id":"018f2a3b-4c5d-7e6f-8123-456789abcdef","name":"subscription-primary","kind":"anthropic_oauth","subscription_quotas":[],"observed_at_unix_secs":1720000000}"#
     );
 }
 

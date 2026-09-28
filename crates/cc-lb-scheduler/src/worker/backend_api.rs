@@ -134,36 +134,6 @@ impl SchedulerBackend {
             }
         }
     }
-
-    pub async fn list_cron_tasks(
-        &self,
-        filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<CronJob>>, SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => {
-                let storage = sqlite.cron_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(sqlite_task_to_row)
-                    .collect()
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                let storage = postgres.cron_operation_storage();
-                storage
-                    .list_tasks(filter)
-                    .await
-                    .map_err(SchedulerError::Database)?
-                    .into_iter()
-                    .map(postgres_task_to_row)
-                    .collect()
-            }
-        }
-    }
 }
 
 #[cfg(feature = "sqlite")]

@@ -135,7 +135,6 @@ describe('LatencyCell timing breakdown', () => {
       response_body_process_ms: 20,
       response_body_downstream_poll_gap_ms: 10,
       finalize_ms: 50,
-      limit_reconcile_ms: 20,
     });
 
     const expected = [
@@ -335,7 +334,6 @@ describe('LatencyCell timing breakdown', () => {
     );
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((a, b) => a - b));
-    expect(screen.queryByText('Internal post')).toBeNull();
     expect(
       screen.getByRole('img', {
         name: /cc-lb 30 ms.*Upstream wait 20 ms.*Unattributed 50 ms/,
@@ -452,21 +450,6 @@ describe('LatencyCell timing breakdown', () => {
       }),
     ).toBeDefined();
   });
-  it('shows Limit reconcile within cc-lb without adding it again', () => {
-    renderCell({
-      ...baseEvent,
-      source_kind: 'proxy',
-      finalize_ms: 20,
-      limit_reconcile_ms: 5,
-    });
-
-    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
-    expect(screen.getByText('Limit reconcile')).toBeDefined();
-    expect(screen.getAllByText('20 ms')).toHaveLength(1);
-    expect(screen.getByText('Other finalize')).toBeDefined();
-    expect(screen.getAllByText('15 ms')).toHaveLength(1);
-    expect(screen.getAllByText('5 ms')).toHaveLength(1);
-  });
 
   it('shows measured zero for new stages', () => {
     renderCell({
@@ -482,57 +465,6 @@ describe('LatencyCell timing breakdown', () => {
       screen.getByRole('group', { name: 'Unattributed latency' }),
     ).toBeDefined();
     expect(screen.getAllByText('0 ms').length).toBeGreaterThanOrEqual(2);
-  });
-
-  it('keeps legacy request-body and post timing in honest responsibility groups', () => {
-    const trigger = renderCell(
-      {
-        ...baseEvent,
-        source_kind: 'proxy',
-        request_body_read_ms: 20,
-        finalize_ms: undefined,
-        limit_reconcile_ms: 10,
-      },
-      'click',
-    );
-
-    expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, show breakdown',
-    );
-    expect(describedText(trigger)).toBe('cc-lb 10 ms, Unattributed 90 ms');
-    expect(screen.getByText('Request body read')).toBeDefined();
-    expect(screen.queryByText('Finalize')).toBeNull();
-    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
-    expect(
-      screen.getByRole('group', { name: 'Unattributed latency' }),
-    ).toBeDefined();
-    expect(screen.getByText('Limit reconcile')).toBeDefined();
-    expect(
-      screen.getByRole('img', {
-        name: /cc-lb 10 ms.*Unattributed 90 ms/,
-      }),
-    ).toBeDefined();
-  });
-
-  it('keeps a measured-zero Limit reconcile audible within cc-lb', () => {
-    const trigger = renderCell(
-      {
-        ...baseEvent,
-        source_kind: 'proxy',
-        request_body_read_ms: 20,
-        finalize_ms: undefined,
-        limit_reconcile_ms: 0,
-      },
-      'click',
-    );
-
-    expect(trigger.getAttribute('aria-label')).toBe(
-      'Latency 100 ms, show breakdown',
-    );
-    expect(describedText(trigger)).toBe('Unattributed 100 ms');
-    expect(screen.getByRole('group', { name: 'cc-lb latency' })).toBeDefined();
-    expect(screen.getByText('Limit reconcile')).toBeDefined();
-    expect(screen.getAllByText('0 ms').length).toBeGreaterThan(0);
   });
 
   it('does not invent new stages for missing or null fields', () => {

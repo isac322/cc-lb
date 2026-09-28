@@ -16,7 +16,7 @@ use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
 use common::{
-    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
     lifecycle_with, lifecycle_with_parts, messages_request,
 };
 
@@ -110,9 +110,6 @@ fn lifecycle_for_response(status: StatusCode, headers: HeaderMap) -> cc_lb_engin
     let state = TestState::default();
     lifecycle_with_parts(
         TestAuthn::new(state),
-        Arc::new(TestRouter {
-            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(StaticResponseDispatch { status, headers }),
         cc_lb_engine::LifecycleConfig::default(),
     )

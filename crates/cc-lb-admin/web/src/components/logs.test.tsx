@@ -101,7 +101,6 @@ vi.mock('../lib/queries', () => ({
   }),
   useUpstreams: () => ({ data: { upstreams: [] } }),
   usePrincipalNameMap: () => new Map(),
-  useUpstreamNameMap: () => new Map(),
   useRecentEventsPage: (
     filters: Record<string, string | undefined>,
     pageParam: TestPageParam,

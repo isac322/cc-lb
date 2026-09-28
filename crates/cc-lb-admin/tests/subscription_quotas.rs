@@ -36,7 +36,7 @@ fn pool_history_record(snapshot_at_unix_secs: i64, utilization: f64) -> PoolQuot
 }
 
 #[tokio::test]
-async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
+async fn subscription_quota_latest_lists_registered_upstreams() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, body) = server
         .client
@@ -48,15 +48,13 @@ async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
     assert_eq!(status, StatusCode::CREATED);
     let upstream_id = body["id"].as_str().unwrap();
 
-    for path in [
-        "/admin/v1/subscription-quotas/latest",
-        "/admin/subscription-quotas/latest",
-    ] {
-        let (status, _, body) = server.client.get(path).await;
-        assert_eq!(status, StatusCode::OK, "{path}");
-        assert_eq!(body["upstreams"][0]["upstream_id"], upstream_id);
-        assert_eq!(body["upstreams"][0]["upstream_name"], "quota-upstream");
-    }
+    let (status, _, body) = server
+        .client
+        .get("/admin/v1/subscription-quotas/latest")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["upstreams"][0]["upstream_id"], upstream_id);
+    assert_eq!(body["upstreams"][0]["upstream_name"], "quota-upstream");
 }
 
 #[tokio::test]
@@ -98,7 +96,7 @@ async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
         .await
         .unwrap();
 
@@ -132,7 +130,7 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
         .await
         .unwrap();
 
@@ -314,14 +312,14 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     let no_anchor_upstream_id = create_oauth_upstream(&server, "checkpoint-series-no-anchor").await;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(quota_observation(
+        .put_subscription_quota_checkpoints(&[checkpoint_record(quota_observation(
             no_anchor_upstream_id,
             180,
             4,
             SubscriptionQuotaSource::Header,
             0.80,
             Some(SubscriptionQuotaStatus::Allowed),
-        )))
+        ))])
         .await
         .unwrap();
 

@@ -162,7 +162,7 @@ async function installPrincipalFixtures(page: Page) {
         next_cursor: null,
       });
     }
-    if (method === 'GET' && pathname === '/admin/events/recent') {
+    if (method === 'GET' && pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     const principalKeysMatch = pathname.match(

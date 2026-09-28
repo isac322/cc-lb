@@ -6,17 +6,13 @@ use std::sync::{
 use std::time::Duration;
 use tokio::time::Instant;
 
-use cc_lb_storage_api::types::{
-    KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, StoredApiKeyRecord,
-};
 use cc_lb_storage_api::{
     ApiKeyConcurrencyHold, ApiKeyConcurrencyHoldStore, ApiKeyUsage, ApiKeyUsageBucketDelta,
     ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery, ApiKeyUsageFlush, ApiKeyUsageFlushResult,
-    BackendKind, Storage, StorageError,
+    BackendKind, KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
+    PrincipalLimitState, Storage, StorageError, StoredApiKeyRecord,
 };
 use parking_lot::{Mutex, RwLock};
-use serde::Serialize;
 use uuid::Uuid;
 
 use crate::api_keys::concurrent_guard::{
@@ -29,9 +25,9 @@ use cc_lb_clock::{ClockHandle, unix_secs};
 
 /// Stable identifier for a live [`Reservation`].
 ///
-/// Post-RFC-0002 Phase 7 the engine stores reservation state by this ID so
-/// out-of-band consumers (Phase 8 `LimitReconcileSubscriber`, TTL sweeper)
-/// can reconcile or refund without holding the `Reservation` handle.
+/// The engine stores reservation state by this ID so out-of-band consumers
+/// (`LimitReconcileSubscriber`, TTL sweeper) can reconcile or refund without
+/// holding the `Reservation` handle.
 pub type ReservationId = String;
 
 type RollingKey = (String, LimitKind, u64);
@@ -54,45 +50,6 @@ const API_KEY_USAGE_PENDING_TARGET_ENTRIES: usize = 90_000;
 const API_KEY_USAGE_WRITER_INACTIVE_AFTER_SECS: u64 = 60;
 const API_KEY_USAGE_COMPACTION_BATCH_SIZE: usize = 1_000;
 const API_KEY_USAGE_FINAL_FLUSH_MAX_ATTEMPTS: usize = 3;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum IdentityFilter {
-    Principal,
-    ApiKey,
-    All,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PrincipalLimitsSnapshot {
-    pub principal_id: String,
-    pub observed: bool,
-    pub identities: Vec<PrincipalLimitIdentitySnapshot>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PrincipalLimitIdentitySnapshot {
-    pub identity_kind: &'static str,
-    pub identity_value: Option<String>,
-    pub account_observed: bool,
-    pub windows: Vec<PrincipalLimitWindowSnapshot>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PrincipalLimitWindowSnapshot {
-    pub window: String,
-    pub snapshots: Vec<PrincipalLimitSnapshot>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PrincipalLimitSnapshot {
-    pub kind: &'static str,
-    pub limit: Option<u64>,
-    pub remaining: Option<u64>,
-    pub reset: Option<String>,
-    pub observed_at_unix_secs: u64,
-    pub stored_at_unix_secs: u64,
-    pub observed: bool,
-}
 
 pub struct LimitEngine {
     inner: Arc<LimitEngineInner>,
@@ -185,7 +142,7 @@ impl Reservation {
 
     /// Suppress the RAII refund on drop.
     ///
-    /// After Phase 8 the handler hands `id` off to the reconcile subscriber
+    /// The handler hands `id` off to the reconcile subscriber
     /// via `LifecycleEvent::LimitDecision::Reserved` and no longer holds the
     /// reservation to completion. Without this suppressor, dropping the
     /// handle would race the subscriber and full-refund. The TTL sweeper is
@@ -198,9 +155,8 @@ impl Reservation {
 /// Engine-side reservation state. Stored inside
 /// [`LimitEngineInner::reservations`] and looked up by [`ReservationId`].
 ///
-/// Moved out of `Reservation` in Phase 7 so out-of-band consumers can
-/// reconcile without owning the handle. `Reservation` is now just an
-/// RAII refund guard keyed by `id`.
+/// Kept outside `Reservation` so out-of-band consumers can reconcile without
+/// owning the handle. `Reservation` is an RAII refund guard keyed by `id`.
 #[allow(dead_code)]
 struct ReservationRecord {
     key_id: String,
@@ -680,9 +636,9 @@ impl LimitEngine {
         );
     }
 
-    /// Reconcile a reservation by ID (RFC-0002 Phase 7).
+    /// Reconcile a reservation by ID.
     ///
-    /// Used by the Phase 8 `LimitReconcileSubscriber` to reconcile out of
+    /// Used by the `LimitReconcileSubscriber` to reconcile out of
     /// band with the handler. Returns `true` if the reservation was found
     /// and reconciled, `false` if the ID is unknown (already reconciled,
     /// refunded, TTL-evicted, or never issued).
@@ -726,7 +682,7 @@ impl LimitEngine {
         true
     }
 
-    /// Refund a reservation in full by ID (RFC-0002 Phase 7).
+    /// Refund a reservation in full by ID.
     ///
     /// Used by the TTL sweeper and by out-of-band callers that know a
     /// request will never reconcile (e.g. client hang-up before response).
@@ -792,118 +748,6 @@ impl LimitEngine {
         }
 
         headers
-    }
-
-    pub fn snapshot_for_principal(
-        &self,
-        view: &PrincipalView,
-        principal_id: &str,
-        identity_filter: IdentityFilter,
-    ) -> PrincipalLimitsSnapshot {
-        let now_sec = unix_secs(self.inner.clock.now());
-        let defaults = view.default_limits(principal_id).to_vec();
-        let effective_limits = self.inner.effective_limits.read().clone();
-        let mut identities = Vec::new();
-
-        if matches!(
-            identity_filter,
-            IdentityFilter::Principal | IdentityFilter::All
-        ) {
-            identities.push(PrincipalLimitIdentitySnapshot {
-                identity_kind: "principal",
-                identity_value: None,
-                account_observed: true,
-                windows: self.snapshot_windows_for_principal(
-                    &defaults,
-                    principal_id,
-                    &effective_limits,
-                    now_sec,
-                ),
-            });
-        }
-
-        if matches!(
-            identity_filter,
-            IdentityFilter::ApiKey | IdentityFilter::All
-        ) {
-            let mut key_limits = effective_limits
-                .iter()
-                .filter(|((_, stored_principal_id), _)| stored_principal_id == principal_id)
-                .map(|((key_id, _), limits)| (key_id.clone(), limits.clone()))
-                .collect::<Vec<_>>();
-            key_limits.sort_by(|left, right| left.0.cmp(&right.0));
-            for (key_id, limits) in key_limits {
-                identities.push(PrincipalLimitIdentitySnapshot {
-                    identity_kind: "api_key",
-                    identity_value: Some(key_id.clone()),
-                    account_observed: false,
-                    windows: self.snapshot_windows_for_key(&key_id, &limits, now_sec),
-                });
-            }
-        }
-
-        let observed = identities.iter().any(|identity| {
-            identity
-                .windows
-                .iter()
-                .any(|window| window.snapshots.iter().any(|snapshot| snapshot.observed))
-        });
-
-        PrincipalLimitsSnapshot {
-            principal_id: principal_id.to_owned(),
-            observed,
-            identities,
-        }
-    }
-
-    fn snapshot_windows_for_principal(
-        &self,
-        defaults: &[Limit],
-        principal_id: &str,
-        effective_limits: &HashMap<(String, String), Vec<Limit>>,
-        now_sec: u64,
-    ) -> Vec<PrincipalLimitWindowSnapshot> {
-        let mut windows = Vec::new();
-        for limit in defaults {
-            let window_sec = limit.window_secs;
-            let mut total = 0_i64;
-            let mut oldest: Option<u64> = None;
-            for ((key_id, stored_principal_id), limits) in effective_limits {
-                if stored_principal_id != principal_id
-                    || !limits.iter().any(|candidate| {
-                        candidate.kind == limit.kind && candidate.window_secs == limit.window_secs
-                    })
-                {
-                    continue;
-                }
-                let (key_total, key_oldest) =
-                    self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
-                total = total.saturating_add(key_total);
-                oldest = match (oldest, key_oldest) {
-                    (Some(left), Some(right)) => Some(left.min(right)),
-                    (None, Some(right)) => Some(right),
-                    (current, None) => current,
-                };
-            }
-            push_limit_snapshot(&mut windows, limit, total, oldest, now_sec);
-        }
-        sort_windows(windows)
-    }
-
-    fn snapshot_windows_for_key(
-        &self,
-        key_id: &str,
-        limits: &[Limit],
-        now_sec: u64,
-    ) -> Vec<PrincipalLimitWindowSnapshot> {
-        let mut windows = Vec::new();
-        for limit in limits {
-            let window_sec = limit.window_secs;
-            let (total, oldest) =
-                self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
-            push_limit_snapshot(&mut windows, limit, total, oldest, now_sec);
-        }
-        sort_windows(windows)
     }
 }
 
@@ -1482,7 +1326,7 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         // RAII refund: if the engine still holds our record (nobody called
         // reconcile_by_id / refund_by_id / TTL sweeper), refund in full.
-        // Skipped when `forget()` was called (Phase 8 subscriber ownership).
+        // Skipped when `forget()` was called (subscriber ownership).
         if self.forgotten {
             return;
         }
@@ -1502,100 +1346,6 @@ impl Drop for Reservation {
                 now_sec,
             );
         }
-    }
-}
-
-fn push_limit_snapshot(
-    windows: &mut Vec<PrincipalLimitWindowSnapshot>,
-    limit: &Limit,
-    total: i64,
-    oldest: Option<u64>,
-    now_sec: u64,
-) {
-    let window_sec = limit.window_secs;
-    let remaining = limit.cap_micros.saturating_sub(total).max(0) as u64;
-    let reset_sec = oldest.unwrap_or(now_sec).saturating_add(window_sec);
-    let window = format_window(window_sec);
-    let snapshot = PrincipalLimitSnapshot {
-        kind: limit_kind_name(limit.kind),
-        limit: Some(limit.cap_micros.max(0) as u64),
-        remaining: Some(remaining),
-        reset: Some(unix_to_iso8601(reset_sec)),
-        observed_at_unix_secs: now_sec,
-        stored_at_unix_secs: now_sec,
-        observed: total != 0,
-    };
-
-    match windows
-        .iter_mut()
-        .find(|candidate| candidate.window == window)
-    {
-        Some(existing) => existing.snapshots.push(snapshot),
-        None => windows.push(PrincipalLimitWindowSnapshot {
-            window,
-            snapshots: vec![snapshot],
-        }),
-    }
-}
-
-fn sort_windows(
-    mut windows: Vec<PrincipalLimitWindowSnapshot>,
-) -> Vec<PrincipalLimitWindowSnapshot> {
-    windows.sort_by(|left, right| {
-        window_sort_key(&left.window)
-            .cmp(&window_sort_key(&right.window))
-            .then_with(|| left.window.cmp(&right.window))
-    });
-    for window in &mut windows {
-        window.snapshots.sort_by(|left, right| {
-            limit_kind_sort_key(left.kind)
-                .cmp(&limit_kind_sort_key(right.kind))
-                .then_with(|| left.kind.cmp(right.kind))
-        });
-    }
-    windows
-}
-
-fn format_window(window_sec: u64) -> String {
-    if window_sec.is_multiple_of(86_400) {
-        format!("{}d", window_sec / 86_400)
-    } else if window_sec.is_multiple_of(3_600) {
-        format!("{}h", window_sec / 3_600)
-    } else if window_sec.is_multiple_of(60) {
-        format!("{}m", window_sec / 60)
-    } else {
-        format!("{window_sec}s")
-    }
-}
-
-fn window_sort_key(window: &str) -> u8 {
-    match window {
-        "5h" => 0,
-        "7d" | "weekly" => 1,
-        _ => 2,
-    }
-}
-
-fn limit_kind_sort_key(kind: &str) -> u8 {
-    match kind {
-        "requests" => 0,
-        "input_tokens" => 1,
-        "output_tokens" => 2,
-        "total_tokens" => 3,
-        "cost_usd" => 4,
-        "concurrent" => 5,
-        _ => 6,
-    }
-}
-
-fn limit_kind_name(kind: LimitKind) -> &'static str {
-    match kind {
-        LimitKind::Requests => "requests",
-        LimitKind::InputTokens => "input_tokens",
-        LimitKind::OutputTokens => "output_tokens",
-        LimitKind::TotalTokens => "total_tokens",
-        LimitKind::CostUsd => "cost_usd",
-        LimitKind::Concurrent => "concurrent",
     }
 }
 
@@ -1742,12 +1492,10 @@ impl ReservationTtlSweeperHandle {
     }
 }
 
-/// Spawn the TTL sweeper (RFC-0002 Phase 7).
+/// Spawn the TTL sweeper.
 ///
 /// Every `tick_interval` the sweeper walks the engine's reservation map and
-/// refunds any reservation older than `ttl`. Off by default via
-/// `features.limit_reservation_ttl.enabled`; enabled unconditionally in
-/// Phase 8 once the subscriber path is authoritative.
+/// refunds any reservation older than `ttl`.
 pub fn spawn_reservation_ttl_sweeper(
     engine: Arc<LimitEngine>,
     ttl: Duration,
@@ -1798,16 +1546,14 @@ mod tests {
     use cc_lb_clock::Clock;
     use std::collections::HashMap;
 
-    use cc_lb_storage_api::BackendKind;
-    use cc_lb_storage_api::MetaStore;
-    use cc_lb_storage_api::types::{
-        PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
+    use cc_lb_storage_api::{
+        MetaStore, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
     };
 
     use super::*;
 
     #[test]
-    fn record_principal_limit_state_feeds_limit_engine_snapshot() {
+    fn record_principal_limit_state_feeds_rate_limit_headers() {
         let engine = LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
             Arc::new(cc_lb_clock::SystemClock),
@@ -1828,24 +1574,16 @@ mod tests {
             stored_at_unix_secs: observed_at_unix_secs,
         });
 
-        let view =
-            PrincipalView::for_tests("principal-a", true, Vec::new(), Vec::new(), HashMap::new());
-        let snapshot = engine.snapshot_for_principal(&view, "principal-a", IdentityFilter::All);
-        let api_key_identity = snapshot
-            .identities
-            .iter()
-            .find(|identity| identity.identity_kind == "api_key")
-            .expect("api key identity should be recorded");
-        let requests = api_key_identity.windows[0]
-            .snapshots
-            .iter()
-            .find(|snapshot| snapshot.kind == "requests")
-            .expect("requests snapshot should be recorded");
+        let headers = engine.headers_for("key-a", "principal-a");
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
 
-        assert_eq!(api_key_identity.identity_value.as_deref(), Some("key-a"));
-        assert_eq!(requests.limit, Some(10));
-        assert_eq!(requests.remaining, Some(7));
-        assert!(requests.observed);
+        assert_eq!(header("anthropic-ratelimit-requests-limit"), Some("10"));
+        assert_eq!(header("anthropic-ratelimit-requests-remaining"), Some("7"));
     }
 
     fn engine_with_output_token_limit(
@@ -2090,10 +1828,7 @@ mod tests {
         let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
             .await
             .expect("open sqlite");
-        storage_impl
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("migrate sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
         let storage: Arc<dyn Storage> = Arc::new(storage_impl);
         let engine_a = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
         let engine_b = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock.clone());
@@ -2337,10 +2072,7 @@ mod tests {
         let storage_impl = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
             .await
             .expect("open sqlite");
-        storage_impl
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("migrate sqlite");
+        storage_impl.initialize().await.expect("migrate sqlite");
         let storage: Arc<dyn Storage> = Arc::new(storage_impl);
         let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()), clock);
         let handle = engine

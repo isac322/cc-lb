@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use cc_lb_engine::api_keys::principal_view::{PrincipalStatus, PrincipalView};
-use cc_lb_engine::api_keys::types::LimitKind as CoreLimitKind;
+use cc_lb_control::api_keys::principal_view::{PrincipalStatus, PrincipalView};
+use cc_lb_control::api_keys::types::LimitKind as CoreLimitKind;
 use cc_lb_storage_api::principal::{
     Limit, LimitKind, PrincipalKind as DbPrincipalKind, PrincipalRecord,
 };
@@ -22,8 +22,6 @@ fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
             cap_micros: 1_000,
         }],
         enabled,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 1,

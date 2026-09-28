@@ -23,10 +23,7 @@ postgres://cclb:cclb@localhost:5432/cclb
 ### Required migrations
 
 Migrations are auto-applied on server startup via `sqlx::migrate!` macro. All migrations in `crates/cc-lb-storage-postgres/migrations/` execute in deterministic order, including:
-- Schema setup (meta, killswitch, audit log, request events)
-- Quota tracking and principal limit states
-- OAuth credential storage
-- API key tables (opaque AEAD ciphertext + managed key records)
+- Schema setup (meta, audit log, request events)
 - Configuration versioning
 - Managed API key tables (0013_managed_api_keys, 0014_managed_api_key_index) for multi-instance support
 

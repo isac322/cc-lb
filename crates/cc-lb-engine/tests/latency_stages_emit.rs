@@ -10,21 +10,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::RequestEventBus;
-use cc_lb_domain::{Principal, UpstreamCandidate};
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, InMemoryBus};
 use cc_lb_engine::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_engine::{
     Body, BulkheadDispatch, BulkheadRegistry, BulkheadRuntimeConfig, CachingDnsConnector,
-    DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY, DispatchError, DnsResolveFuture, DnsResolver,
-    DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder, InMemoryBus, Lifecycle,
-    LifecycleConfig, RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
+    DispatchError, DnsResolveFuture, DnsResolver, DnsResolverConfig, Lifecycle, LifecycleConfig,
+    RequestEventAssemblerHandle, UpstreamDispatch, spawn_request_event_assembler,
 };
 use cc_lb_observability::NoopMetricsHook;
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
-use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{KeyStatus, RequestEvent, StoredApiKeyRecord};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -128,11 +127,6 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     );
     // IP literals can bypass the resolver, so dns_ms is covered by the hostname regression test.
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
-    assert!(
-        event.limit_reconcile_ms.is_none(),
-        "RFC-0002 H4: handler no longer measures reconcile; LimitReconcileSubscriber owns the reconcile call and does not populate this handler-side field. Got: {:?}",
-        event.limit_reconcile_ms
-    );
 }
 
 #[tokio::test]
@@ -234,13 +228,10 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     let dir = tempfile::tempdir().expect("request event storage tempdir");
     let path = dir.path().join("latency-stages.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("request event storage opens");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize");
+    storage.initialize().await.expect("initialize");
     let storage = Arc::new(storage);
     let bus = Arc::new(InMemoryBus::new());
     let assembler_rx = bus.attach_lifecycle_assembler(DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
@@ -252,12 +243,11 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
     );
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     let base_url = Url::parse(base_url).expect("test base URL parses");
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(SelectingRouter))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![upstream_record(base_url)])
         .build();
@@ -266,7 +256,7 @@ async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) ->
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(Arc::clone(&bus) as Arc<dyn RequestEventBus>)
     .with_static_limit_subject(
@@ -378,19 +368,6 @@ fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {
         wait_ms <= max_ms,
         "expected bulkhead wait <= {max_ms}ms, got {wait_ms}ms"
     );
-}
-
-struct SelectingRouter;
-
-impl RouterPlugin for SelectingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        panic!("terminal strategy selects upstream before legacy router")
-    }
 }
 
 fn default_upstream_id() -> Uuid {

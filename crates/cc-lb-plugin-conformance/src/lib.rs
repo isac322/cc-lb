@@ -146,7 +146,7 @@ impl<'a> ConformanceSuite<'a> {
             wasm,
             kind,
             plugin_name: format!("conformance-{label}"),
-            engine_config: conformance_engine_config(),
+            engine_config: HotEngineConfig::default(),
         }
     }
 
@@ -158,8 +158,7 @@ impl<'a> ConformanceSuite<'a> {
     }
 
     /// Override the [`HotEngineConfig`] used by the suite. Defaults to
-    /// [`conformance_engine_config`] which mirrors production cc-lb
-    /// defaults (1024 pages / 1 MiB stack).
+    /// [`HotEngineConfig::default()`], the production cc-lb envelope.
     pub fn with_engine_config(mut self, cfg: HotEngineConfig) -> Self {
         self.engine_config = cfg;
         self
@@ -266,8 +265,7 @@ impl PluginSession {
     }
 
     /// Underlying [`WasmtimeRuntime`] — escape hatch for advanced
-    /// tests that want to poke at hot-swap, pure vs stateful mode,
-    /// version bumps, etc.
+    /// tests that want to poke at hot-swap or slot eviction.
     pub fn runtime(&self) -> &WasmtimeRuntime {
         &self.runtime
     }
@@ -275,19 +273,15 @@ impl PluginSession {
     /// Round-trip a [`FilterRequest`] through the guest boundary.
     /// Panics if this session is not Filter-kind.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
-        let input = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
-        self.call_filter_bytes(input.as_slice())
-    }
-
-    fn call_filter_bytes(&self, input: &[u8]) -> FilterResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
             "call_filter requires SlotKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
+        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
         let out_bytes = self
             .runtime
-            .call_filter(&self.slot_key, input)
+            .call_filter(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_filter must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -316,19 +310,5 @@ impl PluginSession {
             .expect("rkyv access ShapeResponse");
         rkyv::deserialize::<ShapeResponse, RkyvError>(archived)
             .expect("rkyv deserialize ShapeResponse")
-    }
-}
-
-/// Opinionated [`HotEngineConfig`] used by the conformance suite by
-/// default. Values match cc-lb's production `HotEngineConfig::default()`
-/// so tests exercise the same resource envelope real traffic sees, but
-/// stay pinned here regardless of future host default changes.
-pub fn conformance_engine_config() -> HotEngineConfig {
-    HotEngineConfig {
-        memory_max_pages: 1024,
-        max_wasm_stack: 1024 * 1024,
-        pool_total_memories: 64,
-        pool_total_core_instances: 64,
-        ..HotEngineConfig::default()
     }
 }

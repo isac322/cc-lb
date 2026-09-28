@@ -159,7 +159,7 @@ The migration to checkpoint-only history is complete and the legacy raw
   and then drops it.
 - The observation-flavored API was renamed to sample terminology
   (`SubscriptionQuotaObservationRecord` -> `SubscriptionQuotaSample`,
-  `put_subscription_quota{,_batch}` -> `record_subscription_quota_sample{,s}`).
+  `put_subscription_quota_batch` -> `record_subscription_quota_samples`).
 - The vestigial `dedup_elapsed_override_secs` knob (the 30 s time-based
   duplicate-suppression window described in the Context above) has been removed
   from `SubscriptionQuotaConfig`, the writer config, and `config-schema.json`.

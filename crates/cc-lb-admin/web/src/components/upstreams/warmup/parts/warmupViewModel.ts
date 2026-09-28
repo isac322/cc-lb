@@ -1,12 +1,7 @@
 import type {
   WarmupAttempt,
   WarmupAttemptStatus,
-  WarmupDialectPluginSnapshot,
-  WarmupPermanentFailureReason,
-  WarmupSkipReason,
-  WarmupSuccessReason,
   WarmupSummary,
-  WarmupTransientFailureReason,
 } from '../../../../lib/queries';
 import { REASON_LABEL } from './copy';
 
@@ -89,35 +84,6 @@ export function formatFreshnessLine(
   }
 }
 
-/** Trim the trailing release-date suffix from Anthropic model identifiers. */
-function shortenModel(s: string): string {
-  return s.replace(/-(\d{8})$/, '');
-}
-
-/** Compact one-line plugin snapshot (id · wire vN · model=…, max_tokens=…). */
-export function formatPluginCompact(
-  snapshot: WarmupDialectPluginSnapshot | null | undefined,
-): string | null {
-  if (!snapshot) return null;
-  const parts: string[] = [snapshot.wasm_registry_id];
-  if (snapshot.wire_version != null) {
-    parts.push(`v${snapshot.wire_version}`);
-  }
-  const cfg = snapshot.config ?? {};
-  const cfgKeys = ['model', 'max_tokens', 'mode'] as const;
-  const cfgParts: string[] = [];
-  for (const k of cfgKeys) {
-    const v = (cfg as Record<string, unknown>)[k];
-    if (v != null && typeof v !== 'object') {
-      const raw = String(v);
-      const display = k === 'model' ? shortenModel(raw) : raw;
-      cfgParts.push(`${k}=${display}`);
-    }
-  }
-  if (cfgParts.length > 0) parts.push(cfgParts.join(', '));
-  return parts.join(' · ');
-}
-
 export interface ActiveIncident {
   lastFailure: WarmupAttempt;
   /** Consecutive failures from newest backward (skips are passed through). */
@@ -182,60 +148,4 @@ export function detectActiveIncident(
     recentFailures: total,
     dominantReason: dominant,
   };
-}
-
-/** When the last attempt is `skipped`, surface the most recent actionable
- * result behind that skip. */
-export function findLastActionableAttempt(
-  summary: WarmupSummary | undefined,
-): WarmupAttempt | null {
-  if (!summary) return null;
-  for (const a of summary.recent_attempts ?? []) {
-    if (a.status !== 'skipped') return a;
-  }
-  return null;
-}
-
-/** Failure breakdown by reason within `windowSecs` (default 7 days). */
-export interface ReasonBreakdownEntry {
-  reason:
-    | WarmupSuccessReason
-    | WarmupSkipReason
-    | WarmupTransientFailureReason
-    | WarmupPermanentFailureReason
-    | 'unknown';
-  label: string;
-  count: number;
-}
-
-export function buildFailureReasonBreakdown(
-  attempts: WarmupAttempt[] | undefined,
-  windowSecs: number = 7 * 86400,
-): ReasonBreakdownEntry[] {
-  if (!attempts) return [];
-  const now = Math.floor(Date.now() / 1000);
-  const cutoff = now - windowSecs;
-  const counts = new Map<string, number>();
-  for (const a of attempts) {
-    if (a.attempted_at_unix_secs < cutoff) continue;
-    if (a.status !== 'permanent_failure' && a.status !== 'transient_failure')
-      continue;
-    const key = a.reason ?? 'unknown';
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return [...counts.entries()]
-    .map(([k, v]) => ({
-      reason: k as
-        | WarmupSuccessReason
-        | WarmupSkipReason
-        | WarmupTransientFailureReason
-        | WarmupPermanentFailureReason
-        | 'unknown',
-      label:
-        k === 'unknown'
-          ? 'Unknown'
-          : (REASON_LABEL[k as keyof typeof REASON_LABEL] ?? k),
-      count: v,
-    }))
-    .sort((a, b) => b.count - a.count);
 }

@@ -120,23 +120,6 @@ async fn get_allowed_models_returns_state_with_etag() {
 }
 
 #[tokio::test]
-async fn legacy_admin_routes_are_aliased_under_v1() {
-    let server = admin_test_common::spawn_admin_server().await;
-
-    for uri in [
-        "/admin/v1/audit?limit=1",
-        "/admin/v1/config/draft",
-        "/admin/v1/config/history",
-        "/admin/v1/dashboard/summary?range=1h",
-        "/admin/v1/dashboard/usage?range=1h",
-        "/admin/v1/events/recent",
-    ] {
-        let (status, _, _) = server.client.get(uri).await;
-        assert_ne!(status, StatusCode::NOT_FOUND, "{uri} should be mounted");
-    }
-}
-
-#[tokio::test]
 async fn update_correct_if_match_bumps_revision() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
@@ -389,10 +372,8 @@ async fn delete_principal_cascades_owned_plugin_chains() {
                 sha256: [7; 32],
                 bytes: b"wasm".to_vec(),
                 size_bytes: 4,
-                parse_validated_at_unix_secs: 1,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: "filter-plugin".to_owned(),
                 version: None,
                 original_filename: "filter.wasm".to_owned(),

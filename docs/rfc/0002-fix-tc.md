@@ -17,15 +17,11 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 - **TC-U-M1-1** · `LifecycleEvent::UpstreamResponseStarted` carries `HeaderSnapshot` with sanitized subset (content-type, x-request-id, rate-limit headers). No `authorization` header included.
 - **TC-U-H5-1** · Fresh config contains no lifecycle subscriber enable switches.
 - **TC-U-H5-2** · `LimitReconcileSubscriber` receives `LimitDecision::Reserved { reservation_id: "" }` + terminate → no panic; increments `empty_reservation_id` outcome counter.
-- **TC-U-M4-1** · `RequestEventWriterSource` semantics: given all 9 permutations of `(source ∈ {Legacy, Both, Shadow}) × (old_flag ∈ {true, false, unset})`, only `source` decides.
 
 ## Integration tests
 
 - **TC-INT-H1-1** · Boot server with SQLite + writer enabled; hit `/api/oauth/usage`, `/admin/health`, unknown fallback, method-not-allowed. Assert `SELECT COUNT(*) FROM request_events_v1` unchanged.
 - **TC-INT-H1-2** · Proxy timeout still writes row with `error_code=tower_timeout`; middleware still active on lifecycle routes.
-- **TC-INT-H2-1** · Removed — legacy row filtering became obsolete when PR #276 deleted the inline handler writer; all returned rows are assembler rows.
-- **TC-INT-H2-2** · Removed — legacy row filtering became obsolete when PR #276 deleted the inline handler writer; all returned rows are assembler rows.
-- **TC-INT-H3-1** · Removed — legacy-vs-assembler parity is no longer meaningful after PR #276 deleted the legacy writer, so no correlation join is needed.
 - **TC-INT-H3-2** · Two sequential requests: cache-bearing then cache-free. Assert second assembler row has NULL cache fields (no cross-request leakage via event_id keying).
 - **TC-INT-H4-1** · Fake LimitEngine counts `reconcile` vs `reconcile_by_id` calls. One `/v1/messages` success → legacy `reconcile` count = 0, `reconcile_by_id` count = 1.
 - **TC-INT-H4-2** · Streaming request → same assertion after full stream drain.
@@ -39,7 +35,7 @@ Consensus of 3 independent test-design agents (behavior verification, regression
 
 Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harness reused across scenarios.
 
-- **LIVE-1** · Default boot: SQLite, no `request_event_writer_source` override.
+- **LIVE-1** · Default boot: SQLite.
   - Trigger: single `POST /v1/messages` happy path.
   - Verify: `SELECT COUNT(*) FROM request_events_v1` = 1; status=200; `error_code IS NULL`.
   - Metrics: `cc_lb_limit_reservation_ttl_evicted_total` and `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` both present.
@@ -70,7 +66,7 @@ Each LIVE-QA uses distinct ports and separate `/tmp/cc-lb-liveqa-N/` dir; harnes
   - Covers: QA7.
 
 - **LIVE-9** · Default subscriber auth; principal with tight limit.
-  - Verify: response row has `limit_reconcile_ms=0`; `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` increments.
+  - Verify: `cc_lb_limit_reconcile_subscriber_rows_total{outcome="reconciled"}` increments.
   - Covers: QA9, H4, H5.
 
 - **LIVE-10** · `limit_reservation_ttl.{ttl_secs=1, tick_secs=1}`; trigger reservation but timeout the request; wait 3s; retry.

@@ -1,20 +1,17 @@
 //! RFC-0001 gap-analysis item #2 — skip re-register on unchanged input.
 //!
-//! Before this test lands, `WasmtimeRuntime::register` unconditionally
-//! called `compile_module` (wasmparser walk + wasmtime compile +
-//! precompile + `instantiate_pre`) and then, on every reconcile pass,
-//! bumped `PluginCell::version_id` by one even when the wasm bytes,
-//! memory knobs, and validation policy were byte-identical. That
-//! churn (a) forced repeated `instantiate_pre` allocations and (b)
-//! periodically nudged the pooling allocator toward its 64-slot
-//! ceiling for zero benefit.
+//! Re-registering byte-identical wasm on every reconcile pass must not
+//! recompile (wasmparser walk + wasmtime compile + precompile +
+//! `instantiate_pre`) when the wasm bytes, memory knobs, and validation
+//! policy are unchanged. Repeated compiles would (a) force repeated
+//! `instantiate_pre` allocations and (b) periodically nudge the pooling
+//! allocator toward its 64-slot ceiling for zero benefit.
 //!
 //! The contract pinned here: register the same wasm twice on the
 //! same slot → the `ArcSwap<PluginCell>` payload is the SAME `Arc`
-//! pointer and `version_id` is stable. `Arc::ptr_eq` on the loaded
-//! cell is the observable signal for "short-circuited, no rebuild
-//! happened" — a fresh compile always produces a fresh `PluginCell`
-//! allocation.
+//! pointer. `Arc::ptr_eq` on the loaded cell is the observable signal
+//! for "short-circuited, no rebuild happened" — a fresh compile always
+//! produces a fresh `PluginCell` allocation.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +41,6 @@ fn register_same_content_reuses_cell() {
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("first register");
     let cell1 = slot1.current.load_full();
-    let v1 = cell1.version_id;
 
     let slot2 = rt
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
@@ -59,5 +55,4 @@ fn register_same_content_reuses_cell() {
         Arc::ptr_eq(&cell1, &cell2),
         "same PluginCell Arc — no rebuild happened",
     );
-    assert_eq!(cell2.version_id, v1, "version_id stable on unchanged input");
 }

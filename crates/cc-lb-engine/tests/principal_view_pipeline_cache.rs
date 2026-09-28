@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
+use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache,
 };
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use uuid::Uuid;
@@ -137,8 +137,6 @@ fn principal(terminal: TerminalStrategy) -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,

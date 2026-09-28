@@ -4,16 +4,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{BusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::{BreakerRegistry, DispatchError, LifecycleConfig, UpstreamDispatch};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 
 use crate::common::{
-    TestAuthn, TestLifecycleBus, TestRouter, TestState, lifecycle_with_parts, messages_request,
+    TestAuthn, TestLifecycleBus, TestState, lifecycle_with_parts, messages_request,
 };
 
 #[test]
@@ -30,17 +30,10 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory request-event receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let dispatcher = CapturingDispatch::default();
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(TestState::default()),
-        Arc::new(TestRouter {
-            base_url: "http://upstream.local/"
-                .parse()
-                .expect("fixture URL parses"),
-        }),
         Arc::new(dispatcher.clone()),
         LifecycleConfig::default(),
     )
@@ -121,8 +114,8 @@ async fn sqlite_storage(
         dir.path().join("hermes-request-events.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

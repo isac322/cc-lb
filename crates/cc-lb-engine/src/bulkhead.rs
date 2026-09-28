@@ -756,7 +756,6 @@ mod tests {
         let principal = Principal {
             id: "principal-test".to_owned(),
             kind: PrincipalKind::ApiKey,
-            claims: serde_json::Map::new(),
         };
         let shaped = shape_request(
             &PassthroughDialect { base_url },

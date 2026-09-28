@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
-use cc_lb_engine::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalCreate,
+    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -142,10 +141,10 @@ impl Fixture {
             "sqlite://{}",
             db_dir.path().join("preflight.sqlite").display()
         );
-        let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .unwrap();
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        storage.initialize().await.unwrap();
         let storage = Arc::new(storage);
         let upstreams: Arc<dyn UpstreamStore> = storage.clone();
         let principals: Arc<dyn PrincipalStore> = storage.clone();
@@ -173,15 +172,9 @@ impl Fixture {
 }
 
 async fn run_preflight(fixture: &Fixture) -> PreflightReport {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
-    preflight::run_preflight(
-        &fixture.stores,
-        &LifecycleConfig::default(),
-        fixture.data_dir.path(),
-        clock,
-    )
-    .await
-    .unwrap()
+    preflight::run_preflight(&fixture.stores, fixture.data_dir.path())
+        .await
+        .unwrap()
 }
 
 fn print_report(report: &PreflightReport) {
@@ -264,10 +257,8 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
                 sha256: [seed; 32],
                 bytes: vec![seed; 4],
                 size_bytes: 4,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),
@@ -277,7 +268,7 @@ async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmReg
                 description: format!("{name} description"),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),
-                supported_slots: Vec::new(),
+                supported_slots: vec![PluginSlotKind::Router, PluginSlotKind::ObservabilityHook],
             },
         )
         .await

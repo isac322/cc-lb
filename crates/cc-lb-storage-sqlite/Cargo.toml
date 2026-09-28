@@ -18,13 +18,11 @@ cc-lb-domain.workspace = true
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 async-trait = { workspace = true }
-chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 metrics = { workspace = true }
-sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
-thiserror = { workspace = true }
+sqlx = { workspace = true, features = ["json", "macros", "migrate", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

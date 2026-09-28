@@ -25,7 +25,6 @@ fn direct_shape_matches_proxy_observable_with_narrow_context() {
     let principal = Principal {
         id: "principal-direct".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: Default::default(),
     };
 
     // When

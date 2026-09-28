@@ -98,10 +98,6 @@ impl PlanTierClassification {
             Self::Unknown => None,
         }
     }
-
-    pub const fn is_unknown(self) -> bool {
-        matches!(self, Self::Unknown)
-    }
 }
 
 pub fn classify_plan_tier(
@@ -164,21 +160,5 @@ pub fn plan_capacity_ratio(
     match classify_plan_tier(organization_type, rate_limit_tier, seat_tier) {
         PlanTierClassification::Known(tier) => tier.seed_pro_relative_ratio(),
         PlanTierClassification::Unknown => PRO_CAPACITY_RATIO,
-    }
-}
-
-pub fn tier_key_from_seed_ratio(ratio: f64) -> Option<TierKey> {
-    if ratio == TierKey::Pro.seed_pro_relative_ratio() {
-        Some(TierKey::Pro)
-    } else if ratio == TierKey::TeamStandard.seed_pro_relative_ratio() {
-        Some(TierKey::TeamStandard)
-    } else if ratio == TierKey::Max5x.seed_pro_relative_ratio() {
-        Some(TierKey::Max5x)
-    } else if ratio == TierKey::TeamPremium.seed_pro_relative_ratio() {
-        Some(TierKey::TeamPremium)
-    } else if ratio == TierKey::Max20x.seed_pro_relative_ratio() {
-        Some(TierKey::Max20x)
-    } else {
-        None
     }
 }

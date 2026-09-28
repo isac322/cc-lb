@@ -8,17 +8,10 @@ import { USAGE_CATEGORIES, type UsageCategoryKey } from './usage/sliceColors';
 type TokenBreakdown = Record<UsageCategoryKey, number>;
 
 function tokenBreakdown(e: RequestEventWithPhase): TokenBreakdown {
-  const split5m = e.cache_creation_input_tokens_5m;
-  const split1h = e.cache_creation_input_tokens_1h;
-  const hasSplit = split5m != null || split1h != null;
   return {
     cache_read: e.cache_read_input_tokens ?? 0,
-    // Rows recorded before the 5m / 1h split carry one legacy total, billed
-    // at the 5m rate.
-    cache_create_5m: hasSplit
-      ? (split5m ?? 0)
-      : (e.cache_creation_input_tokens ?? 0),
-    cache_create_1h: hasSplit ? (split1h ?? 0) : 0,
+    cache_create_5m: e.cache_creation_input_tokens_5m ?? 0,
+    cache_create_1h: e.cache_creation_input_tokens_1h ?? 0,
     input: e.input_tokens ?? 0,
     output: e.output_tokens ?? 0,
   };

@@ -25,7 +25,7 @@ async fn usage_returns_200_grouped_by_model() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;
@@ -56,9 +56,10 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         Some(storage.clone()),
         clock,
     ));
-    let usage_uri = "/admin/usage?range=1h&step=minute&group_by=model";
-    let principal_uri = "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals";
-    let summary_uri = "/admin/dashboard/summary?range=1h";
+    let usage_uri = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=model";
+    let principal_uri =
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&projection=totals";
+    let summary_uri = "/admin/v1/dashboard/summary?range=1h";
     let (usage_status, usage_headers, _) =
         authed_bytes(admin_app.clone(), "GET", usage_uri, None).await;
     let (summary_status, summary_headers, _) =
@@ -173,32 +174,6 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
 }
 
 #[tokio::test]
-async fn usage_legacy_dashboard_alias_matches_v1_body() {
-    let (_dir, storage) = temp_storage().await;
-    let state = test_state(Config::default(), Some(storage));
-    let admin_app = app(state);
-
-    let (legacy_status, _, legacy_body, _) = authed_json(
-        admin_app.clone(),
-        "GET",
-        "/admin/dashboard/usage?range=1h&group_by=model",
-        None,
-    )
-    .await;
-    let (v1_status, _, v1_body, _) = authed_json(
-        admin_app,
-        "GET",
-        "/admin/v1/dashboard/usage?range=1h&group_by=model",
-        None,
-    )
-    .await;
-
-    assert_eq!(legacy_status, StatusCode::OK);
-    assert_eq!(v1_status, StatusCode::OK);
-    assert_eq!(legacy_body, v1_body);
-}
-
-#[tokio::test]
 async fn usage_returns_200_grouped_by_principal() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -206,7 +181,7 @@ async fn usage_returns_200_grouped_by_principal() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -262,14 +237,14 @@ async fn usage_totals_projection_preserves_full_series_totals() {
     let (full_status, _, full, _) = authed_json(
         admin_app.clone(),
         "GET",
-        "/admin/usage?range=1h&step=minute&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal",
         None,
     )
     .await;
     let (totals_status, _, totals, _) = authed_json(
         admin_app,
         "GET",
-        "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&projection=totals",
         None,
     )
     .await;
@@ -311,7 +286,7 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
         Some(storage.clone()),
         clock.clone(),
     ));
-    let uri = "/admin/usage?range=1h&step=minute&group_by=principal";
+    let uri = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal";
     let (baseline_full, baseline_totals) = usage_projection_pair(&admin_app, uri).await;
     assert_usage_totals_match_full_collapse(&baseline_full, &baseline_totals);
     assert_usage_bucket_fields(
@@ -411,7 +386,7 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
     ));
     let (full, totals) = usage_projection_pair(
         &admin_app,
-        "/admin/usage?range=1h&step=minute&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal",
     )
     .await;
     assert_usage_totals_match_full_collapse(&full, &totals);
@@ -476,7 +451,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         clock.clone(),
     ));
     let target_uri = format!(
-        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={target_upstream_id}"
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&upstream_id={target_upstream_id}"
     );
     let (target_full, target_totals) = usage_projection_pair(&admin_app, target_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&target_full, &target_totals);
@@ -500,7 +475,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
     );
 
     let empty_uri = format!(
-        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={initially_empty_upstream_id}"
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&upstream_id={initially_empty_upstream_id}"
     );
     let (empty_full, empty_totals) = usage_projection_pair(&admin_app, empty_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&empty_full, &empty_totals);
@@ -545,7 +520,7 @@ async fn usage_rejects_invalid_projection() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal&projection=dense",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal&projection=dense",
         None,
     )
     .await;
@@ -560,7 +535,7 @@ async fn usage_rejects_invalid_group_by() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=bogus",
+        "/admin/v1/dashboard/usage?range=1h&group_by=bogus",
         None,
     )
     .await;
@@ -601,7 +576,7 @@ async fn usage_filters_by_upstream_id() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        &format!("/admin/usage?range=24h&group_by=model&upstream_id={upstream_id}"),
+        &format!("/admin/v1/dashboard/usage?range=24h&group_by=model&upstream_id={upstream_id}"),
         None,
     )
     .await;
@@ -659,7 +634,7 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -710,7 +685,7 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -763,7 +738,7 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -809,7 +784,7 @@ async fn usage_non_principal_grouping_does_not_expose_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;
@@ -851,8 +826,13 @@ async fn summary_error_rate_excludes_client_navigation_statuses() {
     storage.rollup_usage_once().await.unwrap();
 
     let state = test_state_with_clock(Config::default(), Some(storage), clock);
-    let (status, _, body, _) =
-        authed_json(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/v1/dashboard/summary?range=1h",
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["totals"]["request_count"], 5);
@@ -866,7 +846,7 @@ async fn usage_503_when_storage_missing() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;

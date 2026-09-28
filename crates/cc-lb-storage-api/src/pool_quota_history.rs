@@ -124,10 +124,4 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
         until_unix_secs: i64,
         bucket_secs: Option<i64>,
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>>;
-
-    async fn delete_pool_quota_snapshots_before(
-        &self,
-        cutoff_unix_secs: i64,
-        batch_size: u32,
-    ) -> StorageResult<u64>;
 }

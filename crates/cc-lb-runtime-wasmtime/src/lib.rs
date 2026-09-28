@@ -24,14 +24,14 @@ mod slot;
 mod tests;
 mod wire_dispatch;
 
-pub use cache::{DEFAULT_ALIGN, call_filter_hook, call_shape_hook};
+
 pub use cc_lb_plugin_wire::schema::HookKind;
 pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{LoadedPluginSlot, PluginCell};
 pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
 pub use inspect::{ModuleInspection, inspect_wasm, inspect_wasm_agnostic};
-pub use module::{admit_wasm, admit_wasm_agnostic, compile_module};
+pub use module::{admit_wasm, admit_wasm_agnostic};
 pub use slot::RuntimeSlotKey;
 pub use wire_dispatch::WasmPluginWireDispatch;
 
@@ -151,26 +151,24 @@ impl WasmtimeRuntime {
             }
         }
 
-        let name_string: String = name.into();
-        let plugin_name: Arc<str> = Arc::from(name_string.as_str());
+        let name: String = name.into();
+        let plugin_name: Arc<str> = Arc::from(name);
         let (instance_pre, inspection) =
             module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
         let new_cell = PluginCell {
-            version_id: 1,
             instance_pre,
             metadata: inspection.metadata,
             memory_max_pages: self.config.memory_max_pages,
             store_budget: Arc::clone(&self.store_budget),
             content_hash: new_content_hash,
-            plugin_name: Arc::clone(&plugin_name),
+            plugin_name,
         };
 
         let mut slots = self.slots.write();
         // Re-check under the write lock: a concurrent register on the
         // same key could have raced ahead while we compiled. If that
         // register produced the same content_hash, keep its result and
-        // discard the wasted compile — do NOT bump version_id, do NOT
-        // store the freshly compiled cell.
+        // discard the wasted compile.
         let slot = match slots.get(&slot_key) {
             Some(existing) => {
                 if existing.kind != kind {
@@ -185,20 +183,11 @@ impl WasmtimeRuntime {
                 if prev.content_hash == new_content_hash {
                     return Ok(Arc::clone(existing));
                 }
-                let bumped = PluginCell {
-                    version_id: prev.version_id + 1,
-                    instance_pre: new_cell.instance_pre,
-                    metadata: new_cell.metadata,
-                    memory_max_pages: new_cell.memory_max_pages,
-                    store_budget: new_cell.store_budget,
-                    content_hash: new_cell.content_hash,
-                    plugin_name: new_cell.plugin_name,
-                };
-                existing.current.store(Arc::new(bumped));
+                existing.current.store(Arc::new(new_cell));
                 Arc::clone(existing)
             }
             None => {
-                let slot = Arc::new(LoadedPluginSlot::new(name_string, kind, new_cell));
+                let slot = Arc::new(LoadedPluginSlot::new(kind, new_cell));
                 slots.insert(slot_key.clone(), Arc::clone(&slot));
                 slot
             }

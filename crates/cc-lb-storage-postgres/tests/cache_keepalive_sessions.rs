@@ -4,9 +4,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest,
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheTtl, MetaStore, cache_keepalive_job_key,
+    CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheTtl, MetaStore, cache_keepalive_job_key,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -32,7 +32,7 @@ fn cache_keepalive_postgres_conformance() {
 async fn run_conformance(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;

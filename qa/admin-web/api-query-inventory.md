@@ -17,11 +17,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 | Dimension | Count / Status |
 |---|---|
-| UI parent actions | 204 |
+| UI parent actions | 203 |
 | UI atomic request occurrences | 142 |
-| Registered API method/path rows | 102 |
-| Independent backend route scan | 102 |
-| Production UI source denominator | 97 files |
+| Registered API method/path rows | 87 |
+| Independent backend route scan | 87 |
+| Production UI source denominator | 90 files |
 | UI route denominator | 8 routes |
 | Unknown UI requests | 0 |
 | Runtime | runtime_pending |
@@ -65,9 +65,9 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-7B67C1B1E413** | `ui_action` | — | Global / CommandPalette | Command Palette Entity Deep Link Selection | `read` | `available` |
 | **UI-CMD-06** | `ui_action` | — | Global / CommandPalette | Command Palette Dismiss / Close | `read` | `available` |
 | **UI-SRC-014AD24226CE** | `ui_action` | — | Overview / KPI Tiles & Header | Overview Dashboard Summary & Sparkline Metrics Query | `read` | `available` |
-| **UI-OV-01** | `network_request` | UI-SRC-014AD24226CE | Overview / KPI Tiles & Header | GET /admin/dashboard/summary | `read` | `available` |
+| **UI-OV-01** | `network_request` | UI-SRC-014AD24226CE | Overview / KPI Tiles & Header | GET /admin/v1/dashboard/summary | `read` | `available` |
 | **UI-SRC-6899B83C35F4** | `ui_action` | — | Overview / Top Principals Card | Overview Dashboard Principal Usage Query | `read` | `available` |
-| **UI-OV-02** | `network_request` | UI-SRC-6899B83C35F4 | Overview / Top Principals Card | GET /admin/usage | `read` | `available` |
+| **UI-OV-02** | `network_request` | UI-SRC-6899B83C35F4 | Overview / Top Principals Card | GET /admin/v1/dashboard/usage | `read` | `available` |
 | **UI-SRC-6A947BA8B48A** | `ui_action` | — | Overview / Pool Quota Card / Stacked Bars | Subscription Quota Aggregate Snapshot Query | `read` | `available` |
 | **UI-OV-03** | `network_request` | UI-SRC-6A947BA8B48A | Overview / Pool Quota Card / Stacked Bars | GET /admin/v1/subscription-quotas/aggregate | `read` | `available` |
 | **UI-SRC-F52C6DD98101** | `ui_action` | — | Overview / Pool Quota Card / Themed Area Chart | Subscription Quota Pool History Time Series Query | `read` | `available` |
@@ -81,11 +81,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-OV-09** | `ui_action` | — | Overview / TopPrincipalsCard / PrincipalCostMeter | Principal Cost Breakdown Popover | `read` | `available` |
 | **UI-OV-10** | `ui_action` | — | Overview / PoolQuotaCard / PoolQuotaStackedBar | Pool Quota Stacked Bar Breakdown Popover | `read` | `available` |
 | **UI-SRC-8C3BDB37C763** | `ui_action` | — | Overview / Recent Requests Table | Recent Requests Initial Page Query | `read` | `available` |
-| **UI-OV-05** | `network_request` | UI-SRC-8C3BDB37C763 | Overview / Recent Requests Table | GET /admin/events/recent | `read` | `available` |
+| **UI-OV-05** | `network_request` | UI-SRC-8C3BDB37C763 | Overview / Recent Requests Table | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-2305B3BC43A4** | `ui_action` | — | Overview / Recent Requests Table / Infinite Scroll | Recent Requests Infinite Scroll Next Page | `read` | `available` |
-| **UI-OV-11** | `network_request` | UI-SRC-2305B3BC43A4 | Overview / Recent Requests Table / Infinite Scroll | GET /admin/events/recent | `read` | `available` |
+| **UI-OV-11** | `network_request` | UI-SRC-2305B3BC43A4 | Overview / Recent Requests Table / Infinite Scroll | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-40B1F1E07B91** | `ui_action` | — | Overview / Recent Requests / Live Event Stream | Live Tail SSE Connection | `read` | `available` |
-| **UI-OV-06** | `network_request` | UI-SRC-40B1F1E07B91 | Overview / Recent Requests / Live Event Stream | GET /admin/events/stream | `read` | `available` |
+| **UI-OV-06** | `network_request` | UI-SRC-40B1F1E07B91 | Overview / Recent Requests / Live Event Stream | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-SRC-FDFB5195AB54** | `ui_action` | — | Overview / Recent Requests / Live Stream Reconnection | Live Stream Reconnect Hybrid Delta Backfill | `read` | `available` |
 | **UI-OV-15** | `network_request` | UI-SRC-FDFB5195AB54 | Overview / Recent Requests / Live Stream Reconnection | GET /admin/v1/events/delta | `read` | `available` |
 | **UI-OV-16** | `ui_action` | — | Overview / LiveTailFailureBanner | Live Tail Failure Banner Manual Retry | `read` | `available` |
@@ -97,51 +97,51 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-FE19ED30AFDB** | `ui_action` | — | Overview / RequestEventDrawer / RequestDetail | Request Detail Copy Actions (ID, Session, JSON) | `read` | `available` |
 | **UI-SRC-25F058F5759A** | `ui_action` | — | Overview / RequestEventDrawer | Request Detail Drawer Close | `read` | `available` |
 | **UI-SRC-35CD806FA378** | `ui_action` | — | Logs / Logs Table Historical Events | Historical Events Page Query on Mount | `read` | `available` |
-| **UI-LOG-01** | `network_request` | UI-SRC-35CD806FA378 | Logs / Logs Table Historical Events | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-01** | `network_request` | UI-SRC-35CD806FA378 | Logs / Logs Table Historical Events | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-8290B2982481** | `ui_action` | — | Logs / Logs Live Event Stream (SSE) | SSE Live Event Stream Subscription | `read` | `available` |
-| **UI-LOG-02** | `network_request` | UI-SRC-8290B2982481 | Logs / Logs Live Event Stream (SSE) | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-02** | `network_request` | UI-SRC-8290B2982481 | Logs / Logs Live Event Stream (SSE) | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-SRC-694A5E8030DA** | `ui_action` | — | Logs / Events Histogram Strip | Events Histogram Query | `read` | `available` |
 | **UI-LOG-03** | `network_request` | UI-SRC-694A5E8030DA | Logs / Events Histogram Strip | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-04** | `ui_action` | — | Logs / Toggle Live Tail Button | Toggle Live Tail Button Click | `read` | `available` |
 | **UI-LOG-05** | `ui_action` | — | Logs / Principal Filter Dropdown | Select Principal Filter | `read` | `available` |
-| **UI-LOG-05A** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-05B** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-05A** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-05B** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-05C** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-06** | `ui_action` | — | Logs / Upstream Filter Dropdown | Select Upstream Filter | `read` | `available` |
-| **UI-LOG-06A** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-06B** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-06A** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-06B** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-06C** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-07** | `ui_action` | — | Logs / Session Filter Dropdown | Select Session Filter | `read` | `available` |
-| **UI-LOG-07A** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-07B** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-07A** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-07B** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-07C** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-08** | `ui_action` | — | Logs / Model Filter Input | Model Input Debounced Filter Change | `read` | `available` |
-| **UI-LOG-08A** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-08B** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-08A** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-08B** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-08C** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-09** | `ui_action` | — | Logs / Status Class Filter Dropdown | Select Status Class Filter | `read` | `available` |
-| **UI-LOG-09A** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-09B** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-09A** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-09B** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-09C** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-10** | `ui_action` | — | Logs / Source Kind Filter Dropdown | Select Source Kind Filter | `read` | `available` |
-| **UI-LOG-10A** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/events/recent | `read` | `available` |
-| **UI-LOG-10B** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/events/stream | `read` | `available` |
+| **UI-LOG-10A** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
+| **UI-LOG-10B** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-10C** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-11** | `ui_action` | — | Logs / Histogram Strip Canvas Interaction | Histogram View Pan/Zoom and Selection Drag | `read` | `available` |
-| **UI-LOG-11B** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-11B** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-LOG-11A** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-12** | `ui_action` | — | Logs / TimeRangeBounds Input and Apply | Absolute Time Bounds Entry and Calendar Pick | `read` | `available` |
-| **UI-LOG-12A** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-12A** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-LOG-12B** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-LOG-13** | `ui_action` | — | Logs / Clear Filters Button | Clear All Filters Button Click | `read` | `available` |
 | **UI-SRC-2874D8E9F106** | `ui_action` | — | Logs / Refresh Button | Manual Refresh Button Click | `read` | `available` |
-| **UI-LOG-14** | `network_request` | UI-SRC-2874D8E9F106 | Logs / Refresh Button | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-14** | `network_request` | UI-SRC-2874D8E9F106 | Logs / Refresh Button | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-LOG-15** | `ui_action` | — | Logs / Export Logs Button | Export Visible Logs to JSON | `read` | `available` |
 | **UI-SRC-A6BE3F64E803** | `ui_action` | — | Logs / Logs Pagination Controls Next Button | Navigate to Next Historical Page | `read` | `available` |
-| **UI-LOG-16** | `network_request` | UI-SRC-A6BE3F64E803 | Logs / Logs Pagination Controls Next Button | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-16** | `network_request` | UI-SRC-A6BE3F64E803 | Logs / Logs Pagination Controls Next Button | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-888A1F4D1DD9** | `ui_action` | — | Logs / Logs Pagination Controls Prev Button | Navigate to Previous Historical Page | `read` | `available` |
 | **UI-LOG-17** | `ui_action` | — | Logs / Log Row Anchor Zoom Buttons | Row Anchor Range Buttons (±1m, ±5m, ±30m) | `read` | `available` |
-| **UI-LOG-17A** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/events/recent | `read` | `available` |
+| **UI-LOG-17A** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-LOG-17B** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/histogram | `read` | `available` |
 | **UI-SRC-091345AD21A8** | `ui_action` | — | Logs / RequestEventsTable Row Click | Row Click Open Request Detail Drawer | `read` | `available` |
 | **UI-SRC-C59FB001EF22** | `ui_action` | — | Logs / Request Event Detail Query | Fetch Full Event Diagnostics Detail | `read` | `available` |
@@ -153,13 +153,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-2B0EFC709378** | `ui_action` | — | Logs / Live Stream Reconnect Delta Backfill | SSE Reconnect Delta Catch-Up Query | `read` | `available` |
 | **UI-LOG-21** | `network_request` | UI-SRC-2B0EFC709378 | Logs / Live Stream Reconnect Delta Backfill | GET /admin/v1/events/delta | `read` | `available` |
 | **UI-LOG-22** | `ui_action` | — | Logs / Live Tail Failure Banner Retry | Force Reconnect Button Click on Terminal SSE Failure | `read` | `available` |
-| **REQ-SRC-B1BE83CDD51E** | `network_request` | UI-LOG-22 | Logs / Live Tail Failure Banner Retry | GET /admin/events/stream | `read` | `available` |
+| **REQ-SRC-B1BE83CDD51E** | `network_request` | UI-LOG-22 | Logs / Live Tail Failure Banner Retry | GET /admin/v1/events/stream | `read` | `available` |
 | **UI-LOG-25** | `ui_action` | — | Logs / Live Tail Failure Banner Dismiss | Dismiss Failure Banner | `read` | `available` |
 | **UI-LOG-23** | `ui_action` | — | Logs / Request Drawer Identity Copy Buttons | Copy Identity Fields to Clipboard | `read` | `available` |
 | **UI-LOG-28** | `ui_action` | — | Logs / Request Detail Drawer Close | Close Detail Drawer | `read` | `available` |
 | **UI-LOG-29** | `ui_action` | — | Logs / Latency Timeline Stage Breakdown | Latency Stage Hover Popover and Sticky Click | `read` | `available` |
 | **UI-LOG-30** | `ui_action` | — | Logs / Streaming Timeline Markers | Streaming Event Markers (TTFT / Message Start / Deltas / Stop) | `read` | `available` |
-| **UI-LOG-31** | `ui_action` | — | Logs / Token & Cost Donut Charts | Pie Slice Hover and Sticky Click | `read` | `available` |
 | **UI-LOG-26** | `ui_action` | — | Logs / Legacy Preset URL Normalization | Rewrite Legacy ?time_range= Preset to Absolute Unix Bounds | `read` | `available` |
 | **UI-SRC-00BD57E4D253** | `ui_action` | — | Principals / PrincipalsPage | Load Principals List | `read` | `available` |
 | **UI-PR-01** | `network_request` | UI-SRC-00BD57E4D253 | Principals / PrincipalsPage | GET /admin/v1/principals | `read` | `available` |
@@ -180,7 +179,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-D74A22B571BC** | `ui_action` | — | Principals / DefaultLimitsCard | Update Principal Default Limits | `reversible_write` | `available` |
 | **UI-PR-06** | `network_request` | UI-SRC-D74A22B571BC | Principals / DefaultLimitsCard | PATCH /admin/v1/principals/{id} | `reversible_write` | `available` |
 | **UI-SRC-5EED9F4C1CB5** | `ui_action` | — | Principals / RecentRequestsCard | Recent Requests Principal Polling | `read` | `available` |
-| **UI-PR-24** | `network_request` | UI-SRC-5EED9F4C1CB5 | Principals / RecentRequestsCard | GET /admin/events/recent | `read` | `available` |
+| **UI-PR-24** | `network_request` | UI-SRC-5EED9F4C1CB5 | Principals / RecentRequestsCard | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-7FA58E7543A9** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Plugin Chain | `read` | `available` |
 | **UI-PR-13A** | `network_request` | UI-SRC-7FA58E7543A9 | Principals / RouterSlotEditor | GET /admin/v1/principals/{id}/plugin-chain | `read` | `available` |
 | **UI-SRC-F380C424AEC6** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Terminal Strategy | `read` | `available` |
@@ -282,25 +281,25 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-6349C47F4250** | `ui_action` | — | Settings / ConfigEditorSection | Copy Draft JSON to Clipboard | `read` | `available` |
 | **UI-SRC-E5CC6F8E2B14** | `ui_action` | — | Settings / ConfigEditorSection | Deep-Link Field Focus via ?field= | `read` | `available` |
 | **UI-SRC-2FC5E3F9B148** | `ui_action` | — | Audit / AuditPage | Load Audit Trail & Supporting Entity Maps | `read` | `available` |
-| **UI-AUD-01** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/audit | `read_with_audit` | `available` |
+| **UI-AUD-01** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-AUD-07** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/principals | `read` | `available` |
 | **UI-AUD-08** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/upstreams | `read` | `available` |
 | **UI-SRC-8A3FB89087F5** | `ui_action` | — | Audit / AuditPage | Refresh Audit Trail | `read` | `available` |
-| **UI-AUD-05** | `network_request` | UI-SRC-8A3FB89087F5 | Audit / AuditPage | GET /admin/audit | `read_with_audit` | `available` |
+| **UI-AUD-05** | `network_request` | UI-SRC-8A3FB89087F5 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-SRC-DD556FCB4A54** | `ui_action` | — | Audit / AuditPage Filter Bar | Filter by Principal ID | `read` | `available` |
-| **UI-AUD-02** | `network_request` | UI-SRC-DD556FCB4A54 | Audit / AuditPage Filter Bar | GET /admin/audit | `read_with_audit` | `available` |
+| **UI-AUD-02** | `network_request` | UI-SRC-DD556FCB4A54 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-SRC-00FD191B0EB1** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range Start (From) Field | `read` | `available` |
 | **UI-SRC-C7A6EA2F6025** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range End (To) Field | `read` | `available` |
 | **UI-SRC-FA47104074F4** | `ui_action` | — | Audit / CalendarPopover | Pick From Date in Calendar Popover | `read` | `available` |
-| **REQ-SRC-0829EA9261F6** | `network_request` | UI-SRC-FA47104074F4 | Audit / CalendarPopover | GET /admin/audit | `read_with_audit` | `available` |
+| **REQ-SRC-0829EA9261F6** | `network_request` | UI-SRC-FA47104074F4 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-SRC-38E343D2A4C1** | `ui_action` | — | Audit / CalendarPopover | Pick To Date in Calendar Popover | `read` | `available` |
-| **REQ-SRC-66D17D1EF13A** | `network_request` | UI-SRC-38E343D2A4C1 | Audit / CalendarPopover | GET /admin/audit | `read_with_audit` | `available` |
+| **REQ-SRC-66D17D1EF13A** | `network_request` | UI-SRC-38E343D2A4C1 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-SRC-D309B057EC9E** | `ui_action` | — | Audit / TimeRangeBounds | Apply Time Range Bounds | `read` | `available` |
-| **UI-AUD-03** | `network_request` | UI-SRC-D309B057EC9E | Audit / TimeRangeBounds | GET /admin/audit | `read_with_audit` | `available` |
+| **UI-AUD-03** | `network_request` | UI-SRC-D309B057EC9E | Audit / TimeRangeBounds | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-AUD-04** | `ui_action` | — | Audit / AuditPage Filter Bar | Clear Filter Bar Filters | `read` | `available` |
-| **REQ-SRC-CAE9CDF1B8F6** | `network_request` | UI-AUD-04 | Audit / AuditPage Filter Bar | GET /admin/audit | `read_with_audit` | `available` |
+| **REQ-SRC-CAE9CDF1B8F6** | `network_request` | UI-AUD-04 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-AUD-09** | `ui_action` | — | Audit / AuditPage EmptyState | Clear Filters from Empty State Action | `read` | `available` |
-| **REQ-SRC-91FBA8F4830F** | `network_request` | UI-AUD-09 | Audit / AuditPage EmptyState | GET /admin/audit | `read_with_audit` | `available` |
+| **REQ-SRC-91FBA8F4830F** | `network_request` | UI-AUD-09 | Audit / AuditPage EmptyState | GET /admin/v1/audit | `read_with_audit` | `available` |
 | **UI-AUD-06** | `ui_action` | — | Audit / Audit Table Row | Open Audit Detail Modal | `read` | `available` |
 | **UI-AUD-10** | `ui_action` | — | Audit / Audit Detail Modal | Close Audit Detail Modal | `read` | `available` |
 | **UI-SRC-BDC81AB9B863** | `ui_action` | — | Upstreams / Upstreams Master List | Upstreams Master List Mount & Polling | `read` | `available` |
@@ -308,7 +307,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-3FC895176F17** | `ui_action` | — | Upstreams / Upstream Quota Latest Snapshots | Subscription Quota Latest Polling | `read` | `available` |
 | **UI-UP-02** | `network_request` | UI-SRC-3FC895176F17 | Upstreams / Upstream Quota Latest Snapshots | GET /admin/v1/subscription-quotas/latest | `read` | `available` |
 | **UI-SRC-F25206CE1E1B** | `ui_action` | — | Upstreams / Upstream 7d Usage Bar | Upstream 7d Usage Summary Query | `read` | `available` |
-| **UI-UP-03** | `network_request` | UI-SRC-F25206CE1E1B | Upstreams / Upstream 7d Usage Bar | GET /admin/usage | `read` | `available` |
+| **UI-UP-03** | `network_request` | UI-SRC-F25206CE1E1B | Upstreams / Upstream 7d Usage Bar | GET /admin/v1/dashboard/usage | `read` | `available` |
 | **UI-SRC-E4C913E07FEC** | `ui_action` | — | Upstreams / Runtime Apply Status | Runtime Status Query | `read` | `available` |
 | **UI-UP-04** | `network_request` | UI-SRC-E4C913E07FEC | Upstreams / Runtime Apply Status | GET /admin/v1/status | `read` | `available` |
 | **UI-UP-05** | `ui_action` | — | Upstreams / Upstream Item Click in Sidebar | Select Upstream in Sidebar | `read` | `available` |
@@ -328,7 +327,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-9FD3FEC04C3D** | `ui_action` | — | Upstreams / SettingsCard (Base URL / API Key) | Update Non-OAuth Upstream Settings | `reversible_write` | `available` |
 | **UI-UP-13** | `network_request` | UI-SRC-9FD3FEC04C3D | Upstreams / SettingsCard (Base URL / API Key) | PUT /admin/v1/upstreams/{id} | `reversible_write` | `available` |
 | **UI-SRC-7F9359EA0052** | `ui_action` | — | Upstreams / ApiUsageCard Range Toggle | Toggle API Usage Range (24h / 7d) | `read` | `available` |
-| **UI-UP-14** | `network_request` | UI-SRC-7F9359EA0052 | Upstreams / ApiUsageCard Range Toggle | GET /admin/usage | `read` | `available` |
+| **UI-UP-14** | `network_request` | UI-SRC-7F9359EA0052 | Upstreams / ApiUsageCard Range Toggle | GET /admin/v1/dashboard/usage | `read` | `available` |
 | **UI-SRC-6D1976AC76E2** | `ui_action` | — | Upstreams / WarmupCardMinimal Toggle Enabled | Toggle Warmup Enabled | `reversible_write` | `available` |
 | **UI-UP-15** | `network_request` | UI-SRC-6D1976AC76E2 | Upstreams / WarmupCardMinimal Toggle Enabled | PATCH /admin/v1/upstreams/{id} | `reversible_write` | `available` |
 | **UI-SRC-1B467A3726A3** | `ui_action` | — | Upstreams / Warmup Dialect Plugin Dropdown | Select Warmup Shape Plugin | `reversible_write` | `available` |
@@ -362,7 +361,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **UI-SRC-AB584B8FD224** | `ui_action` | — | Upstreams / Warmup Shape Plugin Registry | Shape Plugin Registry Query | `read` | `available` |
 | **UI-UP-32** | `network_request` | UI-SRC-AB584B8FD224 | Upstreams / Warmup Shape Plugin Registry | GET /admin/v1/plugins/registry | `read` | `available` |
 | **UI-SRC-C28C003E8881** | `ui_action` | — | Upstreams / Selected Upstream Recent Requests | Recent Requests for Upstream | `read` | `available` |
-| **UI-UP-33** | `network_request` | UI-SRC-C28C003E8881 | Upstreams / Selected Upstream Recent Requests | GET /admin/events/recent | `read` | `available` |
+| **UI-UP-33** | `network_request` | UI-SRC-C28C003E8881 | Upstreams / Selected Upstream Recent Requests | GET /admin/v1/events/recent | `read` | `available` |
 | **UI-SRC-9CDF9EE839AE** | `ui_action` | — | Upstreams / Warmup History Status Filter | Filter Warmup History by Status | `read` | `available` |
 | **UI-UP-34** | `network_request` | UI-SRC-9CDF9EE839AE | Upstreams / Warmup History Status Filter | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` | `available` |
 | **UI-SRC-35D5E99A460E** | `ui_action` | — | Upstreams / Warmup History Pagination | Load Older Warmup Attempts | `read` | `available` |
@@ -411,27 +410,12 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 | **API-SRC-276F2E8B8B8D** | `backend_endpoint` | — | Backend-Only / serve_asset | GET /{*file} | `read` | `available` |
 | **API-SRC-7A787CD5C3CF** | `backend_endpoint` | — | Backend-Only / admin_server_state | GET /admin/health/state | `read` | `available` |
 | **API-SYS-02** | `backend_endpoint` | — | Backend-Only / handle_internal_partial_fetch | GET /internal/v1/partials/{event_id} | `read` | `available` |
-| **API-SRC-15D90407F542** | `backend_endpoint` | — | Backend-Only / query_audit | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **API-SRC-C2E19B96F128** | `backend_endpoint` | — | Backend-Only / crate::dashboard_routes::handle_dashboard_summary | GET /admin/v1/dashboard/summary | `read` | `available` |
-| **API-SRC-6272C4C4303C** | `backend_endpoint` | — | Backend-Only / crate::dashboard_routes::handle_dashboard_usage | GET /admin/v1/dashboard/usage | `read` | `available` |
-| **API-SRC-17E768052C98** | `backend_endpoint` | — | Backend-Only / handle_dashboard_usage | GET /admin/dashboard/usage | `read` | `available` |
-| **API-SRC-393CB1B46201** | `backend_endpoint` | — | Backend-Only / crate::events_routes::handle_recent_events | GET /admin/v1/events/recent | `read` | `available` |
-| **API-SRC-220A728FB03F** | `backend_endpoint` | — | Backend-Only / crate::events_routes::handle_events_histogram | GET /admin/events/histogram | `read` | `available` |
-| **API-SRC-149FAC449949** | `backend_endpoint` | — | Backend-Only / handle_events_delta | GET /admin/events/delta | `read` | `available` |
-| **API-SRC-07C82F02A23B** | `backend_endpoint` | — | Backend-Only / crate::events_routes::handle_events_stream | GET /admin/v1/events/stream | `read` | `available` |
-| **API-SRC-FC8E60B994F7** | `backend_endpoint` | — | Backend-Only / handle_latest | GET /admin/subscription-quotas/latest | `read` | `available` |
-| **API-SRC-063C7455BC4D** | `backend_endpoint` | — | Backend-Only / handle_series | GET /admin/subscription-quotas/series | `read` | `available` |
-| **API-SRC-B19EB1F130F2** | `backend_endpoint` | — | Backend-Only / handle_aggregate | GET /admin/subscription-quotas/aggregate | `read` | `available` |
-| **API-SRC-155F19B11A2E** | `backend_endpoint` | — | Backend-Only / handle_pool_history | GET /admin/subscription-quotas/pool-history | `read` | `available` |
 | **API-SYS-04** | `backend_endpoint` | — | Backend-Only / status | GET /admin/scheduler/status | `read` | `available` |
 | **API-SYS-03** | `backend_endpoint` | — | Backend-Only / failures | GET /admin/scheduler/failures | `read` | `available` |
 | **API-SRC-BD965DDC38E0** | `backend_endpoint` | — | Backend-Only / get_registry | GET /admin/v1/plugins/registry/{id} | `read` | `available` |
 | **API-SRC-8895068281DE** | `backend_endpoint` | — | Backend-Only / get_chain | GET /admin/v1/plugin-chain-entries/{id} | `read` | `available` |
 | **API-SRC-166291C6FB8A** | `backend_endpoint` | — | Backend-Only / get_principal | GET /admin/v1/principals/{id} | `read` | `available` |
 | **API-SRC-4B568BB20E22** | `backend_endpoint` | — | Backend-Only / get_allowed_models | GET /admin/v1/principals/{id}/allowed_models | `read` | `available` |
-| **API-SRC-5E670B98E5A2** | `backend_endpoint` | — | Backend-Only / principal_usage | GET /admin/principals/{id}/usage | `read` | `available` |
-| **API-SRC-BC21CB4F90EC** | `backend_endpoint` | — | Backend-Only / principal_usage | GET /admin/v1/principals/{id}/usage | `read` | `available` |
-| **API-SRC-B7C3EDE0843A** | `backend_endpoint` | — | Backend-Only / principal_limits | GET /admin/principals/{id}/limits | `read` | `available` |
 | **API-SRC-7E55E35928A2** | `backend_endpoint` | — | Backend-Only / principal_limits | GET /admin/v1/principals/{id}/limits | `read` | `available` |
 | **API-SRC-92FD477750A5** | `backend_endpoint` | — | Backend-Only / get_api_key | GET /admin/principals/{id}/keys/{key_id} | `read` | `available` |
 | **API-SRC-7383936FE537** | `backend_endpoint` | — | Backend-Only / principal_key_usage | GET /admin/principals/{id}/keys/{key_id}/usage | `read` | `available` |
@@ -867,7 +851,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-OV-01`
 - **Source:** `crates/cc-lb-admin/web/src/routes/index.tsx:1354#useSummary`
 - **Preconditions:** Overview route active, authenticated
-- **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
+- **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/v1/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -880,11 +864,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-SRC-014AD24226CE`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:370#useSummary`
 - **Preconditions:** Overview route active, authenticated
-- **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
+- **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/v1/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/dashboard/summary`
+- **HTTP:** `GET /admin/v1/dashboard/summary`
   - Query: `range`
   - Body: None
   - Headers: `if-none-match`
@@ -901,7 +885,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-OV-02`
 - **Source:** `crates/cc-lb-admin/web/src/routes/index.tsx:1355#useUsage`
 - **Preconditions:** Overview route active, authenticated
-- **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
+- **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -914,11 +898,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-SRC-6899B83C35F4`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:382#useUsage`
 - **Preconditions:** Overview route active, authenticated
-- **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
+- **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/usage`
+- **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `projection`
   - Body: None
   - Headers: `if-none-match`
@@ -1144,7 +1128,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`
   - Body: None
   - Headers: None
@@ -1178,7 +1162,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `on_user_action` — User scroll intersection
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `until_ts_ms`, `until_event_id`
   - Body: None
   - Headers: None
@@ -1195,7 +1179,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-OV-06`
 - **Source:** `crates/cc-lb-admin/web/src/routes/index.tsx:1378#useLiveEventStream`
 - **Preconditions:** Authenticated session, window online and active
-- **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/events/stream
+- **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/v1/events/stream
 - **Scope:** `streaming` — Component mount & connection lifecycle
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1208,11 +1192,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-SRC-40B1F1E07B91`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:236#connect`
 - **Preconditions:** Authenticated session, window online and active
-- **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/events/stream
+- **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/v1/events/stream
 - **Scope:** `streaming` — Component mount & connection lifecycle
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: None
   - Body: None
   - Headers: `last-event-id`
@@ -1268,7 +1252,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Risk:** `read`
 - **Production applicability:** `available`
 - **Expected UI:** Calls live.forceReconnect(), resetting reconnect counters and immediately initiating stream connect()
-- **Client-only reason:** Client connection state trigger (leads to GET /admin/events/stream)
+- **Client-only reason:** Client connection state trigger (leads to GET /admin/v1/events/stream)
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-CFF84088D66A] Overview — Live Tail Failure Banner Dismiss
@@ -1398,7 +1382,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Route mount / URL filter changes
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `since_unix_secs`, `until_unix_secs`, `until_ts_ms`, `until_event_id`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
   - Headers: None
@@ -1432,7 +1416,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Effective tailing state active
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
   - Headers: `last-event-id`
@@ -1497,7 +1481,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-LOG-05A`, `UI-LOG-05B`, `UI-LOG-05C`
 - **Source:** `crates/cc-lb-admin/web/src/routes/logs.tsx:847#LogsPage`
 - **Preconditions:** Principal list loaded via usePrincipalNameMap
-- **Steps:** Open Principal LogSelect dropdown → Select a specific principal or 'All principals'
+- **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1510,11 +1494,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-05`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:622#useRecentEventsPage`
 - **Preconditions:** Principal list loaded via usePrincipalNameMap
-- **Steps:** Open Principal LogSelect dropdown → Select a specific principal or 'All principals'
+- **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `principal_id`, `limit`
   - Body: None
   - Headers: None
@@ -1531,11 +1515,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-05`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:270#connect`
 - **Preconditions:** Principal list loaded via usePrincipalNameMap
-- **Steps:** Open Principal LogSelect dropdown → Select a specific principal or 'All principals'
+- **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`
   - Body: None
   - Headers: `last-event-id`
@@ -1552,7 +1536,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-05`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:497#useEventsHistogram`
 - **Preconditions:** Principal list loaded via usePrincipalNameMap
-- **Steps:** Open Principal LogSelect dropdown → Select a specific principal or 'All principals'
+- **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1573,7 +1557,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-LOG-06A`, `UI-LOG-06B`, `UI-LOG-06C`
 - **Source:** `crates/cc-lb-admin/web/src/routes/logs.tsx:856#LogsPage`
 - **Preconditions:** Upstreams loaded via useUpstreams
-- **Steps:** Open Upstream LogSelect dropdown → Select an upstream or 'All upstreams'
+- **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1586,11 +1570,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-06`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:622#useRecentEventsPage`
 - **Preconditions:** Upstreams loaded via useUpstreams
-- **Steps:** Open Upstream LogSelect dropdown → Select an upstream or 'All upstreams'
+- **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `upstream_id`, `limit`
   - Body: None
   - Headers: None
@@ -1607,11 +1591,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-06`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:270#connect`
 - **Preconditions:** Upstreams loaded via useUpstreams
-- **Steps:** Open Upstream LogSelect dropdown → Select an upstream or 'All upstreams'
+- **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `upstream_id`
   - Body: None
   - Headers: `last-event-id`
@@ -1628,7 +1612,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-06`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:497#useEventsHistogram`
 - **Preconditions:** Upstreams loaded via useUpstreams
-- **Steps:** Open Upstream LogSelect dropdown → Select an upstream or 'All upstreams'
+- **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1649,7 +1633,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-LOG-07A`, `UI-LOG-07B`, `UI-LOG-07C`
 - **Source:** `crates/cc-lb-admin/web/src/routes/logs.tsx:865#LogsPage`
 - **Preconditions:** Session list extracted from loaded rows
-- **Steps:** Open Session LogSelect dropdown → Select a session chip or 'All sessions'
+- **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1662,11 +1646,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-07`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:622#useRecentEventsPage`
 - **Preconditions:** Session list extracted from loaded rows
-- **Steps:** Open Session LogSelect dropdown → Select a session chip or 'All sessions'
+- **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `thread_id`, `limit`
   - Body: None
   - Headers: None
@@ -1683,11 +1667,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-07`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:270#connect`
 - **Preconditions:** Session list extracted from loaded rows
-- **Steps:** Open Session LogSelect dropdown → Select a session chip or 'All sessions'
+- **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `thread_id`
   - Body: None
   - Headers: `last-event-id`
@@ -1704,7 +1688,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-07`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:497#useEventsHistogram`
 - **Preconditions:** Session list extracted from loaded rows
-- **Steps:** Open Session LogSelect dropdown → Select a session chip or 'All sessions'
+- **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1742,7 +1726,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `model`, `limit`
   - Body: None
   - Headers: None
@@ -1763,7 +1747,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `model`
   - Body: None
   - Headers: `last-event-id`
@@ -1801,7 +1785,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-LOG-09A`, `UI-LOG-09B`, `UI-LOG-09C`
 - **Source:** `crates/cc-lb-admin/web/src/routes/logs.tsx:883#LogsPage`
 - **Preconditions:** None
-- **Steps:** Open Status LogSelect dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
+- **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1814,11 +1798,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-09`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:622#useRecentEventsPage`
 - **Preconditions:** None
-- **Steps:** Open Status LogSelect dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
+- **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `status_class`, `limit`
   - Body: None
   - Headers: None
@@ -1835,11 +1819,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-09`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:270#connect`
 - **Preconditions:** None
-- **Steps:** Open Status LogSelect dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
+- **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `status_class`
   - Body: None
   - Headers: `last-event-id`
@@ -1856,7 +1840,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-09`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:497#useEventsHistogram`
 - **Preconditions:** None
-- **Steps:** Open Status LogSelect dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
+- **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1877,7 +1861,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Atomic requests:** `UI-LOG-10A`, `UI-LOG-10B`, `UI-LOG-10C`
 - **Source:** `crates/cc-lb-admin/web/src/routes/logs.tsx:892#LogsPage`
 - **Preconditions:** None
-- **Steps:** Open Kind LogSelect dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
+- **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1890,11 +1874,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-10`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:622#useRecentEventsPage`
 - **Preconditions:** None
-- **Steps:** Open Kind LogSelect dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
+- **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `source_kind`, `limit`
   - Body: None
   - Headers: None
@@ -1911,11 +1895,11 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-10`
 - **Source:** `crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts:270#connect`
 - **Preconditions:** None
-- **Steps:** Open Kind LogSelect dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
+- **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `source_kind`
   - Body: None
   - Headers: `last-event-id`
@@ -1932,7 +1916,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Parent action:** `UI-LOG-10`
 - **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:497#useEventsHistogram`
 - **Preconditions:** None
-- **Steps:** Open Kind LogSelect dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
+- **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
 - **Production applicability:** `available`
@@ -1970,7 +1954,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Canvas drag actions
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
   - Headers: None
@@ -2025,7 +2009,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Valid date combinations + error boundary cases
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
   - Headers: None
@@ -2094,7 +2078,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — User action
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `since_unix_secs`, `until_unix_secs`, `until_ts_ms`, `until_event_id`
   - Body: None
   - Headers: None
@@ -2142,7 +2126,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Pagination control
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `until_ts_ms`, `until_event_id`, `since_unix_secs`, `until_unix_secs`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
   - Headers: None
@@ -2190,7 +2174,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_row` — Row timestamp × ANCHOR_RADII_SECS
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
   - Headers: None
@@ -2382,7 +2366,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Failure banner action
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Calls forceReconnect(); attempts fresh connection to /admin/events/stream; resets failure counter on success
+- **Expected UI:** Calls forceReconnect(); attempts fresh connection to /admin/v1/events/stream; resets failure counter on success
 - **Runtime result:** `PENDING`
 
 ### [REQ-SRC-B1BE83CDD51E] Logs — Force Reconnect Button Click on Terminal SSE Failure — useLiveEventStream.forceReconnect
@@ -2395,7 +2379,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Failure banner action
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/stream`
+- **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
   - Headers: `last-event-id`
@@ -2403,7 +2387,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor`, `postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor`, `sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors`, `postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors`
 - **Cache / no-query path:** SSE: reads the current cursor and performs one reconnect backfill bounded by BACKFILL_MAX_EVENTS=500; reaching the cap emits a backfill-cap reset, otherwise delivery continues from in-memory event-bus/storage-tail broadcasts with heartbeats.
 - **Side effects:** None
-- **Expected UI:** Calls forceReconnect(); attempts fresh connection to /admin/events/stream; resets failure counter on success
+- **Expected UI:** Calls forceReconnect(); attempts fresh connection to /admin/v1/events/stream; resets failure counter on success
 - **Runtime result:** `PENDING`
 
 ### [UI-LOG-25] Logs — Dismiss Failure Banner
@@ -2474,20 +2458,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Production applicability:** `available`
 - **Expected UI:** Displays Popover with exact marker description and offset relative to request start
 - **Client-only reason:** Client-only popover display
-- **Runtime result:** `PENDING`
-
-### [UI-LOG-31] Logs — Pie Slice Hover and Sticky Click
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/components/ui/usage/PieChart.tsx:154#PieChart`
-- **Preconditions:** Event has non-zero tokens or cost
-- **Steps:** Hover over slice in TokenPie or CostPie donut chart → Click slice to lock sticky focus
-- **Scope:** `each_row` — Token/cost categories present on event
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **Expected UI:** Center text changes to show selected slice label, count, and percentage; clicking applies white border stroke to slice
-- **Client-only reason:** Client-side SVG path onMouseEnter/onClick state manipulation
 - **Runtime result:** `PENDING`
 
 ### [UI-LOG-26] Logs — Rewrite Legacy ?time_range= Preset to Absolute Unix Bounds
@@ -2824,7 +2794,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `principal_id`, `limit`
   - Body: None
   - Headers: None
@@ -4496,7 +4466,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution on mount / search change
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4559,7 +4529,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **Expected UI:** Re-queries GET /admin/audit with current search parameters
+- **Expected UI:** Re-queries GET /admin/v1/audit with current search parameters
 - **Runtime result:** `PENDING`
 
 ### [UI-AUD-05] Audit — Refresh Audit Trail — audit.refetch
@@ -4572,7 +4542,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4580,7 +4550,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
 - **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
 - **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
-- **Expected UI:** Re-queries GET /admin/audit with current search parameters
+- **Expected UI:** Re-queries GET /admin/v1/audit with current search parameters
 - **Runtime result:** `PENDING`
 
 ### [UI-SRC-DD556FCB4A54] Audit — Filter by Principal ID
@@ -4606,7 +4576,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_principal` — Principals list + empty option
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4668,7 +4638,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4702,7 +4672,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4736,7 +4706,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
   - Headers: None
@@ -4770,7 +4740,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`
   - Body: None
   - Headers: None
@@ -4804,7 +4774,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/audit`
+- **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`
   - Body: None
   - Headers: None
@@ -4934,7 +4904,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/usage`
+- **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `projection`
   - Body: None
   - Headers: `if-none-match`
@@ -5268,7 +5238,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/usage`
+- **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `upstream_id`
   - Body: None
   - Headers: `if-none-match`
@@ -5840,7 +5810,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Scope:** `each_upstream` — Each selected upstream
 - **Risk:** `read`
 - **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/recent`
+- **HTTP:** `GET /admin/v1/events/recent`
   - Query: `upstream_id`, `limit`
   - Body: None
   - Headers: None
@@ -6154,7 +6124,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Source:** `crates/cc-lb-admin/web/src/routes/audit.tsx:402#AuditPage`
 - **Preconditions:** Audit query returned a row
 - **Steps:** Audit rows render actor in the table → Open a row → Inspect authority, subject, kind, and email in the detail modal
-- **Scope:** `each_row` — Every row returned by GET /admin/audit
+- **Scope:** `each_row` — Every row returned by GET /admin/v1/audit
 - **Risk:** `read`
 - **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **Expected UI:** Actor identity columns and detail fields reflect the source row, using an em dash for absent legacy values.
@@ -6661,246 +6631,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SRC-15D90407F542] Backend-Only — GET /admin/v1/audit
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:48`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read_with_audit`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/audit`
-  - Query: `principal_id`, `since`, `after`, `until`, `limit`, `actor_authority`, `actor_subject`, `admin_only`
-  - Body: None
-  - Headers: None
-- **Handler:** `query_audit`
-- **Storage operations:** `sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit`, `postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.
-- **Side effects:** Audit log write: record_admin_audit("audit_query", "/admin/v1/audit")
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-C2E19B96F128] Backend-Only — GET /admin/v1/dashboard/summary
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:64`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/dashboard/summary`
-  - Query: `range`
-  - Body: None
-  - Headers: `if-none-match`
-- **Handler:** `crate::dashboard_routes::handle_dashboard_summary`
-- **Storage operations:** `sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint`, `postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint`, `sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range`, `postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range`, `sqlite:UsageRollupStore::query_overview_excluded_error_buckets_in_range:SqliteStorage::query_overview_excluded_error_buckets_in_range`, `postgres:UsageRollupStore::query_overview_excluded_error_buckets_in_range:PostgresStorage::query_overview_excluded_error_buckets_in_range`
-- **Cache / no-query path:** Reads usage-rollup checkpoint for weak ETag/304, then usage rollups and overview-excluded error buckets when a body is required.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-6272C4C4303C] Backend-Only — GET /admin/v1/dashboard/usage
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:68`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/dashboard/usage`
-  - Query: `range`, `group_by`, `step`, `upstream_id`, `projection`
-  - Body: None
-  - Headers: `if-none-match`
-- **Handler:** `crate::dashboard_routes::handle_dashboard_usage`
-- **Storage operations:** `sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint`, `postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint`, `sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range`, `postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range`, `sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs`, `postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs`
-- **Cache / no-query path:** Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-17E768052C98] Backend-Only — GET /admin/dashboard/usage
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/dashboard_routes.rs:29`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/dashboard/usage`
-  - Query: `range`, `group_by`, `step`, `upstream_id`, `projection`
-  - Body: None
-  - Headers: `if-none-match`
-- **Handler:** `handle_dashboard_usage`
-- **Storage operations:** `sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint`, `postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint`, `sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range`, `postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range`, `sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs`, `postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs`
-- **Cache / no-query path:** Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-393CB1B46201] Backend-Only — GET /admin/v1/events/recent
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:72`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/events/recent`
-  - Query: `since_unix_secs`, `until_unix_secs`, `until_ts_ms`, `until_event_id`, `limit`, `principal_id`, `thread_id`, `model`, `upstream`, `upstream_id`, `status_class`, `source_kind`
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::events_routes::handle_recent_events`
-- **Storage operations:** `sqlite:RequestEventStore::list_request_events:SqliteStorage::list_request_events`, `postgres:RequestEventStore::list_request_events:PostgresStorage::list_request_events`
-- **Cache / no-query path:** Dynamic query builder branching based on filters: principal_id, thread_id, model, upstream, status_class, source_kind. Keysets: until_ts_ms, until_event_id
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-220A728FB03F] Backend-Only — GET /admin/events/histogram
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:80`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/histogram`
-  - Query: `since_unix_secs`, `until_unix_secs`, `bucket_ms`, `principal_id`, `thread_id`, `model`, `upstream`, `upstream_id`, `status_class`, `source_kind`
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::events_routes::handle_events_histogram`
-- **Storage operations:** `sqlite:RequestEventStore::request_event_histogram:SqliteStorage::request_event_histogram`, `postgres:RequestEventStore::request_event_histogram:PostgresStorage::request_event_histogram`
-- **Cache / no-query path:** Computes time buckets and rejects requests exceeding MAX_HISTOGRAM_BUCKETS=240.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-149FAC449949] Backend-Only — GET /admin/events/delta
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/events_routes.rs:52`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/events/delta`
-  - Query: `since_cursor`, `limit`, `principal_id`, `thread_id`, `model`, `upstream`, `upstream_id`, `status_class`, `source_kind`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_events_delta`
-- **Storage operations:** `sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor`, `postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor`, `sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors`, `postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors`
-- **Cache / no-query path:** Reads a storage cursor and cursor-bounded page. build_delta_events_payload in the admin layer then applies residual filters in memory (including excluding renewal source_kind by default); exhausted is computed from the pre-filter row count.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-07C82F02A23B] Backend-Only — GET /admin/v1/events/stream
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:88`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/events/stream`
-  - Query: `principal_id`, `thread_id`, `model`, `upstream`, `upstream_id`, `status_class`, `source_kind`
-  - Body: None
-  - Headers: `last-event-id`
-- **Handler:** `crate::events_routes::handle_events_stream`
-- **Storage operations:** `sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor`, `postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor`, `sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors`, `postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors`
-- **Cache / no-query path:** SSE: reads the current cursor and performs one reconnect backfill bounded by BACKFILL_MAX_EVENTS=500; reaching the cap emits a backfill-cap reset, otherwise delivery continues from in-memory event-bus/storage-tail broadcasts with heartbeats.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-FC8E60B994F7] Backend-Only — GET /admin/subscription-quotas/latest
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:50`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/subscription-quotas/latest`
-  - Query: `upstream_ids`, `windows`, `source`, `max_staleness_secs`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_latest`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Reads upstream records for names/filtering; quota snapshots come from the in-memory dynamic subscription-quota cache.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-063C7455BC4D] Backend-Only — GET /admin/subscription-quotas/series
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:52`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/subscription-quotas/series`
-  - Query: `upstream_ids`, `windows`, `source`, `since_unix_secs`, `until_unix_secs`, `bucket_secs`, `max_points_per_series`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_series`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints`
-- **Cache / no-query path:** Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-B19EB1F130F2] Backend-Only — GET /admin/subscription-quotas/aggregate
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:57`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/subscription-quotas/aggregate`
-  - Query: `upstream_ids`, `windows`, `source`, `max_staleness_secs`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_aggregate`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`, `sqlite:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:SqliteStorage::list_upstream_subscription_metadata`, `postgres:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:PostgresStorage::list_upstream_subscription_metadata`, `sqlite:OrganizationMetadataStore::list_organization_metadata:SqliteStorage::list_organization_metadata`, `postgres:OrganizationMetadataStore::list_organization_metadata:PostgresStorage::list_organization_metadata`, `sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:SqliteStorage::list_subscription_quota_provider_lots`, `postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:PostgresStorage::list_subscription_quota_provider_lots`, `sqlite:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:SqliteStorage::sum_usage_tokens_for_intervals`, `postgres:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:PostgresStorage::sum_usage_tokens_for_intervals`
-- **Cache / no-query path:** Reads upstreams, subscription/organization metadata, provider-lot checkpoint history, and usage-rollup token sums for generated intervals; current quota candidates also come from the in-memory dynamic cache.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-155F19B11A2E] Backend-Only — GET /admin/subscription-quotas/pool-history
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/subscription_quotas.rs:65`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/subscription-quotas/pool-history`
-  - Query: `windows`, `since_unix_secs`, `until_unix_secs`, `series_projection`, `max_points_per_series`
-  - Body: None
-  - Headers: None
-- **Handler:** `handle_pool_history`
-- **Storage operations:** `sqlite:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:SqliteStorage::list_latest_pool_quota_snapshot_summaries`, `postgres:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:PostgresStorage::list_latest_pool_quota_snapshot_summaries`, `sqlite:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:SqliteStorage::list_pool_quota_snapshot_summaries_in_range`, `postgres:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:PostgresStorage::list_pool_quota_snapshot_summaries_in_range`, `sqlite:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:SqliteStorage::list_pool_quota_chart_points_in_range`, `postgres:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:PostgresStorage::list_pool_quota_chart_points_in_range`
-- **Cache / no-query path:** Always reads latest pooled summaries; series_projection=full reads raw summary rows, while chart reads raw or bucketed chart projections.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
 ### [API-SYS-04] Backend-Only — GET /admin/scheduler/status
 
 - **Entry type:** `backend_endpoint`
@@ -7017,66 +6747,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Handler:** `get_allowed_models`
 - **Storage operations:** `sqlite:PrincipalStore::get_by_id:SqliteStorage::get_by_id`, `postgres:PrincipalStore::get_by_id:PostgresStorage::get_by_id`
 - **Cache / no-query path:** Includes ETag header W/"{revision}"
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-5E670B98E5A2] Backend-Only — GET /admin/principals/{id}/usage
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:26`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/principals/{id}/usage`
-  - Query: `range`, `step`, `group_by`
-  - Body: None
-  - Headers: None
-- **Handler:** `principal_usage`
-- **Storage operations:** `sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range`, `postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range`
-- **Cache / no-query path:** Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-BC21CB4F90EC] Backend-Only — GET /admin/v1/principals/{id}/usage
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:28`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/v1/principals/{id}/usage`
-  - Query: `range`, `step`, `group_by`
-  - Body: None
-  - Headers: None
-- **Handler:** `principal_usage`
-- **Storage operations:** `sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range`, `postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range`
-- **Cache / no-query path:** Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory.
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-B7C3EDE0843A] Backend-Only — GET /admin/principals/{id}/limits
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:27`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/principals/{id}/limits`
-  - Query: `identity`
-  - Body: None
-  - Headers: None
-- **Handler:** `principal_limits`
-- **Storage operations:** None
-- **Cache / no-query path:** PURE IN-MEMORY PATH: reads dynamic_view.principal_view and takes an in-memory snapshot via state.limit_engine.snapshot_for_principal
 - **Side effects:** None
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -7486,7 +7156,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-GLOBAL-01** (medium): The legacy inventory documented localStorage['cclb.auth.token'], whereas the actual codebase uses AUTH_TOKEN_KEY = 'cc-lb-admin-token' in src/lib/auth.ts:1.
 - **GAP-GLOBAL-02** (low): The legacy inventory documented localStorage['theme'] with .dark class toggling. The actual codebase uses STORAGE_KEY = 'cclb.theme' in src/lib/theme.ts:10 and sets data-theme attribute on document.documentElement.
 - **GAP-GLOBAL-03** (medium): CommandPalette.tsx lists Overview, Upstreams, Principals, Plugins, Logs, and Settings in the Pages group, but omits the /audit route, even though it exists in Sidebar.tsx.
-- **GAP-OV-01** (high): The legacy inventory documented GET /admin/dashboard/usage for UI-OV-02. The actual codebase requests GET /admin/usage with query parameters range, step, group_by=principal, and projection=totals.
 - **GAP-OV-02** (high): The legacy inventory documented a single GET /admin/dashboard/pool-history endpoint for UI-OV-03, UI-OV-04, and UI-OV-07C. The actual codebase splits this into two distinct endpoints: GET /admin/v1/subscription-quotas/aggregate (snapshot stacked bars) and GET /admin/v1/subscription-quotas/pool-history (multi-series Recharts area chart).
 - **GAP-OV-03** (medium): UI-OV-12 was documented purely as a UI row click action, but selecting any finalized request row triggers an asynchronous network fetch to GET /admin/v1/events/detail/{eventId} via useRequestEventDetail.
 - **GAP-LOGS-1** (low): SSE reconnect delta query (/admin/v1/events/delta) is only called when lastCursor is known and resumeNeedsBackfill is true. If connection drops on initial load before any event arrives, it reconnects directly without backfill.
@@ -7502,9 +7171,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-SET-01** (documented): The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list).
 - **GAP-SET-02** (documented): Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file.
 - **GAP-AUD-01** (documented): AuditPage requests useAudit with limit='200'. The UI table displays at most 200 admin rows and a static 'No more entries' footer. There are no next/previous page buttons, cursor tokens, or infinite scrolling.
-- **GAP-AUD-02** (documented): GET /admin/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.
+- **GAP-AUD-02** (documented): GET /admin/v1/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.
 - **GAP-UPSTREAMS-1** (documented): WarmupConfigModal is conditionally rendered when pluginSnapshot exists with open={configOpen}, but configOpen is initialized to false and no button or interaction anywhere in WarmupCardMinimal or the UI ever calls setConfigOpen(true). It is an unreachable dead modal in production.
-- **GAP-UPSTREAMS-2** (documented): WarmupRecentStrip is exported in parts/WarmupRecentStrip.tsx but is never imported or rendered by any component or route in the entire admin web application.
 - **GAP-UPSTREAMS-3** (documented): Triggering Fire Now sends an actual /messages payload directly upstream to Anthropic, burning real account tokens and potentially incurring billable usage or rate limit depletion.
 - **GAP-STATIC-RUNTIME** (runtime_pending): Static source reconciliation does not prove browser behavior, production entity coverage, latency, or deployed availability.
 - **GAP-DEPLOYED-DELTA** (production_applicability_pending): No deployed-delta.json has been supplied yet; latest-source items stay out of an asserted production-complete matrix until applicability is reconciled.

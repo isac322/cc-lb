@@ -3,9 +3,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_domain::Upstream;
 use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::principal::{Limit, PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
@@ -87,21 +86,6 @@ impl UpstreamDispatch for AgentTurnDispatch {
     }
 }
 
-pub(crate) struct FirstRouter;
-
-impl RouterPlugin for FirstRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "test uses terminal routing".to_owned(),
-        })
-    }
-}
-
 pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
         id: Uuid::new_v4(),
@@ -111,8 +95,6 @@ pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::<Limit>::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,

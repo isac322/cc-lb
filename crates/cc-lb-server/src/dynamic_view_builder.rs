@@ -6,25 +6,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_dialect_anthropic::AnthropicDirectDialect;
-use cc_lb_domain::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, Principal, RateLimitObservation, Upstream,
-    UpstreamCandidate,
-};
-use cc_lb_engine::api_keys::principal_view::{
+use cc_lb_clock::{unix_millis, unix_secs};
+use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
-use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_engine::clock::{unix_millis, unix_secs};
-use cc_lb_engine::plan_capacity::{
-    PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
-};
-use cc_lb_engine::{
+use cc_lb_control::{
     ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamRateLimitCache, UpstreamStatusEntry,
     UpstreamStatusSnapshot,
 };
-use cc_lb_routing::{FilterPlugin, RouteDecision, RouteError, RouterPlugin};
+use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, RateLimitObservation, Upstream};
+use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+use cc_lb_quota::plan_capacity::{
+    PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
+};
+use cc_lb_routing::FilterPlugin;
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 
 use crate::wasm_host::{WasmtimeFilterPlugin, WasmtimeUpstreamDialect};
@@ -41,13 +36,12 @@ use cc_lb_storage_api::{
 use cc_lb_upstream::{Signer, SignerError, SignerFactory};
 use parking_lot::RwLock;
 use thiserror::Error;
-use url::Url;
 use uuid::Uuid;
 
 use crate::PluginManifest;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
-use cc_lb_engine::lifecycle::{PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike};
+use cc_lb_control::PromptCacheObservationSinkLike;
 
 /// Maximum number of user-supplied router filters. The built-in
 /// `subscription-preference` entry is structural router-chain state.
@@ -169,7 +163,6 @@ pub fn ensure_wasm_cached(
 #[allow(clippy::too_many_arguments)]
 pub async fn build_dynamic_view(
     stores: &Stores,
-    oauth_anthropic: &AnthropicOAuthConfig,
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     current_generation: u64,
@@ -177,10 +170,9 @@ pub async fn build_dynamic_view(
     data_dir: &Path,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     prompt_cache_grace_margin_secs: u64,
-    prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
-    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
-    clock: cc_lb_engine::ClockHandle,
+    clock: cc_lb_clock::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
@@ -220,9 +212,8 @@ pub async fn build_dynamic_view(
     }
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
-    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, &aead, now).await?;
+    let statuses = apply_upstreams(stores, &upstreams, &aead, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
-    let global_router = Arc::new(FirstCandidateRouter);
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
         upstreams.clone(),
         stores.upstreams.clone(),
@@ -239,9 +230,8 @@ pub async fn build_dynamic_view(
     let plan_info_by_upstream = load_plan_info_by_upstream(stores).await?;
     let now_unix_millis = i64::try_from(unix_millis(clock.now())).unwrap_or(i64::MAX);
     reconcile_upstream_plan_tiers(stores, now_unix_millis).await;
-    let mut builder = DynamicViewBuilder::new(current_generation)
+    let builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
-        .global_router(global_router)
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
@@ -250,25 +240,11 @@ pub async fn build_dynamic_view(
             subscription_quota_routing_max_staleness_secs,
         )
         .plan_info_by_upstream(plan_info_by_upstream)
-        .upstream_records(upstreams.clone());
-    builder = builder
+        .upstream_records(upstreams.clone())
         .prompt_cache_observation_store(stores.prompt_cache_observations.clone())
-        .prompt_cache_grace_margin_secs(prompt_cache_grace_margin_secs);
-    if let Some(tracker) = prompt_cache_thread_usage {
-        builder = builder.prompt_cache_thread_usage(tracker);
-    }
-    if let Some(sink) = prompt_cache_observation_sink {
-        builder = builder.prompt_cache_observation_sink(sink);
-    }
+        .prompt_cache_grace_margin_secs(prompt_cache_grace_margin_secs)
+        .prompt_cache_observation_sink(prompt_cache_observation_sink);
     Ok(builder.build())
-}
-
-pub(crate) fn new_prompt_cache_thread_usage_tracker(
-    grace_margin_secs: u64,
-) -> Arc<crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker> {
-    Arc::new(
-        crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker::new(grace_margin_secs),
-    )
 }
 
 fn group_rate_limit_observations(
@@ -548,9 +524,7 @@ fn registry_entry_unsupported_slot(
     registry_entry: &WasmRegistryEntry,
     slot: PluginSlotKind,
 ) -> bool {
-    !registry_entry.is_builtin
-        && !registry_entry.supported_slots.is_empty()
-        && !registry_entry.supported_slots.contains(&slot)
+    !registry_entry.is_builtin && !registry_entry.supported_slots.contains(&slot)
 }
 
 async fn build_principal_chains(
@@ -621,12 +595,8 @@ async fn build_principal_chains(
             } else {
                 let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
                 let manifest = PluginManifest {
-                    pure: true,
                     name: registry_entry.name.clone(),
                     artifact: wasm_path.to_string_lossy().into_owned(),
-                    wire_version: None,
-                    config: entry.config,
-                    metadata: std::collections::BTreeMap::new(),
                 };
                 let slot_key = cc_lb_runtime_wasmtime::RuntimeSlotKey::new(
                     principal.name.clone(),
@@ -718,12 +688,8 @@ async fn manifest_for_chain_entry(
     })?;
     let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
     Ok(PluginManifest {
-        pure: true,
         name: registry_entry.name.clone(),
         artifact: wasm_path.to_string_lossy().into_owned(),
-        wire_version: None,
-        config: entry.config.clone(),
-        metadata: std::collections::BTreeMap::new(),
     })
 }
 
@@ -844,7 +810,6 @@ async fn build_router_pipeline(
 async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
-    _oauth_anthropic: &AnthropicOAuthConfig,
     aead: &AeadService,
     now: u64,
 ) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
@@ -910,18 +875,8 @@ enum ApiKeyResolutionError {
 
 /// Resolve the operator-configured anthropic api key for an upstream record.
 ///
-/// Three ciphertext shapes exist on disk for `api_key_ciphertext`:
-///
-/// 1. pre-PR-#848 `POST /admin/v1/upstreams`: AAD `upstream.name`, plaintext
-///    `serde_json::to_vec(&String)` (the key with literal surrounding quotes);
-/// 2. pre-PR-#848 `PATCH`/`PUT`: AAD `upstream.id`, same JSON-quoted plaintext;
-/// 3. current writes: AAD `upstream.id`, raw UTF-8 key bytes.
-///
-/// The legacy shapes are read-only compatibility: rows are never re-encrypted
-/// or rewritten here, and writes always use the canonical shape (3). A raw
-/// `sk-ant-…` key is never valid JSON while the legacy payload always is, so
-/// `serde_json::from_slice::<String>` cleanly discriminates the two plaintext
-/// forms. Resolution fails closed: any error means no credential, never a
+/// `api_key_ciphertext` is sealed with AAD `upstream.id` over the raw UTF-8
+/// key bytes. Resolution fails closed: any error means no credential, never a
 /// fallback to the downstream caller's key.
 fn resolve_api_key(
     aead: &AeadService,
@@ -931,21 +886,15 @@ fn resolve_api_key(
         .api_key_ciphertext
         .as_deref()
         .ok_or(ApiKeyResolutionError::Missing)?;
-    // Canonical AAD first, then the pre-PR create binding (shape 1).
     let plaintext = aead
         .decrypt(ciphertext, record.id.as_bytes())
-        .or_else(|_| aead.decrypt(ciphertext, record.name.as_bytes()))
         .map(zeroize::Zeroizing::new)
         .map_err(|_| ApiKeyResolutionError::NotDecryptable)?;
-    // Legacy rows hold a JSON-quoted string (shapes 1 and 2); canonical rows
-    // hold raw UTF-8. The key must reach the upstream byte-identical to what
-    // the operator stored, so neither form is trimmed or rewritten.
-    let key = match serde_json::from_slice::<String>(&plaintext) {
-        Ok(legacy) => legacy,
-        Err(_) => std::str::from_utf8(&plaintext)
-            .map_err(|_| ApiKeyResolutionError::NotUtf8)?
-            .to_owned(),
-    };
+    // The key must reach the upstream byte-identical to what the operator
+    // stored, so it is neither trimmed nor rewritten.
+    let key = std::str::from_utf8(&plaintext)
+        .map_err(|_| ApiKeyResolutionError::NotUtf8)?
+        .to_owned();
     let key = zeroize::Zeroizing::new(key);
     // The signer applies `HeaderValue::from_str` to this value at request time;
     // reject here so a malformed key surfaces as a view-build error instead of
@@ -993,41 +942,6 @@ fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<()
     Ok(())
 }
 
-struct FirstCandidateRouter;
-
-impl RouterPlugin for FirstCandidateRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        let candidate = candidates.first().ok_or_else(|| RouteError::NoRoute {
-            reason: "no eligible upstream candidates for principal".to_owned(),
-        })?;
-        let base_url = candidate
-            .base_url
-            .as_deref()
-            .map(Url::parse)
-            .transpose()
-            .map_err(|source| RouteError::NoRoute {
-                reason: format!("candidate upstream has invalid base_url: {source}"),
-            })?;
-        tracing::debug!(
-            upstream = candidate.name.as_str(),
-            upstream_id = %candidate.upstream_id,
-            "first candidate route selected",
-        );
-        Ok(RouteDecision {
-            upstream_id: Some(candidate.upstream_id),
-            upstream: Upstream::AnthropicDirect {
-                base_url: base_url.clone(),
-            },
-            dialect: Arc::new(AnthropicDirectDialect::with_base_url(base_url)),
-        })
-    }
-}
-
 #[derive(Clone)]
 struct DbCompositeSignerFactory {
     upstreams: Vec<UpstreamRecord>,
@@ -1035,7 +949,7 @@ struct DbCompositeSignerFactory {
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     router_chosen_upstream_name: Option<String>,
-    clock: cc_lb_engine::ClockHandle,
+    clock: cc_lb_clock::ClockHandle,
 }
 
 impl DbCompositeSignerFactory {
@@ -1044,7 +958,7 @@ impl DbCompositeSignerFactory {
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-        clock: cc_lb_engine::ClockHandle,
+        clock: cc_lb_clock::ClockHandle,
     ) -> Self {
         Self {
             upstreams,
@@ -1165,10 +1079,10 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use cc_lb_engine::clock::TestClock;
-    use cc_lb_engine::lifecycle::{HASH_SCHEMA_VERSION, PromptCacheThreadUsage};
+    use cc_lb_clock::TestClock;
+    use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
     use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
-    use cc_lb_storage_api::{BackendKind, MetaStore, PromptCacheObservationRecord, UpstreamCreate};
+    use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, UpstreamCreate};
     use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     use super::*;
@@ -1322,10 +1236,10 @@ mod tests {
                 .display()
         );
         let storage =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage");
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        storage.initialize().await.unwrap();
         let storage = Arc::new(storage);
         (dir, storage)
     }
@@ -1390,9 +1304,7 @@ mod tests {
         data_dir: &Path,
         config: cc_lb_config::Config,
     ) -> Arc<DynamicView> {
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-        let tracker =
-            new_prompt_cache_thread_usage_tracker(config.prompt_cache_shadow.grace_margin_secs);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
         let (sink, _writer) = PromptCacheObservationSink::new(
             stores.prompt_cache_observations.clone(),
             DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
@@ -1401,7 +1313,6 @@ mod tests {
         let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
         build_dynamic_view(
             stores,
-            &AnthropicOAuthConfig::default(),
             Arc::new(AeadService::from_master_key([19; 32])),
             None,
             0,
@@ -1409,8 +1320,7 @@ mod tests {
             data_dir,
             Arc::new(SubscriptionQuotaCache::new()),
             config.prompt_cache_shadow.grace_margin_secs,
-            Some(tracker),
-            Some(sink),
+            sink,
             1800,
             clock,
         )
@@ -1432,14 +1342,6 @@ mod tests {
             dynamic_view.prompt_cache_observation_store_opt().is_some(),
             "shared observation store must be wired into DynamicView"
         );
-        assert!(
-            dynamic_view.prompt_cache_observation_sink_opt().is_some(),
-            "prompt cache observation sink must be wired into DynamicView"
-        );
-        assert!(
-            dynamic_view.prompt_cache_thread_usage_opt().is_some(),
-            "thread usage tracker must be wired into DynamicView"
-        );
         assert_eq!(
             prompt_store.list_call_count(),
             0,
@@ -1456,10 +1358,7 @@ mod tests {
         let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
 
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
-        let sink = dynamic_view
-            .prompt_cache_observation_sink_opt()
-            .expect("sink wired when prompt_cache_shadow enabled")
-            .clone();
+        let sink = dynamic_view.prompt_cache_observation_sink.clone();
         let record = PromptCacheObservationRecord {
             upstream_id: upstream.id,
             canonical_model_id: MODEL.to_owned(),
@@ -1491,84 +1390,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_thread_usage_tracker_sees_live_record_after_rebind() {
-        // Given: two DynamicView builds share the process-level thread-usage
-        // tracker handle (diagnostic telemetry, not warmth authority).
-        let (dir, storage) = storage_fixture(23).await;
-        let upstream = create_upstream(&storage, "shared-tracker-upstream").await;
-        let prompt_store = Arc::new(FakePromptCacheObservationStore::new());
-        let stores = stores(storage, prompt_store);
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-        let clock: cc_lb_engine::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
-        let shared_tracker: Arc<dyn PromptCacheThreadUsageTrackerLike> =
-            new_prompt_cache_thread_usage_tracker(30);
-
-        let view_a = build_dynamic_view(
-            &stores,
-            &AnthropicOAuthConfig::default(),
-            Arc::new(AeadService::from_master_key([19; 32])),
-            None,
-            0,
-            &runtime,
-            dir.path(),
-            Arc::new(SubscriptionQuotaCache::new()),
-            30,
-            Some(shared_tracker.clone()),
-            None,
-            1800,
-            clock.clone(),
-        )
-        .await
-        .expect("first dynamic view builds");
-        let view_b = build_dynamic_view(
-            &stores,
-            &AnthropicOAuthConfig::default(),
-            Arc::new(AeadService::from_master_key([19; 32])),
-            None,
-            view_a.generation,
-            &runtime,
-            dir.path(),
-            Arc::new(SubscriptionQuotaCache::new()),
-            30,
-            Some(shared_tracker.clone()),
-            None,
-            1800,
-            clock.clone(),
-        )
-        .await
-        .expect("second dynamic view builds");
-
-        // When: thread usage is recorded on the shared tracker after rebind.
-        shared_tracker.record_thread_usage(
-            upstream.id,
-            MODEL,
-            "thread-live",
-            PromptCacheThreadUsage {
-                cache_read_input_tokens: 512,
-                cache_creation_input_tokens_5m: 0,
-                cache_creation_input_tokens_1h: 0,
-            },
-            1_700_000_010,
-        );
-
-        // Then: the rebuilt DynamicView observes the same tracker state.
-        assert!(Arc::ptr_eq(
-            view_a
-                .prompt_cache_thread_usage_opt()
-                .expect("first view has shared tracker"),
-            &shared_tracker,
-        ));
-        let view_b_tracker = view_b
-            .prompt_cache_thread_usage_opt()
-            .expect("second view has shared tracker");
-        assert!(Arc::ptr_eq(view_b_tracker, &shared_tracker));
-        let score = view_b_tracker
-            .thread_usage_score(upstream.id, MODEL, "thread-live", 1_700_000_020)
-            .expect("live thread usage visible through rebound view");
-        assert_eq!(score.predicted_cache_read_tokens, 512);
-    }
-
-    #[tokio::test]
     async fn build_never_reads_observation_store() {
         let (dir, storage) = storage_fixture(20).await;
         create_upstream(&storage, "no-read-upstream").await;
@@ -1584,28 +1405,6 @@ mod tests {
             0,
             "build/rebind must not hydrate observations; reads are per request"
         );
-    }
-
-    #[tokio::test]
-    async fn default_config_wires_store_sink_and_tracker() {
-        let (dir, storage) = storage_fixture(21).await;
-        let stores = stores(storage, Arc::new(FakePromptCacheObservationStore::new()));
-        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-
-        let dynamic_view = build_view_with_config(
-            &stores,
-            &runtime,
-            dir.path(),
-            cc_lb_config::Config::default(),
-        )
-        .await;
-
-        assert!(dynamic_view.prompt_cache_observation_store_opt().is_some());
-        assert!(
-            dynamic_view.prompt_cache_observation_sink_opt().is_some(),
-            "prompt cache observation sink must always be wired"
-        );
-        assert!(dynamic_view.prompt_cache_thread_usage_opt().is_some());
     }
 
     #[tokio::test]
@@ -1642,44 +1441,6 @@ mod tests {
 
         let resolved = resolve_api_key(&aead, &record).expect("canonical shape resolves");
         assert_eq!(resolved.as_str(), "sk-ant-canonical");
-    }
-
-    #[test]
-    fn resolve_api_key_unquotes_legacy_json_payload_under_id_aad() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let record = api_key_record("legacy-patch", None);
-        // Pre-PR PATCH/PUT shape: id AAD over serde_json::to_vec(&String).
-        let legacy_plaintext =
-            serde_json::to_vec(&"sk-ant-legacy-id".to_owned()).expect("json encodes");
-        let ciphertext = aead
-            .encrypt(&legacy_plaintext, record.id.as_bytes())
-            .expect("encrypt");
-        let record = UpstreamRecord {
-            api_key_ciphertext: Some(ciphertext),
-            ..record
-        };
-
-        let resolved = resolve_api_key(&aead, &record).expect("legacy id-AAD shape resolves");
-        assert_eq!(resolved.as_str(), "sk-ant-legacy-id");
-    }
-
-    #[test]
-    fn resolve_api_key_unquotes_legacy_json_payload_under_name_aad() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let record = api_key_record("legacy-create", None);
-        // Pre-PR POST shape: name AAD over serde_json::to_vec(&String).
-        let legacy_plaintext =
-            serde_json::to_vec(&"sk-ant-legacy-name".to_owned()).expect("json encodes");
-        let ciphertext = aead
-            .encrypt(&legacy_plaintext, record.name.as_bytes())
-            .expect("encrypt");
-        let record = UpstreamRecord {
-            api_key_ciphertext: Some(ciphertext),
-            ..record
-        };
-
-        let resolved = resolve_api_key(&aead, &record).expect("legacy name-AAD shape resolves");
-        assert_eq!(resolved.as_str(), "sk-ant-legacy-name");
     }
 
     #[test]

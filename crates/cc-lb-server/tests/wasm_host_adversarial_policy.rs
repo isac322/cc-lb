@@ -123,7 +123,6 @@ fn shape_origin_mismatch_is_rejected_by_selected_upstream_policy() {
     let principal = Principal {
         id: "tenant-origin".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
 
     // When

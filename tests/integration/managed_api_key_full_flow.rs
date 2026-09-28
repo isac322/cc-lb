@@ -7,19 +7,15 @@ use http::{HeaderMap, StatusCode};
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
-    global_catalog,
-};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore,
+    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -444,7 +440,7 @@ impl StartedServer {
         } = reserved;
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
+        let clock: cc_lb_clock::ClockHandle = std::sync::Arc::new(cc_lb_clock::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         // Keep all selected ports reserved while build_app performs its async setup.
@@ -585,10 +581,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
-            .is_some()
-        {
+        if global_catalog().lookup(MODEL, None).is_some() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -638,8 +631,8 @@ fn evidence_dir() -> std::path::PathBuf {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-    let clock = cc_lb_engine::SystemClock;
+    use cc_lb_clock::Clock as _;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -726,7 +719,7 @@ async fn seed_runtime_state(
             },
         )
         .await?;
-    let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())?;
+    let (key_id, _) = cc_lb_control::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
@@ -764,11 +757,7 @@ async fn sqlite_storage(
     path: &std::path::Path,
 ) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(
-        &database_url,
-        std::sync::Arc::new(cc_lb_engine::SystemClock),
-    )
-    .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }

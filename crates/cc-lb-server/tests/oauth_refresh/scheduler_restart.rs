@@ -141,7 +141,6 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
-        fixture.oauth_cfg.as_ref(),
         fixture.aead.clone(),
         Some(lazy),
         0,
@@ -149,8 +148,7 @@ async fn replacement_worker_refreshes_selected_oauth_upstream_during_message_req
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         fixture.clock.clone(),
     )

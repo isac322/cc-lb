@@ -1,7 +1,6 @@
-use cc_lb_engine::clock::unix_secs;
-#[allow(deprecated)]
-use cc_lb_engine::subscription_quota_events::unified_observation_to_sample;
-use cc_lb_engine::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
+use cc_lb_clock::unix_secs;
+use cc_lb_quota::unified_observation_to_sample;
+use cc_lb_quota::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::{
@@ -13,8 +12,8 @@ use http::HeaderMap;
 use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
 use crate::scheduler_dispatch::time::now_unix_millis;
+use crate::warmup::dispatch_warmup_attempt;
 use crate::warmup::request::WarmupRequestAttempt;
-use crate::warmup::{WarmupAbandonReason, dispatch_warmup_attempt};
 
 use super::SchedulerDispatch;
 
@@ -121,7 +120,7 @@ impl SchedulerDispatch {
                     };
                 }
                 Err(error) => {
-                    tracing::warn!(error = %error, reason = WarmupAbandonReason::DialectPlugin.as_str(), "warmup dialect failed permanently");
+                    tracing::warn!(error = %error, reason = "dialect_plugin_failed", "warmup dialect failed permanently");
                     return WarmupDispatchAttempt {
                         dispatch_kind: WarmupDispatchKind::DialectPlugin,
                         result: WarmupDispatchResult::PermanentFailure {
@@ -163,13 +162,7 @@ impl SchedulerDispatch {
                 };
             }
         };
-        let replica_id = self
-            .replica_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "unknown".to_owned());
-        match dispatch_warmup_attempt(&self.http, &bundle.access_token, &base_url, &replica_id)
-            .await
-        {
+        match dispatch_warmup_attempt(&self.http, &bundle.access_token, &base_url).await {
             WarmupRequestAttempt::Response {
                 status,
                 observations,

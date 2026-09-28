@@ -41,7 +41,6 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),

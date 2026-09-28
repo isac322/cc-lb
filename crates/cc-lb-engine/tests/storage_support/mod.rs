@@ -66,7 +66,11 @@ impl storage_api::AuditStore for TestStorage {
         Ok(Vec::new())
     }
 
-    async fn prune_audit(&self, _older_than: u64) -> storage_api::StorageResult<u64> {
+    async fn prune_audit_before(
+        &self,
+        _cutoff_ts_x_1m: u64,
+        _batch_size: usize,
+    ) -> storage_api::StorageResult<u64> {
         Ok(0)
     }
 }
@@ -141,11 +145,6 @@ fn request_event_matches_filters(
     {
         return false;
     }
-    if let Some(upstream) = filters.upstream
-        && event.upstream != Some(upstream)
-    {
-        return false;
-    }
     if let Some(upstream_id) = filters.upstream_id
         && event.upstream_id != Some(upstream_id)
     {
@@ -177,12 +176,6 @@ impl storage_api::UsageRollupStore for TestStorage {
         })
     }
 
-    async fn query_usage_rollups(
-        &self,
-    ) -> storage_api::StorageResult<Vec<storage_api::UsageRollup>> {
-        Ok(Vec::new())
-    }
-
     async fn query_usage_rollups_in_range(
         &self,
         _resolution: storage_api::UsageRollupResolution,
@@ -194,13 +187,6 @@ impl storage_api::UsageRollupStore for TestStorage {
 
     async fn usage_rollup_checkpoint(&self) -> storage_api::StorageResult<Option<u64>> {
         Ok(None)
-    }
-
-    async fn advance_rollup_checkpoint_and_persist(
-        &self,
-        _run: &storage_api::UsageRollupRun,
-    ) -> storage_api::StorageResult<()> {
-        Ok(())
     }
 }
 
@@ -264,15 +250,8 @@ impl storage_api::ConfigStore for TestStorage {
 
 #[async_trait]
 impl storage_api::MetaStore for TestStorage {
-    async fn initialize(
-        &self,
-        _requested: storage_api::BackendKind,
-    ) -> storage_api::StorageResult<()> {
+    async fn initialize(&self) -> storage_api::StorageResult<()> {
         Ok(())
-    }
-
-    async fn contract_version(&self) -> storage_api::StorageResult<u32> {
-        Ok(storage_api::CURRENT_CONTRACT_VERSION)
     }
 
     async fn backend_kind(&self) -> storage_api::StorageResult<storage_api::BackendKind> {

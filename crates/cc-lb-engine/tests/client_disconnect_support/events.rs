@@ -1,20 +1,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_lifecycle::{LifecycleEvent, StreamError, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use tokio::sync::broadcast;
 
 use super::super::common::TestLifecycleBus;
 
 pub fn lifecycle_receiver(test_bus: &TestLifecycleBus) -> broadcast::Receiver<LifecycleEvent> {
-    let LifecycleBusReceiver::InMemory(rx) = test_bus.bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
-    rx
+    test_bus.bus.subscribe_lifecycle()
 }
 pub async fn assert_stream_error(
     rx: &mut broadcast::Receiver<LifecycleEvent>,
@@ -120,8 +117,8 @@ pub async fn sqlite_storage(
         dir.path().join("client-disconnect.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

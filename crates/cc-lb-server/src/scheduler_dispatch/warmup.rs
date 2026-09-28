@@ -1,4 +1,4 @@
-use cc_lb_engine::clock::unix_secs;
+use cc_lb_clock::unix_secs;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -140,7 +140,7 @@ impl SchedulerDispatch {
         }
 
         let initial_attempt = self.dispatch_warmup_request(upstream).await;
-        let final_attempt = if response_is_auth_failed(&initial_attempt, expected_cycle_key) {
+        let final_attempt = if response_is_auth_failed(&initial_attempt) {
             match self.force_refresh_oauth_token(upstream).await {
                 Ok(true) => self.dispatch_warmup_request(upstream).await,
                 Ok(false) => initial_attempt,

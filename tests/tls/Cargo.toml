@@ -13,8 +13,8 @@ path = "tests/all.rs"
 
 [dependencies]
 axum.workspace = true
+cc-lb-clock = { path = "../../crates/cc-lb-clock" }
 cc-lb-config = { path = "../../crates/cc-lb-config" }
-cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-server = { path = "../../crates/cc-lb-server" }
 fake-anthropic = { path = "../fixtures/fake-anthropic" }
 ring.workspace = true

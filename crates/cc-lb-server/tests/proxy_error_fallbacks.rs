@@ -9,9 +9,9 @@ use cc_lb_config::Config;
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    ApiKeyMutation, BackendKind, IssueParams, ManagedKeyStore, MetaStore, PrincipalCreate,
-    PrincipalKind, PrincipalStore, RequestEventStore, Storage as StorageTrait, StorageError,
-    StorageResult, StoredApiKeyRecord, UpstreamCreate, UpstreamStore,
+    ApiKeyMutation, IssueParams, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind,
+    PrincipalStore, RequestEventStore, Storage as StorageTrait, StorageError, StorageResult,
+    StoredApiKeyRecord, UpstreamCreate, UpstreamStore,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http_body_util::BodyExt;
@@ -23,7 +23,7 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let dir = tempfile::tempdir()?;
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
@@ -90,7 +90,7 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
 
 #[tokio::test]
 async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let dir = tempfile::tempdir()?;
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
@@ -224,7 +224,7 @@ impl ManagedKeyStore for FailingManagedKeyStore {
 
 #[tokio::test]
 async fn key_store_unavailable_persists_typed_authn_reason() -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let dir = tempfile::tempdir()?;
     let storage_path = dir.path().join("storage.sqlite");
     let storage_arc = sqlite_storage(&storage_path).await?;
@@ -245,7 +245,7 @@ async fn key_store_unavailable_persists_typed_authn_reason() -> TestResult<()> {
 
     // A well-formed credential whose lookup fails: the caller sees 503 and
     // the persisted row must carry the typed authn/unavailable diagnostic.
-    let plaintext = cc_lb_engine::api_keys::secret::generate_new().plaintext;
+    let plaintext = cc_lb_control::api_keys::secret::generate_new().plaintext;
     let response = app
         .router
         .clone()
@@ -297,7 +297,7 @@ async fn key_store_unavailable_persists_typed_authn_reason() -> TestResult<()> {
 
 async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }

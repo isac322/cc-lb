@@ -1,16 +1,16 @@
 use super::*;
 
 use bytes::Bytes;
+use cc_lb_clock::SystemClock;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
-use cc_lb_engine::SystemClock;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveNotTrackedRequest, RequestSnapshot, ScheduleParams,
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::worker::{Filter, TaskStatus};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
-    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
+    CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
+    CacheKeepaliveSessionStatus, CacheTtl, MetaStore,
 };
 use http::{HeaderMap, Method};
 use tempfile::TempDir;
@@ -233,10 +233,7 @@ impl Fixture {
                 .await
                 .expect("open sqlite"),
         );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
+        storage.initialize().await.expect("initialize sqlite");
         Self {
             _dir: dir,
             sqlite_path,

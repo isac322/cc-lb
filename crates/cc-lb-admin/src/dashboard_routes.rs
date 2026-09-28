@@ -1,12 +1,11 @@
 use std::sync::{Arc, LazyLock};
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Query, State},
     http::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -22,13 +21,6 @@ use crate::response_cache::{
     PRINCIPAL_TOTALS_CACHE_TTL, ShortTtlSingleFlightCache, apply_private_revalidation,
     matches_if_none_match, not_modified_response,
 };
-
-pub fn router() -> Router<AdminState> {
-    Router::new()
-        .route("/admin/dashboard/summary", get(handle_dashboard_summary))
-        .route("/admin/dashboard/usage", get(handle_dashboard_usage))
-        .route("/admin/usage", get(handle_dashboard_usage))
-}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SummaryQuery {

@@ -13,7 +13,9 @@ path = "all.rs"
 
 [dev-dependencies]
 cc-lb-aead = { path = "../../crates/cc-lb-aead" }
+cc-lb-clock = { path = "../../crates/cc-lb-clock" }
 cc-lb-config = { path = "../../crates/cc-lb-config" }
+cc-lb-control.workspace = true
 cc-lb-engine = { path = "../../crates/cc-lb-engine" }
 cc-lb-pricing = { path = "../../crates/cc-lb-pricing" }
 cc-lb-server = { path = "../../crates/cc-lb-server" }

@@ -229,12 +229,6 @@ function roundCompact(v: number): string {
   return v.toFixed(1);
 }
 
-export function fmtUsdCompact(micros: number | null | undefined): string {
-  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
-  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
-  return formatUsdValue(micros / 1_000_000, 4);
-}
-
 export function fmtMsCompact(ms: number | null | undefined): {
   value: string;
   unit: string;

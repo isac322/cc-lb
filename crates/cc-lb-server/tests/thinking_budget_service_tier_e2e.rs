@@ -11,7 +11,7 @@ const MODEL: &str = "claude-sonnet-4-5-20250929";
 
 async fn persisted_model_event(server: &common::TestServer) -> RequestEvent {
     let database_url = format!("sqlite://{}", server.sqlite_path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("open server SQLite storage");
     // The final RequestEvent row is written asynchronously by the lifecycle

@@ -10,10 +10,6 @@ mod cache_keepalive_session_reads;
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]
 mod crash_recovery;
-#[path = "migration_0037_warmup.rs"]
-mod migration_0037_warmup;
-#[path = "migration_0040_wasm_registry_wire_version.rs"]
-mod migration_0040_wasm_registry_wire_version;
 #[path = "migration_versions.rs"]
 mod migration_versions;
 #[path = "plan_tier_concurrency.rs"]

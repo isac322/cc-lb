@@ -19,12 +19,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/admin/v1': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/events': { target: ADMIN_TARGET, changeOrigin: true },
       '/admin/health': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/dashboard': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/usage': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/audit': { target: ADMIN_TARGET, changeOrigin: true },
-      '/admin/config': { target: ADMIN_TARGET, changeOrigin: true },
     },
   },
   test: {

@@ -32,12 +32,12 @@ impl CacheKeepaliveProjectionStore for SqliteStorage {
 #[async_trait]
 impl RequestEventStore for SqliteStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
-        let event_id = storage_event_id(event);
+        let event_id = storage_event_id(event)?;
         let mut tx = self.begin_immediate().await?;
-        let inserted_id = insert_request_event_in_tx(&mut tx, event, &event_id).await?;
+        let inserted_id = insert_request_event_in_tx(&mut tx, event, event_id).await?;
         let id = match inserted_id {
             Some(id) => id,
-            None => select_existing_event_id_in_tx(&mut tx, &event_id).await?,
+            None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(id, "request event cursor")
@@ -48,12 +48,12 @@ impl RequestEventStore for SqliteStorage {
         event: &RequestEvent,
         projections: &RequestEventProjections,
     ) -> StorageResult<u64> {
-        let event_id = storage_event_id(event);
+        let event_id = storage_event_id(event)?;
         let mut tx = self.begin_immediate().await?;
-        let inserted_id = insert_request_event_in_tx(&mut tx, event, &event_id).await?;
+        let inserted_id = insert_request_event_in_tx(&mut tx, event, event_id).await?;
         let id = match inserted_id {
             Some(id) => id,
-            None => select_existing_event_id_in_tx(&mut tx, &event_id).await?,
+            None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
         if let Some(turn) = projections.turn.as_ref() {
             insert_keepalive_turn_in_tx(&mut tx, turn).await?;
@@ -693,31 +693,30 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
             THEN 1 END) AS error_count \
  FROM request_events_v1 \
  WHERE ts >= ?4 AND ts <= ?5 \
-   AND list_ts_ms >= ?15 AND list_ts_ms < ?16 \
+   AND list_ts_ms >= ?14 AND list_ts_ms < ?15 \
    AND (?6 IS NULL OR principal_id = ?6) \
    AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\') \
    AND (?8 IS NULL OR upstream_id = ?8) \
-   AND (?14 IS NULL OR thread_id = ?14) \
-   AND (?9 IS NULL OR list_upstream = ?9) \
-   AND (?10 IS NULL OR list_status BETWEEN ?10 AND ?11) \
-   AND (?18 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
+   AND (?13 IS NULL OR thread_id = ?13) \
+   AND (?9 IS NULL OR list_status BETWEEN ?9 AND ?10) \
+   AND (?17 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
    AND ( \
-         ?12 = 1 \
-      OR (?13 IS NOT NULL AND source_kind = ?13) \
-      OR (?13 IS NULL AND ?17 IS NOT NULL) \
-      OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
+         ?11 = 1 \
+      OR (?12 IS NOT NULL AND source_kind = ?12) \
+      OR (?12 IS NULL AND ?16 IS NOT NULL) \
+      OR (?12 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
    )";
 
 // Emitted only when `event_kind` is `Some`: a direct equality against the
 // effective kind so the query can seek
 // `request_events_v1_event_kind_list_order_idx` instead of scanning the whole
-// time window. The `?17 IS NULL OR ...` optional form cannot use that index,
-// so the clause is omitted entirely when no kind filter is set. `?17` stays
+// time window. The `?16 IS NULL OR ...` optional form cannot use that index,
+// so the clause is omitted entirely when no kind filter is set. `?16` stays
 // bound in both branches because the source_kind clause above still
 // references it.
 const HISTOGRAM_EVENT_KIND_FILTER: &str = " \
    AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
-            ELSE COALESCE(event_kind, 'unclassified') END = ?17";
+            ELSE COALESCE(event_kind, 'unclassified') END = ?16";
 
 const HISTOGRAM_SQL_TAIL: &str = " \
  GROUP BY bucket_index";
@@ -796,12 +795,6 @@ async fn request_event_histogram(
                 .map(model_filter_like_pattern),
         )
         .bind(query.filters.upstream_id.map(|id| id.to_string()))
-        .bind(
-            query
-                .filters
-                .upstream
-                .map(request_event_list_sql::upstream_as_str),
-        )
         .bind(status_min)
         .bind(status_max)
         .bind(i64::from(source_kind_all))
@@ -864,36 +857,26 @@ async fn insert_request_event_in_tx(
     event: &RequestEvent,
     event_id: &str,
 ) -> StorageResult<Option<i64>> {
+    let ts_ms = storage_ts_ms(event)?;
+    let ts_secs = ts_ms / 1_000;
     let payload = serde_json::to_string(event)?;
-    let cache_breakpoints = serde_json::to_string(&event.cache_breakpoints)?;
     sqlx::query_scalar::<_, i64>(concat!(
         "INSERT INTO request_events_v1 (",
-        "request_id, ts, event_type, source_kind, source_ref_id, upstream_id, ",
-        "principal_id, created_at, key_id, model, upstream_name, cache_state, ",
-        "thread_id, message_id, message_index, message_count, ",
-        "cache_control_block_count, cache_breakpoints, cache_prefix_hash, ",
-        "input_tokens, output_tokens, cache_creation_input_tokens, ",
-        "cache_read_input_tokens, event_id, error_code, upstream_error_type, ",
-        "upstream_error_message, thinking_tokens, web_search_requests, ",
-        "web_fetch_requests, service_tier, inference_geo, ",
-        "cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, ",
-        "matched_v3_cache_key, breakpoint_content_block_index, ",
-        "matched_content_block_index, lookback_distance, ",
-        "predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, ",
-        "predicted_cache_creation_tokens_1h, token_estimate_source, ",
-        "cache_value_micros, formula_winner_upstream_id, kept_upstream_id, ",
-        "quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, ",
-        "quota_warning_multiplier, lineage_would_have_predicted_read_tokens, ",
-        "lineage_would_have_picked_upstream_id, thinking_budget_tokens, ",
-        "reasoning_effort, payload, list_ts_ms, list_event_key, list_upstream, ",
-        "list_status, list_duration_ms, list_auth_ms, list_route_ms, ",
-        "list_limit_reserve_ms, list_json_parse_ms, list_cache_structure_ms, ",
-        "list_cache_token_key_ms, list_cache_count_lookup_ms, ",
-        "list_cache_tokenizer_queue_ms, list_cache_serialize_ms, ",
-        "list_cache_tokenize_ms, list_prepare_signer_ms, list_bulkhead_wait_ms, ",
-        "list_dns_ms, list_connect_ms, list_connection_reused, ",
-        "list_limit_reconcile_ms, ",
-        "list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, ",
+        "request_id, ts, source_kind, source_ref_id, upstream_id, principal_id, ",
+        "created_at, key_id, model, upstream_name, thread_id, input_tokens, ",
+        "output_tokens, cache_creation_input_tokens, cache_read_input_tokens, ",
+        "event_id, error_code, upstream_error_type, upstream_error_message, ",
+        "thinking_tokens, service_tier, cache_creation_input_tokens_5m, ",
+        "cache_creation_input_tokens_1h, token_estimate_source, ",
+        "thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, ",
+        "list_event_key, list_status, list_duration_ms, list_auth_ms, ",
+        "list_route_ms, list_limit_reserve_ms, list_json_parse_ms, ",
+        "list_cache_structure_ms, list_cache_token_key_ms, ",
+        "list_cache_count_lookup_ms, list_cache_tokenizer_queue_ms, ",
+        "list_cache_serialize_ms, list_cache_tokenize_ms, ",
+        "list_prepare_signer_ms, list_bulkhead_wait_ms, list_dns_ms, ",
+        "list_connect_ms, list_connection_reused, list_proxy_setup_ms, ",
+        "list_shape_ms, list_sign_ms, list_upstream_ttfb_ms, ",
         "list_upstream_body_ms, list_stream_first_content_delta_ms, ",
         "list_stream_last_content_delta_ms, list_inter_token_avg_ms, ",
         "list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, ",
@@ -914,44 +897,21 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?",
+        "?, ?, ?, ?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
     .bind(&event.request_id)
-    .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
-    .bind("request")
+    .bind(u64_to_i64(ts_secs, "request event ts")?)
     .bind(event.source_kind.as_deref())
     .bind(event.source_ref_id.as_deref())
     .bind(event.upstream_id.map(|id| id.to_string()))
     .bind(event.principal_id.as_deref())
-    .bind(u64_to_i64(
-        event_ts_secs(event),
-        "request event created_at",
-    )?)
+    .bind(u64_to_i64(ts_secs, "request event created_at")?)
     .bind(event.key_id.as_deref())
     .bind(event.model.as_deref())
     .bind(event.upstream_name.as_deref())
-    .bind(event.cache_state.map(|state| state.as_str()))
     .bind(event.thread_id.as_deref())
-    .bind(event.message_id.as_deref())
-    .bind(option_u64_to_i64(
-        event.message_index,
-        "request event message_index",
-    )?)
-    .bind(option_u64_to_i64(
-        event.message_count,
-        "request event message_count",
-    )?)
-    .bind(option_u64_to_i64(
-        event.cache_control_block_count,
-        "request event cache_control_block_count",
-    )?)
-    .bind(cache_breakpoints)
-    .bind(event.cache_prefix_hash.as_deref())
     .bind(option_u64_to_i64(
         event.input_tokens,
         "request event input_tokens",
@@ -976,16 +936,7 @@ async fn insert_request_event_in_tx(
         event.thinking_tokens,
         "request event thinking_tokens",
     )?)
-    .bind(option_u64_to_i64(
-        event.web_search_requests,
-        "request event web_search_requests",
-    )?)
-    .bind(option_u64_to_i64(
-        event.web_fetch_requests,
-        "request event web_fetch_requests",
-    )?)
     .bind(event.service_tier.as_deref())
-    .bind(event.inference_geo.as_deref())
     .bind(option_u64_to_i64(
         event.cache_creation_input_tokens_5m,
         "request event cache_creation_input_tokens_5m",
@@ -994,64 +945,15 @@ async fn insert_request_event_in_tx(
         event.cache_creation_input_tokens_1h,
         "request event cache_creation_input_tokens_1h",
     )?)
-    .bind(event.matched_v3_cache_key.as_deref())
-    .bind(option_u64_to_i64(
-        event.breakpoint_content_block_index,
-        "request event breakpoint_content_block_index",
-    )?)
-    .bind(option_u64_to_i64(
-        event.matched_content_block_index,
-        "request event matched_content_block_index",
-    )?)
-    .bind(option_u64_to_i64(
-        event.lookback_distance,
-        "request event lookback_distance",
-    )?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_read_tokens,
-        "request event predicted_cache_read_tokens",
-    )?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_creation_tokens_5m,
-        "request event predicted_cache_creation_tokens_5m",
-    )?)
-    .bind(option_u64_to_i64(
-        event.predicted_cache_creation_tokens_1h,
-        "request event predicted_cache_creation_tokens_1h",
-    )?)
     .bind(event.token_estimate_source.as_deref())
-    .bind(event.cache_value_micros)
-    .bind(event.formula_winner_upstream_id.map(|id| id.to_string()))
-    .bind(event.kept_upstream_id.map(|id| id.to_string()))
-    .bind(event.quota_urgency_5h)
-    .bind(event.quota_urgency_7d)
-    .bind(event.quota_urgency_combined)
-    .bind(event.quota_warning_multiplier)
-    .bind(option_u64_to_i64(
-        event.lineage_would_have_predicted_read_tokens,
-        "request event lineage_would_have_predicted_read_tokens",
-    )?)
-    .bind(
-        event
-            .lineage_would_have_picked_upstream_id
-            .map(|id| id.to_string()),
-    )
     .bind(option_u64_to_i64(
         event.thinking_budget_tokens,
         "thinking_budget_tokens",
     )?)
     .bind(event.reasoning_effort.as_deref())
     .bind(payload)
-    .bind(u64_to_i64(
-        event
-            .ts_ms
-            .unwrap_or_else(|| event_ts_secs(event).saturating_mul(1_000)),
-        "request event list_ts_ms",
-    )?)
-    .bind(event.event_id.as_deref().unwrap_or(&event.request_id))
-    .bind(event.upstream.map(|upstream| match upstream {
-        cc_lb_storage_api::RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-    }))
+    .bind(u64_to_i64(ts_ms, "request event list_ts_ms")?)
+    .bind(event_id)
     .bind(i64::from(event.status))
     .bind(u64_to_i64(
         event.duration_ms,
@@ -1090,10 +992,6 @@ async fn insert_request_event_in_tx(
         "request event list_connect_ms",
     )?)
     .bind(event.connection_reused.map(i64::from))
-    .bind(option_u64_to_i64(
-        event.limit_reconcile_ms,
-        "request event list_limit_reconcile_ms",
-    )?)
     .bind(option_u64_to_i64(
         event.proxy_setup_ms,
         "request event list_proxy_setup_ms",
@@ -1168,6 +1066,7 @@ async fn insert_request_event_in_tx(
     .await
     .map_err(map_sqlx_error)
 }
+
 async fn select_existing_event_id_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event_id: &str,
@@ -1319,15 +1218,21 @@ fn request_event_from_storage(
     Ok(event)
 }
 
-fn event_ts_secs(event: &RequestEvent) -> u64 {
-    event.ts_ms.map(|ts_ms| ts_ms / 1_000).unwrap_or(event.ts)
-}
-
-fn storage_event_id(event: &RequestEvent) -> String {
+fn storage_event_id(event: &RequestEvent) -> StorageResult<&str> {
     event
         .event_id
-        .clone()
-        .unwrap_or_else(|| format!("{}-legacy-live-{}", event_ts_secs(event), Uuid::now_v7()))
+        .as_deref()
+        .ok_or_else(|| StorageError::InvalidInput {
+            field: "request_event.event_id".to_owned(),
+            reason: "must be set".to_owned(),
+        })
+}
+
+fn storage_ts_ms(event: &RequestEvent) -> StorageResult<u64> {
+    event.ts_ms.ok_or_else(|| StorageError::InvalidInput {
+        field: "request_event.ts_ms".to_owned(),
+        reason: "must be set".to_owned(),
+    })
 }
 
 fn request_event_matches_filters(
@@ -1346,11 +1251,6 @@ fn request_event_matches_filters(
     }
     if let Some(model) = filters.model.as_deref()
         && !model_filter_matches(model, event.model.as_deref())
-    {
-        return false;
-    }
-    if let Some(upstream) = filters.upstream
-        && event.upstream != Some(upstream)
     {
         return false;
     }

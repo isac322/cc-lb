@@ -1,8 +1,8 @@
-//! Stage 7 — confirm pure-mode dispatch drops per-call wasm state.
+//! Confirm hook dispatch drops per-call wasm state.
 //!
-//! Pure mode builds a fresh `Store` for each hook call (Stage 2). This
-//! test exercises the cache-aware-wasmtime plugin 10 times in a row
-//! against a pure slot and verifies:
+//! Every hook call builds a fresh `Store`. This test exercises the
+//! cache-aware-wasmtime plugin 10 times in a row against one slot and
+//! verifies:
 //!
 //! 1. **Determinism**: every call returns byte-identical wire output
 //!    given identical input, i.e. no state from earlier calls leaks
@@ -112,7 +112,7 @@ fn vmrss_kib() -> std::io::Result<u64> {
 }
 
 #[test]
-fn pure_mode_does_not_accumulate_state() {
+fn dispatch_does_not_accumulate_state() {
     let wasm = match std::fs::read(wasm_path()) {
         Ok(bytes) => bytes,
         Err(_) => {
@@ -124,7 +124,7 @@ fn pure_mode_does_not_accumulate_state() {
         }
     };
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
-    let slot = RuntimeSlotKey::global("pure-leak-probe");
+    let slot = RuntimeSlotKey::global("state-leak-probe");
     runtime
         .register_filter(slot.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register filter");
@@ -152,7 +152,7 @@ fn pure_mode_does_not_accumulate_state() {
         let growth = final_rss.saturating_sub(baseline_rss);
         assert!(
             growth <= RSS_GROWTH_CEILING_KIB,
-            "RSS grew {growth} KiB over {ITERATIONS} pure-mode calls (ceiling {RSS_GROWTH_CEILING_KIB} KiB)",
+            "RSS grew {growth} KiB over {ITERATIONS} calls (ceiling {RSS_GROWTH_CEILING_KIB} KiB)",
         );
     }
 }

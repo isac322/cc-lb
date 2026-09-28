@@ -84,14 +84,6 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         .increment(1);
         return;
     };
-    let Some(subject) = subject else {
-        metrics::counter!(
-            "cc_lb_lifecycle_limit_rejection_audit_events_total",
-            "outcome" => "skipped_no_subject"
-        )
-        .increment(1);
-        return;
-    };
     metrics::counter!(
         "cclb_limit_hits_total",
         "kind" => violation.clone(),
@@ -105,15 +97,6 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         )
         .increment(1);
     }
-
-    let request_summary = request_summary.unwrap_or(cc_lb_lifecycle::LimitRequestSummary {
-        model: String::new(),
-        path: String::new(),
-        method: String::new(),
-    });
-    let route_summary = route_summary.unwrap_or(cc_lb_lifecycle::RouteSummary {
-        upstream_name: String::new(),
-    });
 
     let entry = AuditEntry {
         ts: system_time_unix_secs(SystemTime::now()),
@@ -136,7 +119,6 @@ fn handle_event(audit_sink: &AuditWriterSink, event: LifecycleEvent) {
         actor_subject: None,
         actor_kind: None,
         actor_email: None,
-        kind: None,
         payload: None,
     };
 
@@ -224,9 +206,13 @@ mod tests {
             })
         }
 
-        async fn prune_audit(&self, _older_than: u64) -> StorageResult<u64> {
+        async fn prune_audit_before(
+            &self,
+            _cutoff_ts_x_1m: u64,
+            _batch_size: usize,
+        ) -> StorageResult<u64> {
             Err(StorageError::Fatal {
-                message: "prune_audit is not used by subscriber tests".to_owned(),
+                message: "prune_audit_before is not used by subscriber tests".to_owned(),
             })
         }
     }
@@ -246,18 +232,18 @@ mod tests {
             event_id: eid("audit-a"),
             decision: LimitDecisionKind::Rejected {
                 reason: "quota_exceeded".into(),
-                subject: Some(LimitSubject {
+                subject: LimitSubject {
                     principal_id: "principal-a".into(),
                     key_id: "key-a".into(),
-                }),
-                request_summary: Some(LimitRequestSummary {
+                },
+                request_summary: LimitRequestSummary {
                     model: "claude-sonnet-4".into(),
                     path: "/v1/messages".into(),
                     method: "POST".into(),
-                }),
-                route_summary: Some(RouteSummary {
+                },
+                route_summary: RouteSummary {
                     upstream_name: "upstream-a".into(),
-                }),
+                },
                 limit_violation: Some("monthly_tokens".into()),
             },
         })
@@ -291,12 +277,18 @@ mod tests {
             event_id: eid("audit-b"),
             decision: LimitDecisionKind::Rejected {
                 reason: "quota_exceeded".into(),
-                subject: Some(LimitSubject {
+                subject: LimitSubject {
                     principal_id: "principal-b".into(),
                     key_id: "key-b".into(),
-                }),
-                request_summary: None,
-                route_summary: None,
+                },
+                request_summary: LimitRequestSummary {
+                    model: String::new(),
+                    path: String::new(),
+                    method: String::new(),
+                },
+                route_summary: RouteSummary {
+                    upstream_name: String::new(),
+                },
                 limit_violation: None,
             },
         })

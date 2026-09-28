@@ -4,10 +4,9 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
-use cc_lb_engine::api_keys::secret;
+use cc_lb_control::api_keys::secret;
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind},
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, ManagedKeyStore, StorageError,
 };
 use futures::future::try_join_all;
 
@@ -74,13 +73,13 @@ where
         let index_hash = params.index_hash;
         let issued = store.issue("principal-a", "key-a", params.clone()).await?;
         let expected = expected_record(&params, issued.issued_at_unix_secs);
-        assert_record_bytes_eq(&issued, &expected)?;
+        assert_record_eq(&issued, &expected)?;
 
         let fetched = store
             .get("principal-a", "key-a")
             .await?
             .ok_or_else(|| anyhow::anyhow!("issued key should be readable"))?;
-        assert_record_bytes_eq(&fetched, &issued)?;
+        assert_record_eq(&fetched, &issued)?;
 
         let lookup = store
             .lookup_by_index_hash(&index_hash)
@@ -88,14 +87,14 @@ where
             .ok_or_else(|| anyhow::anyhow!("index lookup should find issued key"))?;
         ensure!(lookup.0 == "principal-a", "lookup principal mismatch");
         ensure!(lookup.1 == "key-a", "lookup key mismatch");
-        assert_record_bytes_eq(&lookup.2, &issued)?;
+        assert_record_eq(&lookup.2, &issued)?;
 
         let principal_records = store.list_by_principal("principal-a").await?;
         ensure!(
             principal_records.len() == 1,
             "principal list should contain one key"
         );
-        assert_record_bytes_eq(&principal_records[0], &issued)?;
+        assert_record_eq(&principal_records[0], &issued)?;
 
         let all_records = store.list_all().await?;
         ensure!(all_records.len() == 1, "list_all should contain one key");
@@ -104,7 +103,7 @@ where
             "list_all principal mismatch"
         );
         ensure!(all_records[0].1 == "key-a", "list_all key mismatch");
-        assert_record_bytes_eq(&all_records[0].2, &issued)?;
+        assert_record_eq(&all_records[0].2, &issued)?;
 
         store
             .update(
@@ -342,7 +341,7 @@ where
                 .get("principal-concurrent", &key_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("missing concurrently issued key {key_id}"))?;
-            assert_record_bytes_eq(&fetched, &issued_record)?;
+            assert_record_eq(&fetched, &issued_record)?;
 
             let lookup = store
                 .lookup_by_index_hash(&index_hash)
@@ -353,7 +352,7 @@ where
                 "concurrent lookup principal mismatch"
             );
             ensure!(lookup.1 == key_id, "concurrent lookup key mismatch");
-            assert_record_bytes_eq(&lookup.2, &issued_record)?;
+            assert_record_eq(&lookup.2, &issued_record)?;
         }
 
         Ok(())
@@ -381,7 +380,7 @@ pub async fn managed_keys_cross_backend_equivalence(
         )
         .await?;
 
-    assert_record_bytes_eq(&sqlite_record, &postgres_record)
+    assert_record_eq(&sqlite_record, &postgres_record)
 }
 
 pub async fn managed_keys_equivalent_records<B>(backend: Arc<B>) -> Result<()>
@@ -425,11 +424,11 @@ where
             })
             .ok_or_else(|| anyhow::anyhow!("list_all missing key-a"))?;
 
-        assert_record_bytes_eq(&fetched, &first)?;
-        assert_record_bytes_eq(&lookup, &first)?;
-        assert_record_bytes_eq(listed_first, &first)?;
-        assert_record_bytes_eq(&all_first.2, &first)?;
-        assert_record_bytes_eq(listed_second, &second)?;
+        assert_record_eq(&fetched, &first)?;
+        assert_record_eq(&lookup, &first)?;
+        assert_record_eq(listed_first, &first)?;
+        assert_record_eq(&all_first.2, &first)?;
+        assert_record_eq(listed_second, &second)?;
 
         Ok(())
     })
@@ -493,21 +492,24 @@ fn expected_record(
     }
 }
 
-fn assert_record_bytes_eq(
+fn assert_record_eq(
     left: &cc_lb_storage_api::StoredApiKeyRecord,
     right: &cc_lb_storage_api::StoredApiKeyRecord,
 ) -> Result<()> {
-    let left_bytes = normalized_record_bytes(left)?;
-    let right_bytes = normalized_record_bytes(right)?;
-    ensure!(left_bytes == right_bytes, "normalized record bytes differ");
+    ensure!(
+        normalized_record(left) == normalized_record(right),
+        "normalized records differ"
+    );
     Ok(())
 }
 
-fn normalized_record_bytes(record: &cc_lb_storage_api::StoredApiKeyRecord) -> Result<Vec<u8>> {
+fn normalized_record(
+    record: &cc_lb_storage_api::StoredApiKeyRecord,
+) -> cc_lb_storage_api::StoredApiKeyRecord {
     let mut normalized = record.clone();
     normalized.issued_at_unix_secs = 0;
     normalized.revoked_at_unix_secs = normalized.revoked_at_unix_secs.map(|_| 0);
-    Ok(serde_json::to_vec(&normalized)?)
+    normalized
 }
 
 fn assert_invalid_field(error: StorageError, expected_field: &str) -> Result<()> {

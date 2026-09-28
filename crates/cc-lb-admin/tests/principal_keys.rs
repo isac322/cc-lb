@@ -8,35 +8,6 @@ use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 
 #[tokio::test]
-async fn key_issue_rejects_removed_kind_fields() {
-    let server = admin_test_common::spawn_admin_server().await;
-    let (_, _, principal) = server
-        .client
-        .post_json(
-            "/admin/v1/principals",
-            json!({ "name": "strict-key-issue", "kind": "human", "allowed_models": [], "default_limits": [] }),
-        )
-        .await;
-    let principal_id = principal["id"].as_str().unwrap();
-
-    for removed in ["principal_kind", "upstream_kind"] {
-        let mut request = json!({ "label": "must-reject" });
-        request[removed] = json!("machine");
-        let (status, _, body) = server
-            .client
-            .post_json(
-                &format!("/admin/v1/principals/{principal_id}/keys"),
-                request,
-            )
-            .await;
-
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["error"], "validation_failed");
-        assert!(body["message"].as_str().unwrap().contains(removed));
-    }
-}
-
-#[tokio::test]
 async fn key_issue_accepts_omitted_and_empty_labels_and_authenticates() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
@@ -215,8 +186,6 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
     assert_eq!(key["id"], key_id);
     assert_eq!(key["principal_id"], principal_id);
     assert!(key.get("plaintext_key").is_none());
-    assert!(key.get("principal_kind").is_none());
-    assert!(key.get("upstream_kind").is_none());
 
     for (operation, action, expected_key_status) in [
         ("disable", "principal_key_disable", "disabled"),

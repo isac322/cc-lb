@@ -21,9 +21,9 @@ pub use types::{
     DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS, EventBusConfig, LONG_LIVED_ACCESS_TOKEN_EXPIRES_IN_SECS,
     LONG_LIVED_MIN_GRANT_SECS, ListenerConfig, ListenerOverrides, ObservabilityConfig,
     PluginWireBounds, PostgresPoolConfig, PriceCatalogConfig, PromptCacheShadowConfig,
-    RecurringJobConfig, RestartRequiredField, RuntimeConfig, SchedulerConfig, SchedulerPoolConfig,
-    ShapeOriginPolicy, StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
-    UpstreamAffinityConfig, WasmtimeAllocationStrategy, WasmtimeConfig,
+    RecurringJobConfig, RuntimeConfig, SchedulerConfig, SchedulerPoolConfig, ShapeOriginPolicy,
+    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig, UpstreamAffinityConfig,
+    WasmtimeAllocationStrategy, WasmtimeConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

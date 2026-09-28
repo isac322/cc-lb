@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_clock::TestClock;
-use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, MetaStore};
 
 const NOW: u64 = 10_000;
 const AUTHORITY: &str = "https://identity.example";
@@ -17,10 +17,7 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(TestClock::new_at_secs(NOW)))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("migrate sqlite");
+    storage.initialize().await.expect("migrate sqlite");
     (directory, storage)
 }
 
@@ -254,8 +251,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
     admin_old.admin_action = Some("principal_update".to_owned());
     let mut admin_new = audit_entry("admin-action-new", NOW + 300, AUTHORITY, SUBJECT);
     admin_new.admin_action = Some("config_apply".to_owned());
-    let mut kind_only = audit_entry("kind-only", NOW + 299, AUTHORITY, "bob");
-    kind_only.kind = Some("admin".to_owned());
+    let plain = audit_entry("kind-only", NOW + 299, AUTHORITY, "bob");
     let mut other_principal_admin =
         audit_entry("other-principal-admin", NOW + 298, AUTHORITY, SUBJECT);
     other_principal_admin.principal_id = "other-principal".to_owned();
@@ -270,7 +266,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
             SUBJECT,
         ));
     }
-    entries.push(kind_only);
+    entries.push(plain);
     entries.push(other_principal_admin);
     entries.push(admin_new);
     storage
@@ -293,7 +289,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
     assert!(
         default_rows
             .iter()
-            .any(|entry| { entry.admin_action.is_none() && entry.kind.is_none() })
+            .any(|entry| entry.admin_action.is_none())
     );
     // The older admin action survives the limit once admin_only filters first.
     let admin_rows = storage

@@ -233,17 +233,12 @@ impl SubscriptionQuotaStatus {
 }
 
 /// `Sample` is a real quota observation. `Absent` is a fresh successful API
-/// enumeration that did not include this window. `ProcessStart` is a synthetic
-/// marker emitted once on writer/poller boot so downstream Δ-rate estimators
-/// can detect that the dedup cache restarted and avoid attributing a
-/// discontinuity to a spike. See `SubscriptionQuotaSeriesQuery` consumers
-/// (R3 prediction).
+/// enumeration that did not include this window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubscriptionQuotaSampleKind {
     Sample,
     Absent,
-    ProcessStart,
 }
 
 impl SubscriptionQuotaSampleKind {
@@ -251,7 +246,6 @@ impl SubscriptionQuotaSampleKind {
         match self {
             Self::Sample => "sample",
             Self::Absent => "absent",
-            Self::ProcessStart => "process_start",
         }
     }
 
@@ -260,7 +254,6 @@ impl SubscriptionQuotaSampleKind {
         Some(match value {
             "sample" => Self::Sample,
             "absent" => Self::Absent,
-            "process_start" => Self::ProcessStart,
             _ => return None,
         })
     }
@@ -321,8 +314,6 @@ pub struct SubscriptionQuotaSample {
 
     pub ingested_at_unix_millis: u64,
 }
-
-pub type SubscriptionQuotaLatestRecord = SubscriptionQuotaSample;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubscriptionQuotaSeriesQuery {
@@ -459,20 +450,12 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         records: &[SubscriptionQuotaSample],
     ) -> StorageResult<()>;
 
-    async fn record_subscription_quota_sample(
-        &self,
-        record: &SubscriptionQuotaSample,
-    ) -> StorageResult<()> {
-        self.record_subscription_quota_samples(std::slice::from_ref(record))
-            .await
-    }
-
     /// Returns the latest sidecar row for each `(upstream_id, window, source)`
     /// intersected with the given upstream IDs. Empty input returns empty.
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>>;
+    ) -> StorageResult<Vec<SubscriptionQuotaSample>>;
 
     /// Server-side bucketed downsample of the change-only checkpoint history.
     /// The caller specifies bucket width and per-series point cap. The backend
@@ -490,14 +473,6 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize>;
-
-    async fn put_subscription_quota_checkpoint(
-        &self,
-        record: &SubscriptionQuotaCheckpointRecord,
-    ) -> StorageResult<usize> {
-        self.put_subscription_quota_checkpoints(std::slice::from_ref(record))
-            .await
-    }
 
     /// Returns the latest checkpoint for every physical `(upstream_id, window,
     /// source)` key intersecting the given upstream IDs. Empty input returns empty.

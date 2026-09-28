@@ -284,18 +284,12 @@ fn evaluate(
         let trace = cc_lb_domain::SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: all_assessments,
-            previous_tier: None,
             formula_version: Some(COST_FIRST_FORMULA_VERSION.to_owned()),
             cache_cost_basis_version: Some(CACHE_COST_BASIS_VERSION.to_owned()),
             formula_winner_upstream_id: Some(formula_winner.candidate.upstream_id),
             kept_upstream_id: Some(kept_upstream_id),
-            incumbent_upstream_id: None,
-            estimated_switch_cache_loss_micros: None,
-            cache_loss_status: None,
             switch_gate_reason: Some("formula_winner".to_owned()),
             bucket_v3_cache_key: bucket_v3_cache_key.map(str::to_owned),
-            lineage_would_have_predicted_read_tokens: None,
-            lineage_would_have_picked_upstream_id: None,
         };
         return FilterOutput {
             kept_upstream_ids: vec![kept_upstream_id],

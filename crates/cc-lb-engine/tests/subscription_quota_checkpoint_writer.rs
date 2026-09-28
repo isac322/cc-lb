@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use cc_lb_clock::SystemClock;
 use cc_lb_engine::{
-    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, SystemClock,
-    start_subscription_quota_writer,
+    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     UpstreamSubscriptionQuotaStore,
 };
@@ -148,7 +148,7 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
             .display()
     );
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok((dir, Arc::new(storage)))
 }
 

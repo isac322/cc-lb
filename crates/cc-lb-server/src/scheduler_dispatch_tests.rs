@@ -5,16 +5,16 @@ mod support;
 
 use ::http::StatusCode;
 use async_trait::async_trait;
+use cc_lb_clock::SystemClock;
+use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
-use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
 use cc_lb_engine::attempt_rail::AttemptIntent;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveEnqueuer, DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher,
     RenewalFinalization, RenewalUsage, RequestSnapshot,
 };
-use cc_lb_engine::clock::SystemClock;
 use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
@@ -211,9 +211,7 @@ async fn renewal_reconcile_false_errors_before_forget_and_lifecycle_publish() {
     // Given
     let fixture = Fixture::new().await;
     let bus = fixture.event_bus();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = bus.subscribe_lifecycle();
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
     let key_store = KeyStore::new(fixture.storage.clone());
     let key = key_store
@@ -319,9 +317,7 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
     let fixture = Fixture::new().await;
     fixture.http.return_cache_hit_usage(10, 40, 10);
     let bus = fixture.event_bus();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = bus.subscribe_lifecycle();
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
@@ -383,9 +379,7 @@ async fn repeated_null_key_renewals_remain_observe_only() {
     let fixture = Fixture::new().await;
     fixture.http.return_cache_hit_usage(10, 40, 10);
     let bus = fixture.event_bus();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = bus.subscribe_lifecycle();
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
     enqueuer
@@ -534,9 +528,7 @@ async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
     fixture.http.return_cache_hit_usage(10, 40, 0);
     let bus = fixture.event_bus();
     let pricing_rx = bus.attach_lifecycle_pricing(32);
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = bus.subscribe_lifecycle();
     let pricing_handle = cc_lb_pricing::spawn_lifecycle_pricing_subscriber(
         pricing_rx,
         bus.clone() as Arc<dyn RequestEventBus>,

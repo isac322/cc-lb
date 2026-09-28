@@ -11,7 +11,7 @@ use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerBackend};
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +34,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
     let storage = Arc::new(
         cc_lb_storage_sqlite::open_sqlite(&storage_url, Arc::new(cc_lb_clock::SystemClock)).await?,
     );
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     let scheduler_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
     let scheduler_options = SqliteConnectOptions::from_str(&scheduler_url)?.create_if_missing(true);
     let scheduler_pool = SqlitePoolOptions::new()

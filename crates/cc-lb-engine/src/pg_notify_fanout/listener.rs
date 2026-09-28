@@ -8,8 +8,8 @@ use tokio::task::JoinHandle;
 use super::metrics::{record_http_fetch, record_pg_listener_reconnect, record_queue_usage};
 use super::notifier::DEFAULT_PG_NOTIFY_CHANNEL;
 use super::protocol::{NotifyOrigin, TruncatedPartialNotifyOwned};
-use crate::event_bus::{RequestEventBus, RequestEventUpdate};
 use crate::metrics_labels::{NotifyHttpOutcome, PgListenerReconnectReason};
+use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
 
 const HTTP_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 const QUEUE_USAGE_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -198,9 +198,7 @@ impl PgListener {
 
 fn is_local_notification(payload: &str, local_instance_url: &str) -> bool {
     serde_json::from_str::<NotifyOrigin>(payload)
-        .ok()
-        .and_then(|origin| origin.producer_url)
-        .is_some_and(|producer_url| producer_url == local_instance_url)
+        .is_ok_and(|origin| origin.producer_url == local_instance_url)
 }
 
 #[cfg(test)]
@@ -224,9 +222,5 @@ mod tests {
 
         assert!(is_local_notification(&payload, "http://instance-a"));
         assert!(!is_local_notification(&payload, "http://instance-b"));
-        assert!(!is_local_notification(
-            &serde_json::to_string(&update).expect("legacy update serializes"),
-            "http://instance-a"
-        ));
     }
 }

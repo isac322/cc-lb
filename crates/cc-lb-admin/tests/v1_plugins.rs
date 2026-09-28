@@ -335,14 +335,14 @@ async fn chain_insert_position_last_uses_next_after() {
         app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+        Some(json!({ "slot": "router", "wasm_registry_id": entry.id })),
     )
     .await;
     let (_, _, second, _) = authed_json(
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "router", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -364,7 +364,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": entry.id,
             "position": { "before": second.id }
         })),
@@ -394,7 +394,7 @@ async fn chain_insert_position_before_seeded_builtin_uses_sparse_order() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": entry.id,
             "position": { "before": builtin.id }
         })),
@@ -418,7 +418,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": entry.id,
             "position": "first"
         })),
@@ -439,7 +439,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID
         })),
     )
@@ -456,7 +456,7 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
     let (status, _, chain, _) = authed_json(
         app,
         "GET",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=router"),
         None,
     )
     .await;
@@ -468,76 +468,22 @@ async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
 }
 
 #[tokio::test]
-async fn plugin_chain_accepts_runtime_slot_aliases() {
+async fn plugin_chain_rejects_non_canonical_slot_names() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-slot-aliases").await;
-    let entry = seed_registry(&storage, 25, "plugin-slot-aliases").await;
-    let router = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::Router,
-        entry.id,
-        1000,
-    )
-    .await;
-    let shape = seed_chain_with_slot(
-        &storage,
-        principal_id,
-        PluginSlotKind::Shape,
-        entry.id,
-        1000,
-    )
-    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
-    for (slot, expected_id) in [("filter", router.id), ("shape", shape.id)] {
-        let (status, _, body, _) = authed_json(
+    for slot in ["Router", "filter", "observe", "sign", "build_signer"] {
+        let (status, _, _) = request_bytes(
             app.clone(),
             "GET",
             &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot={slot}"),
             None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(
-            body["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["id"] == expected_id.to_string())
-        );
-    }
-
-    for slot in ["sign", "build_signer", "on_unauthorized"] {
-        let (status, _, body, _) = authed_json(
-            app.clone(),
-            "GET",
-            &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot={slot}"),
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body["entries"].as_array().unwrap().is_empty());
+        assert_eq!(status, StatusCode::BAD_REQUEST, "slot={slot}");
     }
-}
-
-#[tokio::test]
-async fn plugin_chain_rejects_runtime_only_slot_mutations() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-runtime-only-slot").await;
-    let entry = seed_registry(&storage, 26, "plugin-runtime-only-slot").await;
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body, _) = authed_json(
-        app,
-        "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "sign", "wasm_registry_id": entry.id })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "unsupported_plugin_slot");
 }
 
 #[tokio::test]
@@ -551,7 +497,7 @@ async fn chain_insert_unknown_principal_returns_400() {
         app,
         "POST",
         &format!("/admin/v1/principals/{unknown_principal}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+        Some(json!({ "slot": "router", "wasm_registry_id": entry.id })),
     )
     .await;
 
@@ -577,7 +523,7 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": shape_only.id })),
+        Some(json!({ "slot": "router", "wasm_registry_id": shape_only.id })),
     )
     .await;
 
@@ -585,27 +531,6 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
     assert_eq!(body["error"], "unsupported_slot");
     assert_eq!(body["plugin_name"], "shape-only-plugin");
     assert_eq!(body["slot"], "router");
-}
-
-#[tokio::test]
-async fn chain_insert_rejects_plugin_with_empty_supported_slots_as_slot_metadata_unknown() {
-    let (_dir, storage) = temp_storage().await;
-    let principal_id = seed_principal(&storage, "principal-empty-slots").await;
-    let legacy = seed_registry_raw(&storage, 78, "legacy-no-slots").await;
-    assert!(legacy.supported_slots.is_empty());
-    let app = app(test_state(Config::default(), Some(storage)));
-
-    let (status, _, body, _) = authed_json(
-        app,
-        "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": legacy.id })),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "slot_metadata_unknown");
-    assert_eq!(body["plugin_name"], "legacy-no-slots");
 }
 
 #[tokio::test]
@@ -627,7 +552,7 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
         app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "router", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -640,7 +565,7 @@ async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let (status, _, chain, _) = authed_json(
         app,
         "GET",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=router"),
         None,
     )
     .await;
@@ -683,7 +608,7 @@ async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Shape", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "shape", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -867,7 +792,7 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     let (status, _, body, _) = authed_json(
         app,
         "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=router"),
         None,
     )
     .await;
@@ -889,7 +814,7 @@ async fn chain_rebalance_emits_chain_audit() {
     let (status, _, _, _) = authed_json(
         app,
         "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=router"),
         None,
     )
     .await;
@@ -1004,13 +929,28 @@ async fn seed_registry_with_slots(
     name: &str,
     slots: Vec<PluginSlotKind>,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
-    let entry = seed_registry_raw(storage, seed, name).await;
-    storage
-        .update_supported_slots(entry.id, slots.clone())
+    let (entry, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: [seed; 32],
+                bytes: vec![seed; seed as usize],
+                size_bytes: seed as u64,
+            },
+            WasmRegistryEntryInput {
+                name: name.to_owned(),
+                version: None,
+                original_filename: format!("{name}.wasm"),
+                label: None,
+                uploaded_at_unix_secs: 1_800_000_000,
+                uploaded_by_admin_id: Uuid::new_v4(),
+                description: format!("{name} description"),
+                usage: "test fixture".to_owned(),
+                hook_metadata: Default::default(),
+                supported_slots: slots,
+            },
+        )
         .await
         .unwrap();
-    let mut entry = entry;
-    entry.supported_slots = slots;
     entry
 }
 
@@ -1026,38 +966,6 @@ async fn seed_registry(
         vec![PluginSlotKind::Router, PluginSlotKind::Shape],
     )
     .await
-}
-
-async fn seed_registry_raw(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
-    seed: u8,
-    name: &str,
-) -> cc_lb_storage_api::WasmRegistryEntry {
-    let (entry, _) = storage
-        .persist_wasm_upload(
-            WasmBlob {
-                sha256: [seed; 32],
-                bytes: vec![seed; seed as usize],
-                size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
-            },
-            WasmRegistryEntryInput {
-                schema_hash: None,
-                name: name.to_owned(),
-                version: None,
-                original_filename: format!("{name}.wasm"),
-                label: None,
-                uploaded_at_unix_secs: 1_800_000_000,
-                uploaded_by_admin_id: Uuid::new_v4(),
-                description: format!("{name} description"),
-                usage: "test fixture".to_owned(),
-                hook_metadata: Default::default(),
-                supported_slots: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-    entry
 }
 
 async fn seed_chain(

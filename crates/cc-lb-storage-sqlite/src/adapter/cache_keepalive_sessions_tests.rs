@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest,
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheTtl, MetaStore, cache_keepalive_job_key,
+    CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheTtl, MetaStore, cache_keepalive_job_key,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -17,10 +17,7 @@ async fn storage() -> (TempDir, SqliteStorage) {
     let storage = open_sqlite(&database_url, Arc::new(SystemClock))
         .await
         .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (dir, storage)
 }
 

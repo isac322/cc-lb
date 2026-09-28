@@ -66,8 +66,6 @@ impl UsagePruner {
 
         PruneResult {
             request_events_removed,
-            usage_rollups_removed: 0,
-            principal_limit_states_removed: 0,
             audit_log_removed,
         }
     }
@@ -128,8 +126,6 @@ impl UsagePruner {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PruneResult {
     pub request_events_removed: u64,
-    pub usage_rollups_removed: u64,
-    pub principal_limit_states_removed: u64,
     pub audit_log_removed: u64,
 }
 

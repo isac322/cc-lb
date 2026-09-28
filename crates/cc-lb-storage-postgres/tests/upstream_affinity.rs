@@ -1,9 +1,8 @@
 use std::{error::Error, str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey,
-    UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
-    upstream::UpstreamKind,
+    MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind,
+    UpstreamAffinityStore, UpstreamCreate, UpstreamStore, upstream::UpstreamKind,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sha2::{Digest, Sha256};
@@ -25,7 +24,7 @@ async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware()
         return Ok(());
     };
     let storage = fixture.store();
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     let first_upstream = create_upstream(&storage, "affinity-first").await?;
     let second_upstream = create_upstream(&storage, "affinity-second").await?;
@@ -274,7 +273,7 @@ async fn upstream_affinity_retention_boundaries_and_expired_rebind_follow_curren
         return Ok(());
     };
     let storage = fixture.store();
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let first_upstream = create_upstream(&storage, "retention-first").await?;
     let second_upstream = create_upstream(&storage, "retention-second").await?;
     let legacy_key = affinity_key("principal-retention", [20; 32]);
@@ -358,7 +357,7 @@ async fn upstream_affinity_purge_is_bounded_and_preserves_concurrent_rebind() ->
         return Ok(());
     };
     let storage = fixture.store();
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let first_upstream = create_upstream(&storage, "purge-first").await?;
     let second_upstream = create_upstream(&storage, "purge-second").await?;
     let explicit_keys = (0..3)

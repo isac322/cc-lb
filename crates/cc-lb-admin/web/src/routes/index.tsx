@@ -92,7 +92,6 @@ import {
   useSubscriptionQuotaAggregate,
   useSubscriptionQuotaPoolHistory,
   useSummary,
-  useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
 import {
@@ -1037,7 +1036,6 @@ type PoolQuotaChartProps = {
   rangeStartUnix: number;
   rangeEndUnix: number;
   latest: PoolQuotaLatest;
-  showFable: boolean;
 };
 
 /**
@@ -1132,7 +1130,6 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
           resets={resets}
           nowUnixSecs={serverNow}
           timeZone={timeZone}
-          showFable={chart.showFable}
           loading={loading}
         />
         <div
@@ -1146,7 +1143,6 @@ const PoolQuotaUsage = memo(function PoolQuotaUsage({
               seriesData={chart.data}
               rangeStartUnix={chart.rangeStartUnix}
               rangeEndUnix={chart.rangeEndUnix}
-              showFable={chart.showFable}
             />
           )}
         </div>
@@ -1208,19 +1204,15 @@ export function PoolQuotaThemedChart({
   seriesData,
   rangeStartUnix,
   rangeEndUnix,
-  showFable,
 }: {
   /** Used rows (0-100). */
   seriesData: PoolQuotaChartRow[];
   rangeStartUnix: number;
   rangeEndUnix: number;
-  showFable: boolean;
 }) {
   const gradientPrefix = `pool-fill-${useChartId()}`;
   // Back to front: the long windows first, 5h (the fastest mover) on top.
-  const windows = POOL_QUOTA_WINDOWS_DRAW_ORDER.filter(
-    (window) => showFable || window !== '7d_fable',
-  );
+  const windows = POOL_QUOTA_WINDOWS_DRAW_ORDER;
   return (
     <div className="absolute inset-0 min-h-0 min-w-0">
       {!seriesData.length ? (
@@ -1360,26 +1352,22 @@ export function PoolQuotaThemedChart({
  * severity ink and when it resets (absolute time in the `title`), then the
  * two threshold rules.
  */
-export function PoolQuotaLegend({
+function PoolQuotaLegend({
   latest,
   resets,
   nowUnixSecs = null,
   timeZone = 'UTC',
-  showFable,
   loading = false,
 }: {
   latest?: PoolQuotaLatest;
   resets?: Record<PoolQuotaWindow, number | null>;
   nowUnixSecs?: number | null;
   timeZone?: string;
-  showFable: boolean;
   loading?: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 text-body text-text-muted">
-      {POOL_QUOTA_WINDOWS.filter(
-        (window) => showFable || window !== '7d_fable',
-      ).map((window) => {
+      {POOL_QUOTA_WINDOWS.map((window) => {
         const value = latest?.[window] ?? null;
         const reset = resets?.[window] ?? null;
         const resetText =
@@ -1472,7 +1460,6 @@ function OverviewPage() {
   );
   const events = useRecentEventsInfinite(OVERVIEW_EVENT_FILTERS);
   const principalNameMap = usePrincipalNameMap();
-  const upstreamNameMap = useUpstreamNameMap();
 
   const quotaAggregate = useSubscriptionQuotaAggregate({
     windows: POOL_QUOTA_QUERY_WINDOWS,
@@ -1486,7 +1473,6 @@ function OverviewPage() {
     windowQuantumSecs: POOL_HISTORY_WINDOW_QUANTUM_SECS,
     maxPointsPerSeries: POOL_HISTORY_MAX_POINTS_PER_SERIES,
   });
-  const showFable = POOL_QUOTA_WINDOWS.includes('7d_fable');
   const quotaLoading =
     (quotaAggregate.data === undefined && quotaAggregate.isPending) ||
     (quotaPoolHistory.data === undefined && quotaPoolHistory.isPending);
@@ -1600,8 +1586,8 @@ function OverviewPage() {
   const displayedPoolHistoryRangeSecs =
     quotaPoolHistory.data?.range_secs ?? seriesRangeSecs;
   const chartData = useMemo(
-    () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows, showFable),
-    [quotaPoolHistory.data, showFable],
+    () => buildPoolQuotaChartData(quotaPoolHistory.data?.windows),
+    [quotaPoolHistory.data],
   );
   const visibleChartData = useMemo(
     () =>
@@ -1615,12 +1601,8 @@ function OverviewPage() {
 
   const chartLatest = useMemo(
     () =>
-      poolQuotaResponseLatest(
-        quotaPoolHistory.data?.windows,
-        visibleChartData,
-        showFable,
-      ),
-    [quotaPoolHistory.data, visibleChartData, showFable],
+      poolQuotaResponseLatest(quotaPoolHistory.data?.windows, visibleChartData),
+    [quotaPoolHistory.data, visibleChartData],
   );
   const poolQuotaChart = useMemo<PoolQuotaChartProps>(
     () => ({
@@ -1628,13 +1610,11 @@ function OverviewPage() {
       rangeStartUnix: poolHistoryNowUnixSecs - displayedPoolHistoryRangeSecs,
       rangeEndUnix: poolHistoryNowUnixSecs,
       latest: chartLatest,
-      showFable,
     }),
     [
       chartLatest,
       displayedPoolHistoryRangeSecs,
       poolHistoryNowUnixSecs,
-      showFable,
       visibleChartData,
     ],
   );
@@ -1916,7 +1896,6 @@ function OverviewPage() {
                 <RequestEventsTable
                   events={latestRows}
                   principalNameMap={principalNameMap}
-                  upstreamNameMap={upstreamNameMap}
                   loading={events.isLoading}
                   liveFlashIds={recentLiveIds}
                   columns={OVERVIEW_TABLE_COLUMNS}

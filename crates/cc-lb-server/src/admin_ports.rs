@@ -16,6 +16,7 @@ use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput as EnginePrev
 use cc_lb_engine::warmup_attempts::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
+use cc_lb_storage_api::WarmupAttemptTrigger;
 
 pub(crate) struct ServerRoutePreviewPort {
     lifecycle: Arc<Lifecycle>,
@@ -105,16 +106,13 @@ impl WarmupPort for ServerWarmupPort {
                 cycle_key,
                 error_detail,
             },
-            WarmupAttemptResult::PreflightActiveWindow { cycle_key } => {
-                WarmupAttemptExecutionResult::PreflightActiveWindow { cycle_key }
-            }
         };
         let record = execute_warmup_attempt(WarmupAttemptExecution {
             storage: input.storage,
             upstream: input.upstream,
             scheduled_for_unix_secs: input.scheduled_for_unix_secs,
-            trigger: input.trigger,
-            replica_id: input.replica_id,
+            trigger: WarmupAttemptTrigger::Manual,
+            replica_id: None,
             lease_holder: input.lease_holder,
             expected_cycle_key: input.expected_cycle_key,
             attempted_at_unix_secs: input.attempted_at_unix_secs,

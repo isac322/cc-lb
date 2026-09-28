@@ -224,9 +224,6 @@ fn same_thread_uses_formula_winner_without_cache_loss_gate() {
         vec![trace.formula_winner_upstream_id.unwrap()]
     );
     assert_eq!(trace.kept_upstream_id, trace.formula_winner_upstream_id);
-    assert_eq!(trace.incumbent_upstream_id, None);
-    assert_eq!(trace.estimated_switch_cache_loss_micros, None);
-    assert_eq!(trace.cache_loss_status, None);
     assert_eq!(trace.switch_gate_reason.as_deref(), Some("formula_winner"));
 }
 
@@ -648,7 +645,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 
@@ -661,7 +657,6 @@ fn oauth_at_t0(
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
         observed_at_unix_secs: T0_SECS,
         cache_score: None,

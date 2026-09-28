@@ -4,17 +4,11 @@
 
 pub mod direct;
 
-use bytes::Bytes;
 use url::Url;
 
 pub use direct::AnthropicDirectDialect;
 
 pub(crate) const ANTHROPIC_API_BASE_URL: &str = "https://api.anthropic.com";
-
-/// Returns upstream SSE bytes without parsing or rewriting them.
-pub fn passthrough_sse_bytes(bytes: Bytes) -> Bytes {
-    bytes
-}
 
 pub(crate) fn compose_url(base_url: &Url, downstream_path: &str, query: Option<&str>) -> Url {
     let mut url = base_url.clone();
@@ -88,12 +82,5 @@ mod tests {
             Some("beta=true"),
         );
         assert_eq!(url.query(), Some("beta=true"));
-    }
-
-    #[test]
-    fn passthrough_sse_bytes_is_identity() {
-        let input = Bytes::from_static(b"event: message\ndata: {}\n\n");
-        let output = passthrough_sse_bytes(input.clone());
-        assert_eq!(input, output);
     }
 }

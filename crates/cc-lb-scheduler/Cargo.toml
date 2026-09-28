@@ -9,18 +9,8 @@ autotests = false
 
 [features]
 default = ["sqlite"]
-sqlite = [
-    "sqlx/sqlite",
-    "apalis-sqlite",
-    "cc-lb-server/sqlite",
-    "cc-lb-signer-anthropic-oauth/sqlite",
-]
-postgres = [
-    "sqlx/postgres",
-    "apalis-postgres",
-    "cc-lb-server/postgres",
-    "cc-lb-signer-anthropic-oauth/postgres",
-]
+sqlite = ["sqlx/sqlite", "apalis-sqlite", "cc-lb-server/sqlite"]
+postgres = ["sqlx/postgres", "apalis-postgres", "cc-lb-server/postgres"]
 
 [dependencies]
 anyhow = { workspace = true }

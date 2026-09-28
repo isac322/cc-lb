@@ -7,13 +7,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_engine::{DispatchError, ErrorNormalizer, LifecycleConfig, UpstreamDispatch};
+use cc_lb_engine::{DispatchError, LifecycleConfig, UpstreamDispatch};
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
-use url::Url;
 
-use common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
+use common::{TestAuthn, TestState, lifecycle_with_parts, messages_request};
 
 #[tokio::test]
 async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
@@ -23,15 +22,11 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
     let state = TestState::default();
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state),
-        Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
         LifecycleConfig::default(),
-    )
-    .with_error_normalizer(Arc::new(ErrorNormalizer::new()));
+    );
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,

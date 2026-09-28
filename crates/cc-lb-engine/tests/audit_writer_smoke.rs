@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_engine::{AuditEntry, spawn_audit_writer};
-use cc_lb_storage_api::{AuditStore, BackendKind, MetaStore};
+use cc_lb_control::{AuditEntry, spawn_audit_writer};
+use cc_lb_storage_api::{AuditStore, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 
 #[tokio::test(flavor = "current_thread")]
@@ -75,9 +75,9 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
         dir.path().join("audit-writer.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok((dir, Arc::new(storage)))
 }
 
@@ -107,7 +107,6 @@ fn audit_entry(index: usize) -> AuditEntry {
         actor_subject: None,
         actor_kind: None,
         actor_email: None,
-        kind: None,
         payload: None,
     }
 }

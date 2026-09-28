@@ -9,11 +9,11 @@
   "deployed_commit": "e56d029ea8641827d420c582c5f41a72ab9e2182",
   "source_reconciliation": {
     "status": "source_reconciled",
-    "ui_actions": 204,
+    "ui_actions": 203,
     "ui_request_occurrences": 142,
-    "api_endpoints": 102,
-    "registered_backend_routes": 102,
-    "production_ui_source_files": 97,
+    "api_endpoints": 87,
+    "registered_backend_routes": 87,
+    "production_ui_source_files": 90,
     "ui_routes": 8,
     "unknown_ui_requests": [],
     "moved_legacy_ids_missing_from_api_catalog": [],
@@ -41,66 +41,6 @@
         "method": "GET",
         "path": "/internal/v1/partials/{event_id}",
         "reason": "API catalog declares non-UI clients: backend-only: authenticated cluster-peer partial-fetch endpoint; no browser UI caller."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/audit",
-        "reason": "API catalog declares non-UI clients: crates/cc-lb-admin/web/src/lib/queries.ts:730"
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/dashboard/summary",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/dashboard/summary."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/dashboard/usage",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/usage."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/dashboard/usage",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/usage."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/events/recent",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/events/recent."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/events/histogram",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/events/histogram."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/events/delta",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/events/delta."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/events/stream",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/events/stream."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/subscription-quotas/latest",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/latest."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/subscription-quotas/series",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/series."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/subscription-quotas/aggregate",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/aggregate."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/subscription-quotas/pool-history",
-        "reason": "API catalog declares non-UI clients: backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/pool-history."
       },
       {
         "method": "GET",
@@ -134,23 +74,8 @@
       },
       {
         "method": "GET",
-        "path": "/admin/principals/{id}/usage",
-        "reason": "API catalog declares non-UI clients: backend-only: principal-specific usage endpoint; no built-in admin web caller."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/v1/principals/{id}/usage",
-        "reason": "API catalog declares non-UI clients: backend-only: versioned principal-usage alias; no built-in admin web caller."
-      },
-      {
-        "method": "GET",
-        "path": "/admin/principals/{id}/limits",
-        "reason": "API catalog declares non-UI clients: backend-only: unversioned limits alias; built-in UI calls /admin/v1/principals/{id}/limits."
-      },
-      {
-        "method": "GET",
         "path": "/admin/v1/principals/{id}/limits",
-        "reason": "API catalog declares non-UI clients: crates/cc-lb-admin/web/src/lib/queries.ts:437"
+        "reason": "API catalog declares non-UI clients: backend-only: principal limits read endpoint; no built-in admin web caller."
       },
       {
         "method": "GET",
@@ -259,7 +184,7 @@
       },
       {
         "classification": "changed_since_deploy",
-        "target": "GET /admin/audit and GET /admin/v1/audit",
+        "target": "GET /admin/v1/audit",
         "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
         "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
         "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
@@ -323,7 +248,7 @@
       },
       {
         "classification": "changed_since_deploy",
-        "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
+        "target": "GET /admin/v1/audit (result ordering)",
         "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
         "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
         "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
@@ -2419,7 +2344,7 @@
     },
     {
       "classification": "changed_since_deploy",
-      "target": "GET /admin/audit and GET /admin/v1/audit",
+      "target": "GET /admin/v1/audit",
       "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
       "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
       "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
@@ -2483,7 +2408,7 @@
     },
     {
       "classification": "changed_since_deploy",
-      "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
+      "target": "GET /admin/v1/audit (result ordering)",
       "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
       "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
       "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
@@ -2723,15 +2648,6 @@
     },
     {
       "source_contract": "Global",
-      "gap_id": "GAP-OV-01",
-      "category": "overview",
-      "severity": "high",
-      "title": "Usage endpoint path mismatch",
-      "description": "The legacy inventory documented GET /admin/dashboard/usage for UI-OV-02. The actual codebase requests GET /admin/usage with query parameters range, step, group_by=principal, and projection=totals.",
-      "evidence": "crates/cc-lb-admin/web/src/lib/queries.ts:406"
-    },
-    {
-      "source_contract": "Global",
       "gap_id": "GAP-OV-02",
       "category": "overview",
       "severity": "high",
@@ -2753,7 +2669,7 @@
       "gap_id": "GAP-LOGS-1",
       "description": "SSE reconnect delta query (/admin/v1/events/delta) is only called when lastCursor is known and resumeNeedsBackfill is true. If connection drops on initial load before any event arrives, it reconnects directly without backfill.",
       "risk": "low",
-      "mitigation": "Verified: tested in useLiveEventStream tests; initial cursor null connects directly to /admin/events/stream."
+      "mitigation": "Verified: tested in useLiveEventStream tests; initial cursor null connects directly to /admin/v1/events/stream."
     },
     {
       "source_contract": "Logs",
@@ -2845,7 +2761,7 @@
       "gap_id": "GAP-AUD-02",
       "id": "GAP-AUD-02",
       "title": "Audit Client-Side Admin Action Filtering",
-      "description": "GET /admin/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.",
+      "description": "GET /admin/v1/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.",
       "resolution": "Documented in audit renderRows filtering logic."
     },
     {
@@ -2856,15 +2772,6 @@
       "file": "crates/cc-lb-admin/web/src/components/upstreams/warmup/WarmupCardMinimal.tsx",
       "line": 698,
       "description": "WarmupConfigModal is conditionally rendered when pluginSnapshot exists with open={configOpen}, but configOpen is initialized to false and no button or interaction anywhere in WarmupCardMinimal or the UI ever calls setConfigOpen(true). It is an unreachable dead modal in production."
-    },
-    {
-      "source_contract": "Upstreams",
-      "gap_id": "GAP-UPSTREAMS-2",
-      "type": "unreferenced_dead_component",
-      "component": "WarmupRecentStrip",
-      "file": "crates/cc-lb-admin/web/src/components/upstreams/warmup/parts/WarmupRecentStrip.tsx",
-      "line": 31,
-      "description": "WarmupRecentStrip is exported in parts/WarmupRecentStrip.tsx but is never imported or rendered by any component or route in the entire admin web application."
     },
     {
       "source_contract": "Upstreams",

@@ -7,7 +7,7 @@
 //! `tier_key` is stored as TEXT (not a Rust enum) to keep this crate free of a
 //! dependency on `cc-lb-engine`, which owns the `TierKey` type. The set of legal
 //! values is enforced by a `CHECK (tier_key IN (...))` constraint in the
-//! migrations and parsed back into `cc_lb_engine::plan_capacity::TierKey` by the
+//! migrations and parsed back into `cc_lb_quota::plan_capacity::TierKey` by the
 //! consumer (the dynamic-view builder).
 //!
 //! All three tables are SCD Type 2 (effective-dated). The `upsert_*` / `append_*`
@@ -25,7 +25,7 @@ use crate::StorageResult;
 /// (`plan_tier_ratio_history_v1`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanTierRatioRecord {
-    /// Canonical tier key (`cc_lb_engine::plan_capacity::TierKey::as_str`).
+    /// Canonical tier key (`cc_lb_quota::plan_capacity::TierKey::as_str`).
     pub tier_key: String,
     /// Pro-relative capacity multiplier. Must be finite and > 0.
     pub pro_relative_ratio: f64,
@@ -66,7 +66,8 @@ pub enum TierResolutionSource {
     Override,
     /// Matched the built-in `classify_plan_tier` logic.
     Builtin,
-    /// Inferred from historical pool quota contributor ratio blobs.
+    /// Written by the retired one-shot contributor-ratio backfill; kept so
+    /// existing history rows still decode.
     Backfill,
     /// Not recognized by either; surfaced for human attention.
     Unknown,
@@ -81,19 +82,6 @@ impl TierResolutionSource {
             TierResolutionSource::Unknown => "unknown",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BackfillApplyCounts {
-    pub inserted: u64,
-    pub skipped_zero_dur: u64,
-    pub capped: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BackfillApplyOutcome {
-    Skipped,
-    Applied(BackfillApplyCounts),
 }
 
 /// A row in the per-upstream resolved-tier history
@@ -168,14 +156,6 @@ pub trait PlanTierStore: Send + Sync {
     /// open row and insert the new one.
     async fn append_upstream_plan_tier(&self, record: &UpstreamPlanTierRecord)
     -> StorageResult<()>;
-
-    async fn backfill_upstream_plan_tier_intervals(
-        &self,
-        upstream_id: Uuid,
-        intervals: &[UpstreamPlanTierRecord],
-        terminal_cap_unix_millis: i64,
-        provenance: &str,
-    ) -> StorageResult<BackfillApplyOutcome>;
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>>;
 

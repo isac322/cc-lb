@@ -9,20 +9,17 @@ use tokio::sync::oneshot;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, StorageConfig};
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
-    global_catalog,
-};
-use cc_lb_server::drain::DrainController;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::DrainController;
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore,
+    ApiKeyMutation, KeyStatus, Limit as KeyLimit, LimitKind as KeyLimitKind, ManagedKeyStore,
+    MetaStore, RequestEvent, RequestEventStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{ApiKeyMutation, KeyStatus, Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -890,7 +887,7 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
             },
         )
         .await?;
-    let (disabled_key_id, _) = cc_lb_engine::api_keys::secret::parse(disabled_plaintext.expose())?;
+    let (disabled_key_id, _) = cc_lb_control::api_keys::secret::parse(disabled_plaintext.expose())?;
     ManagedKeyStore::update(
         storage.as_ref(),
         "u1",
@@ -1659,7 +1656,7 @@ impl StartedServer {
         } = reserved;
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         let drain_controller = app.drain_controller();
@@ -1994,10 +1991,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
-            .is_some()
-        {
+        if global_catalog().lookup(MODEL, None).is_some() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -2032,8 +2026,8 @@ fn seed_price_catalog() {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-    let clock = cc_lb_engine::SystemClock;
+    use cc_lb_clock::Clock as _;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -2209,7 +2203,7 @@ async fn seed_runtime_state_full_v2(
             },
         )
         .await?;
-    let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())?;
+    let (key_id, _) = cc_lb_control::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
@@ -2241,8 +2235,8 @@ fn free_addr() -> SocketAddr {
 
 async fn sqlite_storage(path: &Path) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }
 

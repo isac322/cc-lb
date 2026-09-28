@@ -3,10 +3,7 @@
 use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
-use cc_lb_storage_api::{
-    AuditStore as _, RequestEventStore as _,
-    types::{AuditEntry, RequestEvent, RequestEventUpstream},
-};
+use cc_lb_storage_api::{AuditEntry, AuditStore as _, RequestEvent, RequestEventStore as _};
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
 
@@ -64,7 +61,9 @@ pub async fn audit_prune<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
             storage.append_audit(&audit_entry(index)).await?;
         }
 
-        let pruned = storage.prune_audit(AUDIT_BASE_TS + 50).await?;
+        let pruned = storage
+            .prune_audit_before((AUDIT_BASE_TS + 50) * 1_000_000, 1_000)
+            .await?;
         let remaining = storage.query_audit(None, 0, u64::MAX, 1_000).await?;
 
         assert_eq!(pruned, 500);
@@ -215,12 +214,14 @@ fn audit_entry(index: usize) -> AuditEntry {
 }
 
 fn request_event(index: usize) -> RequestEvent {
+    let ts = REQUEST_EVENT_BASE_TS + (index / 10) as u64;
     RequestEvent {
-        ts: REQUEST_EVENT_BASE_TS + (index / 10) as u64,
+        ts,
+        ts_ms: Some(ts * 1_000),
         request_id: format!("req-{index:04}"),
+        event_id: Some(format!("event-{index:04}")),
         principal_id: Some("principal-a".to_owned()),
         principal_kind: Some("api_key".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
         input_tokens: Some(index as u64),

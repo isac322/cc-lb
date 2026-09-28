@@ -20,7 +20,8 @@ async fn events_recent_returns_empty_with_no_traffic() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
-    let (status, _, body, _) = authed_json(app(state), "GET", "/admin/events/recent", None).await;
+    let (status, _, body, _) =
+        authed_json(app(state), "GET", "/admin/v1/events/recent", None).await;
     assert_eq!(status, StatusCode::OK);
     let events = body["events"].as_array().expect("events array");
     assert_eq!(events.len(), 0);
@@ -33,7 +34,7 @@ async fn events_recent_accepts_limit_param() {
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) =
-        authed_json(app(state), "GET", "/admin/events/recent?limit=10", None).await;
+        authed_json(app(state), "GET", "/admin/v1/events/recent?limit=10", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["limit"], 10);
 }
@@ -43,7 +44,7 @@ async fn events_recent_rejects_invalid_limit() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (status, _, _) =
-        authed_bytes(app(state), "GET", "/admin/events/recent?limit=abc", None).await;
+        authed_bytes(app(state), "GET", "/admin/v1/events/recent?limit=abc", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -79,7 +80,7 @@ async fn events_recent_filters_by_upstream_id() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        &format!("/admin/events/recent?upstream_id={upstream_id}"),
+        &format!("/admin/v1/events/recent?upstream_id={upstream_id}"),
         None,
     )
     .await;
@@ -125,8 +126,13 @@ async fn events_recent_serializes_request_timings_without_losing_zero_or_fractio
     let state = test_state(Config::default(), Some(storage));
     let admin = app(state);
 
-    let (status, _, body, _) =
-        authed_json(admin.clone(), "GET", "/admin/events/recent?limit=1", None).await;
+    let (status, _, body, _) = authed_json(
+        admin.clone(),
+        "GET",
+        "/admin/v1/events/recent?limit=1",
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     let row = &body["events"][0];
@@ -203,7 +209,7 @@ async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
     let (status, _, first_page, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/recent?limit=1",
+        "/admin/v1/events/recent?limit=1",
         None,
     )
     .await;
@@ -213,7 +219,7 @@ async fn events_recent_uses_compound_cursor_for_same_timestamp_pages() {
     let (status, _, second_page, _) = authed_json(
         app(state),
         "GET",
-        "/admin/events/recent?limit=1&until_ts_ms=1800000000000&until_event_id=event-b",
+        "/admin/v1/events/recent?limit=1&until_ts_ms=1800000000000&until_event_id=event-b",
         None,
     )
     .await;
@@ -251,9 +257,9 @@ async fn events_recent_cursor_paginates_past_five_hundred_rows() {
     loop {
         let uri = match cursor.as_ref() {
             Some((ts_ms, event_id)) => format!(
-                "/admin/events/recent?limit=200&source_kind=all&until_ts_ms={ts_ms}&until_event_id={event_id}"
+                "/admin/v1/events/recent?limit=200&source_kind=all&until_ts_ms={ts_ms}&until_event_id={event_id}"
             ),
-            None => "/admin/events/recent?limit=200&source_kind=all".to_owned(),
+            None => "/admin/v1/events/recent?limit=200&source_kind=all".to_owned(),
         };
         let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
         assert_eq!(status, StatusCode::OK);
@@ -365,7 +371,7 @@ async fn events_recent_applies_each_filter_and_their_combination() {
         let (status, _, body, _) = authed_json(
             admin_app.clone(),
             "GET",
-            &format!("/admin/events/recent?limit=20&{query}"),
+            &format!("/admin/v1/events/recent?limit=20&{query}"),
             None,
         )
         .await;
@@ -384,7 +390,7 @@ async fn events_recent_applies_each_filter_and_their_combination() {
         admin_app,
         "GET",
         &format!(
-            "/admin/events/recent?limit=20&principal_id=principal-target&thread_id=thread-target&model=model-target&upstream_id={upstream_id}&status_class=4xx&source_kind=renewal"
+            "/admin/v1/events/recent?limit=20&principal_id=principal-target&thread_id=thread-target&model=model-target&upstream_id={upstream_id}&status_class=4xx&source_kind=renewal"
         ),
         None,
     )
@@ -408,7 +414,7 @@ async fn events_recent_rejects_unknown_event_kind() {
         let (status, _, body, _) = authed_json(
             admin_app.clone(),
             "GET",
-            &format!("/admin/events/recent?{query}"),
+            &format!("/admin/v1/events/recent?{query}"),
             None,
         )
         .await;
@@ -462,9 +468,9 @@ async fn events_recent_filters_by_event_kind() {
         ("", vec!["req-unclassified", "req-messages"]),
     ] {
         let uri = if query.is_empty() {
-            "/admin/events/recent?limit=20".to_owned()
+            "/admin/v1/events/recent?limit=20".to_owned()
         } else {
-            format!("/admin/events/recent?limit=20&{query}")
+            format!("/admin/v1/events/recent?limit=20&{query}")
         };
         let (status, _, body, _) = authed_json(admin_app.clone(), "GET", &uri, None).await;
         assert_eq!(status, StatusCode::OK, "{query}");
@@ -474,7 +480,7 @@ async fn events_recent_filters_by_event_kind() {
     let (status, _, body, _) = authed_json(
         admin_app,
         "GET",
-        "/admin/events/recent?limit=20&event_kind=messages",
+        "/admin/v1/events/recent?limit=20&event_kind=messages",
         None,
     )
     .await;
@@ -485,7 +491,7 @@ async fn events_recent_filters_by_event_kind() {
 #[tokio::test]
 async fn events_recent_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
-    let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/recent", None).await;
+    let (status, _, _) = authed_bytes(app(state), "GET", "/admin/v1/events/recent", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 

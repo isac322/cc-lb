@@ -83,7 +83,7 @@ fn shape_passthrough_echoes_request_via_wire_dispatch() {
     let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
 
     let out_bytes = dispatch
-        .call_shape(in_bytes.as_slice())
+        .call_shape_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
         .expect("shape call succeeds");
 
     let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());

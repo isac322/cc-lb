@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind,
-    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters,
+    MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind, RequestEventListQuery,
+    RequestEventStore, RequestEventStreamFilters,
 };
 use sqlx::Row;
 
@@ -15,10 +15,7 @@ async fn migrated_storage(name: &str) -> (tempfile::TempDir, cc_lb_storage_sqlit
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (temp_dir, storage)
 }
 
@@ -52,9 +49,9 @@ async fn insert_legacy_row(
     let event_id = format!("0193a7b8-1234-7e2f-9012-legacy{index:06}");
     sqlx::query(
         "INSERT INTO request_events_v1 \
-            (request_id, ts, event_type, source_kind, payload, event_id, \
-             cache_breakpoints, list_ts_ms, list_event_key, list_status, list_duration_ms) \
-         VALUES (?, ?, 'request', ?, ?, ?, '[]', ?, ?, 200, 10)",
+            (request_id, ts, source_kind, payload, event_id, \
+             list_ts_ms, list_event_key, list_status, list_duration_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 200, 10)",
     )
     .bind(format!("req-legacy-{index}"))
     .bind(ts as i64)

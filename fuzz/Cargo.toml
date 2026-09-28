@@ -8,22 +8,10 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-cc-lb-domain = { path = "../crates/cc-lb-domain" }
-axum = "0.8"
-bytes = "1"
 cc-lb-engine = { path = "../crates/cc-lb-engine" }
-cc-lb-upstream = { path = "../crates/cc-lb-upstream" }
-http = "1"
-http-body-util = "0.1"
-libfuzzer-sys = "0.4"
-tokio = { version = "1", features = ["rt", "time"] }
 
-[[bin]]
-name = "sse_wrapper"
-path = "fuzz_targets/sse_wrapper.rs"
-test = false
-doc = false
-bench = false
+http = "1"
+libfuzzer-sys = "0.4"
 
 [[bin]]
 name = "header_parser"

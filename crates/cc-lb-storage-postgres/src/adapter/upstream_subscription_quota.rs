@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     ChangeChannel, StorageError, StorageResult, SubscriptionQuotaBucket,
     SubscriptionQuotaCheckpointRange, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
     SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
@@ -61,7 +61,7 @@ impl UpstreamSubscriptionQuotaStore for PostgresStorage {
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>> {
+    ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
         if upstream_ids.is_empty() {
             return Ok(Vec::new());
         }

@@ -1,17 +1,20 @@
 use async_trait::async_trait;
 
 use crate::{
-    AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow, RequestEventHistogramBucket,
+    ApiKeyMutation, AuditEntry, AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow,
+    ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
+    PriceCatalogSnapshotFetch, RequestEvent, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RuntimeChangeNotifier, StorageError,
-    StorageResult,
+    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventListItem,
+    RequestEventListQuery, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery,
+    RequestEventProjections, RequestEventStreamFilters, RuntimeChangeNotifier, StorageError,
+    StorageResult, StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun,
+    UsageTokenInterval, UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
     organization_metadata::OrganizationMetadataStore,
     prompt_cache_observation::PromptCacheObservationStore,
-    types::*,
     upstream_affinity::UpstreamAffinityStore,
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
@@ -20,8 +23,6 @@ use crate::{
     },
     warmup_attempts::UpstreamWarmupAttemptStore,
 };
-
-pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 
 #[async_trait]
 pub trait AuditStore: Send + Sync {
@@ -43,7 +44,7 @@ pub trait AuditStore: Send + Sync {
     ) -> StorageResult<Vec<AuditEntry>>;
 
     /// Returns matching entries newest first, with newer insertions first on timestamp ties.
-    /// When `admin_only` is true, only entries with an admin action or kind are matched,
+    /// When `admin_only` is true, only entries with an admin action are matched,
     /// and that filter applies before `limit`.
     async fn query_recent_audit(
         &self,
@@ -63,19 +64,11 @@ pub trait AuditStore: Send + Sync {
         limit: usize,
     ) -> StorageResult<Vec<AuditEntry>>;
 
-    async fn prune_audit(&self, older_than: u64) -> StorageResult<u64>;
-
     async fn prune_audit_before(
         &self,
         cutoff_ts_x_1m: u64,
         batch_size: usize,
-    ) -> StorageResult<u64> {
-        let _ = cutoff_ts_x_1m;
-        let _ = batch_size;
-        Err(StorageError::Fatal {
-            message: "prune_audit_before is not implemented for this storage backend".to_owned(),
-        })
-    }
+    ) -> StorageResult<u64>;
 }
 
 #[async_trait]
@@ -228,8 +221,6 @@ pub trait CacheKeepaliveProjectionStore: Send + Sync {
 pub trait UsageRollupStore: Send + Sync {
     async fn rollup_usage_once(&self) -> StorageResult<UsageRollupRun>;
 
-    async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>>;
-
     /// CATEGORY-3: `UsageRollup.upstream_id` is the stable cross-table identity for quota joins;
     /// `upstream_name` is best-effort display data captured from the upstream's current name and
     /// may drift across renames.
@@ -251,11 +242,6 @@ pub trait UsageRollupStore: Send + Sync {
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>>;
-
-    async fn advance_rollup_checkpoint_and_persist(
-        &self,
-        run: &UsageRollupRun,
-    ) -> StorageResult<()>;
 }
 
 #[async_trait]
@@ -389,9 +375,7 @@ pub trait ConfigStore: Send + Sync {
 
 #[async_trait]
 pub trait MetaStore: Send + Sync {
-    async fn initialize(&self, requested: BackendKind) -> StorageResult<()>;
-
-    async fn contract_version(&self) -> StorageResult<u32>;
+    async fn initialize(&self) -> StorageResult<()>;
 
     async fn backend_kind(&self) -> StorageResult<BackendKind>;
 
@@ -435,17 +419,6 @@ pub trait PriceCatalogCache: Send + Sync {
         &self,
         current_hash: &str,
     ) -> StorageResult<PriceCatalogSnapshotFetch>;
-
-    async fn get_price_snapshot(&self) -> StorageResult<Option<PriceCatalogSnapshotRecord>> {
-        match self.get_price_snapshot_if_changed("").await? {
-            PriceCatalogSnapshotFetch::Missing => Ok(None),
-            PriceCatalogSnapshotFetch::Changed(record) => Ok(Some(record)),
-            PriceCatalogSnapshotFetch::Unchanged(_) => Err(StorageError::Corrupted {
-                message: "price catalog returned unchanged for an empty compatibility hash"
-                    .to_owned(),
-            }),
-        }
-    }
 }
 
 #[async_trait]
@@ -477,7 +450,6 @@ pub trait Storage:
     + ConfigStore
     + MetaStore
     + RuntimeChangeNotifier
-    + crate::PluginBlobRepo
     + OAuthPkceStore
     + Send
     + Sync
@@ -513,7 +485,6 @@ impl<T> Storage for T where
         + ConfigStore
         + MetaStore
         + RuntimeChangeNotifier
-        + crate::PluginBlobRepo
         + OAuthPkceStore
         + Send
         + Sync

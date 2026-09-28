@@ -93,7 +93,6 @@ INVENTORY_RECONCILIATION = {
         "auth_error_empty": ["api-read.json", "ui.json"],
     },
     "aliases": {
-        "audit": ["/admin/audit", "/admin/v1/audit"],
         "legacy_key_mutations": [
             "/admin/principals/{id}/keys/{key_id}/revoke",
             "/admin/principals/{id}/keys/{key_id}/disable",
@@ -122,8 +121,7 @@ GET_SIDE_EFFECTS = [
     {"id": "GET-AUDIT-CONFIG-EDITOR", "method": "GET", "path": "/admin/v1/config/editor", "effect": "appends config_editor_read Audit entry"},
     {"id": "GET-AUDIT-CONFIG-DRAFT-V1", "method": "GET", "path": "/admin/v1/config/draft", "effect": "appends config_draft_read Audit entry"},
     {"id": "GET-AUDIT-CONFIG-HISTORY-V1", "method": "GET", "path": "/admin/v1/config/history", "effect": "appends config_history_read Audit entry"},
-    {"id": "GET-AUDIT-AUDIT", "method": "GET", "path": "/admin/audit", "effect": "queries first, then appends audit_query; response does not contain its own new row"},
-    {"id": "GET-AUDIT-AUDIT-V1", "method": "GET", "path": "/admin/v1/audit", "effect": "same handler; queries first, then appends audit_query"},
+    {"id": "GET-AUDIT-AUDIT", "method": "GET", "path": "/admin/v1/audit", "effect": "queries first, then appends audit_query; response does not contain its own new row"},
     {"id": "GET-AUDIT-EVENT-DETAIL", "method": "GET", "path": "/admin/v1/events/detail/{event_id}", "effect": "appends request_event_detail_read Audit entry"},
     {"id": "GET-AUDIT-KEY-LIST", "method": "GET", "path": "/admin/v1/principals/{principal_id}/keys", "effect": "appends principal_keys_list Audit entry"},
 ]
@@ -180,7 +178,7 @@ COVERAGE_GROUPS: dict[str, list[dict[str, Any]]] = {
         {"id": "UI-SET-15", "method": "POST", "path": "/admin/v1/config/save", "fixture": "settings.validated_draft with current file fingerprint", "reset": "snapshot plus config file; restart only if saved settings were activated", "warning": "isolated instance only; atomic file save does not change running configuration"},
         {"id": "UI-SET-16", "method": "POST", "path": "/admin/v1/config/draft/download", "fixture": "settings.validated_draft", "reset": "snapshot for Audit entry; delete owned download", "warning": "TOML may contain credentials; do not publish the download"},
         {"id": "UI-SET-02/GET-side-effects", "method": "GET", "path": "/admin/v1/export and config/audit/detail/key reads", "fixture": "populated", "reset": "snapshot", "side_effect": "Audit writes listed in get_side_effects"},
-        {"id": "UI-AUD-01/UI-AUD-09", "method": "GET", "path": "/admin/audit", "fixture": "audit.seeded_history", "reset": "snapshot", "side_effect": "Audit query appends audit_query after selecting response rows"},
+        {"id": "UI-AUD-01/UI-AUD-09", "method": "GET", "path": "/admin/v1/audit", "fixture": "audit.seeded_history", "reset": "snapshot", "side_effect": "Audit query appends audit_query after selecting response rows"},
     ],
     "auth_error_empty": [
         {"id": "AUTH-401", "method": "any protected", "path": "/admin/v1/*", "fixture": "missing or wrong static token", "reset": "none", "ready": True},
@@ -1827,7 +1825,7 @@ def proof_fixture(args: argparse.Namespace) -> None:
     check("config-editor", "GET", "/admin/v1/config/editor")
     draft_state = check("config-draft", "GET", "/admin/v1/config/draft")
     check("config-history", "GET", "/admin/v1/config/history")
-    audit = check("audit-all", "GET", "/admin/audit?limit=1000")
+    audit = check("audit-all", "GET", "/admin/v1/audit?limit=1000")
     primary_id = fixtures.get("principal", {}).get("primary", {}).get("id")
     key_id = fixtures.get("key", {}).get("preexisting", {}).get("key_id")
     key_list = None

@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError, StorageResult,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
-    validate_identifier,
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
+    StoredApiKeyRecord, validate_identifier,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -156,7 +155,6 @@ async fn insert_record(
     key_id: &str,
     record: &StoredApiKeyRecord,
 ) -> StorageResult<()> {
-    let id = composite_id(principal_id, key_id);
     let limit_overrides = serde_json::to_string(&record.limit_overrides)?;
     let issued_at = u64_to_i64(record.issued_at_unix_secs, "issued_at_unix_secs")?;
     let expires_at = option_u64_to_i64(record.expires_at_unix_secs, "expires_at_unix_secs")?;
@@ -164,13 +162,11 @@ async fn insert_record(
 
     sqlx::query(
         "INSERT INTO managed_keys_v1 \
-         (id, name, secret_hash, created_at, expires_at, status, principal_id, key_id, label, \
+         (secret_hash, created_at, expires_at, status, principal_id, key_id, label, \
           revoked_at, verify_hash, secret_salt, limit_overrides, last_4, description, \
           index_hash, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&id)
-    .bind(&id)
     .bind(&record.key_hash_b64)
     .bind(issued_at)
     .bind(expires_at)
@@ -357,10 +353,6 @@ fn key_status_as_str(value: KeyStatus) -> &'static str {
         KeyStatus::Disabled => "disabled",
         KeyStatus::Revoked => "revoked",
     }
-}
-
-fn composite_id(principal_id: &str, key_id: &str) -> String {
-    format!("{principal_id}/{key_id}")
 }
 
 fn base64_url_no_pad(value: &[u8]) -> String {

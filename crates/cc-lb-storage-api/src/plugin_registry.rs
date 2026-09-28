@@ -67,12 +67,6 @@ pub trait PluginRegistryStore: Send + Sync {
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry>;
 
-    async fn update_supported_slots(
-        &self,
-        id: Uuid,
-        supported_slots: Vec<PluginSlotKind>,
-    ) -> StorageResult<()>;
-
     async fn delete_registry_entry(
         &self,
         id: Uuid,

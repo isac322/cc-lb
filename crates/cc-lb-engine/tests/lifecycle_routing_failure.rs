@@ -5,15 +5,14 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::StatusCode;
 use serde_json::Value;
@@ -30,7 +29,6 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = upstream_id(1);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let _dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-routing-failure.sqlite").await?);
@@ -42,10 +40,6 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
             calls: Arc::clone(&filter_calls),
         })],
         vec![upstream_record(upstream_id, "first")],
-        Arc::new(RecordingRouter {
-            calls: Arc::clone(&router_calls),
-            selected_id: Some(upstream_id),
-        }),
         state.clone(),
     )
     .with_event_bus(test_bus.bus_arc());
@@ -68,7 +62,6 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
         filter_calls.lock().expect("filter calls lock").as_slice(),
         &[vec![upstream_id]]
     );
-    assert!(router_calls.lock().expect("router calls lock").is_empty());
 
     let events = wait_for_events(storage.as_ref(), 1).await?;
     assert_eq!(events.len(), 1);
@@ -102,7 +95,7 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
 async fn wait_for_events(
     storage: &dyn RequestEventStore,
     expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
@@ -122,16 +115,15 @@ async fn sqlite_storage(
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
 fn lifecycle_with_pipeline(
     filters: Vec<Arc<dyn FilterPlugin>>,
     records: Vec<UpstreamRecord>,
-    router: Arc<dyn RouterPlugin>,
     state: TestState,
 ) -> Lifecycle {
     let principal_view = principal_view(filters);
@@ -142,7 +134,6 @@ fn lifecycle_with_pipeline(
     });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(router)
         .principal_view(principal_view)
         .upstream_records(records)
         .build();
@@ -151,7 +142,7 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -175,8 +166,6 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             enabled: true,
-            last_apply_error: None,
-            last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
             created_at_unix_secs: 0,
@@ -213,34 +202,6 @@ fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
 
 fn upstream_id(index: u128) -> Uuid {
     Uuid::from_u128(index)
-}
-
-struct RecordingRouter {
-    calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
-    selected_id: Option<Uuid>,
-}
-
-impl RouterPlugin for RecordingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.calls.lock().expect("router calls lock").push(
-            candidates
-                .iter()
-                .map(|candidate| candidate.upstream_id)
-                .collect(),
-        );
-        Ok(RouteDecision {
-            upstream_id: self.selected_id,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(common::PassthroughDialect {
-                base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            }),
-        })
-    }
 }
 
 struct KeepFilter {

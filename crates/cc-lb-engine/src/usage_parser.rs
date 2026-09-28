@@ -168,16 +168,13 @@ pub(crate) enum SseEventParseError {
 
 /// One SSE frame split into its borrowed event metadata and parsed JSON payload.
 ///
-/// The conformant joined payload is parsed once so usage, provider-error,
-/// affinity, and keepalive observers can share the same JSON tree. Only when a
-/// multiline payload is not valid joined JSON do we retain individually
-/// parseable data lines for compatibility with the legacy observers.
+/// The joined payload is parsed once so usage, provider-error, affinity, and
+/// keepalive observers can share the same JSON tree.
 #[derive(Debug)]
 pub(crate) struct ParsedSseEvent<'a> {
     event_name: Option<&'a [u8]>,
     named_error: bool,
     value: Result<Option<Value>, SseEventParseError>,
-    legacy_values: Vec<Value>,
 }
 
 impl ParsedSseEvent<'_> {
@@ -204,34 +201,18 @@ impl ParsedSseEvent<'_> {
             .map(Option::as_ref)
             .map_err(|error| *error)
     }
-
-    pub(crate) fn first_observed_value(&self) -> Option<&Value> {
-        match self.value() {
-            Ok(value) => value,
-            Err(_) => self.legacy_values.first(),
-        }
-    }
-
-    fn last_observed_value(&self) -> Option<&Value> {
-        match self.value() {
-            Ok(value) => value,
-            Err(_) => self.legacy_values.last(),
-        }
-    }
 }
 
 /// Parse one complete SSE frame.
 ///
 /// A single `data:` line is parsed directly from the input buffer. Multiline
-/// data allocates only for the required SSE newline joining. The legacy
-/// per-line compatibility values are parsed only if that joined payload fails.
+/// data allocates only for the required SSE newline joining.
 pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
     let Ok(text) = std::str::from_utf8(raw_event) else {
         return ParsedSseEvent {
             event_name: sse_event_name(raw_event),
             named_error: false,
             value: Err(SseEventParseError::InvalidData),
-            legacy_values: Vec::new(),
         };
     };
     let (event_name, named_error) = scan_sse_event_metadata(text);
@@ -241,7 +222,6 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
             event_name,
             named_error,
             value: Ok(None),
-            legacy_values: Vec::new(),
         };
     };
     let Some(second) = data_lines.next() else {
@@ -252,24 +232,10 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
                 .map(Some)
                 .map_err(|_| SseEventParseError::InvalidData)
         };
-        let legacy_values = if value.is_err() {
-            let legacy = first.trim_start();
-            if legacy.len() != first.len() {
-                sonic_rs::from_str::<Value>(legacy)
-                    .ok()
-                    .into_iter()
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
         return ParsedSseEvent {
             event_name,
             named_error,
             value,
-            legacy_values,
         };
     };
 
@@ -288,29 +254,16 @@ pub(crate) fn parse_sse_event(raw_event: &[u8]) -> ParsedSseEvent<'_> {
             .map(Some)
             .map_err(|_| SseEventParseError::InvalidData)
     };
-    let legacy_values = if value.is_err() {
-        text.split(['\r', '\n'])
-            .filter_map(legacy_sse_data_line)
-            .filter_map(|line| sonic_rs::from_str::<Value>(line).ok())
-            .collect()
-    } else {
-        Vec::new()
-    };
     ParsedSseEvent {
         event_name,
         named_error,
         value,
-        legacy_values,
     }
 }
 
 fn sse_data_line(line: &str) -> Option<&str> {
     line.strip_prefix("data:")
         .map(|data| data.strip_prefix(' ').unwrap_or(data))
-}
-
-fn legacy_sse_data_line(line: &str) -> Option<&str> {
-    line.strip_prefix("data:").map(str::trim_start)
 }
 
 fn scan_sse_event_metadata(text: &str) -> (Option<&[u8]>, bool) {
@@ -342,16 +295,8 @@ pub(crate) fn accumulate_sse_usage(
     usage: &mut UsageCounts,
 ) -> SseUsageUpdate {
     let mut update = SseUsageUpdate::default();
-    match event.value() {
-        Ok(Some(value)) => {
-            accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
-        }
-        Ok(None) => {}
-        Err(_) => {
-            for value in &event.legacy_values {
-                accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
-            }
-        }
+    if let Ok(Some(value)) = event.value() {
+        accumulate_sse_usage_value(value, event.event_name, usage, &mut update);
     }
     update
 }
@@ -479,7 +424,7 @@ pub(crate) fn observe_http_error_body(body: &[u8]) -> Option<CanonicalUpstreamEr
 /// Detect a mid-stream `event: error` (or `data: {"type":"error",...}`)
 /// emission. Returns the upstream error's `type` and `message` if found.
 pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<UpstreamStreamError> {
-    let value = event.last_observed_value()?;
+    let value = event.value().ok().flatten()?;
     let type_str = value.get("type").and_then(Value::as_str);
     if !event.named_error && type_str != Some("error") {
         return None;
@@ -495,7 +440,7 @@ pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<Upst
 /// `Some` only for `refusal` and `model_context_window_exceeded`; every other
 /// stop reason and every other event type returns `None`.
 pub(crate) fn detect_abnormal_stop(event: &ParsedSseEvent<'_>) -> Option<AbnormalStop> {
-    let value = event.last_observed_value()?;
+    let value = event.value().ok().flatten()?;
     if value.get("type").and_then(Value::as_str) != Some("message_delta") {
         return None;
     }
@@ -698,29 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn unicode_trim_legacy_observers_survive_while_affinity_stays_strict() {
-        let raw = "event: error\ndata:\u{a0}{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"unicode trim\"},\"usage\":{\"output_tokens\":23}}\n\n";
-        let event = parse_sse_event(raw.as_bytes());
-        let mut usage = UsageCounts::default();
-
-        let _ = accumulate_sse_usage(&event, &mut usage);
-        let error = detect_mid_stream_error(&event).expect("legacy trimmed error detected");
-
-        assert_eq!(event.value(), Err(SseEventParseError::InvalidData));
-        assert_eq!(usage.output_tokens, 23);
-        assert_eq!(error.error_type.as_deref(), Some("api_error"));
-        assert_eq!(error.error_message.as_deref(), Some("unicode trim"));
-        assert_eq!(
-            crate::upstream_affinity::extract_anthropic_web_search_affinity_keys_from_sse_event(
-                &event,
-                "principal-unicode",
-            ),
-            Err(crate::upstream_affinity::UpstreamAffinityExtractionError::InvalidSseData)
-        );
-    }
-
-    #[test]
-    fn later_error_event_name_preserves_legacy_error_classification() {
+    fn later_error_event_name_classifies_mid_stream_error() {
         let raw = "event: message_delta\nevent:\u{a0}error\u{a0}\ndata: {\"type\":\"message_delta\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"later named error\"}}\n\n";
         let event = parse_sse_event(raw.as_bytes());
 
@@ -729,22 +652,6 @@ mod tests {
         assert_eq!(event.event_name(), Some(b"message_delta".as_slice()));
         assert_eq!(error.error_type.as_deref(), Some("overloaded_error"));
         assert_eq!(error.error_message.as_deref(), Some("later named error"));
-    }
-
-    #[test]
-    fn invalid_joined_multiline_preserves_legacy_usage_and_last_error_value() {
-        let raw = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"legacy last\"},\"usage\":{\"output_tokens\":11}}\n\n";
-        let event = parse_sse_event(raw);
-        let mut usage = UsageCounts::default();
-
-        let update = accumulate_sse_usage(&event, &mut usage);
-        let error = detect_mid_stream_error(&event).expect("last parseable error detected");
-
-        assert_eq!(event.value(), Err(SseEventParseError::InvalidData));
-        assert!(!update.message_stop);
-        assert_eq!(usage.output_tokens, 11);
-        assert_eq!(error.error_type.as_deref(), Some("api_error"));
-        assert_eq!(error.error_message.as_deref(), Some("legacy last"));
     }
 
     #[test]

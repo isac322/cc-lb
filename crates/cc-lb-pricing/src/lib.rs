@@ -14,9 +14,7 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
-pub use cost::{
-    cache_creation_1h_micros_from_input, virtual_cost_micros, virtual_cost_micros_full,
-};
+pub use cost::{cache_creation_1h_micros_from_input, virtual_cost_micros_full};
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price, token_cost_micros};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
@@ -26,7 +24,7 @@ pub(crate) static GLOBAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 pub use lifecycle_pricing_subscriber::{
     PricingSubscriberHandle, spawn_lifecycle_pricing_subscriber,
 };
-pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError, PriceCatalogStatus};
+pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TierRate {
@@ -49,12 +47,6 @@ pub struct RoutingCachePricing {
     pub cache_creation_5m_per_million_usd: Option<UsdPerMillion>,
     pub cache_creation_1h_per_million_usd: Option<UsdPerMillion>,
     pub cache_read_per_million_usd: Option<UsdPerMillion>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CostEstimate {
-    pub micros_usd: Option<u64>,
-    pub pricing_status: PricingStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -88,16 +80,6 @@ impl ComputedCostBreakdown {
             cache_read_micros: 0,
             total_micros: 0,
             pricing_status: PricingStatus::Unknown,
-        }
-    }
-
-    pub fn into_estimate(self) -> CostEstimate {
-        CostEstimate {
-            micros_usd: match self.pricing_status {
-                PricingStatus::Known => Some(self.total_micros.max(0) as u64),
-                PricingStatus::Unknown => None,
-            },
-            pricing_status: self.pricing_status,
         }
     }
 }
@@ -136,16 +118,8 @@ impl UsdPerMillion {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpstreamKind {
-    AnthropicKey,
-    AnthropicOAuth,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CatalogStatus {
     Ok,
-    Stale,
     CostDisabled,
 }
 
@@ -199,13 +173,8 @@ impl PriceCatalog {
         self.snapshot.load_full()
     }
 
-    pub fn lookup(
-        &self,
-        model: &str,
-        upstream_kind: Option<UpstreamKind>,
-        service_tier: Option<&str>,
-    ) -> Option<Pricing> {
-        let normalized = normalize_model_id(model, upstream_kind);
+    pub fn lookup(&self, model: &str, service_tier: Option<&str>) -> Option<Pricing> {
+        let normalized = normalize_model_id(model);
         let mut pricing = self.current().models.get(&normalized).cloned()?;
         let tier = canonical_service_tier(service_tier);
         let resolved = resolve_tier_rate(&pricing, tier.as_deref());
@@ -219,7 +188,7 @@ impl PriceCatalog {
         model: &str,
         service_tier: Option<&str>,
     ) -> Option<RoutingCachePricing> {
-        let normalized = normalize_model_id(model, None);
+        let normalized = normalize_model_id(model);
         let snapshot = self.current();
         let pricing = snapshot.models.get(&normalized)?;
         let tier = canonical_service_tier(service_tier);
@@ -260,11 +229,10 @@ impl PriceCatalog {
         model: &str,
         max_input: u64,
         max_output: u64,
-        upstream_kind: Option<UpstreamKind>,
         service_tier: Option<&str>,
     ) -> Option<u64> {
-        let normalized = normalize_model_id(model, upstream_kind);
-        let Some(pricing) = self.lookup(model, upstream_kind, service_tier) else {
+        let normalized = normalize_model_id(model);
+        let Some(pricing) = self.lookup(model, service_tier) else {
             record_missing_price_field(&normalized, "model");
             return None;
         };
@@ -299,18 +267,7 @@ pub fn init_global_catalog(catalog: Arc<PriceCatalog>) -> Result<(), CatalogAlre
         .map_err(|_catalog| CatalogAlreadyInitialized)
 }
 
-pub fn pricing_for_model(model: &str) -> Option<Pricing> {
-    global_catalog().lookup(model, None, None)
-}
-
-pub fn pricing_for_model_with_kind(
-    model: &str,
-    upstream_kind: Option<UpstreamKind>,
-) -> Option<Pricing> {
-    global_catalog().lookup(model, upstream_kind, None)
-}
-
-pub fn normalize_model_id(model: &str, _upstream_kind: Option<UpstreamKind>) -> String {
+pub fn normalize_model_id(model: &str) -> String {
     match model {
         "claude-opus-4-8-20250514" => "claude-opus-4-8".to_owned(),
         _ => model.to_owned(),
@@ -359,25 +316,7 @@ mod tests {
     #[test]
     fn normalize_none_keeps_model_unchanged() {
         assert_eq!(
-            normalize_model_id("claude-3-5-sonnet-20241022", None),
-            "claude-3-5-sonnet-20241022"
-        );
-    }
-
-    #[test]
-    fn normalize_anthropic_kind_keeps_model_unchanged() {
-        assert_eq!(
-            normalize_model_id(
-                "claude-3-5-sonnet-20241022",
-                Some(UpstreamKind::AnthropicKey)
-            ),
-            "claude-3-5-sonnet-20241022"
-        );
-        assert_eq!(
-            normalize_model_id(
-                "claude-3-5-sonnet-20241022",
-                Some(UpstreamKind::AnthropicOAuth)
-            ),
+            normalize_model_id("claude-3-5-sonnet-20241022"),
             "claude-3-5-sonnet-20241022"
         );
     }
@@ -392,7 +331,7 @@ mod tests {
         ));
 
         assert_eq!(
-            catalog.lookup("claude-3-5-sonnet-20241022", None, None),
+            catalog.lookup("claude-3-5-sonnet-20241022", None),
             Some(inserted)
         );
     }
@@ -404,7 +343,7 @@ mod tests {
         catalog.install_snapshot(snapshot_with("claude-opus-4-8", inserted.clone()));
 
         assert_eq!(
-            catalog.lookup("claude-opus-4-8-20250514", None, None),
+            catalog.lookup("claude-opus-4-8-20250514", None),
             Some(inserted)
         );
     }
@@ -418,46 +357,8 @@ mod tests {
         ));
 
         assert_eq!(
-            catalog.estimate_max(
-                "claude-3-5-sonnet-20241022",
-                2_000_000,
-                1_000_000,
-                None,
-                None,
-            ),
+            catalog.estimate_max("claude-3-5-sonnet-20241022", 2_000_000, 1_000_000, None),
             Some(21_000_000)
-        );
-    }
-
-    #[test]
-    fn pricing_for_model_uses_populated_global_catalog() {
-        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
-        let model = "claude-3-5-haiku-20241022";
-        let inserted = pricing(model, 1, 5);
-        let snapshot = snapshot_with(model, inserted.clone());
-        let catalog = PriceCatalog::new_empty();
-        catalog.install_snapshot(snapshot.clone());
-        if init_global_catalog(catalog).is_err() {
-            global_catalog().install_snapshot(snapshot);
-        }
-
-        assert_eq!(pricing_for_model(model), Some(inserted));
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn virtual_cost_micros_deprecated_wrapper_still_estimates_known_model() {
-        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
-        let model = "claude-opus-4-1-20250805";
-        let inserted = pricing(model, 15, 75);
-        global_catalog().install_snapshot(snapshot_with(model, inserted));
-
-        assert_eq!(
-            virtual_cost_micros(model, 1_000_000, 2_000_000),
-            CostEstimate {
-                micros_usd: Some(165_000_000),
-                pricing_status: PricingStatus::Known,
-            }
         );
     }
 
@@ -466,13 +367,9 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
         global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
 
-        let breakdown = virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None, None);
+        let breakdown = virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None);
         assert_eq!(breakdown, ComputedCostBreakdown::unknown());
-        assert_eq!(breakdown.into_estimate().micros_usd, None);
-        assert_eq!(
-            breakdown.into_estimate().pricing_status,
-            PricingStatus::Unknown
-        );
+        assert_eq!(breakdown.pricing_status, PricingStatus::Unknown);
     }
 
     fn snapshot_with_cache_prices(
@@ -504,7 +401,7 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None, None);
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
         assert_eq!(breakdown.cache_creation_5m_micros, 3_750_000);
         assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
         assert_eq!(breakdown.total_micros, 9_750_000);
@@ -522,7 +419,7 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 0, 1_000_000, None, None);
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 0, 1_000_000, None);
         assert_eq!(breakdown.cache_read_micros, 300_000);
         assert_eq!(breakdown.cache_creation_5m_micros, 0);
         assert_eq!(breakdown.cache_creation_1h_micros, 0);
@@ -540,7 +437,7 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None, None);
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
         assert_eq!(breakdown.cache_creation_5m_micros, 0);
         assert_eq!(breakdown.cache_creation_1h_micros, 0);
         assert_eq!(breakdown.pricing_status, PricingStatus::Known);
@@ -557,33 +454,14 @@ mod tests {
             Some(UsdPerMillion::from_micros_usd(300_000)),
         ));
 
-        let breakdown = virtual_cost_micros_full(
-            model, 2_000_000, 1_000_000, 100_000, 200_000, 500_000, None, None,
-        );
+        let breakdown =
+            virtual_cost_micros_full(model, 2_000_000, 1_000_000, 100_000, 200_000, 500_000, None);
         let expected_sum = breakdown.input_micros
             + breakdown.output_micros
             + breakdown.cache_creation_5m_micros
             + breakdown.cache_creation_1h_micros
             + breakdown.cache_read_micros;
         assert_eq!(breakdown.total_micros, expected_sum);
-    }
-
-    #[test]
-    fn into_estimate_round_trips_total_when_known() {
-        let breakdown = ComputedCostBreakdown {
-            input_micros: 1,
-            output_micros: 2,
-            cache_creation_5m_micros: 3,
-            cache_creation_1h_micros: 4,
-            cache_read_micros: 5,
-            total_micros: 15,
-            pricing_status: PricingStatus::Known,
-        };
-        assert_eq!(breakdown.into_estimate().micros_usd, Some(15));
-        assert_eq!(
-            breakdown.into_estimate().pricing_status,
-            PricingStatus::Known
-        );
     }
 }
 

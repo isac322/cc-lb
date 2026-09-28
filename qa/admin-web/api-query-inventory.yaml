@@ -29,10 +29,10 @@
     - "It does not verify rendered reachability, runtime entity counts, pagination termination, polling cycles, SSE behavior, latency, or the deployed commit."
     - "TanStack Query cache hits and request coalescing can suppress a potential request occurrence at runtime; each item records the condition."
   "counts":
-    "total": 414
-    "ui_action": 214
+    "total": 398
+    "ui_action": 213
     "network_request": 155
-    "backend_endpoint": 45
+    "backend_endpoint": 30
 "coverage_dimensions":
   - "id": "theme"
     "kind": "finite_enum"
@@ -1537,7 +1537,7 @@
     "name": "Overview Dashboard Summary & Sparkline Metrics Query"
     "trigger_steps":
       - "OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d)"
-      - "useSummary hook executes GET /admin/dashboard/summary?range={range}"
+      - "useSummary hook executes GET /admin/v1/dashboard/summary?range={range}"
       - "Polls periodically every 5,000ms while window visible"
     "preconditions":
       - "Overview route active, authenticated"
@@ -1584,7 +1584,7 @@
     "name": "Overview Dashboard Summary & Sparkline Metrics Query — useSummary"
     "trigger_steps":
       - "OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d)"
-      - "useSummary hook executes GET /admin/dashboard/summary?range={range}"
+      - "useSummary hook executes GET /admin/v1/dashboard/summary?range={range}"
       - "Polls periodically every 5,000ms while window visible"
     "preconditions":
       - "Overview route active, authenticated"
@@ -1606,7 +1606,7 @@
       "line": 370
     "http":
       "method": "GET"
-      "path": "/admin/dashboard/summary"
+      "path": "/admin/v1/dashboard/summary"
       "path_bindings": []
       "query_fields":
         - "range"
@@ -1641,7 +1641,7 @@
     "name": "Overview Dashboard Principal Usage Query"
     "trigger_steps":
       - "OverviewPage mounts or time range toggle changes"
-      - "useUsage executes GET /admin/usage?range={range}&step={step}&group_by=principal&projection=totals"
+      - "useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals"
       - "Polls every 5,000ms while window visible"
     "preconditions":
       - "Overview route active, authenticated"
@@ -1688,7 +1688,7 @@
     "name": "Overview Dashboard Principal Usage Query — useUsage"
     "trigger_steps":
       - "OverviewPage mounts or time range toggle changes"
-      - "useUsage executes GET /admin/usage?range={range}&step={step}&group_by=principal&projection=totals"
+      - "useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals"
       - "Polls every 5,000ms while window visible"
     "preconditions":
       - "Overview route active, authenticated"
@@ -1710,7 +1710,7 @@
       "line": 382
     "http":
       "method": "GET"
-      "path": "/admin/usage"
+      "path": "/admin/v1/dashboard/usage"
       "path_bindings": []
       "query_fields":
         - "range"
@@ -2322,7 +2322,7 @@
       "line": 581
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "limit"
@@ -2410,7 +2410,7 @@
       "line": 581
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "limit"
@@ -2442,7 +2442,7 @@
     "name": "Live Tail SSE Connection"
     "trigger_steps":
       - "OverviewPage mounts"
-      - "useLiveEventStream opens EventSource to /admin/events/stream"
+      - "useLiveEventStream opens EventSource to /admin/v1/events/stream"
     "preconditions":
       - "Authenticated session, window online and active"
     "variants":
@@ -2485,7 +2485,7 @@
     "name": "Live Tail SSE Connection — createEventSource"
     "trigger_steps":
       - "OverviewPage mounts"
-      - "useLiveEventStream opens EventSource to /admin/events/stream"
+      - "useLiveEventStream opens EventSource to /admin/v1/events/stream"
     "preconditions":
       - "Authenticated session, window online and active"
     "variants":
@@ -2504,7 +2504,7 @@
       "line": 236
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields": []
       "body_fields": []
@@ -2643,7 +2643,7 @@
     "risk_tier": "read"
     "expected_ui": "Calls live.forceReconnect(), resetting reconnect counters and immediately initiating stream connect()"
     "polling": false
-    "client_only_reason": "Client connection state trigger (leads to GET /admin/events/stream)"
+    "client_only_reason": "Client connection state trigger (leads to GET /admin/v1/events/stream)"
     "source":
       "file": "crates/cc-lb-admin/web/src/components/LiveTailFailureBanner.tsx"
       "symbol": "onRetry"
@@ -2996,7 +2996,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "limit"
@@ -3092,7 +3092,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "principal_id"
@@ -3261,7 +3261,7 @@
     "component": "Principal Filter Dropdown"
     "name": "Select Principal Filter"
     "trigger_steps":
-      - "Open Principal LogSelect dropdown"
+      - "Open Principal filter Select dropdown"
       - "Select a specific principal or 'All principals'"
     "preconditions":
       - "Principal list loaded via usePrincipalNameMap"
@@ -3303,7 +3303,7 @@
     "component": "Principal Filter Dropdown"
     "name": "Select Principal Filter — useRecentEventsPage"
     "trigger_steps":
-      - "Open Principal LogSelect dropdown"
+      - "Open Principal filter Select dropdown"
       - "Select a specific principal or 'All principals'"
     "preconditions":
       - "Principal list loaded via usePrincipalNameMap"
@@ -3321,7 +3321,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "principal_id"
@@ -3352,7 +3352,7 @@
     "component": "Principal Filter Dropdown"
     "name": "Select Principal Filter — useLiveEventStream"
     "trigger_steps":
-      - "Open Principal LogSelect dropdown"
+      - "Open Principal filter Select dropdown"
       - "Select a specific principal or 'All principals'"
     "preconditions":
       - "Principal list loaded via usePrincipalNameMap"
@@ -3370,7 +3370,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "principal_id"
@@ -3403,7 +3403,7 @@
     "component": "Principal Filter Dropdown"
     "name": "Select Principal Filter — useEventsHistogram"
     "trigger_steps":
-      - "Open Principal LogSelect dropdown"
+      - "Open Principal filter Select dropdown"
       - "Select a specific principal or 'All principals'"
     "preconditions":
       - "Principal list loaded via usePrincipalNameMap"
@@ -3453,7 +3453,7 @@
     "component": "Upstream Filter Dropdown"
     "name": "Select Upstream Filter"
     "trigger_steps":
-      - "Open Upstream LogSelect dropdown"
+      - "Open Upstream filter Select dropdown"
       - "Select an upstream or 'All upstreams'"
     "preconditions":
       - "Upstreams loaded via useUpstreams"
@@ -3495,7 +3495,7 @@
     "component": "Upstream Filter Dropdown"
     "name": "Select Upstream Filter — useRecentEventsPage"
     "trigger_steps":
-      - "Open Upstream LogSelect dropdown"
+      - "Open Upstream filter Select dropdown"
       - "Select an upstream or 'All upstreams'"
     "preconditions":
       - "Upstreams loaded via useUpstreams"
@@ -3513,7 +3513,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "upstream_id"
@@ -3544,7 +3544,7 @@
     "component": "Upstream Filter Dropdown"
     "name": "Select Upstream Filter — useLiveEventStream"
     "trigger_steps":
-      - "Open Upstream LogSelect dropdown"
+      - "Open Upstream filter Select dropdown"
       - "Select an upstream or 'All upstreams'"
     "preconditions":
       - "Upstreams loaded via useUpstreams"
@@ -3562,7 +3562,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "upstream_id"
@@ -3595,7 +3595,7 @@
     "component": "Upstream Filter Dropdown"
     "name": "Select Upstream Filter — useEventsHistogram"
     "trigger_steps":
-      - "Open Upstream LogSelect dropdown"
+      - "Open Upstream filter Select dropdown"
       - "Select an upstream or 'All upstreams'"
     "preconditions":
       - "Upstreams loaded via useUpstreams"
@@ -3645,7 +3645,7 @@
     "component": "Session Filter Dropdown"
     "name": "Select Session Filter"
     "trigger_steps":
-      - "Open Session LogSelect dropdown"
+      - "Open Session filter Select dropdown"
       - "Select a session chip or 'All sessions'"
     "preconditions":
       - "Session list extracted from loaded rows"
@@ -3689,7 +3689,7 @@
     "component": "Session Filter Dropdown"
     "name": "Select Session Filter — useRecentEventsPage"
     "trigger_steps":
-      - "Open Session LogSelect dropdown"
+      - "Open Session filter Select dropdown"
       - "Select a session chip or 'All sessions'"
     "preconditions":
       - "Session list extracted from loaded rows"
@@ -3708,7 +3708,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "thread_id"
@@ -3739,7 +3739,7 @@
     "component": "Session Filter Dropdown"
     "name": "Select Session Filter — useLiveEventStream"
     "trigger_steps":
-      - "Open Session LogSelect dropdown"
+      - "Open Session filter Select dropdown"
       - "Select a session chip or 'All sessions'"
     "preconditions":
       - "Session list extracted from loaded rows"
@@ -3758,7 +3758,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "thread_id"
@@ -3791,7 +3791,7 @@
     "component": "Session Filter Dropdown"
     "name": "Select Session Filter — useEventsHistogram"
     "trigger_steps":
-      - "Open Session LogSelect dropdown"
+      - "Open Session filter Select dropdown"
       - "Select a session chip or 'All sessions'"
     "preconditions":
       - "Session list extracted from loaded rows"
@@ -3905,7 +3905,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "model"
@@ -3955,7 +3955,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "model"
@@ -4039,7 +4039,7 @@
     "component": "Status Class Filter Dropdown"
     "name": "Select Status Class Filter"
     "trigger_steps":
-      - "Open Status LogSelect dropdown"
+      - "Open Status filter Select dropdown"
       - "Select 2xx, 3xx, 4xx, 5xx or 'All statuses'"
     "preconditions":
       - "None"
@@ -4087,7 +4087,7 @@
     "component": "Status Class Filter Dropdown"
     "name": "Select Status Class Filter — useRecentEventsPage"
     "trigger_steps":
-      - "Open Status LogSelect dropdown"
+      - "Open Status filter Select dropdown"
       - "Select 2xx, 3xx, 4xx, 5xx or 'All statuses'"
     "preconditions":
       - "None"
@@ -4108,7 +4108,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "status_class"
@@ -4139,7 +4139,7 @@
     "component": "Status Class Filter Dropdown"
     "name": "Select Status Class Filter — useLiveEventStream"
     "trigger_steps":
-      - "Open Status LogSelect dropdown"
+      - "Open Status filter Select dropdown"
       - "Select 2xx, 3xx, 4xx, 5xx or 'All statuses'"
     "preconditions":
       - "None"
@@ -4160,7 +4160,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "status_class"
@@ -4193,7 +4193,7 @@
     "component": "Status Class Filter Dropdown"
     "name": "Select Status Class Filter — useEventsHistogram"
     "trigger_steps":
-      - "Open Status LogSelect dropdown"
+      - "Open Status filter Select dropdown"
       - "Select 2xx, 3xx, 4xx, 5xx or 'All statuses'"
     "preconditions":
       - "None"
@@ -4246,7 +4246,7 @@
     "component": "Source Kind Filter Dropdown"
     "name": "Select Source Kind Filter"
     "trigger_steps":
-      - "Open Kind LogSelect dropdown"
+      - "Open Kind filter Select dropdown"
       - "Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'"
     "preconditions":
       - "None"
@@ -4290,7 +4290,7 @@
     "component": "Source Kind Filter Dropdown"
     "name": "Select Source Kind Filter — useRecentEventsPage"
     "trigger_steps":
-      - "Open Kind LogSelect dropdown"
+      - "Open Kind filter Select dropdown"
       - "Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'"
     "preconditions":
       - "None"
@@ -4309,7 +4309,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "source_kind"
@@ -4340,7 +4340,7 @@
     "component": "Source Kind Filter Dropdown"
     "name": "Select Source Kind Filter — useLiveEventStream"
     "trigger_steps":
-      - "Open Kind LogSelect dropdown"
+      - "Open Kind filter Select dropdown"
       - "Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'"
     "preconditions":
       - "None"
@@ -4359,7 +4359,7 @@
       "line": 270
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "source_kind"
@@ -4392,7 +4392,7 @@
     "component": "Source Kind Filter Dropdown"
     "name": "Select Source Kind Filter — useEventsHistogram"
     "trigger_steps":
-      - "Open Kind LogSelect dropdown"
+      - "Open Kind filter Select dropdown"
       - "Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'"
     "preconditions":
       - "None"
@@ -4517,7 +4517,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "since_unix_secs"
@@ -4670,7 +4670,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "since_unix_secs"
@@ -4840,7 +4840,7 @@
       "line": 692
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "limit"
@@ -4962,7 +4962,7 @@
       "line": 662
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "limit"
@@ -5097,7 +5097,7 @@
       "line": 622
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "since_unix_secs"
@@ -5576,7 +5576,7 @@
     "atomic_request_ids":
       - "REQ-SRC-B1BE83CDD51E"
     "risk_tier": "read"
-    "expected_ui": "Calls forceReconnect(); attempts fresh connection to /admin/events/stream; resets failure counter on success"
+    "expected_ui": "Calls forceReconnect(); attempts fresh connection to /admin/v1/events/stream; resets failure counter on success"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
@@ -5606,7 +5606,7 @@
     "scope": "once"
     "iteration_source": "Failure banner action"
     "risk_tier": "read"
-    "expected_ui": "Calls forceReconnect(); attempts fresh connection to /admin/events/stream; resets failure counter on success"
+    "expected_ui": "Calls forceReconnect(); attempts fresh connection to /admin/v1/events/stream; resets failure counter on success"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/lib/useLiveEventStream.ts"
@@ -5614,7 +5614,7 @@
       "line": 436
     "http":
       "method": "GET"
-      "path": "/admin/events/stream"
+      "path": "/admin/v1/events/stream"
       "path_bindings": []
       "query_fields":
         - "principal_id"
@@ -5867,50 +5867,6 @@
       "file": "crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.tsx"
       "symbol": "LatencyTimeline"
       "line": 962
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "UI-LOG-31"
-    "aliases": []
-    "entry_type": "ui_action"
-    "source_id": "components/ui/usage/PieChart.tsx#PieChart:slice_interaction"
-    "category": "logs"
-    "page": "Logs"
-    "component": "Token & Cost Donut Charts"
-    "name": "Pie Slice Hover and Sticky Click"
-    "trigger_steps":
-      - "Hover over slice in TokenPie or CostPie donut chart"
-      - "Click slice to lock sticky focus"
-    "preconditions":
-      - "Event has non-zero tokens or cost"
-    "variants":
-      - "Input tokens"
-      - "Output tokens"
-      - "Cache creation tokens"
-      - "Cache read tokens"
-      - "Thinking tokens"
-    "scope": "each_row"
-    "iteration_source": "Token/cost categories present on event"
-    "coverage":
-      "kind": "runtime_population"
-      "source": "Token/cost categories present on event"
-      "variants":
-        - "Input tokens"
-        - "Output tokens"
-        - "Cache creation tokens"
-        - "Cache read tokens"
-        - "Thinking tokens"
-    "atomic_request_ids": []
-    "risk_tier": "read"
-    "expected_ui": "Center text changes to show selected slice label, count, and percentage; clicking applies white border stroke to slice"
-    "polling": "not_applicable"
-    "client_only_reason": "Client-side SVG path onMouseEnter/onClick state manipulation"
-    "source":
-      "file": "crates/cc-lb-admin/web/src/components/ui/usage/PieChart.tsx"
-      "symbol": "PieChart"
-      "line": 154
     "source_reconciled": true
     "runtime_status": "runtime_pending"
     "production_applicability":
@@ -6893,7 +6849,7 @@
       "line": 476
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "principal_id"
@@ -11719,7 +11675,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -11864,7 +11820,7 @@
     "atomic_request_ids":
       - "UI-AUD-05"
     "risk_tier": "read"
-    "expected_ui": "Re-queries GET /admin/audit with current search parameters"
+    "expected_ui": "Re-queries GET /admin/v1/audit with current search parameters"
     "polling": "not_applicable"
     "client_only_reason": null
     "source":
@@ -11894,7 +11850,7 @@
     "scope": "once"
     "iteration_source": "Single execution"
     "risk_tier": "read_with_audit"
-    "expected_ui": "Re-queries GET /admin/audit with current search parameters"
+    "expected_ui": "Re-queries GET /admin/v1/audit with current search parameters"
     "polling": "not_applicable"
     "source":
       "file": "crates/cc-lb-admin/web/src/routes/audit.tsx"
@@ -11902,7 +11858,7 @@
       "line": 210
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -11993,7 +11949,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12170,7 +12126,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12265,7 +12221,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12361,7 +12317,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12448,7 +12404,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12532,7 +12488,7 @@
       "line": 724
     "http":
       "method": "GET"
-      "path": "/admin/audit"
+      "path": "/admin/v1/audit"
       "path_bindings": []
       "query_fields":
         - "limit=200"
@@ -12882,7 +12838,7 @@
       "line": 382
     "http":
       "method": "GET"
-      "path": "/admin/usage"
+      "path": "/admin/v1/dashboard/usage"
       "path_bindings": []
       "query_fields":
         - "range"
@@ -13862,7 +13818,7 @@
       "line": 382
     "http":
       "method": "GET"
-      "path": "/admin/usage"
+      "path": "/admin/v1/dashboard/usage"
       "path_bindings": []
       "query_fields":
         - "range"
@@ -15447,7 +15403,7 @@
       "line": 476
     "http":
       "method": "GET"
-      "path": "/admin/events/recent"
+      "path": "/admin/v1/events/recent"
       "path_bindings": []
       "query_fields":
         - "upstream_id"
@@ -16307,10 +16263,10 @@
       - "partially populated actor metadata"
       - "legacy row with actor metadata absent"
     "scope": "each_row"
-    "iteration_source": "Every row returned by GET /admin/audit"
+    "iteration_source": "Every row returned by GET /admin/v1/audit"
     "coverage":
       "kind": "runtime_population"
-      "source": "Every row returned by GET /admin/audit"
+      "source": "Every row returned by GET /admin/v1/audit"
       "variants":
         - "all actor fields populated"
         - "partially populated actor metadata"
@@ -17502,563 +17458,6 @@
     "production_applicability":
       "status": "available"
       "reason": null
-  - "id": "API-SRC-15D90407F542"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "query_audit"
-    "name": "GET /admin/v1/audit"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/audit"
-      "parameters":
-        "path": []
-        "query":
-          - "principal_id"
-          - "since"
-          - "after"
-          - "until"
-          - "limit"
-          - "actor_authority"
-          - "actor_subject"
-          - "admin_only"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read_with_audit"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:48"
-    "api_handler": "query_audit"
-    "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)"
-    "storage_operation_ids":
-      - "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit"
-      - "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit"
-      - "sqlite:AuditStore::append_audit:SqliteStorage::append_audit"
-      - "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-    "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL."
-    "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-C2E19B96F128"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "crate::dashboard_routes::handle_dashboard_summary"
-    "name": "GET /admin/v1/dashboard/summary"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/dashboard/summary"
-      "parameters":
-        "path": []
-        "query":
-          - "range"
-        "header":
-          - "if-none-match"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:64"
-    "api_handler": "crate::dashboard_routes::handle_dashboard_summary"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint"
-      - "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint"
-      - "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-      - "sqlite:UsageRollupStore::query_overview_excluded_error_buckets_in_range:SqliteStorage::query_overview_excluded_error_buckets_in_range"
-      - "postgres:UsageRollupStore::query_overview_excluded_error_buckets_in_range:PostgresStorage::query_overview_excluded_error_buckets_in_range"
-    "cache_or_no_query": "Reads usage-rollup checkpoint for weak ETag/304, then usage rollups and overview-excluded error buckets when a body is required."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-6272C4C4303C"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "crate::dashboard_routes::handle_dashboard_usage"
-    "name": "GET /admin/v1/dashboard/usage"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/dashboard/usage"
-      "parameters":
-        "path": []
-        "query":
-          - "range"
-          - "group_by"
-          - "step"
-          - "upstream_id"
-          - "projection"
-        "header":
-          - "if-none-match"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:68"
-    "api_handler": "crate::dashboard_routes::handle_dashboard_usage"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint"
-      - "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint"
-      - "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-      - "sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs"
-      - "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs"
-    "cache_or_no_query": "Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-17E768052C98"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_dashboard_usage"
-    "name": "GET /admin/dashboard/usage"
-    "http":
-      "method": "GET"
-      "path": "/admin/dashboard/usage"
-      "parameters":
-        "path": []
-        "query":
-          - "range"
-          - "group_by"
-          - "step"
-          - "upstream_id"
-          - "projection"
-        "header":
-          - "if-none-match"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/dashboard_routes.rs:29"
-    "api_handler": "handle_dashboard_usage"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint"
-      - "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint"
-      - "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-      - "sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs"
-      - "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs"
-    "cache_or_no_query": "Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-393CB1B46201"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "crate::events_routes::handle_recent_events"
-    "name": "GET /admin/v1/events/recent"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/events/recent"
-      "parameters":
-        "path": []
-        "query":
-          - "since_unix_secs"
-          - "until_unix_secs"
-          - "until_ts_ms"
-          - "until_event_id"
-          - "limit"
-          - "principal_id"
-          - "thread_id"
-          - "model"
-          - "upstream"
-          - "upstream_id"
-          - "status_class"
-          - "source_kind"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:72"
-    "api_handler": "crate::events_routes::handle_recent_events"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:RequestEventStore::list_request_events:SqliteStorage::list_request_events"
-      - "postgres:RequestEventStore::list_request_events:PostgresStorage::list_request_events"
-    "cache_or_no_query": "Dynamic query builder branching based on filters: principal_id, thread_id, model, upstream, status_class, source_kind. Keysets: until_ts_ms, until_event_id"
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-220A728FB03F"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "crate::events_routes::handle_events_histogram"
-    "name": "GET /admin/events/histogram"
-    "http":
-      "method": "GET"
-      "path": "/admin/events/histogram"
-      "parameters":
-        "path": []
-        "query":
-          - "since_unix_secs"
-          - "until_unix_secs"
-          - "bucket_ms"
-          - "principal_id"
-          - "thread_id"
-          - "model"
-          - "upstream"
-          - "upstream_id"
-          - "status_class"
-          - "source_kind"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:80"
-    "api_handler": "crate::events_routes::handle_events_histogram"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:RequestEventStore::request_event_histogram:SqliteStorage::request_event_histogram"
-      - "postgres:RequestEventStore::request_event_histogram:PostgresStorage::request_event_histogram"
-    "cache_or_no_query": "Computes time buckets and rejects requests exceeding MAX_HISTOGRAM_BUCKETS=240."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-149FAC449949"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_events_delta"
-    "name": "GET /admin/events/delta"
-    "http":
-      "method": "GET"
-      "path": "/admin/events/delta"
-      "parameters":
-        "path": []
-        "query":
-          - "since_cursor"
-          - "limit"
-          - "principal_id"
-          - "thread_id"
-          - "model"
-          - "upstream"
-          - "upstream_id"
-          - "status_class"
-          - "source_kind"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/events_routes.rs:52"
-    "api_handler": "handle_events_delta"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor"
-      - "postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor"
-      - "sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors"
-      - "postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors"
-    "cache_or_no_query": "Reads a storage cursor and cursor-bounded page. build_delta_events_payload in the admin layer then applies residual filters in memory (including excluding renewal source_kind by default); exhausted is computed from the pre-filter row count."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-07C82F02A23B"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "crate::events_routes::handle_events_stream"
-    "name": "GET /admin/v1/events/stream"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/events/stream"
-      "parameters":
-        "path": []
-        "query":
-          - "principal_id"
-          - "thread_id"
-          - "model"
-          - "upstream"
-          - "upstream_id"
-          - "status_class"
-          - "source_kind"
-        "header":
-          - "last-event-id"
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:88"
-    "api_handler": "crate::events_routes::handle_events_stream"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor"
-      - "postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor"
-      - "sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors"
-      - "postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors"
-    "cache_or_no_query": "SSE: reads the current cursor and performs one reconnect backfill bounded by BACKFILL_MAX_EVENTS=500; reaching the cap emits a backfill-cap reset, otherwise delivery continues from in-memory event-bus/storage-tail broadcasts with heartbeats."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-FC8E60B994F7"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_latest"
-    "name": "GET /admin/subscription-quotas/latest"
-    "http":
-      "method": "GET"
-      "path": "/admin/subscription-quotas/latest"
-      "parameters":
-        "path": []
-        "query":
-          - "upstream_ids"
-          - "windows"
-          - "source"
-          - "max_staleness_secs"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:50"
-    "api_handler": "handle_latest"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-    "cache_or_no_query": "Reads upstream records for names/filtering; quota snapshots come from the in-memory dynamic subscription-quota cache."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-063C7455BC4D"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_series"
-    "name": "GET /admin/subscription-quotas/series"
-    "http":
-      "method": "GET"
-      "path": "/admin/subscription-quotas/series"
-      "parameters":
-        "path": []
-        "query":
-          - "upstream_ids"
-          - "windows"
-          - "source"
-          - "since_unix_secs"
-          - "until_unix_secs"
-          - "bucket_secs"
-          - "max_points_per_series"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:52"
-    "api_handler": "handle_series"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-      - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints"
-      - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
-    "cache_or_no_query": "Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-B19EB1F130F2"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_aggregate"
-    "name": "GET /admin/subscription-quotas/aggregate"
-    "http":
-      "method": "GET"
-      "path": "/admin/subscription-quotas/aggregate"
-      "parameters":
-        "path": []
-        "query":
-          - "upstream_ids"
-          - "windows"
-          - "source"
-          - "max_staleness_secs"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:57"
-    "api_handler": "handle_aggregate"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UpstreamStore::list:SqliteStorage::list"
-      - "postgres:UpstreamStore::list:PostgresStorage::list"
-      - "sqlite:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:SqliteStorage::list_upstream_subscription_metadata"
-      - "postgres:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:PostgresStorage::list_upstream_subscription_metadata"
-      - "sqlite:OrganizationMetadataStore::list_organization_metadata:SqliteStorage::list_organization_metadata"
-      - "postgres:OrganizationMetadataStore::list_organization_metadata:PostgresStorage::list_organization_metadata"
-      - "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:SqliteStorage::list_subscription_quota_provider_lots"
-      - "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:PostgresStorage::list_subscription_quota_provider_lots"
-      - "sqlite:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:SqliteStorage::sum_usage_tokens_for_intervals"
-      - "postgres:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:PostgresStorage::sum_usage_tokens_for_intervals"
-    "cache_or_no_query": "Reads upstreams, subscription/organization metadata, provider-lot checkpoint history, and usage-rollup token sums for generated intervals; current quota candidates also come from the in-memory dynamic cache."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-155F19B11A2E"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "handle_pool_history"
-    "name": "GET /admin/subscription-quotas/pool-history"
-    "http":
-      "method": "GET"
-      "path": "/admin/subscription-quotas/pool-history"
-      "parameters":
-        "path": []
-        "query":
-          - "windows"
-          - "since_unix_secs"
-          - "until_unix_secs"
-          - "series_projection"
-          - "max_points_per_series"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:65"
-    "api_handler": "handle_pool_history"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:SqliteStorage::list_latest_pool_quota_snapshot_summaries"
-      - "postgres:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:PostgresStorage::list_latest_pool_quota_snapshot_summaries"
-      - "sqlite:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:SqliteStorage::list_pool_quota_snapshot_summaries_in_range"
-      - "postgres:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:PostgresStorage::list_pool_quota_snapshot_summaries_in_range"
-      - "sqlite:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:SqliteStorage::list_pool_quota_chart_points_in_range"
-      - "postgres:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:PostgresStorage::list_pool_quota_chart_points_in_range"
-    "cache_or_no_query": "Always reads latest pooled summaries; series_projection=full reads raw summary rows, while chart reads raw or bucketed chart projections."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
   - "id": "API-SYS-04"
     "aliases": []
     "entry_type": "backend_endpoint"
@@ -18286,125 +17685,6 @@
       - "sqlite:PrincipalStore::get_by_id:SqliteStorage::get_by_id"
       - "postgres:PrincipalStore::get_by_id:PostgresStorage::get_by_id"
     "cache_or_no_query": "Includes ETag header W/\"{revision}\""
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-5E670B98E5A2"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "principal_usage"
-    "name": "GET /admin/principals/{id}/usage"
-    "http":
-      "method": "GET"
-      "path": "/admin/principals/{id}/usage"
-      "parameters":
-        "path":
-          - "id"
-        "query":
-          - "range"
-          - "step"
-          - "group_by"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:26"
-    "api_handler": "principal_usage"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-    "cache_or_no_query": "Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-BC21CB4F90EC"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "principal_usage"
-    "name": "GET /admin/v1/principals/{id}/usage"
-    "http":
-      "method": "GET"
-      "path": "/admin/v1/principals/{id}/usage"
-      "parameters":
-        "path":
-          - "id"
-        "query":
-          - "range"
-          - "step"
-          - "group_by"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:28"
-    "api_handler": "principal_usage"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids":
-      - "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range"
-      - "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-    "cache_or_no_query": "Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory."
-    "side_effects": "None"
-    "source_reconciled": true
-    "runtime_status": "runtime_pending"
-    "production_applicability":
-      "status": "available"
-      "reason": null
-  - "id": "API-SRC-B7C3EDE0843A"
-    "aliases": []
-    "entry_type": "backend_endpoint"
-    "category": "backend_only"
-    "page": "Backend-Only"
-    "component": "principal_limits"
-    "name": "GET /admin/principals/{id}/limits"
-    "http":
-      "method": "GET"
-      "path": "/admin/principals/{id}/limits"
-      "parameters":
-        "path":
-          - "id"
-        "query":
-          - "identity"
-        "header": []
-        "body": []
-    "trigger_steps":
-      - "Direct API, operator, scheduler, health probe, or internal service caller"
-    "preconditions":
-      - "require_admin_auth middleware"
-    "variants": []
-    "scope": "backend_only"
-    "iteration_source": "not_applicable"
-    "risk_tier": "read"
-    "expected_ui": "No Admin Web caller. Validate through the authorized backend-only QA path."
-    "source": "crates/cc-lb-admin/src/routes.rs:27"
-    "api_handler": "principal_limits"
-    "auth": "require_admin_auth middleware"
-    "storage_operation_ids": []
-    "cache_or_no_query": "PURE IN-MEMORY PATH: reads dynamic_view.principal_view and takes an in-memory snapshot via state.limit_engine.snapshot_for_principal"
     "side_effects": "None"
     "source_reconciled": true
     "runtime_status": "runtime_pending"
@@ -19414,7 +18694,6 @@
   - "UI-LOG-28"
   - "UI-LOG-29"
   - "UI-LOG-30"
-  - "UI-LOG-31"
   - "UI-LOG-26"
   - "UI-SRC-00BD57E4D253"
   - "UI-PR-01"
@@ -19657,27 +18936,12 @@
   - "API-SRC-276F2E8B8B8D"
   - "API-SRC-7A787CD5C3CF"
   - "API-SYS-02"
-  - "API-SRC-15D90407F542"
-  - "API-SRC-C2E19B96F128"
-  - "API-SRC-6272C4C4303C"
-  - "API-SRC-17E768052C98"
-  - "API-SRC-393CB1B46201"
-  - "API-SRC-220A728FB03F"
-  - "API-SRC-149FAC449949"
-  - "API-SRC-07C82F02A23B"
-  - "API-SRC-FC8E60B994F7"
-  - "API-SRC-063C7455BC4D"
-  - "API-SRC-B19EB1F130F2"
-  - "API-SRC-155F19B11A2E"
   - "API-SYS-04"
   - "API-SYS-03"
   - "API-SRC-BD965DDC38E0"
   - "API-SRC-8895068281DE"
   - "API-SRC-166291C6FB8A"
   - "API-SRC-4B568BB20E22"
-  - "API-SRC-5E670B98E5A2"
-  - "API-SRC-BC21CB4F90EC"
-  - "API-SRC-B7C3EDE0843A"
   - "API-SRC-7E55E35928A2"
   - "API-SRC-92FD477750A5"
   - "API-SRC-7383936FE537"
@@ -26423,7 +25687,7 @@
     "latest_behavior": "Returns simplified status object containing only version, git_sha, rust_version, profile, target, uptime_secs, replica_id, generation, upstreams."
     "impact": "Clients expecting killswitch, principals, or restart_required_changes in /admin/v1/status receive undefined in latest."
   - "classification": "changed_since_deploy"
-    "target": "GET /admin/audit and GET /admin/v1/audit"
+    "target": "GET /admin/v1/audit"
     "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement."
     "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization."
     "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
@@ -26469,7 +25733,7 @@
     "latest_behavior": "Table has 3 columns: Revision, Applied, TLS."
     "impact": "UI columns removed to match backend HistorySummary simplification."
   - "classification": "changed_since_deploy"
-    "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)"
+    "target": "GET /admin/v1/audit (result ordering)"
     "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor."
     "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler."
     "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed."
@@ -26649,13 +25913,6 @@
     "description": "CommandPalette.tsx lists Overview, Upstreams, Principals, Plugins, Logs, and Settings in the Pages group, but omits the /audit route, even though it exists in Sidebar.tsx."
     "evidence": "crates/cc-lb-admin/web/src/components/CommandPalette.tsx:77-101 vs crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx:18"
   - "source_contract": "Global"
-    "gap_id": "GAP-OV-01"
-    "category": "overview"
-    "severity": "high"
-    "title": "Usage endpoint path mismatch"
-    "description": "The legacy inventory documented GET /admin/dashboard/usage for UI-OV-02. The actual codebase requests GET /admin/usage with query parameters range, step, group_by=principal, and projection=totals."
-    "evidence": "crates/cc-lb-admin/web/src/lib/queries.ts:406"
-  - "source_contract": "Global"
     "gap_id": "GAP-OV-02"
     "category": "overview"
     "severity": "high"
@@ -26673,7 +25930,7 @@
     "gap_id": "GAP-LOGS-1"
     "description": "SSE reconnect delta query (/admin/v1/events/delta) is only called when lastCursor is known and resumeNeedsBackfill is true. If connection drops on initial load before any event arrives, it reconnects directly without backfill."
     "risk": "low"
-    "mitigation": "Verified: tested in useLiveEventStream tests; initial cursor null connects directly to /admin/events/stream."
+    "mitigation": "Verified: tested in useLiveEventStream tests; initial cursor null connects directly to /admin/v1/events/stream."
   - "source_contract": "Logs"
     "gap_id": "GAP-LOGS-2"
     "description": "Model filter is debounced by 300ms in client. Fast typing will not issue network requests per keystroke, but typing rapidly across the 300ms boundary produces sequential queries."
@@ -26739,7 +25996,7 @@
     "gap_id": "GAP-AUD-02"
     "id": "GAP-AUD-02"
     "title": "Audit Client-Side Admin Action Filtering"
-    "description": "GET /admin/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view."
+    "description": "GET /admin/v1/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view."
     "resolution": "Documented in audit renderRows filtering logic."
   - "source_contract": "Upstreams"
     "gap_id": "GAP-UPSTREAMS-1"
@@ -26748,13 +26005,6 @@
     "file": "crates/cc-lb-admin/web/src/components/upstreams/warmup/WarmupCardMinimal.tsx"
     "line": 698
     "description": "WarmupConfigModal is conditionally rendered when pluginSnapshot exists with open={configOpen}, but configOpen is initialized to false and no button or interaction anywhere in WarmupCardMinimal or the UI ever calls setConfigOpen(true). It is an unreachable dead modal in production."
-  - "source_contract": "Upstreams"
-    "gap_id": "GAP-UPSTREAMS-2"
-    "type": "unreferenced_dead_component"
-    "component": "WarmupRecentStrip"
-    "file": "crates/cc-lb-admin/web/src/components/upstreams/warmup/parts/WarmupRecentStrip.tsx"
-    "line": 31
-    "description": "WarmupRecentStrip is exported in parts/WarmupRecentStrip.tsx but is never imported or rendered by any component or route in the entire admin web application."
   - "source_contract": "Upstreams"
     "gap_id": "GAP-UPSTREAMS-3"
     "type": "external_billing_risk"

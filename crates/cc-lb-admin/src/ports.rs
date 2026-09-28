@@ -6,7 +6,7 @@ use bytes::Bytes;
 use cc_lb_domain::RoutingTrace;
 use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord, WarmupAttemptOutcome, WarmupAttemptTrigger, WarmupDispatchKind,
+    Storage, UpstreamRecord, WarmupAttemptOutcome, WarmupDispatchKind,
     WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
 use serde::Serialize;
@@ -51,8 +51,6 @@ pub struct WarmupAttemptInput<'a> {
     pub storage: &'a dyn Storage,
     pub upstream: &'a UpstreamRecord,
     pub scheduled_for_unix_secs: i64,
-    pub trigger: WarmupAttemptTrigger,
-    pub replica_id: Option<Uuid>,
     pub lease_holder: Option<&'a str>,
     pub expected_cycle_key: Option<i64>,
     pub attempted_at_unix_secs: i64,
@@ -82,9 +80,6 @@ pub enum WarmupAttemptResult<'a> {
         reason: WarmupSkipReason,
         cycle_key: Option<i64>,
         error_detail: Option<&'a str>,
-    },
-    PreflightActiveWindow {
-        cycle_key: i64,
     },
 }
 

@@ -4,17 +4,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthError;
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthError;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
 use http::{HeaderMap, StatusCode};
 use url::Url;
 
@@ -41,7 +40,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
     let engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
@@ -56,12 +55,6 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 
 #[tokio::test]
 async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
-    let global_router_hits = Arc::new(Mutex::new(Vec::new()));
-
-    let global_router: Arc<dyn RouterPlugin> = Arc::new(RecordingRouter {
-        name: "global",
-        hits: global_router_hits.clone(),
-    });
     let explicit_pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![Arc::new(RecordingFilter { name: "explicit" })],
         terminal: TerminalStrategy::Random,
@@ -76,7 +69,6 @@ async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::e
     });
     let dynamic_view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(global_router)
         .principal_view(view)
         .upstream_records(vec![test_upstream_record()])
         .build();
@@ -85,7 +77,7 @@ async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::e
         Arc::new(DynamicViewHolder::new(dynamic_view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let request = messages_request(Bytes::from_static(br#"{"model":"claude","messages":[]}"#));
@@ -97,10 +89,6 @@ async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::e
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        global_router_hits.lock().unwrap().as_slice(),
-        &[] as &[String]
-    );
     Ok(())
 }
 
@@ -155,32 +143,6 @@ fn test_upstream_record() -> UpstreamRecord {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
-    }
-}
-
-struct RecordingRouter {
-    name: &'static str,
-    hits: Arc<Mutex<Vec<String>>>,
-}
-
-impl RouterPlugin for RecordingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.hits
-            .lock()
-            .unwrap()
-            .push(format!("{}:{}", self.name, principal.id));
-        Ok(RouteDecision {
-            upstream_id: None,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(common::PassthroughDialect {
-                base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            }),
-        })
     }
 }
 

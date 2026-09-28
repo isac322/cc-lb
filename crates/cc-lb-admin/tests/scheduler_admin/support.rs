@@ -27,7 +27,6 @@ pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: crate::admin_test_common::limit_engine(),
         lifecycle: None,
-        subscription_metadata_hook: None,
         lazy_refresher: None,
         runtime: None,
         data_dir: None,

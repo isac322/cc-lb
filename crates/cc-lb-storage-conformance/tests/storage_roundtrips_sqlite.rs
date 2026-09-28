@@ -10,19 +10,18 @@ request_event_quota_sqlite::define_request_event_quota_sqlite_tests!();
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock, TestClock};
+use cc_lb_clock::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads, managed_keys,
-        organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
-        plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
-        prompt_cache_observation_store, request_event_key_usage, request_event_list,
-        request_event_principal_costs, storage_roundtrips, storage_roundtrips_cache_split,
-        storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
-        warmup_attempts_store,
+        organization_metadata_store, plan_tier_store, plugin_registry_store,
+        pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
+        request_event_key_usage, request_event_list, request_event_principal_costs,
+        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -52,7 +51,7 @@ impl ConformanceBackend for SqliteConformanceBackend {
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
         let storage = open_sqlite(&fixture.database_url, system_clock()).await?;
-        storage.initialize(BackendKind::Sqlite).await?;
+        storage.initialize().await?;
         Ok(storage)
     }
 
@@ -342,10 +341,6 @@ upstream_subscription_quota_sqlite_test!(
     series_max_points_per_series_downsamples
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_process_start_marker_persists_with_sample_kind_sqlite,
-    process_start_marker_persists_with_sample_kind
-);
-upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_empty_upstream_ids_returns_empty_sqlite,
     empty_upstream_ids_returns_empty
 );
@@ -464,14 +459,6 @@ fn organization_metadata_store_sqlite() {
 #[test]
 fn plan_tier_store_sqlite() {
     run_sqlite_scenario("plan_tier_store", plan_tier_store::run_all);
-}
-
-#[test]
-fn plan_tier_store_backfill_sqlite() {
-    run_sqlite_scenario(
-        "plan_tier_store_backfill",
-        plan_tier_store_backfill::upstream_tier_backfill_intervals,
-    );
 }
 
 macro_rules! plugin_registry_sqlite_test {

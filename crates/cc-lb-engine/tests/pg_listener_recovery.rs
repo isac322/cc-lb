@@ -4,14 +4,14 @@ use std::error::Error;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_engine::{DEFAULT_PG_NOTIFY_CHANNEL, InMemoryBus, PgListener};
+use cc_lb_control::{InMemoryBus, RequestEventBus};
+use cc_lb_engine::{DEFAULT_PG_NOTIFY_CHANNEL, PgListener};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use secrecy::SecretString;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::time::{Instant, MissedTickBehavior, timeout};
 
 const CLUSTER_TOKEN: &str = "test-cluster-token";
@@ -156,7 +156,7 @@ async fn terminate_listener_backends(pool: &PgPool, app_name: &str) -> TestResul
 
 async fn publish_until_received(
     pool: &PgPool,
-    receiver: &mut BusReceiver,
+    receiver: &mut broadcast::Receiver<RequestEventUpdate>,
     partial: RequestEventPartial,
 ) -> TestResult<()> {
     let event_id = partial.event_id.clone();
@@ -186,12 +186,12 @@ async fn publish_payload(pool: &PgPool, payload: &str) -> Result<(), sqlx::Error
     Ok(())
 }
 
-async fn receive_partial(receiver: &mut BusReceiver, expected_event_id: &str) -> TestResult<()> {
-    let BusReceiver::InMemory(rx) = receiver else {
-        return Err(error("remote bus receiver unsupported in this test"));
-    };
+async fn receive_partial(
+    receiver: &mut broadcast::Receiver<RequestEventUpdate>,
+    expected_event_id: &str,
+) -> TestResult<()> {
     loop {
-        if let RequestEventUpdate::Partial(partial) = rx.recv().await?
+        if let RequestEventUpdate::Partial(partial) = receiver.recv().await?
             && partial.event_id == expected_event_id
         {
             return Ok(());

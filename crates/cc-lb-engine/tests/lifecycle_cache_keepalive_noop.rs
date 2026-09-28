@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
@@ -19,7 +19,7 @@ use http::{Response, StatusCode};
 use uuid::Uuid;
 
 use common::{
-    TestAuthn, TestRouter, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle,
+    TestAuthn, TestState, collect_body, lifecycle_with_parts, managed_api_key, settle,
 };
 
 #[tokio::test]
@@ -30,9 +30,6 @@ async fn cache_keepalive_without_scheduler_is_response_noop() {
     let state = TestState::default();
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state),
-        Arc::new(TestRouter {
-            base_url: "http://upstream.local/".parse().expect("test URL parses"),
-        }),
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
@@ -77,9 +74,6 @@ async fn cache_keepalive_enqueue_failure_does_not_change_proxy_response() {
     let calls = Arc::new(AtomicUsize::new(0));
     let lifecycle = lifecycle_with_parts(
         authn,
-        Arc::new(TestRouter {
-            base_url: "http://upstream.local/".parse().expect("test URL parses"),
-        }),
         Arc::new(FixedSuccessDispatch {
             body: upstream_body.clone(),
         }),
@@ -173,8 +167,6 @@ fn principal_with_keepalive() -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::<Limit>::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,

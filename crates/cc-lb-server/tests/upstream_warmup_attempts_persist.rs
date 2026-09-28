@@ -1,14 +1,14 @@
-use cc_lb_engine::UnifiedQuotaObservation;
+use cc_lb_quota::UnifiedQuotaObservation;
 use cc_lb_server::warmup::execute::{
     WarmupAttemptExecution, WarmupAttemptExecutionResult, execute_warmup_attempt,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
-    UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamWarmupAttemptStore,
-    WarmupAttemptListFilters, WarmupAttemptOutcome, WarmupAttemptStatus, WarmupAttemptTrigger,
-    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
+    MetaStore, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
+    UpstreamSubscriptionQuotaStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters,
+    WarmupAttemptOutcome, WarmupAttemptStatus, WarmupAttemptTrigger, WarmupDispatchKind,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupSuccessReason,
     WarmupTransientFailureReason,
 };
 use http::StatusCode;
@@ -18,14 +18,11 @@ use uuid::Uuid;
 async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
     let storage = cc_lb_storage_sqlite::open_sqlite(
         "sqlite::memory:",
-        std::sync::Arc::new(cc_lb_engine::SystemClock),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("sqlite opens");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("sqlite initializes");
+    storage.initialize().await.expect("sqlite initializes");
     let upstream = storage
         .create(UpstreamCreate {
             name: "warmup-attempts-persist".to_owned(),
@@ -39,7 +36,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
         .await
         .expect("upstream creates");
     storage
-        .record_subscription_quota_sample(&previous_quota(upstream.id))
+        .record_subscription_quota_samples(&[previous_quota(upstream.id)])
         .await
         .expect("previous quota inserts");
 

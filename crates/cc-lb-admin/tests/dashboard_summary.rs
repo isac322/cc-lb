@@ -21,8 +21,13 @@ async fn summary_returns_200_with_empty_storage() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
-    let (status, _, body, _) =
-        authed_json(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/v1/dashboard/summary?range=1h",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["range"], "1h");
     assert_eq!(body["totals"]["request_count"], 0);
@@ -39,7 +44,7 @@ async fn summary_accepts_multiple_ranges() {
         let (status, _, _, _) = authed_json(
             app.clone(),
             "GET",
-            &format!("/admin/dashboard/summary?range={range}"),
+            &format!("/admin/v1/dashboard/summary?range={range}"),
             None,
         )
         .await;
@@ -55,7 +60,7 @@ async fn summary_rejects_invalid_range() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/dashboard/summary?range=42q",
+        "/admin/v1/dashboard/summary?range=42q",
         None,
     )
     .await;
@@ -65,8 +70,13 @@ async fn summary_rejects_invalid_range() {
 #[tokio::test]
 async fn summary_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
-    let (status, _, _) =
-        authed_bytes(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
+    let (status, _, _) = authed_bytes(
+        app(state),
+        "GET",
+        "/admin/v1/dashboard/summary?range=1h",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -93,7 +103,7 @@ async fn summary_includes_current_partial_minute_and_hour_rollups() {
         let (status, _, body, _) = authed_json(
             admin_app.clone(),
             "GET",
-            &format!("/admin/dashboard/summary?range={range}"),
+            &format!("/admin/v1/dashboard/summary?range={range}"),
             None,
         )
         .await;
@@ -163,7 +173,7 @@ async fn summary_exact_boundaries_do_not_advance_or_change_bucket_count() {
         let (status, _, body, _) = authed_json(
             admin_app,
             "GET",
-            &format!("/admin/dashboard/summary?range={range}"),
+            &format!("/admin/v1/dashboard/summary?range={range}"),
             None,
         )
         .await;

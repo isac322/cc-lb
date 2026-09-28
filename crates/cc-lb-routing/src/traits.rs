@@ -1,7 +1,7 @@
 use cc_lb_domain::{Principal, SubscriptionPreferenceTrace, UpstreamCandidate};
 use uuid::Uuid;
 
-use crate::{PerCandidateReason, RouteDecision, RouteError, RoutingContext};
+use crate::{PerCandidateReason, RoutingContext};
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,15 +57,4 @@ pub trait FilterPlugin: Send + Sync {
 
     /// Returns the human-readable plugin name.
     fn plugin_name(&self) -> &str;
-}
-
-/// Router plugin boundary.
-pub trait RouterPlugin: Send + Sync {
-    /// Selects the upstream and dialect for an authenticated request.
-    fn route(
-        &self,
-        ctx: &RoutingContext,
-        principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError>;
 }

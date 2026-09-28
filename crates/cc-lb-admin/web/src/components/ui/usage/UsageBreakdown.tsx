@@ -75,25 +75,16 @@ function UsageBreakdown({
 }
 
 export function TokenBreakdown({ event }: { event: RequestEventWithPhase }) {
-  const cache5m = event.cache_creation_input_tokens_5m;
-  const cache1h = event.cache_creation_input_tokens_1h;
-  const hasSplit = cache5m != null || cache1h != null;
   const tokens: Record<UsageCategoryKey, number> = {
     cache_read: event.cache_read_input_tokens ?? 0,
-    cache_create_5m: hasSplit
-      ? (cache5m ?? 0)
-      : (event.cache_creation_input_tokens ?? 0),
-    cache_create_1h: hasSplit ? (cache1h ?? 0) : 0,
+    cache_create_5m: event.cache_creation_input_tokens_5m ?? 0,
+    cache_create_1h: event.cache_creation_input_tokens_1h ?? 0,
     input: event.input_tokens ?? 0,
     output: event.output_tokens ?? 0,
   };
   const rows = USAGE_CATEGORIES.map((category) => ({
     key: category.key,
-    // A row recorded before the 5m / 1h split carries one unsplit total.
-    label:
-      category.key === 'cache_create_5m' && !hasSplit
-        ? 'Cache creation'
-        : category.label,
+    label: category.label,
     value: tokens[category.key],
     color: category.color,
   }))

@@ -199,10 +199,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::body_io_timing::BodyIoPhase;
-    use crate::clock::{ClockHandle, SystemClock};
-    use crate::event_bus::InMemoryBus;
     use crate::terminal_observer::{InternalFailure, UpstreamErrorCode, error_codes};
-    use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+    use cc_lb_clock::{ClockHandle, SystemClock};
+    use cc_lb_control::RequestEventBus;
+    use cc_lb_control::event_bus::InMemoryBus;
     use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
     use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
@@ -394,9 +394,7 @@ mod tests {
     #[tokio::test]
     async fn pending_error_drop_preserves_partial_body_and_finalize_timing() {
         let bus = Arc::new(InMemoryBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx = bus.subscribe_lifecycle();
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "pending-error-drop".to_owned(),
@@ -507,9 +505,7 @@ mod tests {
     #[tokio::test]
     async fn client_cancelled_drop_preserves_partial_body_and_existing_timings() {
         let bus = Arc::new(InMemoryBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx = bus.subscribe_lifecycle();
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "client-cancelled-drop".to_owned(),
@@ -518,7 +514,7 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_request_body_timing(11, Some(123));
-        observer.set_termination_timings(None, Some(17), None, None);
+        observer.set_termination_timings(Some(17), None, None);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
@@ -585,9 +581,7 @@ mod tests {
     #[tokio::test]
     async fn tower_timeout_overrides_provisional_client_cancellation_after_guard_drop() {
         let bus = Arc::new(InMemoryBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx = bus.subscribe_lifecycle();
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "tower-timeout-after-client-cancellation".to_owned(),
@@ -596,7 +590,7 @@ mod tests {
         );
         observer.mark_authn_reached();
         observer.set_request_body_timing(13, Some(456));
-        observer.set_termination_timings(None, Some(19), None, None);
+        observer.set_termination_timings(Some(19), None, None);
         let relay_start = Instant::now()
             .checked_sub(Duration::from_millis(25))
             .expect("relay start before cancellation");
@@ -672,9 +666,7 @@ mod tests {
     #[tokio::test]
     async fn detached_observer_is_not_reclassified_on_post_eos_drop() {
         let bus = Arc::new(InMemoryBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx = bus.subscribe_lifecycle();
         let clock: ClockHandle = Arc::new(SystemClock);
         let observer = LifecycleContext::new(
             "post-eos-drop".to_owned(),

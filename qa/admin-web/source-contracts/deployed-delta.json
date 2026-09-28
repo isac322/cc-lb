@@ -196,7 +196,7 @@
    "source_commit": "a9da5c3c11ee5a56b15737ba29b7cea744809086",
    "candidate_uncommitted": true,
    "production_applicability": false,
-   "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/audit and GET /admin/v1/audit in the candidate. The new admin_only parameter (API default false; the audit page sends admin_only=true) appends the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT on both engines; both implementations now build the statement with sqlx QueryBuilder (Postgres binds until twice). Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
+   "description": "Newest-first audit query with scope filtering applied before LIMIT; backs GET /admin/v1/audit in the candidate. The new admin_only parameter (API default false; the audit page sends admin_only=true) appends the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT on both engines; both implementations now build the statement with sqlx QueryBuilder (Postgres binds until twice). Existing ascending AuditStore::query_audit and query_audit_by_actor definitions are preserved but are no longer mapped by the HTTP audit handler."
   },
   {
    "type": "migration",
@@ -480,7 +480,7 @@
    "impact": "Clients expecting killswitch, principals, or restart_required_changes in /admin/v1/status receive undefined in latest."
   },
   {
-   "target": "GET /admin/audit and GET /admin/v1/audit",
+   "target": "GET /admin/v1/audit",
    "deployed_behavior": "Accepts query params: since, until, limit, principal_id. No actor filtering. No SensitiveRead authorization enforcement.",
    "latest_behavior": "Accepts additional query params: actor_authority, actor_subject, admin_only. Enforces validation that both actor params must be supplied together and cannot be combined with principal_id. admin_only (default false) filters to entries with an admin action or kind before LIMIT. Enforces SensitiveRead authorization.",
    "impact": "In deployed, querying by actor_authority or actor_subject is ignored/not supported. In latest, missing permissions return 403 Forbidden."
@@ -535,7 +535,7 @@
    "impact": "UI columns removed to match backend HistorySummary simplification."
   },
   {
-   "target": "GET /admin/audit and GET /admin/v1/audit (result ordering)",
+   "target": "GET /admin/v1/audit (result ordering)",
    "deployed_behavior": "Returns audit entries oldest first (ORDER BY id/seq ASC) via AuditStore::query_audit / query_audit_by_actor.",
    "latest_behavior": "Uncommitted candidate: returns entries newest first (ORDER BY ts DESC, id/seq DESC) via new AuditStore::query_recent_audit with AuditQueryScope (All | Principal | Actor) and an admin_only flag; scope and admin_only filters apply before LIMIT. 'after' remains an exclusive lower time bound (since = max(since, after+1)), not a forward pagination cursor. Ascending query_audit/query_audit_by_actor trait methods remain defined but are no longer used by the HTTP audit handler.",
    "impact": "Entry order reverses vs deployed; clients paging by position see newest-first pages. Candidate only - not committed or deployed.",
@@ -1295,7 +1295,6 @@
   "crates/cc-lb-admin/web/src/components/settings-config/schema.ts",
   "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.test.tsx",
   "crates/cc-lb-admin/web/src/components/ui/RequestEventsTable.tsx",
-  "crates/cc-lb-admin/web/src/components/ui/Sparkline.tsx",
   "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.test.tsx",
   "crates/cc-lb-admin/web/src/components/ui/latency/LatencyCell.tsx",
   "crates/cc-lb-admin/web/src/components/ui/latency/LatencyTimeline.test.tsx",

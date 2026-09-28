@@ -1,5 +1,5 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_engine::clock::unix_secs;
+use cc_lb_clock::unix_secs;
 use cc_lb_oauth_protocol::{ExistingTokenParts, refreshed_token_parts};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;

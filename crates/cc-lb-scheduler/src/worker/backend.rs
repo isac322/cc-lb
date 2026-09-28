@@ -145,13 +145,6 @@ impl PostgresSchedulerBackend {
             &apalis_postgres::Config::new(CACHE_KEEPALIVE_QUEUE),
         )
     }
-
-    pub(crate) fn cron_operation_storage(&self) -> apalis_postgres::PostgresStorage<CronJob> {
-        apalis_postgres::PostgresStorage::new_with_config(
-            &self.pool,
-            &apalis_postgres::Config::new(CRON_QUEUE),
-        )
-    }
 }
 
 #[cfg(feature = "postgres")]

@@ -10,7 +10,6 @@ vi.mock('../lib/queries', async () => {
     ...actual,
     usePrincipalNameMap: vi.fn(),
     useRecentEvents: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
   };
 });
 
@@ -71,7 +70,6 @@ describe('principal recent-request polling', () => {
         [otherPrincipal.id, otherPrincipal.name],
       ]),
     );
-    vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
   });
 
   afterEach(() => cleanup());

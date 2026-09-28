@@ -21,8 +21,6 @@ pub(super) fn principal_record_with_id(id: &str) -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,

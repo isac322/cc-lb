@@ -8,7 +8,6 @@ import {
   buildPoolQuotaChartData,
   formatAgo,
   formatResetIn,
-  hasFableHistoryData,
   missingCapacityUpstreams,
   oldestProviderObservation,
   poolQuotaResponseLatest,
@@ -42,13 +41,7 @@ function historyWindow(
   };
 }
 
-describe('Overview pooled Fable history', () => {
-  it('hides Fable when the selected range has no non-null Fable point', () => {
-    expect(
-      hasFableHistoryData([historyWindow('7d_fable', [[100, null]])]),
-    ).toBe(false);
-  });
-
+describe('Overview pooled quota history', () => {
   it('plots used per bucket and keeps exact latest utilization for the legend', () => {
     const windows = [
       historyWindow('5h', [[100, 20]], 18),
@@ -56,17 +49,16 @@ describe('Overview pooled Fable history', () => {
       historyWindow('7d_fable', [[100, 130]], 110),
     ];
 
-    expect(hasFableHistoryData(windows)).toBe(true);
-    const data = buildPoolQuotaChartData(windows, true);
+    const data = buildPoolQuotaChartData(windows);
     // Over-limit utilization pins to the top of the plot rather than leaving it.
     expect(data).toEqual([{ unix: 100, '5h': 20, '7d': 40, '7d_fable': 100 }]);
-    expect(poolQuotaResponseLatest(windows, data, true)).toEqual({
+    expect(poolQuotaResponseLatest(windows, data)).toEqual({
       '5h': 18,
       '7d': 35,
       '7d_fable': 110,
     });
 
-    expect(poolQuotaResponseLatest(windows, [], true)).toEqual({
+    expect(poolQuotaResponseLatest(windows, [])).toEqual({
       '5h': null,
       '7d': null,
       '7d_fable': null,

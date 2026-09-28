@@ -2,20 +2,12 @@
 mod admin_security_headers;
 #[path = "admin_separate_listener.rs"]
 mod admin_separate_listener;
-#[path = "api_wildcard_forwarding.rs"]
-mod api_wildcard_forwarding;
-#[path = "backend_kind_mismatch_fatal.rs"]
-mod backend_kind_mismatch_fatal;
 #[path = "bad_postgres_url_fatal.rs"]
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]
 mod build_metadata_present;
 #[path = "cache_keepalive_server_wiring.rs"]
 mod cache_keepalive_server_wiring;
-#[path = "cache_memory_bound.rs"]
-mod cache_memory_bound;
-#[path = "chaos_common.rs"]
-mod chaos_common;
 #[path = "claude_fable_5_proxy_path.rs"]
 mod claude_fable_5_proxy_path;
 #[path = "common.rs"]
@@ -30,28 +22,8 @@ mod db_unreachable_503;
 mod dispatch_uses_resolved_upstream_base_url;
 #[path = "doctor_command.rs"]
 mod doctor_command;
-#[path = "drain_common.rs"]
-mod drain_common;
-#[path = "drain_finishes_in_flight.rs"]
-mod drain_finishes_in_flight;
-#[path = "drain_rejects_new.rs"]
-mod drain_rejects_new;
-#[path = "drain_timeout_force_closes.rs"]
-mod drain_timeout_force_closes;
-#[path = "drop_pct_50.rs"]
-mod drop_pct_50;
 #[path = "dynamic_view_rebind.rs"]
 mod dynamic_view_rebind;
-#[path = "files_content_explicit_route.rs"]
-mod files_content_explicit_route;
-#[path = "header_preservation_contract.rs"]
-mod header_preservation_contract;
-#[path = "healthcheck_common.rs"]
-mod healthcheck_common;
-#[path = "healthz_always_200.rs"]
-mod healthz_always_200;
-#[path = "latency_injection.rs"]
-mod latency_injection;
 #[path = "load_bad_cert.rs"]
 mod load_bad_cert;
 #[path = "load_certs_ok.rs"]
@@ -92,18 +64,12 @@ mod prompt_cache_observation_metrics;
 mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]
 mod proxy_error_fallbacks;
-#[path = "readyz_503_during_drain.rs"]
-mod readyz_503_during_drain;
-#[path = "readyz_503_when_no_upstream_ready.rs"]
-mod readyz_503_when_no_upstream_ready;
 #[path = "reconciliation.rs"]
 mod reconciliation;
 #[path = "reload_atomic_swap.rs"]
 mod reload_atomic_swap;
 #[path = "rfc_0002_fix_live_qa.rs"]
 mod rfc_0002_fix_live_qa;
-#[path = "rst_after_bytes.rs"]
-mod rst_after_bytes;
 #[path = "scheduler_factory.rs"]
 mod scheduler_factory;
 #[path = "scheduler_init_hard_fail.rs"]
@@ -118,12 +84,8 @@ mod server_starts_and_responds;
 mod thinking_budget_service_tier_e2e;
 #[path = "tls_common.rs"]
 mod tls_common;
-#[path = "truncate_mid_stream.rs"]
-mod truncate_mid_stream;
 #[path = "ulimit_low_warns.rs"]
 mod ulimit_low_warns;
-#[path = "upstream_probe_warn_only.rs"]
-mod upstream_probe_warn_only;
 #[path = "upstream_rate_limit_persisted_end_to_end.rs"]
 mod upstream_rate_limit_persisted_end_to_end;
 #[path = "upstream_warmup_attempts_persist.rs"]

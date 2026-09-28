@@ -5,7 +5,6 @@ pub mod cache_keepalive_session_reads;
 pub mod managed_keys;
 pub mod organization_metadata_store;
 pub mod plan_tier_store;
-pub mod plan_tier_store_backfill;
 pub mod pool_quota_history_store;
 pub use crate::plugin_registry_store;
 pub mod price_catalog;

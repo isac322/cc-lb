@@ -1,11 +1,4 @@
-import type {
-  FireNowErrorReason,
-  FireNowResponse,
-  PluginEntry,
-  Upstream,
-} from '../queries';
-
-export const FIXED_NOW = new Date('2026-06-14T11:25:00.000Z');
+import type { FireNowErrorReason, FireNowResponse, Upstream } from '../queries';
 
 type UpstreamFixtureOverrides = Partial<Upstream> & {
   revision?: number;
@@ -54,59 +47,6 @@ export function makeOauthUpstream(
     },
     overrides,
   );
-}
-
-export function makeApiKeyUpstream(
-  overrides?: UpstreamFixtureOverrides,
-): Upstream {
-  return mergeUpstreamOverrides(
-    {
-      id: 'api-key-1',
-      name: 'my-api-key',
-      kind: 'anthropic_api_key',
-      enabled: true,
-      base_url: null,
-      warmup_enabled: false,
-      warmup_dialect_plugin: null,
-      spec_revision: 1,
-      status: {
-        last_apply_error: null,
-        last_apply_at_unix_secs: null,
-        last_warmup_at_unix_secs: null,
-      },
-    },
-    overrides,
-  );
-}
-
-export function makePluginRegistryEntry(
-  overrides?: Partial<PluginEntry>,
-): PluginEntry {
-  return {
-    id: 'plugin-1',
-    sha256_hex: 'mock-sha256',
-    name: 'anthropic-shape-v2',
-    original_filename: 'anthropic-shape-v2.wasm',
-    label: 'Anthropic Shape V2',
-    size_bytes: 1024,
-    refcount: 0,
-    revision: 1,
-    uploaded_at_unix_secs: 1718380800,
-    metadata: null,
-    description: 'Mock description',
-    usage: 'Mock usage',
-    hook_metadata: {},
-    supported_slots: ['shape'],
-    ...overrides,
-  };
-}
-
-export function makeShapePlugin(id: string, name: string): PluginEntry {
-  return makePluginRegistryEntry({ id, name, supported_slots: ['shape'] });
-}
-
-export function makeRouterPlugin(id: string, name: string): PluginEntry {
-  return makePluginRegistryEntry({ id, name, supported_slots: ['router'] });
 }
 
 export function makeFireNowSuccess(): FireNowResponse {

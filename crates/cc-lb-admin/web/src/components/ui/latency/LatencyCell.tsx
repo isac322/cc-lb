@@ -128,7 +128,6 @@ export function LatencyCell({
   const stagesId = useId();
   const attribution = computeLatencyAttribution(e);
   const isRenewal = attribution.isFinalRenewal;
-  const hasFinalize = e.finalize_ms != null;
   const {
     totalMs: duration,
     requestBodyOtherMs: requestBodyOther,
@@ -144,9 +143,6 @@ export function LatencyCell({
     hasRequestBodyBreakdown,
     hasResponseBodyBreakdown,
   } = attribution;
-  const limitReconcileMs =
-    typeof e.limit_reconcile_ms === 'number' ? e.limit_reconcile_ms : 0;
-  const otherFinalize = Math.max(0, (e.finalize_ms ?? 0) - limitReconcileMs);
   const { value, unit } = fmtMsCompact(e._phase === 'final' ? duration : 0);
   const setup_overhead_ms = deriveSetupOverhead(e);
   const hasSetupBreakdown = hasSetupTimingBreakdown(e);
@@ -278,36 +274,11 @@ export function LatencyCell({
             showZero: typeof e.response_body_process_ms === 'number',
             setupTiming: true,
           },
-          ...(hasFinalize
-            ? [
-                {
-                  label: 'Limit reconcile',
-                  value:
-                    e._phase === 'final' &&
-                    e.finalize_ms != null &&
-                    typeof e.limit_reconcile_ms === 'number'
-                      ? e.limit_reconcile_ms
-                      : undefined,
-                },
-                {
-                  label: 'Other finalize',
-                  value:
-                    e._phase === 'final' && e.finalize_ms != null
-                      ? otherFinalize
-                      : undefined,
-                  showZero: true,
-                },
-              ]
-            : [
-                {
-                  label: 'Limit reconcile',
-                  value:
-                    typeof e.limit_reconcile_ms === 'number'
-                      ? e.limit_reconcile_ms
-                      : undefined,
-                  showZero: typeof e.limit_reconcile_ms === 'number',
-                },
-              ]),
+          {
+            label: 'Finalize',
+            value: e._phase === 'final' ? e.finalize_ms : undefined,
+            showZero: e._phase === 'final' && e.finalize_ms != null,
+          },
         ]}
       />
 

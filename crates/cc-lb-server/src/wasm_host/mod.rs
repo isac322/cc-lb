@@ -152,7 +152,6 @@ mod tests {
         Principal {
             id: "tenant-a".to_owned(),
             kind: PrincipalKind::ApiKey,
-            claims: serde_json::Map::new(),
         }
     }
 
@@ -181,7 +180,6 @@ mod tests {
             upstream_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
             name: "upstream-1".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
-            observed_rate_limits: Vec::new(),
             subscription_quotas: Vec::new(),
             observed_at_unix_secs: 0,
             cache_score: None,

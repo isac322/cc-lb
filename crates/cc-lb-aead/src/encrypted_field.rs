@@ -74,7 +74,6 @@ impl<T: Serialize + for<'de> Deserialize<'de>> AeadEncryptedField<T> {
         &self.ciphertext
     }
 
-    #[allow(dead_code)]
     pub fn from_ciphertext(ciphertext: Vec<u8>) -> Self {
         Self {
             ciphertext,

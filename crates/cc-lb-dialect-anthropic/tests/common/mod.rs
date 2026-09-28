@@ -9,7 +9,6 @@ pub fn principal() -> Principal {
     Principal {
         id: "principal-direct".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: Default::default(),
     }
 }
 

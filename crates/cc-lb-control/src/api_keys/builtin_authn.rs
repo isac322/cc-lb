@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{
-    StorageError,
-    types::{KeyStatus, StoredApiKeyRecord},
-};
+use cc_lb_storage_api::{KeyStatus, StorageError, StoredApiKeyRecord};
 
 use crate::api_keys::{
     key_store::{KeyStore, KeyStoreError},
@@ -161,10 +158,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use cc_lb_storage_api::{
-        ManagedKeyStore, StorageResult,
-        types::{ApiKeyMutation, IssueParams},
-    };
+    use cc_lb_storage_api::{ApiKeyMutation, IssueParams, ManagedKeyStore, StorageResult};
     use http::{HeaderMap, HeaderValue};
 
     use super::*;

@@ -736,8 +736,8 @@ fn url(value: &str) -> Result<Url> {
 mod tests {
     use super::*;
 
-    use cc_lb_engine::SystemClock;
-    use cc_lb_storage_api::{BackendKind, MetaStore};
+    use cc_lb_clock::SystemClock;
+    use cc_lb_storage_api::MetaStore;
     use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 
     struct SqliteBackend;
@@ -763,7 +763,7 @@ mod tests {
 
         async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
             let storage = open_sqlite(&fixture.database_url, Arc::new(SystemClock)).await?;
-            MetaStore::initialize(&storage, BackendKind::Sqlite).await?;
+            MetaStore::initialize(&storage).await?;
             Ok(storage)
         }
 
@@ -781,7 +781,7 @@ mod tests {
     mod postgres_backend {
         use std::str::FromStr;
 
-        use cc_lb_storage_api::{BackendKind, MetaStore};
+        use cc_lb_storage_api::MetaStore;
         use cc_lb_storage_postgres::PostgresStorage;
         use sqlx::{
             AssertSqlSafe, PgPool,
@@ -827,16 +827,16 @@ mod tests {
                     .await?;
                 let storage = PostgresStorage::new(
                     pool.clone(),
-                    std::sync::Arc::new(cc_lb_engine::SystemClock),
+                    std::sync::Arc::new(cc_lb_clock::SystemClock),
                 );
-                MetaStore::initialize(&storage, BackendKind::Postgres).await?;
+                MetaStore::initialize(&storage).await?;
                 Ok(PostgresFixture { url, schema, pool })
             }
 
             async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
                 Ok(PostgresStorage::new(
                     fixture.pool.clone(),
-                    std::sync::Arc::new(cc_lb_engine::SystemClock),
+                    std::sync::Arc::new(cc_lb_clock::SystemClock),
                 ))
             }
 

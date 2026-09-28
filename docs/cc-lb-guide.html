@@ -447,7 +447,7 @@ xdg-open http://127.0.0.1:9090/ 2&gt;/dev/null
 
 # Admin REST (감사 로그)
 curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
-  http://127.0.0.1:9090/admin/audit | head -c 400</code></pre><button class="copy">복사</button></div>
+  http://127.0.0.1:9090/admin/v1/audit | head -c 400</code></pre><button class="copy">복사</button></div>
         <div class="callout tip">
           <span class="label">잘 됐나?</span>
           <code>cc_lb_requests_total</code>이 늘었고 응답 본문이 정상 Anthropic JSON이면 프록시 path가 끝까지 통과한 것입니다. 이 상태에서 클라이언트(Claude Code, OpenCode 등)의 <code>ANTHROPIC_BASE_URL</code>을 <code>http://127.0.0.1:8080</code>로 바꾸면 됩니다.
@@ -826,7 +826,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>GET /admin/health</code></td><td>비인증 헬스</td></tr>
       <tr><td><code>GET /admin/v1/principals</code></td><td>DB principal 목록</td></tr>
       <tr><td><code>GET /admin/v1/principals/{id}/limits</code></td><td>principal의 DB 저장 기본 한도</td></tr>
-      <tr><td><code>GET /admin/v1/audit?since=&amp;until=&amp;limit=&amp;principal_id=&amp;admin_only=</code></td><td>감사 로그 — 최신 항목부터(ts·id/seq 내림차순) limit개 반환. 기본값은 전체 기록이며, <code>admin_only=true</code>는 관리자 작업·kind 기록을 LIMIT 전에 필터링(Audit UI에서 사용). <code>after</code>는 배타적 시간 하한(after+1초부터)이며 전진 커서가 아님. storage의 기존 오름차순 조회 계약은 유지</td></tr>
+      <tr><td><code>GET /admin/v1/audit?since=&amp;until=&amp;limit=&amp;principal_id=&amp;admin_only=</code></td><td>감사 로그 — 최신 항목부터(ts·id/seq 내림차순) limit개 반환. 기본값은 전체 기록이며, <code>admin_only=true</code>는 관리자 작업 기록을 LIMIT 전에 필터링(Audit UI에서 사용). <code>after</code>는 배타적 시간 하한(after+1초부터)이며 전진 커서가 아님. storage의 기존 오름차순 조회 계약은 유지</td></tr>
       <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태 — <code>base_url</code> 포함(미설정 시 <code>null</code>)</td></tr>
       <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략·<code>null</code>은 기존 override 유지, URL 문자열은 설정. <code>clear_base_url: true</code>만 override를 제거하고 기본 endpoint를 사용하며, URL 설정과 초기화의 동시 요청은 거절. 구버전 폼의 무편집 저장이 override를 지우지 않도록 초기화 의도를 구분한다. <code>If-Match</code> revision 보호와 API 키·OAuth 토큰의 null 처리는 유지</td></tr>
       <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
@@ -850,7 +850,7 @@ reload_on_sighup = true</code></pre><button class="copy">복사</button></div>
 
     <h4>Config editor와 저장</h4>
     <p>관리 UI는 <code>/admin/v1/config/editor</code>에서 파일의 writable/read-only 상태와 revision을 읽습니다. 초안은 <code>/admin/v1/config/draft</code>로 조회·저장하고, 저장 전에 <code>/admin/v1/config/draft/validate</code>를 호출하세요. 검증 결과는 초안의 <code>last_validation</code> JSON으로 확인할 수 있습니다.</p>
-    <p><code>/admin/v1/config/save</code>는 expected revision과 파일 fingerprint를 확인한 뒤 초안을 파일에 저장합니다. 저장 이력은 <code>/admin/v1/config/history</code>에서 metadata-only로 조회하고, <code>/admin/v1/config/draft/download</code>로 초안을 내려받습니다. 저장한 설정은 실행 중인 프로세스에 즉시 반영되지 않으며 항상 프로세스 재시작 후 적용됩니다 (<code>restart_required</code>는 항상 true).</p>
+    <p><code>/admin/v1/config/save</code>는 expected revision과 파일 fingerprint를 확인한 뒤 초안을 파일에 저장합니다. 저장 이력은 <code>/admin/v1/config/history</code>에서 metadata-only로 조회하고, <code>/admin/v1/config/draft/download</code>로 초안을 내려받습니다. 저장한 설정은 실행 중인 프로세스에 즉시 반영되지 않으며 항상 프로세스 재시작 후 적용됩니다.</p>
 
     <h4>Graceful drain</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>kill -TERM $(pgrep -x cc-lb)
@@ -1147,7 +1147,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
       cmd += '# Upload Wasm first with POST /admin/v1/plugins/wasm, then replace the placeholder id.\n';
       cmd += 'curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain" \\\n';
       cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" -H "content-type: application/json" \\\n';
-      cmd += '  -d \'{"slot":"Router","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
+      cmd += '  -d \'{"slot":"router","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
     }
     cmd += '\n# 5) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
     var sampleModel = 'claude-sonnet-4-5-20250929';

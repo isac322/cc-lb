@@ -9,7 +9,6 @@ pub struct OrganizationMetadataRecord {
     pub organization_name: Option<String>,
     pub organization_type: Option<String>,
     pub rate_limit_tier: Option<String>,
-    #[serde(default)]
     pub seat_tier: Option<String>,
     pub has_extra_usage_enabled: Option<bool>,
     pub billing_type: Option<String>,

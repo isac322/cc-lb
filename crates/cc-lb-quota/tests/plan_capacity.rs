@@ -1,6 +1,5 @@
 use cc_lb_quota::plan_capacity::{
     PRO_CAPACITY_RATIO, PlanTierClassification, TierKey, classify_plan_tier, plan_capacity_ratio,
-    tier_key_from_seed_ratio,
 };
 
 #[test]
@@ -87,11 +86,8 @@ fn tier_strings_and_seed_ratios_are_canonical() {
     for (tier, ratio) in expected {
         assert_eq!(tier.as_str().parse::<TierKey>(), Ok(tier));
         assert_eq!(tier.seed_pro_relative_ratio(), ratio);
-        assert_eq!(tier_key_from_seed_ratio(ratio), Some(tier));
     }
     assert!("nope".parse::<TierKey>().is_err());
-    assert_eq!(tier_key_from_seed_ratio(10.0), None);
-    assert_eq!(tier_key_from_seed_ratio(f64::NAN), None);
 }
 
 #[test]

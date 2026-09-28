@@ -12,16 +12,6 @@ export type PoolQuotaChartRow = {
 /** Latest pool utilization per window (0-100 used), for legends. */
 export type PoolQuotaLatest = Omit<PoolQuotaChartRow, 'unix'>;
 
-export function hasFableHistoryData(
-  windows: readonly PoolHistoryWindowResponse[] | undefined,
-): boolean {
-  return (
-    windows
-      ?.find((entry) => entry.window === '7d_fable')
-      ?.series.some((point) => point.utilization_percent != null) ?? false
-  );
-}
-
 /**
  * Pool history as used percent: each bucket plots the pool utilization,
  * clamped to 0-100 so an over-limit reading pins to the top of the plot
@@ -29,11 +19,9 @@ export function hasFableHistoryData(
  */
 export function buildPoolQuotaChartData(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
-  includeFable: boolean,
 ): PoolQuotaChartRow[] {
   const buckets = new Map<number, Omit<PoolQuotaChartRow, 'unix'>>();
   for (const window of POOL_QUOTA_WINDOWS) {
-    if (window === '7d_fable' && !includeFable) continue;
     const series =
       windows?.find((entry) => entry.window === window)?.series ?? [];
     for (const point of series) {
@@ -57,7 +45,6 @@ export function buildPoolQuotaChartData(
 export function poolQuotaResponseLatest(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
   visibleRows: readonly PoolQuotaChartRow[],
-  includeFable: boolean,
 ): PoolQuotaLatest {
   const latest: PoolQuotaLatest = {
     '5h': null,
@@ -65,7 +52,6 @@ export function poolQuotaResponseLatest(
     '7d_fable': null,
   };
   for (const window of POOL_QUOTA_WINDOWS) {
-    if (window === '7d_fable' && !includeFable) continue;
     if (!visibleRows.some((row) => row[window] != null)) continue;
     latest[window] =
       windows?.find((entry) => entry.window === window)?.latest

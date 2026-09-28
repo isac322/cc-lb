@@ -46,7 +46,7 @@ test('errors pages contain matching rows even behind newer successes', async ({
         auth_mode: 'static_token',
       });
     }
-    if (url.pathname === '/admin/events/recent') {
+    if (url.pathname === '/admin/v1/events/recent') {
       requests.push(url.search);
       const matching =
         url.searchParams.get('status_class') === 'errors'
@@ -63,7 +63,7 @@ test('errors pages contain matching rows even behind newer successes', async ({
         limit: Number(url.searchParams.get('limit')),
       });
     }
-    if (url.pathname === '/admin/events/histogram') {
+    if (url.pathname === '/admin/v1/events/histogram') {
       return json({ buckets: [], bucket_ms: 60_000, bucket_count: 0 });
     }
     if (url.pathname === '/admin/health') {

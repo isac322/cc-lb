@@ -17,7 +17,6 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 cc-lb-clock = { path = "../cc-lb-clock" }
-cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-lifecycle = { workspace = true }
 cc-lb-request-log.workspace = true
 cc-lb-domain.workspace = true

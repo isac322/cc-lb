@@ -389,10 +389,10 @@ The `cc-lb-storage-postgres` `prompt_cache_observation` adapter tests are marked
 
 - **Status**: PASS
 - **Given**: the same request sequence before and after the observation-structure change.
-- **When**: query the `request_events_v1` cache-analysis fields (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`, etc.) and the usage rollup.
+- **When**: query the `request_events_v1` payload cache-analysis fields (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`, etc.) and the usage rollup.
 - **Then**: the request log and rollup keep their schema and meaning across the transition. The observation-storage change does not change this consumer's data source.
 - **Environment**: `cargo test -p cc-lb-admin --test integration` + the live QA harness's `wait_for_lookback_event` family assertions.
-- **Evidence**: existing contract parity as the baseline (not a byte-identical raw DB dump claim). `target/test-evidence/issue-825/qa825-baseline-rollup.json` — baseline conformance 3/3 pass, the same 3 tests run on both SQLite+PG as current. `target/test-evidence/issue-825/usage-rollup.log` — current head 3/3 pass. The `request_events_v1` cache-field assertions (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`) of baseline+current live QA hold identically on both. See `runtime/events-{before,after}.json`, `usage-{before,after}.json`.
+- **Evidence**: existing contract parity as the baseline (not a byte-identical raw DB dump claim). `target/test-evidence/issue-825/qa825-baseline-rollup.json` — baseline conformance 3/3 pass, the same 3 tests run on both SQLite+PG as current. `target/test-evidence/issue-825/usage-rollup.log` — current head 3/3 pass. The request-event payload cache-field assertions (`matched_v3_cache_key`, `lookback_distance`, `predicted_*`, `token_estimate_source`) of baseline+current live QA hold identically on both. See `runtime/events-{before,after}.json`, `usage-{before,after}.json`.
 
 #### QA-H3. Existing prompt_cache_live_qa scenarios pass
 

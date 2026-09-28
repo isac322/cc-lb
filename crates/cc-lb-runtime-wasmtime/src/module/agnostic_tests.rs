@@ -7,7 +7,7 @@ use crate::{WasmtimeRuntime, WasmtimeRuntimeError, inspect_wasm_agnostic};
 const FILTER_RESPONSE_OFFSET: u64 = 4096;
 const SHAPE_RESPONSE_OFFSET: u64 = 8192;
 
-fn plugin_wasm(declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u8> {
+fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let filter_response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
         results: Box::new([]),
     })
@@ -79,23 +79,16 @@ fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String 
     }
 }
 
-fn metadata(declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u8> {
+fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
-            let hook_metadata = match mode {
-                Some(mode) => serde_json::json!({
-                    "wire_version": 1,
-                    "description": format!("{} hook", hook.as_str()),
-                    "usage": format!("call {}", hook.as_str()),
-                    "mode": mode,
-                }),
-                None => serde_json::json!({
-                    "wire_version": 1,
-                    "description": format!("{} hook", hook.as_str()),
-                    "usage": format!("call {}", hook.as_str()),
-                }),
-            };
+            let hook_metadata = serde_json::json!({
+                "wire_version": 1,
+                "description": format!("{} hook", hook.as_str()),
+                "usage": format!("call {}", hook.as_str()),
+                "mode": mode,
+            });
             (hook.as_str().to_owned(), hook_metadata)
         })
         .collect::<serde_json::Map<_, _>>();
@@ -137,10 +130,10 @@ fn encode_leb128(buffer: &mut Vec<u8>, mut value: u64) {
 fn agnostic_admission_accepts_filter_and_shape_hooks() {
     // Given: one artifact declaring both independent slot hooks.
     let wasm = plugin_wasm(&[
-        (HookKind::Filter, None),
-        (HookKind::Shape, Some("active")),
-        (HookKind::TransformResponse, Some("noop")),
-        (HookKind::TransformSseEvent, Some("noop")),
+        (HookKind::Filter, "active"),
+        (HookKind::Shape, "active"),
+        (HookKind::TransformResponse, "noop"),
+        (HookKind::TransformSseEvent, "noop"),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
@@ -164,7 +157,7 @@ fn agnostic_admission_accepts_filter_and_shape_hooks() {
 #[test]
 fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
     // Given: Shape is declared without either Shape-owned response hook.
-    let wasm = plugin_wasm(&[(HookKind::Shape, Some("active"))]);
+    let wasm = plugin_wasm(&[(HookKind::Shape, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("incomplete Shape ownership rejected");
@@ -180,7 +173,7 @@ fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
 #[test]
 fn agnostic_inspection_rejects_orphan_transform_response() {
     // Given: a response transform is declared without Shape ownership.
-    let wasm = plugin_wasm(&[(HookKind::TransformResponse, Some("active"))]);
+    let wasm = plugin_wasm(&[(HookKind::TransformResponse, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("orphan response hook rejected");
@@ -196,7 +189,7 @@ fn agnostic_inspection_rejects_orphan_transform_response() {
 #[test]
 fn agnostic_inspection_rejects_orphan_transform_sse_event() {
     // Given: an SSE transform is declared without Shape ownership.
-    let wasm = plugin_wasm(&[(HookKind::TransformSseEvent, Some("active"))]);
+    let wasm = plugin_wasm(&[(HookKind::TransformSseEvent, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("orphan SSE hook rejected");
@@ -212,7 +205,7 @@ fn agnostic_inspection_rejects_orphan_transform_sse_event() {
 #[test]
 fn agnostic_inspection_rejects_noop_primary_hook() {
     // Given: a primary slot hook declares the response-only noop mode.
-    let wasm = plugin_wasm(&[(HookKind::Filter, Some("noop"))]);
+    let wasm = plugin_wasm(&[(HookKind::Filter, "noop")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("primary noop rejected");
@@ -230,10 +223,10 @@ fn agnostic_admission_probes_each_declared_hook() {
     // Given: Filter and Shape are valid but the active response transform
     // returns the invalid `(0, 0)` output.
     let wasm = plugin_wasm(&[
-        (HookKind::Filter, None),
-        (HookKind::Shape, Some("active")),
-        (HookKind::TransformResponse, Some("active")),
-        (HookKind::TransformSseEvent, Some("noop")),
+        (HookKind::Filter, "active"),
+        (HookKind::Shape, "active"),
+        (HookKind::TransformResponse, "active"),
+        (HookKind::TransformSseEvent, "noop"),
     ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 

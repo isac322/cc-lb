@@ -15,7 +15,6 @@ pub trait CompatEtagRepository {
     fn upsert_compat_value<'a>(
         &'a self,
         key: &'a str,
-        etag: Option<&'a str>,
         hash: &'a str,
         now_unix_secs: u64,
     ) -> CompatJobFuture<'a, Result<()>>;
@@ -33,11 +32,10 @@ impl CompatEtagRepository for AnthropicCompatEtagsStore<sqlx::Sqlite> {
     fn upsert_compat_value<'a>(
         &'a self,
         key: &'a str,
-        etag: Option<&'a str>,
         hash: &'a str,
         now_unix_secs: u64,
     ) -> CompatJobFuture<'a, Result<()>> {
-        Box::pin(self.upsert_value(key, etag, hash, now_unix_secs))
+        Box::pin(self.upsert_value(key, hash, now_unix_secs))
     }
 }
 
@@ -53,10 +51,9 @@ impl CompatEtagRepository for AnthropicCompatEtagsStore<sqlx::Postgres> {
     fn upsert_compat_value<'a>(
         &'a self,
         key: &'a str,
-        etag: Option<&'a str>,
         hash: &'a str,
         now_unix_secs: u64,
     ) -> CompatJobFuture<'a, Result<()>> {
-        Box::pin(self.upsert_value(key, etag, hash, now_unix_secs))
+        Box::pin(self.upsert_value(key, hash, now_unix_secs))
     }
 }

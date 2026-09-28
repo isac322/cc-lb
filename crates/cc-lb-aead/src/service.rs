@@ -33,10 +33,6 @@ impl AeadService {
         Ok(service)
     }
 
-    pub fn try_from_key(key: &[u8]) -> AeadResult<Self> {
-        Self::try_from_master_key(key)
-    }
-
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> AeadResult<Vec<u8>> {
         let nonce = Nonce::generate();
         let payload = Payload {
@@ -188,7 +184,7 @@ mod tests {
                     aad,
                 },
             )
-            .expect("legacy format encrypts");
+            .expect("current format encrypts");
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         blob.extend_from_slice(nonce);
@@ -211,7 +207,7 @@ mod tests {
                     aad,
                 },
             )
-            .expect("legacy format decrypts")
+            .expect("current format decrypts")
     }
 
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

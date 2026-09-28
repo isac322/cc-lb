@@ -4,7 +4,7 @@ use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
 
 #[tokio::test]
 async fn pg_notify_fanout_notifier_queue_overflow_drops_without_blocking() {
-    let local_bus = cc_lb_engine::InMemoryBus::with_capacity(16);
+    let local_bus = cc_lb_control::InMemoryBus::with_capacity(16);
     let (notify_tx, mut notify_rx) = tokio::sync::mpsc::channel(1024);
     let fanout = PgNotifyFanout::new(local_bus, notify_tx);
 

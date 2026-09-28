@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{BackendKind, MetaStore, PriceCatalogCache};
+use cc_lb_storage_api::{MetaStore, PriceCatalogCache};
 
 #[tokio::test]
 async fn price_catalog_keeps_only_latest_snapshots() {
@@ -16,10 +16,7 @@ async fn price_catalog_keeps_only_latest_snapshots() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     for index in 0..5_u64 {
         let payload = format!(r#"{{"models":[{{"id":"model-{index}"}}]}}"#);

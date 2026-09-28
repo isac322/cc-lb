@@ -2,7 +2,7 @@ use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
 use cc_lb_plugin_wire::{
     schema::WireVersion,
     v1::{
-        CachePricingSummaryRef, ClaimRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
+        CachePricingSummaryRef, FilterRequestRef, HeaderRef, PrincipalRef, QueryRef,
         UpstreamCandidateRef,
     },
 };
@@ -25,23 +25,6 @@ impl FilterWireRequest<'_> {
         with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
     ) -> Result<R, RkyvError> {
         let principal_kind = principal_kind_to_wire(self.principal);
-        let claim_buffers: Vec<(&str, Vec<u8>)> = self
-            .principal
-            .claims
-            .iter()
-            .filter_map(|(key, value)| {
-                serde_json::to_vec(value)
-                    .ok()
-                    .map(|bytes| (key.as_str(), bytes))
-            })
-            .collect();
-        let claims: Vec<ClaimRef<'_>> = claim_buffers
-            .iter()
-            .map(|(key, value)| ClaimRef {
-                key,
-                value: value.as_slice(),
-            })
-            .collect();
         let headers: Vec<HeaderRef<'_>> = self
             .ctx
             .downstream_headers
@@ -98,7 +81,7 @@ impl FilterWireRequest<'_> {
         let principal = || PrincipalRef {
             id: self.principal.id.as_str(),
             kind: principal_kind,
-            claims: &claims,
+            claims: &[],
         };
         let cache_pricing = || CachePricingSummaryRef {
             status: self.ctx.cache_pricing.status.as_str(),
@@ -146,8 +129,6 @@ pub(super) fn principal_kind_to_wire(principal: &Principal) -> &'static str {
         PrincipalKind::ApiKey => "api_key",
         PrincipalKind::OAuthSubject => "oauth_subject",
         PrincipalKind::InternalKey => "internal_key",
-        PrincipalKind::WorkloadIdentity => "workload_identity",
-        PrincipalKind::SubscriptionBearer => "subscription_bearer",
     }
 }
 

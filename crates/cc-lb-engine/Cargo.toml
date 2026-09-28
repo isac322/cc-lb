@@ -42,7 +42,6 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 brotli.workspace = true
 dashmap.workspace = true
-eventsource-stream.workspace = true
 flate2.workspace = true
 futures-core = "0.3"
 h2.workspace = true

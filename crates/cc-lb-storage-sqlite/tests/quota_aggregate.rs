@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSampleKind,
+    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
+    SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
     SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageTokenInterval,
@@ -21,10 +20,7 @@ async fn quota_storage(database_name: &str) -> (TempDir, SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open quota sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize quota sqlite");
+    storage.initialize().await.expect("initialize quota sqlite");
     (temp_dir, storage)
 }
 

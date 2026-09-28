@@ -18,7 +18,7 @@ use cc_lb_config::{
 use cc_lb_server::app::{
     App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
 };
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
+use cc_lb_storage_api::{ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http_body_util::BodyExt;
@@ -47,7 +47,7 @@ const MESSAGES_BODY: &[u8] = br#"{"model":"claude-3-5-sonnet-20241022","messages
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let Some(database_url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
@@ -158,10 +158,10 @@ async fn build_postgres_app(
     pool: PgPool,
     upstream_addr: SocketAddr,
 ) -> TestResult<App> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let storage: Arc<dyn StorageTrait> =
         Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     seed_app_testing_storage(
         storage.as_ref(),
         Some(Url::parse(&format!("http://{}", upstream_addr))?),

@@ -1,7 +1,7 @@
+use cc_lb_clock::unix_secs;
 use cc_lb_control::api_keys::limit_engine::Reservation;
 use cc_lb_control::api_keys::principal_view::PrincipalStatus;
 use cc_lb_engine::cache_keepalive::{DispatchOutcome, KeepaliveDispatchContext, RequestSnapshot};
-use cc_lb_engine::clock::unix_secs;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -234,7 +234,6 @@ impl SchedulerDispatch {
                 model,
                 4_000,
                 u64::try_from(max_tokens.max(0)).unwrap_or(0),
-                None,
                 None,
             )
             .map(|cost| i64::try_from(cost).unwrap_or(i64::MAX));

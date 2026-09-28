@@ -6,7 +6,5 @@ mod headers_preserved;
 mod integration_with_fake;
 #[path = "shape_identity.rs"]
 mod shape_identity;
-#[path = "sse_passthrough.rs"]
-mod sse_passthrough;
 #[path = "upstream_api.rs"]
 mod upstream_api;

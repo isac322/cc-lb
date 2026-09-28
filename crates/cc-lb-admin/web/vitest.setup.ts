@@ -1,14 +1,13 @@
 import '@testing-library/react';
-import { vi } from 'vitest';
 
-// Mock ResizeObserver for Radix UI
+// jsdom lacks ResizeObserver; Base UI and recharts measure through it.
 global.ResizeObserver = class ResizeObserver {
   observe() {}
   unobserve() {}
   disconnect() {}
 };
 
-// Mock hasPointerCapture for Radix UI Popover
+// jsdom lacks pointer capture; Base UI popovers and sliders call it.
 if (!HTMLElement.prototype.hasPointerCapture) {
   HTMLElement.prototype.hasPointerCapture = () => false;
 }

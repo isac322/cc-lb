@@ -32,16 +32,14 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::{
-    DynamicView, DynamicViewHolder, MetadataHookHandle,
+    DynamicView, DynamicViewHolder,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_domain::ReplicaIdentity;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{Storage, UpstreamRecord};
 
-use crate::ports::{
-    RetainedPartialPort, RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort,
-};
+use crate::ports::{RoutePreviewPort, SubscriptionQuotaIngestionPort, WarmupPort};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WarmupDialectDispatchErrorKind {
@@ -92,7 +90,6 @@ pub trait DynamicViewRebinder: Send + Sync {
 pub struct AdminPorts {
     pub route_preview: Option<Arc<dyn RoutePreviewPort>>,
     pub warmup: Option<Arc<dyn WarmupPort>>,
-    pub retained_partials: Option<Arc<dyn RetainedPartialPort>>,
     pub subscription_quota_ingestion: Option<Arc<dyn SubscriptionQuotaIngestionPort>>,
     pub replica_identity: Option<ReplicaIdentity>,
 }
@@ -111,7 +108,6 @@ pub struct AdminState {
     pub aead: Arc<AeadService>,
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<AdminPorts>,
-    pub subscription_metadata_hook: Option<MetadataHookHandle>,
     pub lazy_refresher: Option<Arc<dyn LazyRefreshHandle>>,
     pub runtime: Option<Arc<WasmtimeRuntime>>,
     pub data_dir: Option<PathBuf>,

@@ -101,14 +101,6 @@ impl Default for UpstreamAffinityConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RestartRequiredField {
-    pub field: String,
-    pub current: String,
-    pub new: String,
-    pub reason: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ListenerConfig {
@@ -1082,116 +1074,16 @@ cache_path = "/tmp/prices.json"
             PathBuf::from("/tmp/prices.json")
         );
     }
-    #[test]
-    fn removed_top_level_tables_are_rejected() {
-        for field in [
-            "api_keys",
-            "dns",
-            "downstream_auth",
-            "egress",
-            "lifecycle_api_key_metrics_subscriber",
-            "lifecycle_cache_hit_miss_subscriber",
-            "lifecycle_cache_observation_subscriber",
-            "lifecycle_hook_adapter",
-            "lifecycle_limit_reconcile_subscriber",
-            "lifecycle_limit_rejection_audit_subscriber",
-            "lifecycle_pricing_subscriber",
-            "lifecycle_rate_limit_header_subscriber",
-            "lifecycle_routing_tier_subscriber",
-            "lifecycle_subscription_quota_subscriber",
-            "tls",
-        ] {
-            let config_toml = format!("[{field}]\nremoved = true\n");
-            let error = load_config(&config_toml).expect_err("removed table should be rejected");
-            assert!(error.to_string().contains(field), "{field}: {error}");
-        }
-    }
 
     #[test]
-    fn removed_nested_fields_and_aliases_are_rejected() {
-        for (field, config_toml) in [
-            (
-                "listener.unix_socket",
-                "[listener]\nunix_socket = \"/tmp/cc-lb.sock\"\n",
-            ),
-            (
-                "body.per_route_overrides",
-                "[body]\nper_route_overrides = {}\n",
-            ),
-            (
-                "timeouts.request_header_secs",
-                "[timeouts]\nrequest_header_secs = 1\n",
-            ),
-            (
-                "timeouts.request_body_chunk_secs",
-                "[timeouts]\nrequest_body_chunk_secs = 1\n",
-            ),
-            ("timeouts.idle_secs", "[timeouts]\nidle_secs = 1\n"),
-            (
-                "scheduler.retry_classes",
-                "[scheduler.retry_classes]\nprobe = {}\n",
-            ),
-            (
-                "scheduler.idempotency",
-                "[scheduler.idempotency]\nclaim_ttl_secs = 60\n",
-            ),
-            (
-                "scheduler.staleness",
-                "[scheduler.staleness]\nwarmup_effect_retention_days = 30\n",
-            ),
-            (
-                "scheduler.pgbouncer_transaction_mode",
-                "[scheduler]\npgbouncer_transaction_mode = true\n",
-            ),
-            (
-                "observability.prometheus_endpoint",
-                "[observability]\nprometheus_endpoint = \"http://localhost:9091\"\n",
-            ),
-            (
-                "admin.token_env",
-                "[admin]\ntoken_env = \"CC_LB_ADMIN_TOKEN\"\n",
-            ),
-            ("admin.token", "[admin]\ntoken = \"secret\"\n"),
-            (
-                "cluster.token_env_optional",
-                "[cluster]\ntoken_env_optional = true\n",
-            ),
-            (
-                "runtime.wasmtime.plugin_failure_policy",
-                "[runtime.wasmtime]\nplugin_failure_policy = \"pass_through\"\n",
-            ),
-            (
-                "price_catalog.refresh_interval",
-                "[price_catalog]\nrefresh_interval = \"1h\"\n",
-            ),
-            (
-                "prompt_cache_shadow.refresh_debounce_secs",
-                "[prompt_cache_shadow]\nrefresh_debounce_secs = 60\n",
-            ),
-            (
-                "prompt_cache_shadow.max_live_entries_per_partition",
-                "[prompt_cache_shadow]\nmax_live_entries_per_partition = 50000\n",
-            ),
-            (
-                "prompt_cache_shadow.enabled",
-                "[prompt_cache_shadow]\nenabled = false\n",
-            ),
-            (
-                "aead.oauth_aead_key_env",
-                "[aead]\noauth_aead_key_env = \"CC_LB_MASTER_KEY\"\n",
-            ),
-            (
-                "storage.storage_path",
-                "[storage]\nkind = \"sqlite\"\npath = \"/tmp/current.sqlite\"\nstorage_path = \"/tmp/legacy.sqlite\"\n",
-            ),
-            (
-                "runtime.wasmtime.allocation_strategy=on_demand",
-                "[runtime.wasmtime]\nallocation_strategy = \"on_demand\"\n",
-            ),
-        ] {
-            let error = load_config(config_toml).expect_err("removed field should be rejected");
-            assert!(error.to_string().contains("unknown"), "{field}: {error}");
-        }
+    fn unknown_top_level_and_nested_fields_are_rejected() {
+        let error = load_config("[unknown_table]\nkey = true\n")
+            .expect_err("unknown top-level table should be rejected");
+        assert!(error.to_string().contains("unknown"), "{error}");
+
+        let error = load_config("[listener]\nunknown_field = true\n")
+            .expect_err("unknown nested field should be rejected");
+        assert!(error.to_string().contains("unknown"), "{error}");
     }
 
     #[test]
@@ -1241,18 +1133,6 @@ instance_url = "http://127.0.0.1:9090"
     }
 
     #[test]
-    fn event_bus_transport_key_is_rejected() {
-        let error = load_config(
-            r#"
-[event_bus]
-transport = "pg_notify"
-"#,
-        )
-        .expect_err("removed event_bus.transport key should fail to parse");
-        assert!(error.to_string().contains("transport"));
-    }
-
-    #[test]
     fn postgres_storage_requires_cluster_instance_url() {
         load_config(
             r#"
@@ -1277,23 +1157,5 @@ url = "postgres://localhost/cc_lb"
         assert!(missing_url.to_string().contains("cluster.instance_url"));
 
         load_config("[listener]\n").expect("sqlite without instance_url should load");
-    }
-
-    #[test]
-    fn database_owned_top_level_keys_are_rejected() {
-        for key in [
-            "principals",
-            "upstreams",
-            "plugins",
-            "plugin_chains",
-            "quotas",
-        ] {
-            let config_toml = format!("[{key}]\n");
-            let error = load_config(&config_toml).expect_err("database-owned key should fail");
-            let message = error.to_string();
-
-            assert!(message.contains("unknown field"), "{message}");
-            assert!(message.contains(key), "{message}");
-        }
     }
 }

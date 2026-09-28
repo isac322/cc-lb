@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionCursor, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore,
-    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
-    RequestEventProjections, RequestEventStore, StorageError,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveSessionCursor,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
+    CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent, RequestEventProjections,
+    RequestEventStore, StorageError,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -26,10 +26,7 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (temp_dir, storage)
 }
 
@@ -685,7 +682,7 @@ async fn legacy_ids_after_cursor(
             UNION ALL
             SELECT
                 'decision:' || source_ref_id AS entry_id,
-                COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms
+                last_message_at_ms
             FROM cache_keepalive_decisions
             WHERE principal_id = ?
               AND NOT EXISTS (
@@ -1056,41 +1053,6 @@ async fn cursor_mismatch_fails_before_query() {
         } if field == "cache_keepalive_session_cursor"
             && reason == "cursor does not match principal, horizon, or filter"
     ));
-}
-
-#[tokio::test]
-async fn nullable_decision_timestamp_uses_ts_millis() {
-    let (_temp_dir, storage) = storage().await;
-    insert_decision(&storage, PRINCIPAL_ID, "nullable-ts", 1_700_000).await;
-    sqlx::query(
-        "UPDATE cache_keepalive_decisions SET last_message_at_ms = NULL WHERE source_ref_id = ?",
-    )
-    .bind("nullable-ts")
-    .execute(storage.pool())
-    .await
-    .expect("clear projected timestamp");
-
-    let list_item = storage
-        .list_cache_keepalive_sessions(&all_query(10))
-        .await
-        .expect("list nullable timestamp")
-        .rows
-        .into_iter()
-        .find(|row| row.id == "nullable-ts")
-        .expect("nullable decision in list");
-    let detail_item = storage
-        .get_cache_keepalive_list_item(PRINCIPAL_ID, "nullable-ts")
-        .await
-        .expect("detail nullable timestamp")
-        .expect("nullable decision detail");
-    let summary = storage
-        .read_cache_keepalive_summary_input(PRINCIPAL_ID, 1_700_000_000)
-        .await
-        .expect("summary nullable timestamp");
-
-    assert_eq!(list_item.last_message_at_ms, 1_700_000_000);
-    assert_eq!(detail_item, list_item);
-    assert_eq!(summary.recent_decisions, 1);
 }
 
 #[tokio::test]

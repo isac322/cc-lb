@@ -32,7 +32,6 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -65,7 +64,7 @@ async fn test_snapshot_audit_query() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit")
+        .uri("/admin/v1/audit")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();

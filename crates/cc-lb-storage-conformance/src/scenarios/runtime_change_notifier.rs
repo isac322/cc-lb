@@ -1,108 +1,7 @@
-use std::{
-    sync::Arc,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, Result, ensure};
-use cc_lb_storage_api::{
-    BackendKind, ChangeChannel, ChangeEvent, MAX_CHANGE_PAYLOAD_LEN, MetaStore,
-    RuntimeChangeNotifier, normalize_payload,
-    upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
-};
-use tokio::{task::JoinHandle, time};
-use tokio_util::sync::CancellationToken;
-
-use crate::harness::{ConformanceBackend, with_conformance_fixture};
-
-#[cfg(all(test, feature = "postgres"))]
-// CI-latency budget: the coverage-instrumented nextest-cov pass runs all tests
-// under llvm-cov on a shared runner, so the pg LISTEN/NOTIFY round-trip can
-// overrun a tight 5s deadline under load (flaky "deadline has elapsed"). 15s is
-// not race-masking (wait_for_listen_ready_postgres already closes the LISTEN
-// race); it only absorbs scheduling latency.
-const RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
-const SUBSCRIBE_TIMEOUT: Duration = Duration::from_millis(10);
-const POSTGRES_LATENCY_BUDGET: Duration = Duration::from_millis(5_000);
-const SQLITE_LATENCY_BUDGET: Duration = Duration::from_millis(1_000);
-const POSTGRES_LISTEN_STARTUP_DELAY: Duration = Duration::from_millis(100);
-
-pub async fn subscribe_returns_without_blocking<N>(notifier: &N) -> Result<()>
-where
-    N: RuntimeChangeNotifier + ?Sized,
-{
-    time::timeout(SUBSCRIBE_TIMEOUT, notifier.subscribe())
-        .await
-        .context("subscribe should not block longer than 10ms")??;
-    Ok(())
-}
-
-pub async fn cancel_during_run_is_graceful<N>(notifier: Arc<N>) -> Result<()>
-where
-    N: RuntimeChangeNotifier + 'static,
-{
-    let cancel = CancellationToken::new();
-    let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
-    time::sleep(Duration::from_millis(20)).await;
-    cancel.cancel();
-    join_run(handle).await
-}
-
-pub async fn subscriber_receives_within_latency_budget<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-{
-    with_conformance_fixture(backend, |storage| async move {
-        let backend_kind = MetaStore::backend_kind(storage.as_ref()).await?;
-        let latency_budget = latency_budget_for_backend(backend_kind)?;
-        let mut receiver = RuntimeChangeNotifier::subscribe(storage.as_ref()).await?;
-        let cancel = CancellationToken::new();
-        let handle = spawn_run(Arc::clone(&storage), cancel.clone());
-        startup_delay_for_backend(backend_kind).await;
-
-        let mut subscriber = tokio::spawn(async move {
-            loop {
-                let event = receiver.recv().await?;
-                if event.channel == ChangeChannel::Upstream {
-                    return Ok::<_, anyhow::Error>(event);
-                }
-            }
-        });
-
-        let scenario_result = async {
-            let record = UpstreamStore::create(storage.as_ref(), latency_upstream()).await?;
-            let event = time::timeout(latency_budget, &mut subscriber)
-                .await
-                .with_context(|| {
-                    format!(
-                        "subscriber should receive upstream change within {}ms for {backend_kind:?}",
-                        latency_budget.as_millis()
-                    )
-                })?
-                .context("subscriber task should complete")??;
-
-            let expected_payload = record.id.to_string();
-            ensure!(
-                event.payload == expected_payload,
-                "notifier payload should identify mutated upstream; expected {expected_payload}, got {}",
-                event.payload
-            );
-
-            Ok(())
-        }
-        .await;
-
-        if !subscriber.is_finished() {
-            subscriber.abort();
-            let _ = subscriber.await;
-        }
-        cancel.cancel();
-        let run_result = join_run(handle).await;
-
-        scenario_result?;
-        run_result
-    })
-    .await
-}
+use anyhow::{Result, ensure};
+use cc_lb_storage_api::{ChangeChannel, ChangeEvent, MAX_CHANGE_PAYLOAD_LEN, normalize_payload};
 
 pub fn payload_is_truncated_to_identifier_limit() -> Result<()> {
     let payload = "x".repeat(MAX_CHANGE_PAYLOAD_LEN + 50);
@@ -118,75 +17,59 @@ pub fn payload_is_truncated_to_identifier_limit() -> Result<()> {
     Ok(())
 }
 
-fn latency_budget_for_backend(kind: BackendKind) -> Result<Duration> {
-    match kind {
-        BackendKind::Postgres => Ok(POSTGRES_LATENCY_BUDGET),
-        BackendKind::Sqlite => Ok(SQLITE_LATENCY_BUDGET),
-    }
-}
-
-async fn startup_delay_for_backend(kind: BackendKind) {
-    if kind == BackendKind::Postgres {
-        time::sleep(POSTGRES_LISTEN_STARTUP_DELAY).await;
-    }
-}
-
-fn latency_upstream() -> UpstreamCreate {
-    UpstreamCreate {
-        name: "notifier-latency-budget".to_owned(),
-        kind: UpstreamKind::AnthropicOauth,
-        base_url: None,
-        api_key_ciphertext: None,
-        oauth_token_generation: None,
-        warmup_enabled: false,
-        warmup_dialect_plugin: None,
-    }
-}
-
-#[cfg(all(test, feature = "postgres"))]
-async fn recv_matching(
-    receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
-    channel: ChangeChannel,
-    payload: &str,
-) -> Result<ChangeEvent> {
-    let deadline = time::Instant::now() + RECEIVE_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(time::Instant::now());
-        ensure!(!remaining.is_zero(), "timed out waiting for {channel:?}");
-        let event = time::timeout(remaining, receiver.recv()).await??;
-        if event.channel == channel && event.payload == payload {
-            return Ok(event);
-        }
-    }
-}
-
-fn spawn_run<N>(
-    notifier: Arc<N>,
-    cancel: CancellationToken,
-) -> JoinHandle<cc_lb_storage_api::StorageResult<()>>
-where
-    N: RuntimeChangeNotifier + 'static,
-{
-    tokio::spawn(async move { notifier.run(cancel).await })
-}
-
-async fn join_run(handle: JoinHandle<cc_lb_storage_api::StorageResult<()>>) -> Result<()> {
-    handle.await??;
-    Ok(())
-}
-
 #[cfg(all(test, feature = "postgres"))]
 mod tests {
-    use std::{str::FromStr, sync::Arc};
+    use std::{str::FromStr, sync::Arc, time::Duration};
 
     use cc_lb_storage_api::RuntimeChangeNotifier;
     use sqlx::{
         AssertSqlSafe,
         postgres::{PgConnectOptions, PgPoolOptions},
     };
+    use tokio::{task::JoinHandle, time};
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     use super::*;
+
+    // CI-latency budget: the coverage-instrumented nextest-cov pass runs all tests
+    // under llvm-cov on a shared runner, so the pg LISTEN/NOTIFY round-trip can
+    // overrun a tight 5s deadline under load (flaky "deadline has elapsed"). 15s is
+    // not race-masking (wait_for_listen_ready_postgres already closes the LISTEN
+    // race); it only absorbs scheduling latency.
+    const RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
+
+    async fn recv_matching(
+        receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
+        channel: ChangeChannel,
+        payload: &str,
+    ) -> Result<ChangeEvent> {
+        let deadline = time::Instant::now() + RECEIVE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(time::Instant::now());
+            ensure!(!remaining.is_zero(), "timed out waiting for {channel:?}");
+            let event = time::timeout(remaining, receiver.recv()).await??;
+            if event.channel == channel && event.payload == payload {
+                return Ok(event);
+            }
+        }
+    }
+
+    fn spawn_run<N>(
+        notifier: Arc<N>,
+        cancel: CancellationToken,
+    ) -> JoinHandle<cc_lb_storage_api::StorageResult<()>>
+    where
+        N: RuntimeChangeNotifier + 'static,
+    {
+        tokio::spawn(async move { notifier.run(cancel).await })
+    }
+
+    async fn join_run(handle: JoinHandle<cc_lb_storage_api::StorageResult<()>>) -> Result<()> {
+        handle.await??;
+        Ok(())
+    }
+
     const POSTGRES_LISTENER_ESTABLISHED_PAYLOAD: &str = "postgres-listener-established";
 
     /// Emit `payload` on `channel` repeatedly until a subscriber observes it,
@@ -440,7 +323,7 @@ mod tests {
             let storage = cc_lb_storage_postgres::PostgresStorage::new_with_listener_pool(
                 pool.clone(),
                 listener_pool.clone(),
-                Arc::new(cc_lb_engine::SystemClock),
+                Arc::new(cc_lb_clock::SystemClock),
             );
             Ok(Some(Self {
                 schema,

@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    AuditStore as _, ConfigDraftState, ConfigStore as _, RequestEventStore as _,
-    types::{
-        AuditEntry, HistoryEntry, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-        RequestCacheState, RequestEvent, RequestEventUpstream,
-    },
+    AuditEntry, AuditStore as _, ConfigDraftState, ConfigStore as _, HistoryEntry,
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEvent,
+    RequestEventStore as _,
 };
 use serde_json::json;
 
@@ -118,22 +116,22 @@ where
         let event_id = "0193a7b8-1234-7e2f-9012-deadbeefcafe".to_owned();
         let first = RequestEvent {
             ts: 1_900_400_100,
+            ts_ms: Some(1_900_400_100_000),
             request_id: "idempotency-event-001".to_owned(),
             event_id: Some(event_id.clone()),
             principal_id: Some("idempotency-principal".to_owned()),
             principal_kind: Some("api_key".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             status: 200,
             duration_ms: 50,
             ..Default::default()
         };
         let second = RequestEvent {
             ts: 1_900_400_200,
+            ts_ms: Some(1_900_400_200_000),
             request_id: "idempotency-event-001".to_owned(),
             event_id: Some(event_id.clone()),
             principal_id: Some("idempotency-principal".to_owned()),
             principal_kind: Some("api_key".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             status: 500,
             duration_ms: 999,
             error_code: Some("retry_after_first_write".to_owned()),
@@ -253,7 +251,6 @@ fn audit_entries() -> Vec<AuditEntry> {
             output_tokens: Some(456),
             duration_ms: 789,
             agent_label: Some("roundtrip-agent".to_owned()),
-            kind: Some("request".to_owned()),
             ..Default::default()
         },
         AuditEntry {
@@ -268,7 +265,6 @@ fn audit_entries() -> Vec<AuditEntry> {
             output_tokens: Some(0),
             duration_ms: 12,
             agent_label: None,
-            kind: Some("admin".to_owned()),
             ..Default::default()
         },
     ]
@@ -286,7 +282,6 @@ fn request_events() -> Vec<RequestEvent> {
             principal_id: Some("roundtrip-principal-a".to_owned()),
             key_id: Some("key-a".to_owned()),
             principal_kind: Some("api_key".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             model: Some("claude-sonnet-4-5".to_owned()),
             status: 200,
             input_tokens: Some(12),
@@ -342,11 +337,11 @@ fn request_events() -> Vec<RequestEvent> {
         },
         RequestEvent {
             ts: 1_800_300_101,
+            ts_ms: Some(1_800_300_101_000),
             request_id: "roundtrip-event-002".to_owned(),
             event_id: Some("0193a7b8-9c5d-7e2f-9012-bbccddeeff00".to_owned()),
             principal_id: Some("roundtrip-principal-b".to_owned()),
             principal_kind: Some("oauth".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             model: Some("claude-opus-4-1".to_owned()),
             status: 429,
             duration_ms: 144,

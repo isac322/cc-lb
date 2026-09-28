@@ -7,12 +7,11 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
     SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaLatestRecord, SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery,
-    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint,
-    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
-    UpstreamSubscriptionQuotaStore,
+    SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries,
+    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
+    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore,
 };
 use sqlx::{AssertSqlSafe, Row, sqlite::SqliteRow};
 use uuid::Uuid;
@@ -40,18 +39,10 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         Ok(())
     }
 
-    async fn record_subscription_quota_sample(
-        &self,
-        record: &SubscriptionQuotaSample,
-    ) -> StorageResult<()> {
-        self.record_subscription_quota_samples(std::slice::from_ref(record))
-            .await
-    }
-
     async fn list_latest_subscription_quota_for_upstreams(
         &self,
         upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>> {
+    ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
         list_latest_records_for_upstreams(self, upstream_ids).await
     }
 
@@ -144,7 +135,7 @@ impl UpstreamSubscriptionQuotaAggregateStore for SqliteStorage {
 async fn list_latest_records_for_upstreams(
     storage: &SqliteStorage,
     upstream_ids: &[Uuid],
-) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>> {
+) -> StorageResult<Vec<SubscriptionQuotaSample>> {
     if upstream_ids.is_empty() {
         return Ok(Vec::new());
     }

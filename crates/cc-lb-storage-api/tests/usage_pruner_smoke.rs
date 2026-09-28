@@ -1,6 +1,6 @@
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, BackendKind, MetaStore, RequestEvent, RequestEventStore,
+    AuditEntry, AuditStore, MetaStore, RequestEvent, RequestEventStore,
     usage_pruner::{PruneResult, UsagePruner},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -80,7 +80,7 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
         dir.path().join("usage-pruner.sqlite").display()
     );
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok((dir, Arc::new(storage)))
 }
 
@@ -91,6 +91,7 @@ async fn insert_request_events(
     for index in 0..5 {
         storage
             .append_request_event(&RequestEvent {
+                event_id: Some(format!("usage-pruner-{ts_ms}-{index}")),
                 ts_ms: Some(ts_ms),
                 principal_id: Some("principal-1".to_owned()),
                 key_id: Some(format!("key-{index}")),

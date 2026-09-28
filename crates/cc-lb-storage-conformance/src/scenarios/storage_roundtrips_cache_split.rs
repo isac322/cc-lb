@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_storage_api::{RequestEventStore as _, types::RequestEvent};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore as _};
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
@@ -15,6 +15,7 @@ where
             ts: 1_800_000_000,
             ts_ms: Some(1_800_000_000_000),
             request_id: "req_cache_split_breakdown".to_owned(),
+            event_id: Some("req_cache_split_breakdown".to_owned()),
             principal_id: Some("p_split".to_owned()),
             key_id: Some("k_split".to_owned()),
             model: Some("claude-sonnet-4-5-20250929".to_owned()),

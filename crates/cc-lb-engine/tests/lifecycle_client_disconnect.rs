@@ -9,18 +9,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{BusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
+use cc_lb_control::api_keys::principal_view::{
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
+};
+use cc_lb_control::{
+    DynamicViewBuilder, DynamicViewHolder, PromptCacheObservationEnqueueError,
+    PromptCacheObservationSinkLike,
+};
 use cc_lb_domain::{
     InternalError, InternalErrorKind, InternalErrorStage, Principal, TerminalStrategy, TtlClass,
     Upstream,
 };
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
-};
-use cc_lb_engine::{
-    DynamicViewBuilder, DynamicViewHolder, InternalFailure, Lifecycle, LifecycleConfig,
-    LifecycleContext, PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
-};
+use cc_lb_engine::{InternalFailure, Lifecycle, LifecycleConfig, LifecycleContext};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -44,7 +45,7 @@ use client_disconnect_support::{
     refusal_sse_body, sqlite_storage, sse_dispatch, transform_body, transform_lifecycle,
     upstream_frame_error, upstream_frame_error_after,
 };
-use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
+use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Notify, mpsc};
 use url::Url;
@@ -57,9 +58,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory update receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let waiting = Arc::new(tokio::sync::Notify::new());
     let lifecycle = lifecycle(
         sse_dispatch(StatusCode::OK, pending_sse(waiting)),
@@ -708,9 +707,7 @@ async fn terminal_body_error_case(
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory update receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let dispatcher = match content_encoding {
         Some(content_encoding) => encoded_sse_dispatch(
             StatusCode::OK,
@@ -809,9 +806,7 @@ async fn upstream_frame_error_preserves_http_error_classification()
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory update receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let lifecycle = lifecycle(
         sse_dispatch(
             StatusCode::TOO_MANY_REQUESTS,
@@ -875,9 +870,7 @@ async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn 
     let storage = Arc::new(sqlite_storage(&dir).await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory update receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let lifecycle = lifecycle(sse_dispatch(StatusCode::OK, refusal_sse_body()), &test_bus);
 
     let request = stream_request();
@@ -927,9 +920,7 @@ async fn provider_error_before_body_failure_preserves_provider_error()
     let storage = Arc::new(sqlite_storage(&dir).await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory update receiver");
-    };
+    let mut update_rx = test_bus.bus.subscribe();
     let lifecycle = lifecycle(
         sse_dispatch(
             StatusCode::OK,
@@ -986,7 +977,7 @@ async fn timeout_after_stream_guard_drop_remains_timeout() {
 async fn generic_observer_drop_remains_terminal_dropped() {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let observer = LifecycleContext::new("generic-drop".to_owned(), test_bus.bus_arc(), &clock);
     observer.mark_authn_reached();
 
@@ -1028,7 +1019,7 @@ async fn non_stream_body_drop_remains_success() {
 async fn timeout_ordering(timeout_first: bool) {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_rx = lifecycle_receiver(&test_bus);
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let observer = LifecycleContext::new("timeout-ordering".to_owned(), test_bus.bus_arc(), &clock);
     observer.mark_authn_reached();
     let waiting = Arc::new(tokio::sync::Notify::new());
@@ -1072,9 +1063,6 @@ fn prompt_cache_lifecycle_with(
     let authn = TestAuthn::new(TestState::default());
     let mut builder = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: uuid::Uuid::from_u128(1),
@@ -1095,7 +1083,7 @@ fn prompt_cache_lifecycle_with(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(test_bus.bus_arc())
 }
@@ -1383,8 +1371,6 @@ fn prompt_cache_transform_lifecycle(
         allowed_upstreams: vec![upstream_id],
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -1398,9 +1384,6 @@ fn prompt_cache_transform_lifecycle(
     );
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: upstream_id,
@@ -1420,7 +1403,7 @@ fn prompt_cache_transform_lifecycle(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(test_bus.bus_arc())
 }

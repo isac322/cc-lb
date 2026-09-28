@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError,
+    StoredApiKeyRecord,
 };
 use thiserror::Error;
 

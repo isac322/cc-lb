@@ -116,7 +116,6 @@ impl Fixture {
             aead: Arc::clone(&aead),
             limit_engine: admin_test_common::limit_engine_with_clock(clock.clone()),
             lifecycle: None,
-            subscription_metadata_hook: None,
             lazy_refresher: None,
             runtime: None,
             data_dir: None,

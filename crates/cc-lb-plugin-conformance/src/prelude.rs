@@ -10,7 +10,7 @@
 //! ```
 
 pub use crate::{
-    ConformanceSuite, PluginSession, conformance_engine_config,
+    ConformanceSuite, PluginSession,
     fixtures::{
         hdr, sample_filter_request, sample_shape_request, sample_transform_response_request,
         sample_transform_sse_event_request, synth_principal,

@@ -217,7 +217,7 @@ pub struct AnthropicOAuthSignerFactory {
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     clock: ClockHandle,
-    upstream_name: Option<String>,
+    upstream_name: String,
     refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
     refresh_locks: RefreshLocks,
     refresh_upstream_id: Option<Uuid>,
@@ -225,19 +225,6 @@ pub struct AnthropicOAuthSignerFactory {
 }
 
 impl AnthropicOAuthSignerFactory {
-    pub fn new(store: Arc<dyn UpstreamStore>, aead: Arc<AeadService>, clock: ClockHandle) -> Self {
-        Self {
-            store,
-            aead,
-            clock,
-            upstream_name: None,
-            refresh_handle: None,
-            refresh_locks: new_refresh_locks(),
-            refresh_upstream_id: None,
-            allow_disabled_upstream: false,
-        }
-    }
-
     pub fn for_upstream_name(
         store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
@@ -248,7 +235,7 @@ impl AnthropicOAuthSignerFactory {
             aead,
             store,
             clock,
-            upstream_name: Some(upstream_name.into()),
+            upstream_name: upstream_name.into(),
             refresh_handle: None,
             refresh_locks: new_refresh_locks(),
             refresh_upstream_id: None,
@@ -264,49 +251,19 @@ impl AnthropicOAuthSignerFactory {
 
     async fn load_record_and_tokens(
         &self,
-        upstream: &Upstream,
     ) -> Result<(UpstreamRecord, OAuthTokenBundle), SignerError> {
-        let record = if let Some(name) = &self.upstream_name {
-            self.store
-                .get_by_name(name)
-                .await
-                .map_err(storage_error_to_signer)?
-                .ok_or_else(|| SignerError::MissingCredentials {
-                    reason: "oauth upstream not found".to_owned(),
-                })?
-        } else {
-            self.resolve_without_name(upstream).await?
-        };
+        let record = self
+            .store
+            .get_by_name(&self.upstream_name)
+            .await
+            .map_err(storage_error_to_signer)?
+            .ok_or_else(|| SignerError::MissingCredentials {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
 
         ensure_oauth_upstream_usable(&record, self.allow_disabled_upstream)?;
         let tokens = decrypt_upstream_tokens(&self.aead, &record)?;
         Ok((record, tokens))
-    }
-
-    async fn resolve_without_name(
-        &self,
-        _upstream: &Upstream,
-    ) -> Result<UpstreamRecord, SignerError> {
-        let mut after = None;
-        loop {
-            let page = self
-                .store
-                .list(after, 100)
-                .await
-                .map_err(storage_error_to_signer)?;
-            if page.is_empty() {
-                return Err(SignerError::MissingCredentials {
-                    reason: "oauth upstream not found".to_owned(),
-                });
-            }
-            after = page.last().map(|record| record.id);
-            if let Some(record) = page.into_iter().find(|record| {
-                record.kind == cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth
-                    && record.deleted_at_unix_secs.is_none()
-            }) {
-                return Ok(record);
-            }
-        }
     }
 }
 
@@ -346,15 +303,15 @@ impl LazyRefreshConfigurable for AnthropicOAuthSignerFactory {
 impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
     fn with_router_choice(&self, router_chosen_upstream_name: String) -> Arc<dyn SignerFactory> {
         let mut factory = self.clone();
-        factory.upstream_name = Some(router_chosen_upstream_name);
+        factory.upstream_name = router_chosen_upstream_name;
         Arc::new(factory)
     }
 }
 
 #[async_trait]
 impl SignerFactory for AnthropicOAuthSignerFactory {
-    async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-        let (record, tokens) = self.load_record_and_tokens(upstream).await?;
+    async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        let (record, tokens) = self.load_record_and_tokens().await?;
         Ok(Arc::new(PersistedAnthropicOAuthSigner {
             access_token: SecretString::new(tokens.access_token.into_boxed_str()),
             expires_at_unix_secs: tokens.expires_at_unix_secs,
@@ -1375,7 +1332,6 @@ mod tests {
         let principal = cc_lb_domain::Principal {
             id: "principal".to_owned(),
             kind: cc_lb_domain::PrincipalKind::OAuthSubject,
-            claims: serde_json::Map::new(),
         };
         shape_request(
             &DirectDialect,

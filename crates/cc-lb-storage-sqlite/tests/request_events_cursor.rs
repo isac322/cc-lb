@@ -5,9 +5,9 @@ use std::{
 };
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKeyLastUsedQuery,
+    MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKeyLastUsedQuery,
     RequestEventKeyUsageQuery, RequestEventListQuery, RequestEventStore, RequestEventStreamFilters,
-    RequestEventUpstream, StatusClass,
+    StatusClass,
 };
 use sqlx::{Connection, Row, SqliteConnection, sqlite::SqliteConnectOptions};
 use uuid::Uuid;
@@ -26,10 +26,7 @@ async fn request_event_list_uses_materialized_sort_columns() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let columns = sqlx::query("PRAGMA table_info(request_events_v1)")
         .fetch_all(storage.pool())
@@ -41,7 +38,6 @@ async fn request_event_list_uses_materialized_sort_columns() {
     for column in [
         "list_ts_ms",
         "list_event_key",
-        "list_upstream",
         "list_status",
         "list_duration_ms",
         "list_cost_usd_micros",
@@ -54,7 +50,7 @@ async fn request_event_list_uses_materialized_sort_columns() {
 
     let plan = sqlx::query(
         "EXPLAIN QUERY PLAN \
-         SELECT ts, list_ts_ms, request_id, event_id, principal_id, list_upstream, list_status \
+         SELECT ts, list_ts_ms, request_id, event_id, principal_id, list_status \
          FROM request_events_v1 \
          WHERE ts >= ?1 AND ts <= ?2 \
          ORDER BY list_ts_ms DESC, list_event_key DESC, id DESC \
@@ -98,10 +94,7 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let plan = sqlx::query(
         "EXPLAIN QUERY PLAN \
@@ -181,10 +174,7 @@ async fn request_event_key_aggregates_use_normalized_columns() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     for event in [
         RequestEvent {
@@ -333,19 +323,16 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let upstream_id = Uuid::from_u128(7);
     let event = RequestEvent {
         ts: 1_800_000_000,
+        ts_ms: Some(1_800_000_000_000),
         request_id: "req-cursor-1".to_owned(),
         event_id: Some("0193a7b8-1234-7e2f-9012-cursor000001".to_owned()),
         principal_id: Some("principal-a".to_owned()),
         thread_id: Some("thread-a".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(upstream_id),
         model: Some("claude-sonnet-4-5".to_owned()),
         matched_v3_cache_key: Some("v3-cache-key".to_owned()),
@@ -359,8 +346,6 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         cache_value_micros: Some(123_456),
         formula_winner_upstream_id: Some(upstream_id),
         kept_upstream_id: Some(upstream_id),
-        lineage_would_have_predicted_read_tokens: Some(15_000),
-        lineage_would_have_picked_upstream_id: Some(upstream_id),
         status: 200,
         duration_ms: 10,
         ..Default::default()
@@ -391,7 +376,6 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
                 principal_id: Some("principal-a".to_owned()),
                 thread_id: Some("thread-a".to_owned()),
                 model: Some("claude-sonnet-4-5".to_owned()),
-                upstream: Some(RequestEventUpstream::AnthropicDirect),
                 upstream_id: Some(upstream_id),
                 status_class: Some(StatusClass::TwoXx),
                 errors_only: false,
@@ -404,51 +388,14 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
     assert_eq!(matching[0].0, first_cursor);
     assert_eq!(matching[0].1.request_id, "req-cursor-1");
 
-    let row = sqlx::query(
-        "SELECT matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, \
-                lookback_distance, predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, \
-                predicted_cache_creation_tokens_1h, token_estimate_source, cache_value_micros, \
-                formula_winner_upstream_id, kept_upstream_id, \
-                lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id \
-         FROM request_events_v1 WHERE event_id = ?",
-    )
-    .bind(event.event_id.as_deref())
-    .fetch_one(storage.pool())
-    .await
-    .expect("v3 request-event columns stored");
-    assert_eq!(row.get::<String, _>("matched_v3_cache_key"), "v3-cache-key");
-    assert_eq!(row.get::<i64, _>("breakpoint_content_block_index"), 12);
-    assert_eq!(row.get::<i64, _>("matched_content_block_index"), 11);
-    assert_eq!(row.get::<i64, _>("lookback_distance"), 1);
-    assert_eq!(row.get::<i64, _>("predicted_cache_read_tokens"), 20_000);
-    assert_eq!(
-        row.get::<i64, _>("predicted_cache_creation_tokens_5m"),
-        1_000
-    );
-    assert_eq!(
-        row.get::<i64, _>("predicted_cache_creation_tokens_1h"),
-        2_000
-    );
+    let row = sqlx::query("SELECT token_estimate_source FROM request_events_v1 WHERE event_id = ?")
+        .bind(event.event_id.as_deref())
+        .fetch_one(storage.pool())
+        .await
+        .expect("request-event columns stored");
     assert_eq!(
         row.get::<String, _>("token_estimate_source"),
         "local_tiktoken_v1"
-    );
-    assert_eq!(row.get::<i64, _>("cache_value_micros"), 123_456);
-    assert_eq!(
-        row.get::<String, _>("formula_winner_upstream_id"),
-        upstream_id.to_string()
-    );
-    assert_eq!(
-        row.get::<String, _>("kept_upstream_id"),
-        upstream_id.to_string()
-    );
-    assert_eq!(
-        row.get::<i64, _>("lineage_would_have_predicted_read_tokens"),
-        15_000
-    );
-    assert_eq!(
-        row.get::<String, _>("lineage_would_have_picked_upstream_id"),
-        upstream_id.to_string()
     );
 
     let filtered = storage
@@ -480,16 +427,14 @@ async fn cursor_pages_cover_two_hundred_rows_without_gaps_or_duplicates() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let mut expected = BTreeSet::new();
     for index in 0..200u64 {
         let cursor = storage
             .append_request_event(&RequestEvent {
                 ts: 1_800_000_000 + index,
+                ts_ms: Some((1_800_000_000 + index) * 1_000),
                 request_id: format!("req-page-{index}"),
                 event_id: Some(format!("0193a7b8-1234-7e2f-9012-page{index:06}")),
                 status: 200,
@@ -552,10 +497,7 @@ async fn request_event_histogram_matches_list_and_uses_index() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let base = 1_800_000_000_u64;
     let events = [
@@ -599,9 +541,9 @@ async fn request_event_histogram_matches_list_and_uses_index() {
     // hint; turning that bound into a real filter drops the row and fails here.
     sqlx::query(
         "INSERT INTO request_events_v1 \
-            (request_id, ts, event_type, payload, event_id, principal_id, model, \
-             cache_breakpoints, list_ts_ms, list_event_key, list_status, list_duration_ms) \
-         VALUES (?, ?, 'request_completed', ?, ?, ?, ?, '[]', ?, ?, 200, 10)",
+            (request_id, ts, payload, event_id, principal_id, model, \
+             list_ts_ms, list_event_key, list_status, list_duration_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 200, 10)",
     )
     .bind("req-histogram-skewed")
     .bind(base as i64)
@@ -754,10 +696,7 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     let columns = sqlx::query("PRAGMA table_info(request_events_v1)")
         .fetch_all(storage.pool())
         .await
@@ -782,6 +721,7 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
     }
     let event = RequestEvent {
         ts: 1_800_000_000,
+        ts_ms: Some(1_800_000_000_000),
         request_id: "req-setup-timings".to_owned(),
         event_id: Some("event-setup-timings".to_owned()),
         status: 502,
@@ -935,7 +875,7 @@ async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_valu
             .await
             .expect("open migrated sqlite");
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("initialize migrated sqlite");
     storage

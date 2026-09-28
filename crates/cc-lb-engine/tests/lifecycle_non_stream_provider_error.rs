@@ -3,9 +3,9 @@ use crate::common;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_engine::event_bus::{BusReceiver, RequestEventBus, RequestEventUpdate};
-use cc_lb_storage_api::types::RequestEvent;
-use cc_lb_storage_api::{BackendKind, MetaStore, Storage as StorageTrait};
+use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
+use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
@@ -246,9 +246,7 @@ async fn observe_429(
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut event_updates) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory request-event receiver");
-    };
+    let mut event_updates = test_bus.bus.subscribe();
     let state = TestState::default();
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -305,8 +303,8 @@ async fn sqlite_storage(
         dir.path().join("provider-error.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

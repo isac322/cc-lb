@@ -137,7 +137,6 @@ pub enum JobOutcome {
     Done,
     Skip,
     Noop,
-    DuplicateEffect,
     Retry { delay: Duration },
     DeadLetter,
 }
@@ -148,7 +147,6 @@ impl JobOutcome {
             Self::Done => JobOutcomeStatus::Done,
             Self::Skip => JobOutcomeStatus::Skip,
             Self::Noop => JobOutcomeStatus::Noop,
-            Self::DuplicateEffect => JobOutcomeStatus::DuplicateEffect,
             Self::Retry { delay: _ } | Self::DeadLetter => JobOutcomeStatus::Retry,
         }
     }
@@ -156,11 +154,7 @@ impl JobOutcome {
     pub const fn is_terminal_failure(&self) -> bool {
         match self {
             Self::DeadLetter => true,
-            Self::Done
-            | Self::Skip
-            | Self::Noop
-            | Self::DuplicateEffect
-            | Self::Retry { delay: _ } => false,
+            Self::Done | Self::Skip | Self::Noop | Self::Retry { delay: _ } => false,
         }
     }
 }
@@ -231,7 +225,6 @@ where
                 JobOutcome::Done => Ok(JobOutcome::Done),
                 JobOutcome::Skip => Ok(JobOutcome::Skip),
                 JobOutcome::Noop => Ok(JobOutcome::Noop),
-                JobOutcome::DuplicateEffect => Ok(JobOutcome::DuplicateEffect),
                 JobOutcome::DeadLetter => Ok(JobOutcome::DeadLetter),
             }
         })

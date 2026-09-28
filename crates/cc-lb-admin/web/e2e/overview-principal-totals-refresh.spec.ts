@@ -21,16 +21,6 @@ function usageBucket(overrides: Partial<UsageBucket>): UsageBucket {
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
-    proxy_setup_ms_sum: 0,
-    proxy_setup_ms_count: 0,
-    shape_ms_sum: 0,
-    shape_ms_count: 0,
-    sign_ms_sum: 0,
-    sign_ms_count: 0,
-    upstream_ttfb_ms_sum: 0,
-    upstream_ttfb_ms_count: 0,
-    upstream_body_ms_sum: 0,
-    upstream_body_ms_count: 0,
     ...overrides,
   };
 }
@@ -50,11 +40,6 @@ const summary: DashboardSummaryResponse = {
     error_rate: 0,
     virtual_cost_micros: 1_500_000,
     avg_latency_ms: 100,
-    avg_proxy_setup_ms: 0,
-    avg_shape_ms: 0,
-    avg_sign_ms: 0,
-    avg_upstream_ttfb_ms: 0,
-    avg_upstream_body_ms: 0,
   },
   sparkline: {
     buckets: [
@@ -237,10 +222,10 @@ async function installOverviewFixtures(
     if (pathname === '/admin/v1/upstreams') {
       return json(200, { upstreams: [] });
     }
-    if (pathname === '/admin/dashboard/summary') {
+    if (pathname === '/admin/v1/dashboard/summary') {
       return json(200, summary);
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       usageUrls.push(request.url());
       usageRequestTimes.push(Date.now());
       const requestNumber = usageUrls.length;
@@ -250,7 +235,7 @@ async function installOverviewFixtures(
       const response = options.usageResponse(requestNumber);
       return json(response.status, response.body);
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 200 });
     }
     if (pathname === '/admin/v1/subscription-quotas/aggregate') {
@@ -269,7 +254,7 @@ async function installOverviewFixtures(
         windows: [],
       });
     }
-    if (pathname === '/admin/events/stream') {
+    if (pathname === '/admin/v1/events/stream') {
       return route.fulfill({
         status: 200,
         headers: {
@@ -328,7 +313,7 @@ function expectTotalsProjection(usageUrls: readonly string[]) {
   expect(usageUrls.length).toBeGreaterThanOrEqual(1);
   for (const requestedUrl of usageUrls) {
     const url = new URL(requestedUrl);
-    expect(url.pathname).toBe('/admin/usage');
+    expect(url.pathname).toBe('/admin/v1/dashboard/usage');
     expect(url.searchParams.get('range')).toBe('24h');
     expect(url.searchParams.get('step')).toBe('hour');
     expect(url.searchParams.get('group_by')).toBe('principal');
@@ -469,8 +454,8 @@ test('recovers the Top principals totals after an initial usage error', async ({
   await expect(page.getByTestId('top-principal-row')).toHaveCount(0);
   await expect(page.getByText('No usage data', { exact: true })).toBeVisible();
   await expect.poll(() => [...adminResponseErrors]).toEqual([
-    '500 /admin/usage',
-    '500 /admin/usage',
+    '500 /admin/v1/dashboard/usage',
+    '500 /admin/v1/dashboard/usage',
   ]);
   expect(fixtures.usageUrls()).toHaveLength(2);
 
@@ -517,7 +502,7 @@ test('recovers the Top principals totals after an initial usage error', async ({
   );
   expect(pageErrors).toEqual([]);
   expect(adminResponseErrors).toEqual([
-    '500 /admin/usage',
-    '500 /admin/usage',
+    '500 /admin/v1/dashboard/usage',
+    '500 /admin/v1/dashboard/usage',
   ]);
 });

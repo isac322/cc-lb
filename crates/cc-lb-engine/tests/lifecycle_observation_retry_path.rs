@@ -16,8 +16,7 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 use common::{
-    TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body, lifecycle_with_parts,
-    messages_request,
+    TestAuthn, TestLifecycleBus, TestState, collect_body, lifecycle_with_parts, messages_request,
 };
 
 #[tokio::test]
@@ -27,9 +26,6 @@ async fn unauthorized_refresh_observes_only_final_attempt() {
     let test_bus = TestLifecycleBus::new().with_rate_limit_header_subscriber(sink);
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state.clone()),
-        Arc::new(TestRouter {
-            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(SequencedDispatch {
             state: state.clone(),
             responses: Arc::new(Mutex::new(VecDeque::from([

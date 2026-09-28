@@ -15,7 +15,6 @@ function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
   return {
     ts: 1234567890,
     request_id: 'req_test',
-    upstream: 'anthropic',
     status: 200,
     duration_ms: 0,
     _phase: 'final',
@@ -338,21 +337,6 @@ describe('computeStageGroups', () => {
     });
   });
 
-  it('counts Finalize as the parent without adding Limit reconcile again', () => {
-    const groups = computeStageGroups(
-      ev({
-        source_kind: 'proxy',
-        duration_ms: 100,
-        finalize_ms: 20,
-        limit_reconcile_ms: 5,
-      }),
-    );
-
-    expect(groups.internalPost).toBe(20);
-    expect(groups.accounted).toBe(20);
-    expect(groups.rawResidual).toBe(80);
-  });
-
   it('exposes signed over-accounting instead of hiding it behind the clamp', () => {
     const groups = computeStageGroups(
       ev({
@@ -369,45 +353,6 @@ describe('computeStageGroups', () => {
     expect(groups.accounted).toBe(200);
     expect(groups.rawResidual).toBe(-100);
     expect(groups.unaccounted).toBe(0);
-  });
-
-  it('keeps legacy, mixed, null, and measured-zero rows distinct', () => {
-    const legacy = computeStageGroups(
-      ev({ duration_ms: 100, limit_reconcile_ms: 10 }),
-    );
-    const mixed = computeStageGroups(
-      ev({
-        duration_ms: 100,
-        request_body_read_ms: 20,
-        finalize_ms: undefined,
-        limit_reconcile_ms: 10,
-      }),
-    );
-    const explicitNull = computeStageGroups(
-      ev({
-        duration_ms: 100,
-        request_body_read_ms: null,
-        finalize_ms: null,
-        limit_reconcile_ms: 10,
-      }),
-    );
-    const measuredZero = computeStageGroups(
-      ev({
-        duration_ms: 100,
-        request_body_read_ms: 0,
-        finalize_ms: 0,
-        limit_reconcile_ms: 10,
-      }),
-    );
-
-    expect(legacy.internalPost).toBe(10);
-    expect(mixed.internalPre).toBe(20);
-    expect(mixed.internalPost).toBe(10);
-    expect(mixed.accounted).toBe(30);
-    expect(mixed.rawResidual).toBe(70);
-    expect(explicitNull.internalPost).toBe(10);
-    expect(measuredZero.internalPost).toBe(0);
-    expect(measuredZero.accounted).toBe(0);
   });
 });
 
@@ -440,7 +385,6 @@ describe('computeLatencyAttribution', () => {
         response_body_process_ms: 20,
         response_body_downstream_poll_gap_ms: 10,
         finalize_ms: 50,
-        limit_reconcile_ms: 20,
       }),
     );
 

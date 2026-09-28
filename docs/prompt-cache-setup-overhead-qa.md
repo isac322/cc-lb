@@ -103,7 +103,6 @@ Permanent component/integration tests:
 Permanent Vitest/component tests:
 
 - [ ] The timeline total denominator keeps the existing `duration_ms`
-- [ ] `limit_reconcile_ms` keeps its existing meaning
 - [ ] Existing behavior of partial/live rows is preserved
 
 ## 3. Real proxy-path QA matrix
@@ -137,7 +136,7 @@ For each case, check the applicable items together.
 Use an isolated admin-web and mock request events.
 
 - [ ] Open the final request drawer in Logs.
-- [ ] Auth/Route/Setup/TTFB/Body/Limit reconcile display normally.
+- [ ] Auth/Route/Setup/TTFB/Body display normally.
 - [ ] The total displayed time and percentages keep the existing `duration_ms` basis.
 - [ ] No clipping/overflow at 375×812, 768×1024, 1280×800.
 - [ ] Stage colors and tooltips are correct in light/dark themes.
