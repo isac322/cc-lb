@@ -139,12 +139,10 @@ The server emits an `event: reset` frame to force the client to clear its local 
 
 ### Protocol Invariants
 
-- **Event ID Unification**: The `event_id` is a single, lifecycle-generated UUID v7 key that is threaded through the entire pipeline. It identifies the request from the initial partial update to the final database row and the SSE frame `id:`. This prevents duplicate rows and ensures consistent identity, as described in the live-tail redesign plan §3.7.
+- **Event ID Unification**: The `event_id` is a single, lifecycle-generated UUID v7 key that is threaded through the entire pipeline. It identifies the request from the initial partial update to the final database row and the SSE frame `id:`. This prevents duplicate rows and ensures consistent identity.
 - **Cursor Semantics**: The `last_finalized_cursor` advances only from ordered storage-tail delivery. Local bus events (both partial and final) are emitted immediately to minimize latency, but they do not advance the client's resume watermark. This is because local bus events can race with the storage tail. The client uses the cursor to resume the stream safely without missing durable final rows, as implemented in [`handle_events_stream`](../crates/cc-lb-admin/src/events_routes.rs#L84).
 
 ## See Also
 
-- [Dashboard Live-Tail Redesign Plan](../.omo/plans/dashboard-live-tail-redesign.md)
-- [Live-Tail Post-Deployment Follow-ups Plan](../.omo/plans/live-tail-followups.md)
 - [Live-Tail Grafana Dashboard Guide](live-tail-dashboard.md)
 - [Live-Tail Load Testing Guide](live-tail-load-testing.md)
