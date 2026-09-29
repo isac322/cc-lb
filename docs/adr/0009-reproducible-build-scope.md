@@ -2,7 +2,6 @@
 
 - Status: Accepted
 - Date: 2026-07-14
-- Research: [.omo/ulw-research/20260714-reproducible-build/SYNTHESIS.md](../../.omo/ulw-research/20260714-reproducible-build/SYNTHESIS.md)
 - Supersedes: none
 
 ## Context

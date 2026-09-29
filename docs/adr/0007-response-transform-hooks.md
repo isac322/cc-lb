@@ -2,7 +2,6 @@
 
 - Status: Accepted
 - Date: 2026-07-08
-- Plan: [.omo/plans/response-transform-hooks.md](../../.omo/plans/response-transform-hooks.md)
 - Supersedes: none
 
 ## Context
