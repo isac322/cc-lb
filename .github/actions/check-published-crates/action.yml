@@ -53,14 +53,16 @@ runs:
         # major release, which is the bump release-plz will apply. Undeclared
         # breaks are still rejected. Requires full history and tags.
         semver_check() {
-          local crate="$1" pkgid version tag
+          local crate="$1" pkgid version tag log
           local args=(--package "$crate")
           pkgid="$(cargo pkgid -p "$crate")" || return 1
           version="${pkgid##*[@#]}"
           tag="$crate-v$version"
+          # Read the whole log before matching: `git log | grep -q` under
+          # pipefail fails with SIGPIPE once grep exits on an early match.
           if git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
-            git log --format='%s%n%b' "$tag..HEAD" -- "crates/$crate" |
-              grep -Eq '^[a-z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:'; then
+            log="$(git log --format='%s%n%b' "$tag..HEAD" -- "crates/$crate")" &&
+            grep -Eq '^[a-z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:' <<<"$log"; then
             echo "Declared breaking change to $crate since $tag; checking as a major release."
             args+=(--release-type major)
           fi
