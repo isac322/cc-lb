@@ -52,6 +52,7 @@ Create `references/scenarios/<feature>.md`, then add a row to the Scenario index
 ## Scenario index
 | Scenario | User flow it proves | File |
 |---|---|---|
+| PostgreSQL pool telemetry | live SQLx pool → exported gauges, including occupancy transitions | `references/scenarios/postgres-pool-telemetry.md` |
 | Subscription quota — full stack | quota storage → endpoints (latest/series/aggregate/pool-history) → routing → admin dashboards, plus state transitions T1–T10 | `references/scenarios/subscription-quota-fullstack.md` |
 | Subscription quota — frontend | admin-web quota surfaces: Overview pool chart, upstream-detail Quota History + snapshot cards, sidebar meters; render + range windowing | `references/scenarios/subscription-quota-frontend.md` |
 | Request log observability | request logs correctly capture and display various request lifecycle events, including rate limits, slow streaming, client disconnects, and timeouts | `references/scenarios/request-log-observability.md` |
