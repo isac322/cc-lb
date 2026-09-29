@@ -109,6 +109,37 @@ where
         partial_event.cost_cache_creation_1h_micros = None;
         partial_event.cost_cache_read_micros = Some(0);
         storage.append_request_event(&partial_event).await?;
+        // Only a NULL principal_id belongs to the "unknown" bucket. Blank and
+        // other non-UUID principal ids are neither UUID keys nor NULL, so the
+        // aggregation must drop them instead of normalizing them into a series.
+        storage
+            .append_request_event(&cost_event(
+                range_start + 25,
+                "principal-cost-null-other-upstream",
+                None,
+                other_upstream_id,
+                Some(17),
+                Some([1, 2, 3, 4, 5]),
+                None,
+            ))
+            .await?;
+        for (offset, request_id, principal_id, cost) in [
+            (26, "principal-cost-empty", "", 101),
+            (27, "principal-cost-whitespace", "   ", 103),
+            (28, "principal-cost-non-uuid", "legacy-principal", 107),
+        ] {
+            storage
+                .append_request_event(&cost_event(
+                    range_start + offset,
+                    request_id,
+                    Some(principal_id),
+                    upstream_id,
+                    Some(cost),
+                    Some([cost, 0, 0, 0, 0]),
+                    None,
+                ))
+                .await?;
+        }
         storage
             .append_request_event(&cost_event(
                 range_start + 120,
@@ -219,6 +250,40 @@ where
                 .iter()
                 .all(|bucket| selected_principals.contains(&bucket.principal)),
             "unselected normalized principals must be excluded"
+        );
+        let unknown_first = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == "unknown" && bucket.bucket_start_unix_secs == range_start
+            })
+            .expect("NULL-principal bucket");
+        ensure!(
+            unknown_first.total_cost_micros == 17
+                && unknown_first.component_costs_recorded
+                && unknown_first.cost_input_micros == 1
+                && unknown_first.cost_output_micros == 2
+                && unknown_first.cost_cache_creation_5m_micros == 3
+                && unknown_first.cost_cache_creation_1h_micros == 4
+                && unknown_first.cost_cache_read_micros == 5,
+            "unknown must aggregate only NULL-principal rows, not blank or non-UUID ids"
+        );
+
+        let non_uuid_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: None,
+                principal_keys: vec![
+                    "legacy-principal".to_owned(),
+                    String::new(),
+                    "   ".to_owned(),
+                ],
+            })
+            .await?;
+        ensure!(
+            non_uuid_buckets.is_empty(),
+            "non-UUID principal keys must not select blank or non-UUID rows: {non_uuid_buckets:?}"
         );
 
         let uuid_buckets = storage

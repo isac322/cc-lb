@@ -110,15 +110,7 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
              FROM request_events_v1 \
              WHERE list_ts_ms >= ? AND list_ts_ms < ? \
                AND (? IS NULL OR upstream_id = ?) \
-               AND (principal_id IS NULL \
-                 OR length(principal_id) <> 36 \
-                 OR length(replace(principal_id, '-', '')) <> 32 \
-                 OR substr(principal_id, 9, 1) <> '-' \
-                 OR substr(principal_id, 14, 1) <> '-' \
-                 OR substr(principal_id, 19, 1) <> '-' \
-                 OR substr(principal_id, 24, 1) <> '-' \
-                 OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*') \
-               AND (principal_id IS NOT NULL OR ?) \
+               AND principal_id IS NULL \
          ) matched \
          GROUP BY principal_id, bucket_index",
     )
@@ -134,7 +126,6 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
     .bind(1_900_500_120_000_i64)
     .bind(Option::<String>::None)
     .bind(Option::<String>::None)
-    .bind(false)
     .fetch_all(storage.pool())
     .await
     .expect("explain composed principal cost aggregate")
@@ -149,8 +140,10 @@ async fn request_event_principal_costs_use_principal_range_indexes() {
     );
     assert!(
         plan.iter()
-            .any(|detail| detail.contains("request_events_v1_non_uuid_principal_cost_idx")),
-        "normalized fallback must use the non-UUID partial index: {plan:?}"
+            .filter(|detail| detail.contains("request_events_v1_principal_list_order_idx"))
+            .count()
+            >= 2,
+        "UUID and NULL principal cost sources must both use the principal-leading range index: {plan:?}"
     );
     assert!(
         plan.iter()

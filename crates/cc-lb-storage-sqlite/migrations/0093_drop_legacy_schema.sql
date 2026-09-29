@@ -47,42 +47,6 @@ ALTER TABLE upstream_api_key_secret_v1 DROP COLUMN secret_revision;
 ALTER TABLE upstream_oauth_token_v1 DROP COLUMN token_revision;
 ALTER TABLE upstream_oauth_token_v1 DROP COLUMN refreshed_at;
 
--- request_events_v1: indexes no query uses, then the insert-only columns.
--- The payload JSON remains the source for every runtime read.
-DROP INDEX IF EXISTS request_events_v1_cache_state_ts;
-DROP INDEX IF EXISTS request_events_v1_v3_cache_key_ts;
-DROP INDEX IF EXISTS request_events_v1_upstream_id_idx;
-
-ALTER TABLE request_events_v1 DROP COLUMN event_type;
-ALTER TABLE request_events_v1 DROP COLUMN cache_state;
-ALTER TABLE request_events_v1 DROP COLUMN message_id;
-ALTER TABLE request_events_v1 DROP COLUMN message_index;
-ALTER TABLE request_events_v1 DROP COLUMN message_count;
-ALTER TABLE request_events_v1 DROP COLUMN cache_control_block_count;
-ALTER TABLE request_events_v1 DROP COLUMN cache_breakpoints;
-ALTER TABLE request_events_v1 DROP COLUMN cache_prefix_hash;
-ALTER TABLE request_events_v1 DROP COLUMN web_search_requests;
-ALTER TABLE request_events_v1 DROP COLUMN web_fetch_requests;
-ALTER TABLE request_events_v1 DROP COLUMN inference_geo;
-ALTER TABLE request_events_v1 DROP COLUMN matched_v3_cache_key;
-ALTER TABLE request_events_v1 DROP COLUMN breakpoint_content_block_index;
-ALTER TABLE request_events_v1 DROP COLUMN matched_content_block_index;
-ALTER TABLE request_events_v1 DROP COLUMN lookback_distance;
-ALTER TABLE request_events_v1 DROP COLUMN predicted_cache_read_tokens;
-ALTER TABLE request_events_v1 DROP COLUMN predicted_cache_creation_tokens_5m;
-ALTER TABLE request_events_v1 DROP COLUMN predicted_cache_creation_tokens_1h;
-ALTER TABLE request_events_v1 DROP COLUMN cache_value_micros;
-ALTER TABLE request_events_v1 DROP COLUMN formula_winner_upstream_id;
-ALTER TABLE request_events_v1 DROP COLUMN kept_upstream_id;
-ALTER TABLE request_events_v1 DROP COLUMN lineage_would_have_predicted_read_tokens;
-ALTER TABLE request_events_v1 DROP COLUMN lineage_would_have_picked_upstream_id;
-ALTER TABLE request_events_v1 DROP COLUMN quota_urgency_5h;
-ALTER TABLE request_events_v1 DROP COLUMN quota_urgency_7d;
-ALTER TABLE request_events_v1 DROP COLUMN quota_urgency_combined;
-ALTER TABLE request_events_v1 DROP COLUMN quota_warning_multiplier;
-ALTER TABLE request_events_v1 DROP COLUMN list_upstream;
-ALTER TABLE request_events_v1 DROP COLUMN list_limit_reconcile_ms;
-
 -- Unused secondary indexes.
 DROP INDEX IF EXISTS prompt_cache_observations_upstream_model_expires_idx;
 DROP INDEX IF EXISTS idx_warmup_attempts_v1_upstream_trigger_scheduled;
@@ -115,14 +79,197 @@ CREATE INDEX idx_audit_log_admin_actor_ts_id
     ON audit_log_v1 (actor_authority, actor_subject, ts DESC, id DESC)
     WHERE admin_action IS NOT NULL;
 
--- Row counts captured before the table rebuilds below.
+-- Row counts captured before the table rebuilds below. request_events_seq
+-- keeps the AUTOINCREMENT high-water mark so the rebuilt table never reissues
+-- an id that was handed out and later deleted.
 CREATE TEMP TABLE legacy_schema_rebuild_before AS
 SELECT
+    (SELECT COUNT(*) FROM request_events_v1) AS request_events,
+    (SELECT seq FROM sqlite_sequence WHERE name = 'request_events_v1') AS request_events_seq,
     (SELECT COUNT(*) FROM managed_keys_v1) AS managed_keys,
     (SELECT COUNT(*) FROM cache_keepalive_decisions) AS keepalive_decisions,
     (SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1) AS quota_checkpoints,
     (SELECT COUNT(*) FROM upstream_plan_tier_history_v1) AS plan_tier_history,
     (SELECT COUNT(*) FROM upstream_subscription_quota_latest_v1) AS quota_latest;
+
+-- request_events_v1: drop the insert-only columns (the payload JSON remains
+-- the source for every runtime read) and the indexes no query uses. One
+-- rebuild copies the table once; a separate ALTER TABLE ... DROP COLUMN per
+-- column would rewrite the whole table for each column. Not recreated:
+-- request_events_v1_cache_state_ts and request_events_v1_v3_cache_key_ts
+-- (their columns are gone), request_events_v1_upstream_id_idx (covered by
+-- request_events_v1_upstream_list_order_idx), and
+-- request_events_v1_non_uuid_principal_cost_idx (principal cost reads cover
+-- only UUID and NULL principals, both served by
+-- request_events_v1_principal_list_order_idx).
+DROP TABLE IF EXISTS request_events_v1_new;
+
+CREATE TABLE request_events_v1_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    upstream_id TEXT,
+    payload TEXT NOT NULL,
+    principal_id BLOB,
+    created_at INTEGER,
+    key_id TEXT,
+    model TEXT,
+    upstream_name TEXT,
+    thread_id TEXT,
+    input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    cache_creation_input_tokens INTEGER CHECK (cache_creation_input_tokens IS NULL OR cache_creation_input_tokens >= 0),
+    cache_read_input_tokens INTEGER CHECK (cache_read_input_tokens IS NULL OR cache_read_input_tokens >= 0),
+    event_id TEXT NOT NULL UNIQUE,
+    error_code TEXT NULL,
+    upstream_error_type TEXT NULL,
+    upstream_error_message TEXT NULL,
+    thinking_tokens INTEGER NULL,
+    service_tier TEXT NULL,
+    cache_creation_input_tokens_5m INTEGER NULL,
+    cache_creation_input_tokens_1h INTEGER NULL,
+    token_estimate_source TEXT NULL,
+    thinking_budget_tokens INTEGER NULL,
+    reasoning_effort TEXT NULL,
+    list_ts_ms INTEGER NOT NULL DEFAULT 0,
+    list_event_key TEXT NOT NULL DEFAULT '',
+    list_status INTEGER NULL,
+    list_duration_ms INTEGER NULL,
+    list_auth_ms INTEGER NULL,
+    list_route_ms INTEGER NULL,
+    list_limit_reserve_ms INTEGER NULL,
+    list_bulkhead_wait_ms INTEGER NULL,
+    list_dns_ms INTEGER NULL,
+    list_connect_ms INTEGER NULL,
+    list_connection_reused INTEGER NULL,
+    list_proxy_setup_ms INTEGER NULL,
+    list_shape_ms INTEGER NULL,
+    list_sign_ms INTEGER NULL,
+    list_upstream_ttfb_ms INTEGER NULL,
+    list_upstream_body_ms INTEGER NULL,
+    list_stream_first_content_delta_ms INTEGER NULL,
+    list_stream_last_content_delta_ms INTEGER NULL,
+    list_inter_token_avg_ms INTEGER NULL,
+    list_cost_usd_micros INTEGER NULL,
+    list_cost_input_micros INTEGER NULL,
+    list_cost_output_micros INTEGER NULL,
+    list_cost_cache_creation_5m_micros INTEGER NULL,
+    list_cost_cache_creation_1h_micros INTEGER NULL,
+    list_cost_cache_read_micros INTEGER NULL,
+    source_kind TEXT NULL,
+    source_ref_id TEXT NULL,
+    observed_session_id TEXT,
+    request_kind TEXT,
+    claude_agent_id TEXT,
+    claude_parent_agent_id TEXT,
+    parent_session_id TEXT,
+    client_app TEXT,
+    session_id_source TEXT,
+    list_json_parse_ms REAL NULL,
+    list_cache_structure_ms REAL NULL,
+    list_cache_token_key_ms REAL NULL,
+    list_cache_count_lookup_ms REAL NULL,
+    list_cache_tokenizer_queue_ms REAL NULL,
+    list_cache_serialize_ms REAL NULL,
+    list_cache_tokenize_ms REAL NULL,
+    list_prepare_signer_ms REAL NULL,
+    list_request_body_read_ms INTEGER NULL,
+    list_request_body_bytes INTEGER NULL,
+    list_finalize_ms INTEGER NULL,
+    list_request_body_first_chunk_ms REAL NULL,
+    list_request_body_receive_ms REAL NULL,
+    list_request_body_wait_ms REAL NULL,
+    list_request_body_process_ms REAL NULL,
+    list_request_body_chunk_count INTEGER NULL,
+    list_response_body_wait_ms REAL NULL,
+    list_response_body_process_ms REAL NULL,
+    list_response_body_downstream_poll_gap_ms REAL NULL,
+    list_retry_overhead_ms REAL NULL,
+    event_kind TEXT NULL
+);
+
+INSERT INTO request_events_v1_new (
+    id, request_id, ts, upstream_id, payload, principal_id, created_at, key_id, model,
+    upstream_name, thread_id, input_tokens, output_tokens, cache_creation_input_tokens,
+    cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message,
+    thinking_tokens, service_tier, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h,
+    token_estimate_source, thinking_budget_tokens, reasoning_effort, list_ts_ms, list_event_key,
+    list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms,
+    list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused,
+    list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms,
+    list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms,
+    list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros,
+    list_cost_output_micros, list_cost_cache_creation_5m_micros,
+    list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, source_kind, source_ref_id,
+    observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id,
+    parent_session_id, client_app, session_id_source, list_json_parse_ms,
+    list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms,
+    list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms,
+    list_prepare_signer_ms, list_request_body_read_ms, list_request_body_bytes,
+    list_finalize_ms, list_request_body_first_chunk_ms, list_request_body_receive_ms,
+    list_request_body_wait_ms, list_request_body_process_ms, list_request_body_chunk_count,
+    list_response_body_wait_ms, list_response_body_process_ms,
+    list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, event_kind
+)
+SELECT
+    id, request_id, ts, upstream_id, payload, principal_id, created_at, key_id, model,
+    upstream_name, thread_id, input_tokens, output_tokens, cache_creation_input_tokens,
+    cache_read_input_tokens, event_id, error_code, upstream_error_type, upstream_error_message,
+    thinking_tokens, service_tier, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h,
+    token_estimate_source, thinking_budget_tokens, reasoning_effort, list_ts_ms, list_event_key,
+    list_status, list_duration_ms, list_auth_ms, list_route_ms, list_limit_reserve_ms,
+    list_bulkhead_wait_ms, list_dns_ms, list_connect_ms, list_connection_reused,
+    list_proxy_setup_ms, list_shape_ms, list_sign_ms, list_upstream_ttfb_ms,
+    list_upstream_body_ms, list_stream_first_content_delta_ms, list_stream_last_content_delta_ms,
+    list_inter_token_avg_ms, list_cost_usd_micros, list_cost_input_micros,
+    list_cost_output_micros, list_cost_cache_creation_5m_micros,
+    list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, source_kind, source_ref_id,
+    observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id,
+    parent_session_id, client_app, session_id_source, list_json_parse_ms,
+    list_cache_structure_ms, list_cache_token_key_ms, list_cache_count_lookup_ms,
+    list_cache_tokenizer_queue_ms, list_cache_serialize_ms, list_cache_tokenize_ms,
+    list_prepare_signer_ms, list_request_body_read_ms, list_request_body_bytes,
+    list_finalize_ms, list_request_body_first_chunk_ms, list_request_body_receive_ms,
+    list_request_body_wait_ms, list_request_body_process_ms, list_request_body_chunk_count,
+    list_response_body_wait_ms, list_response_body_process_ms,
+    list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, event_kind
+FROM request_events_v1
+ORDER BY id;
+
+DROP TABLE request_events_v1;
+ALTER TABLE request_events_v1_new RENAME TO request_events_v1;
+
+UPDATE sqlite_sequence
+SET seq = (SELECT request_events_seq FROM legacy_schema_rebuild_before)
+WHERE name = 'request_events_v1'
+  AND seq < (SELECT request_events_seq FROM legacy_schema_rebuild_before);
+
+CREATE INDEX request_events_v1_thread_ts
+    ON request_events_v1 (thread_id, ts);
+CREATE INDEX request_events_v1_list_order_idx
+    ON request_events_v1 (list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_principal_list_order_idx
+    ON request_events_v1 (principal_id, list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_model_list_order_idx
+    ON request_events_v1 (model, list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_upstream_list_order_idx
+    ON request_events_v1 (upstream_id, list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_principal_key_ts_idx
+    ON request_events_v1 (principal_id, key_id, ts);
+CREATE INDEX request_events_v1_principal_key_usage_idx
+    ON request_events_v1 (principal_id, key_id, list_ts_ms);
+CREATE INDEX request_events_v1_thread_list_order_idx
+    ON request_events_v1 (thread_id, list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_source_kind_list_order_idx
+    ON request_events_v1 (source_kind, list_ts_ms DESC, list_event_key DESC, id DESC);
+CREATE INDEX request_events_v1_event_kind_list_order_idx
+    ON request_events_v1 (
+        (CASE WHEN source_kind = 'renewal' THEN 'renewal'
+              ELSE COALESCE(event_kind, 'unclassified') END),
+        list_ts_ms DESC,
+        list_event_key DESC,
+        id DESC
+    );
 
 -- managed_keys_v1: the synthetic id and name columns duplicated
 -- (principal_id, key_id), which becomes the primary key.
@@ -500,7 +647,8 @@ CREATE TEMP TABLE legacy_schema_rebuild_guard (
 
 INSERT INTO legacy_schema_rebuild_guard (ok)
 SELECT CASE
-    WHEN (SELECT COUNT(*) FROM managed_keys_v1) = b.managed_keys
+    WHEN (SELECT COUNT(*) FROM request_events_v1) = b.request_events
+     AND (SELECT COUNT(*) FROM managed_keys_v1) = b.managed_keys
      AND (SELECT COUNT(*) FROM cache_keepalive_decisions) = b.keepalive_decisions
      AND (SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1) = b.quota_checkpoints
      AND (SELECT COUNT(*) FROM upstream_plan_tier_history_v1) = b.plan_tier_history

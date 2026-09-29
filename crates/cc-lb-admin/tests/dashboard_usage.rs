@@ -439,7 +439,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         "other-upstream",
         100,
     );
-    other.principal_id = Some("principal-b".to_owned());
+    other.principal_id = Some(Uuid::from_u128(0xB1).to_string());
     other.cost_usd_micros = Some(100);
     other.cost_input_micros = Some(100);
     storage.append_request_event(&other).await.unwrap();
@@ -456,7 +456,10 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
     let (target_full, target_totals) = usage_projection_pair(&admin_app, target_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&target_full, &target_totals);
     assert_eq!(target_totals["series"].as_array().unwrap().len(), 1);
-    assert_eq!(target_totals["series"][0]["key"], "principal-a");
+    assert_eq!(
+        target_totals["series"][0]["key"],
+        Uuid::from_u128(0xA1).to_string()
+    );
     assert_usage_bucket_fields(
         &target_totals["series"][0]["buckets"][0],
         &[
@@ -489,7 +492,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         "new-upstream",
         17,
     );
-    newly_observed.principal_id = Some("principal-c".to_owned());
+    newly_observed.principal_id = Some(Uuid::from_u128(0xB2).to_string());
     newly_observed.cost_usd_micros = Some(9);
     newly_observed.cost_input_micros = Some(9);
     storage.append_request_event(&newly_observed).await.unwrap();
@@ -500,7 +503,10 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         usage_projection_pair(&admin_app, empty_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&observed_full, &observed_totals);
     assert_eq!(observed_totals["observed"], true);
-    assert_eq!(observed_totals["series"][0]["key"], "principal-c");
+    assert_eq!(
+        observed_totals["series"][0]["key"],
+        Uuid::from_u128(0xB2).to_string()
+    );
     assert_usage_bucket_fields(
         &observed_totals["series"][0]["buckets"][0],
         &[
@@ -608,7 +614,8 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
         "target-upstream",
         1,
     );
-    modern.principal_id = Some("  principal/A  ".to_owned());
+    let principal = Uuid::from_u128(0xA2).to_string();
+    modern.principal_id = Some(principal.clone());
     modern.source_kind = Some("renewal".to_owned());
     modern.cost_usd_micros = Some(15);
     modern.cost_input_micros = Some(1);
@@ -625,7 +632,9 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
         "target-upstream",
         1,
     );
-    legacy.principal_id = Some("principal A".to_owned());
+    // Legacy rows record only a total cost; both rows share one canonical UUID
+    // principal so the mixed total enriches with the modern row's components.
+    legacy.principal_id = Some(principal.clone());
     legacy.cost_usd_micros = Some(10);
     storage.append_request_event(&legacy).await.unwrap();
     storage.rollup_usage_once().await.unwrap();
@@ -640,7 +649,7 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    let principal = normalize_usage_rollup_dimension(Some("principal A"));
+    let principal = normalize_usage_rollup_dimension(Some(principal.as_str()));
     let series = body["series"]
         .as_array()
         .unwrap()
@@ -673,6 +682,8 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
         "target-upstream",
         1,
     );
+    // NULL principal ids are bucketed as "unknown" and still aggregate costs.
+    event.principal_id = None;
     event.cost_input_micros = Some(0);
     event.cost_output_micros = Some(0);
     event.cost_cache_creation_5m_micros = Some(0);
@@ -691,6 +702,7 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["series"][0]["key"], "unknown");
     let bucket = body["series"][0]["buckets"]
         .as_array()
         .unwrap()
@@ -987,7 +999,7 @@ fn usage_event(
         ts_ms: Some(ts * 1000),
         event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
-        principal_id: Some("principal-a".to_owned()),
+        principal_id: Some(Uuid::from_u128(0xA1).to_string()),
         key_id: Some("test-key".to_owned()),
         upstream_id: Some(upstream_id),
         upstream_name: Some(upstream_name.to_owned()),

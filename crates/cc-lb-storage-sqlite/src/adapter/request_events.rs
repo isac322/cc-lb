@@ -284,7 +284,7 @@ const FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
       AND upstream_id = ?4 \
       AND principal_id IN (SELECT CAST(value AS TEXT) FROM json_each(?5))";
 
-const NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+const NULL_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
         ((list_ts_ms - ?1) / ?2) AS bucket_index, \
         list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
         list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
@@ -292,16 +292,9 @@ const NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
     FROM request_events_v1 \
     WHERE list_ts_ms >= ?1 \
       AND list_ts_ms < ?3 \
-      AND (principal_id IS NULL \
-        OR length(principal_id) <> 36 \
-        OR length(replace(principal_id, '-', '')) <> 32 \
-        OR substr(principal_id, 9, 1) <> '-' \
-        OR substr(principal_id, 14, 1) <> '-' \
-        OR substr(principal_id, 19, 1) <> '-' \
-        OR substr(principal_id, 24, 1) <> '-' \
-        OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+      AND principal_id IS NULL";
 
-const FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
+const FILTERED_NULL_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, \
         ((list_ts_ms - ?1) / ?2) AS bucket_index, \
         list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
         list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, \
@@ -310,14 +303,7 @@ const FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str = "SELECT principal_id, 
     WHERE list_ts_ms >= ?1 \
       AND list_ts_ms < ?3 \
       AND upstream_id = ?4 \
-      AND (principal_id IS NULL \
-        OR length(principal_id) <> 36 \
-        OR length(replace(principal_id, '-', '')) <> 32 \
-        OR substr(principal_id, 9, 1) <> '-' \
-        OR substr(principal_id, 14, 1) <> '-' \
-        OR substr(principal_id, 19, 1) <> '-' \
-        OR substr(principal_id, 24, 1) <> '-' \
-        OR lower(replace(principal_id, '-', '')) GLOB '*[^0-9a-f]*')";
+      AND principal_id IS NULL";
 
 fn is_canonical_uuid_principal(value: &str) -> bool {
     value.len() == 36 && Uuid::parse_str(value).is_ok()
@@ -406,7 +392,6 @@ async fn fetch_filtered_uuid_principal_cost_rows(
 fn merge_principal_cost_rows(
     buckets: &mut BTreeMap<(String, u64), RequestEventPrincipalCostBucket>,
     rows: Vec<PrincipalCostRow>,
-    selected_principals: &[String],
     query: &RequestEventPrincipalCostQuery,
 ) -> StorageResult<()> {
     for (
@@ -422,12 +407,6 @@ fn merge_principal_cost_rows(
     ) in rows
     {
         let principal = normalize_usage_rollup_dimension(principal_id.as_deref());
-        if !selected_principals
-            .iter()
-            .any(|selected| selected == &principal)
-        {
-            continue;
-        }
         let bucket_index = i64_to_u64(bucket_index, "request event principal cost bucket index")?;
         let bucket_offset = bucket_index
             .checked_mul(query.bucket_width_secs)
@@ -542,32 +521,35 @@ async fn request_event_principal_costs(
                 .await?
             }
         };
-        merge_principal_cost_rows(&mut buckets, rows, &uuid_keys, query)?;
+        merge_principal_cost_rows(&mut buckets, rows, query)?;
     }
-    let rows = match query.upstream_id {
-        Some(upstream_id) => {
-            fetch_filtered_principal_cost_rows(
-                storage,
-                FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
-                range_start_ms,
-                bucket_width_ms,
-                range_end_ms,
-                upstream_id.to_string(),
-            )
-            .await?
-        }
-        None => {
-            fetch_principal_cost_rows(
-                storage,
-                NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
-                range_start_ms,
-                bucket_width_ms,
-                range_end_ms,
-            )
-            .await?
-        }
-    };
-    merge_principal_cost_rows(&mut buckets, rows, &query.principal_keys, query)?;
+    let unknown_principal = normalize_usage_rollup_dimension(None);
+    if query.principal_keys.contains(&unknown_principal) {
+        let rows = match query.upstream_id {
+            Some(upstream_id) => {
+                fetch_filtered_principal_cost_rows(
+                    storage,
+                    FILTERED_NULL_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                    upstream_id.to_string(),
+                )
+                .await?
+            }
+            None => {
+                fetch_principal_cost_rows(
+                    storage,
+                    NULL_PRINCIPAL_COST_SOURCE_SQL,
+                    range_start_ms,
+                    bucket_width_ms,
+                    range_end_ms,
+                )
+                .await?
+            }
+        };
+        merge_principal_cost_rows(&mut buckets, rows, query)?;
+    }
 
     Ok(buckets.into_values().collect())
 }
