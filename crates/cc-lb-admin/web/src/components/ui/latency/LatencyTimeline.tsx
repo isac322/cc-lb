@@ -38,14 +38,16 @@ const GROUP_META: Record<
   StageGroup,
   { label: string; hue: number; chroma: number }
 > = {
-  // OKLCH hues from the series family (sky, teal, green, magenta, neutral).
-  // Across the whole lightness ramp every shade stays more than OKLab ΔE 0.1
-  // from the accent, warn and danger tokens: brand and severity keep their
+  // OKLCH hues: internal stages take the cc-lb blue, upstream stages the
+  // upstream-wait teal, wait stages a lime and the body a magenta; finalize
+  // stays neutral. Stages in one group spread in lightness and hue around the
+  // group's base (`STAGE_SHADE_OFFSETS`), keeping at least OKLab ΔE 0.09 from
+  // the accent, warn and danger tokens so brand and severity keep their
   // meaning inside the timeline.
-  renewal: { label: 'Renewal', hue: 235, chroma: 0.1 },
-  internal_pre: { label: 'Internal pre', hue: 235, chroma: 0.1 },
-  wait: { label: 'Wait', hue: 190, chroma: 0.09 },
-  upstream: { label: 'Upstream', hue: 150, chroma: 0.11 },
+  renewal: { label: 'Renewal', hue: 259, chroma: 0.1 },
+  internal_pre: { label: 'Internal pre', hue: 259, chroma: 0.1 },
+  wait: { label: 'Wait', hue: 128, chroma: 0.1 },
+  upstream: { label: 'Upstream', hue: 193, chroma: 0.08 },
   body: { label: 'Body', hue: 335, chroma: 0.11 },
   internal_post: { label: 'Finalize', hue: 260, chroma: 0.012 },
 };
@@ -140,17 +142,46 @@ interface Stage {
 
 interface StageDetail extends Stage {
   index: number;
-  groupCount: number;
   fill: string;
 }
 
-/** Night ramps 0.58→0.86 lightness, day 0.40→0.72: each shade holds its contrast on the ground. */
-function stageShade(group: StageGroup, index: number, count: number): string {
+/**
+ * Per-stage [lightness, hue°] offsets from a group's base shade, in
+ * farthest-point order: each stage sits as far (OKLab) from every earlier
+ * stage as the ±0.13 lightness × ±30° hue grid allows, so any prefix is
+ * spread and chronological neighbours differ by at least ΔE 0.13 through
+ * twelve stages (0.08 through sixteen). A plain lightness ramp left eleven
+ * internal stages about ΔE 0.03 apart.
+ */
+const STAGE_SHADE_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [0, 0],
+  [-0.13, 30],
+  [0.13, -30],
+  [-0.13, -30],
+  [0.13, 30],
+  [-0.065, -30],
+  [0.065, 30],
+  [-0.065, 15],
+  [0.065, -30],
+  [-0.13, 0],
+  [0.13, 0],
+  [0, 30],
+  [0, -30],
+  [0.065, 0],
+  [-0.13, -15],
+  [0.13, 15],
+];
+
+/** Night centres on lightness 0.71, day on 0.53: each shade holds its contrast on the ground. */
+function stageShade(group: StageGroup, index: number): string {
   const { hue, chroma } = GROUP_META[group];
-  const t = count <= 1 ? 0.5 : index / (count - 1);
-  const night = (0.58 + t * 0.28).toFixed(3);
-  const day = (0.4 + t * 0.32).toFixed(3);
-  return `light-dark(oklch(${day} ${chroma} ${hue}), oklch(${night} ${chroma} ${hue}))`;
+  const [lightness, hueShift] = STAGE_SHADE_OFFSETS[
+    index % STAGE_SHADE_OFFSETS.length
+  ] ?? [0, 0];
+  const h = hue + hueShift;
+  const night = (0.71 + lightness).toFixed(3);
+  const day = (0.53 + lightness).toFixed(3);
+  return `light-dark(oklch(${day} ${chroma} ${h}), oklch(${night} ${chroma} ${h}))`;
 }
 
 function formatStageMs(stage: Stage): string {
@@ -292,20 +323,14 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
     }
   }
 
-  const perGroupCount = new Map<StageGroup, number>();
-  for (const s of raw) {
-    perGroupCount.set(s.group, (perGroupCount.get(s.group) ?? 0) + 1);
-  }
   const seen = new Map<StageGroup, number>();
   return raw.map((s) => {
-    const groupCount = perGroupCount.get(s.group) ?? 1;
     const index = seen.get(s.group) ?? 0;
     seen.set(s.group, index + 1);
     return {
       ...s,
       index,
-      groupCount,
-      fill: stageShade(s.group, index, groupCount),
+      fill: stageShade(s.group, index),
     };
   });
 }
@@ -1601,7 +1626,7 @@ export function LatencyTimeline({
                           aria-hidden
                           className="h-2 w-2 shrink-0 rounded-sm"
                           style={{
-                            backgroundColor: stageShade(g, 0, 1),
+                            backgroundColor: stageShade(g, 0),
                           }}
                         />
                         {groupLabel}
