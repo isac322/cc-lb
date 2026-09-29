@@ -2,7 +2,6 @@
 
 - Status: Accepted
 - Date: 2026-07-10
-- Plan: [.omo/plans/scheduler-backend-resource-lifetimes.md](../../.omo/plans/scheduler-backend-resource-lifetimes.md)
 - Supersedes: none
 
 ## Context
