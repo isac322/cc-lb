@@ -126,10 +126,8 @@ pub fn host_supports(hook: HookKind, version: WireVersion) -> bool {
     host_supported_versions(hook).contains(&version)
 }
 
-/// Layout fingerprint published by each wire struct via the
-/// `#[derive(WireSchema)]` proc-macro (defined in
-/// `cc-lb-pdk-wasmtime-macros`). The macro walks the struct AST,
-/// serialises fields to a canonical descriptor string, then embeds
+/// Layout fingerprint of a hook wire type. `build.rs` generates the impl
+/// for every wire type from its canonical descriptor string and embeds
 /// `BLAKE3(descriptor)` as a 32-byte const.
 pub trait WireSchema {
     const FINGERPRINT: [u8; 32];

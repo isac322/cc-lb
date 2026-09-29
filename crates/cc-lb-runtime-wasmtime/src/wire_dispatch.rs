@@ -9,7 +9,7 @@ use crate::cache::{
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
 use crate::policy::{PluginWireBounds, ShapeOriginPolicy};
-use crate::{HotEngineConfig, SlotKind};
+use crate::{HookKind, HotEngineConfig};
 
 /// Wire-level dispatch handle for a single loaded plugin slot.
 ///
@@ -22,7 +22,7 @@ use crate::{HotEngineConfig, SlotKind};
 /// the host↔wire type conversion.
 pub struct WasmPluginWireDispatch {
     pub(crate) cell: Arc<PluginCell>,
-    pub(crate) kind: SlotKind,
+    pub(crate) kind: HookKind,
     pub(crate) config: Arc<HotEngineConfig>,
 }
 
@@ -34,8 +34,8 @@ impl WasmPluginWireDispatch {
         Self { cell, kind, config }
     }
 
-    /// The [`SlotKind`] this dispatch handle was built for.
-    pub fn kind(&self) -> SlotKind {
+    /// The [`HookKind`] this dispatch handle was built for.
+    pub fn kind(&self) -> HookKind {
         self.kind
     }
 

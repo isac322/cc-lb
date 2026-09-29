@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Remove `impl Default for HostState`; use `HostState::new(memory_max_pages)`.
 - Remove `ModuleInspection::primary_schema_hash`; use `hook_fingerprints`.
 - Plugin metadata must declare `mode` on every hook (see `cc-lb-plugin-wire`).
+- Remove the `SlotKind` alias; use `HookKind`.
+- Remove the `WasmtimeRuntime::admit_wasm(kind, bytes)` method; use the free `admit_wasm(engine, linker, kind, bytes, config)` or `WasmtimeRuntime::admit_wasm_agnostic`.
 
 ## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-15
 

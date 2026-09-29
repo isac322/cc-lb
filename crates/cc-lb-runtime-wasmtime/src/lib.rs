@@ -25,7 +25,6 @@ mod tests;
 mod wire_dispatch;
 
 pub use cc_lb_plugin_wire::schema::HookKind;
-pub use cc_lb_plugin_wire::schema::HookKind as SlotKind;
 pub use cell::{LoadedPluginSlot, PluginCell};
 pub use engine::{HostState, HotEngineAllocationStrategy, HotEngineConfig, build_hot_engine};
 pub use error::WasmtimeRuntimeError;
@@ -87,16 +86,6 @@ impl WasmtimeRuntime {
         &self.linker
     }
 
-    pub fn admit_wasm(
-        &self,
-        kind: HookKind,
-        wasm_bytes: &[u8],
-    ) -> Result<ModuleInspection, WasmtimeRuntimeError> {
-        let (_, inspection) =
-            module::admit_wasm(&self.engine, &self.linker, kind, wasm_bytes, &self.config)?;
-        Ok(inspection)
-    }
-
     pub fn admit_wasm_agnostic(
         &self,
         wasm_bytes: &[u8],
@@ -113,7 +102,7 @@ impl WasmtimeRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Filter, slot_key, name, wasm_bytes)
+        self.register(HookKind::Filter, slot_key, name, wasm_bytes)
     }
 
     /// Register (or replace) a shape-hook slot. The plugin module
@@ -124,12 +113,12 @@ impl WasmtimeRuntime {
         name: impl Into<String>,
         wasm_bytes: &[u8],
     ) -> Result<Arc<LoadedPluginSlot>, WasmtimeRuntimeError> {
-        self.register(SlotKind::Shape, slot_key, name, wasm_bytes)
+        self.register(HookKind::Shape, slot_key, name, wasm_bytes)
     }
 
     fn register(
         &self,
-        kind: SlotKind,
+        kind: HookKind,
         slot_key: RuntimeSlotKey,
         name: impl Into<String>,
         wasm_bytes: &[u8],

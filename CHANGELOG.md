@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 ### Removed
 
 - Legacy compatibility code, fallbacks and dead code left behind by earlier cutovers: the unused router-plugin slot (`RouterPlugin`, `global_router`), the unused `cc-lb-dialect-anthropic` crate, the plugin blob repository, redb-era storage record formats and contract-version checks, the warmup-loop helpers, and the Bedrock/Vertex and Extism leftovers.
+- Plugin SDK aliases and helpers the host no longer uses: the `SlotKind` alias (use `HookKind`), `#[derive(WireSchema)]` (hook wire types get their fingerprints from `cc-lb-plugin-wire`), `WasmtimeRuntime::admit_wasm(kind, bytes)`, and `ConformanceSuite::assert_static_admission`. The published plugin crates take a major version bump at the next release; see their changelogs.
 - Schema that no current code reads or writes. PostgreSQL migration 0130 drops `killswitch_v1`, `quotas_by_principal_v1`, `principal_limit_states_v1`, `plugin_registry*` and 26 insert-only `request_events_v1` columns (their values stay in the payload JSON), plus stale columns, indexes and the cost-component compatibility trigger. SQLite migration 0093 does the same for its schema. Scheduler migration 0010 drops `anthropic_compat_etags.etag`.
 
 ### Added

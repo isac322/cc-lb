@@ -326,10 +326,11 @@ chain or called on user traffic.
 
 ## Layout Fingerprint (`WireSchema`)
 
-The wire layout fingerprint is derived from the Rust type AST with
-`#[derive(WireSchema)]`. The derive macro builds a canonical descriptor string
-from the type name, fields, variants, and field types, then embeds
-`BLAKE3(descriptor)` as a 32-byte fingerprint.
+Each hook wire type carries a layout fingerprint. `cc-lb-plugin-wire` builds a
+canonical descriptor string from the type name, fields, variants, and field
+types, and embeds `BLAKE3(descriptor)` as a 32-byte fingerprint.
+`#[cc_lb_plugin]` embeds the fingerprint of each handler's request type in the
+plugin.
 
 Plugin authors do not edit schema tags or manual hashes. A field edit naturally
 changes the descriptor and the embedded fingerprint. During admission, the host

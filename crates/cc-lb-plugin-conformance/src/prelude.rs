@@ -21,4 +21,4 @@ pub use cc_lb_plugin_wire::{
     ShapeResponse, SseEvent, TransformResponseRequest, TransformResponseResult,
     TransformSseEventRequest, TransformSseEventResult, Upstream, UpstreamCandidate,
 };
-pub use cc_lb_runtime_wasmtime::{HotEngineConfig, SlotKind};
+pub use cc_lb_runtime_wasmtime::{HookKind, HotEngineConfig};

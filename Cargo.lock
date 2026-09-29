@@ -1038,7 +1038,6 @@ dependencies = [
 name = "cc-lb-pdk-wasmtime-macros"
 version = "0.1.2"
 dependencies = [
- "blake3",
  "proc-macro2",
  "quote",
  "syn 3.0.6",

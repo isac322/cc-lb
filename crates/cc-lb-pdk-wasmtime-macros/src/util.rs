@@ -1,13 +1,9 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{ToTokens, quote};
+use quote::quote;
 
 pub(crate) fn byte_array_tokens(bytes: &[u8]) -> TokenStream2 {
     let elems = bytes.iter().map(|b| quote! { #b });
     quote! { [ #(#elems),* ] }
-}
-
-pub(crate) fn compact_tokens<T: ToTokens>(value: T) -> String {
-    value.to_token_stream().to_string().replace(' ', "")
 }
 
 pub(crate) fn escape_json(s: &str) -> String {
