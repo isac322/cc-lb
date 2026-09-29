@@ -425,7 +425,7 @@ async fn insert_chain(
         .await
     {
         Ok(Some(entry)) => {
-            if registry_entry_unsupported_slot(&entry, slot) {
+            if !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);
             }
             Some(plugin_chain_audit_metadata(&entry))

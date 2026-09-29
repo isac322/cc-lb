@@ -3,8 +3,9 @@
 -- Data rewrites below touch only legacy rows: audit rows written before
 -- admin_action existed, keepalive decisions recorded before
 -- last_message_at_ms existed, plan-tier rows tagged by the removed one-shot
--- backfill, and the 50-row config history. Each UPDATE is guarded by a
--- predicate that matches nothing once applied.
+-- backfill, plugin hook metadata uploaded before hook modes existed, and the
+-- 50-row config history. Each UPDATE is guarded by a predicate that matches
+-- nothing once applied.
 --
 -- Plain CREATE INDEX, not CONCURRENTLY: see
 -- 0126_audit_log_principal_ts_seq_index.sql for the advisory-lock rationale.
@@ -29,6 +30,25 @@ DELETE FROM meta WHERE key IN ('killswitch_enabled', 'contract_version');
 -- wasm_registry_v2 upload timestamp.
 ALTER TABLE wasm_registry_v2 DROP COLUMN IF EXISTS schema_hash;
 ALTER TABLE wasm_blobs_v2 DROP COLUMN IF EXISTS parse_validated_at;
+
+-- Hook metadata now always carries an explicit mode; stamp the former serde
+-- default on entries uploaded before the field existed.
+UPDATE wasm_registry_v2
+SET hook_metadata = (
+    SELECT jsonb_object_agg(
+        hook.key,
+        CASE
+            WHEN hook.value ? 'mode' THEN hook.value
+            ELSE hook.value || '{"mode":"active"}'::jsonb
+        END
+    )::text
+    FROM jsonb_each(wasm_registry_v2.hook_metadata::jsonb) AS hook
+)
+WHERE EXISTS (
+    SELECT 1
+    FROM jsonb_each(wasm_registry_v2.hook_metadata::jsonb) AS hook
+    WHERE NOT hook.value ? 'mode'
+);
 
 -- Principal apply status was never set by any runtime path.
 ALTER TABLE principals_v1

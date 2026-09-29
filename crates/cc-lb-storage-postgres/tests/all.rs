@@ -10,6 +10,8 @@ mod cache_keepalive_session_reads;
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]
 mod crash_recovery;
+#[path = "hook_metadata_mode_backfill.rs"]
+mod hook_metadata_mode_backfill;
 #[path = "migration_versions.rs"]
 mod migration_versions;
 #[path = "plan_tier_concurrency.rs"]

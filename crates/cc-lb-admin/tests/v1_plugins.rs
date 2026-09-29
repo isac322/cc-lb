@@ -534,6 +534,39 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
 }
 
 #[tokio::test]
+async fn chain_insert_rejects_builtin_subscription_preference_in_shape_slot() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-builtin-shape").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app.clone(),
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({
+            "slot": "shape",
+            "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unsupported_slot");
+    assert_eq!(body["plugin_name"], "subscription-preference");
+    assert_eq!(body["slot"], "shape");
+
+    let (status, _, chain, _) = authed_json(
+        app,
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=shape"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(chain["entries"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-router-singleton").await;
