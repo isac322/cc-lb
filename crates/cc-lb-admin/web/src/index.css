@@ -209,7 +209,10 @@
        slate, output violet. Quota windows: the three live windows (5h, 7d,
        7d Fable) are sky, magenta and lime, at least OKLab ΔE 0.12 apart under
        protan/deutan/tritan simulation; legacy Sonnet/Opus windows are muted.
-       Latency responsibility groups have their own tokens. */
+       Latency responsibility groups have their own tokens: cc-lb blue,
+       upstream-wait teal, upstream-net lime and downstream magenta, each
+       step apart in lightness as well as hue so any two stay at least OKLab
+       ΔE 0.13 apart (0.1 under protan/deutan/tritan simulation). */
     --color-series-input: #96a6bb;
     --color-series-output: #997fde;
     --color-series-cache-create-5m: #e48d28;
@@ -222,10 +225,10 @@
     --color-series-opus: #91745d;
     --color-series-overage: #a3a5a8;
     --color-series-unified: #777a80;
-    --color-series-latency-downstream: #1c989e;
-    --color-series-latency-cclb: #64bced;
-    --color-series-latency-net: #67bb6b;
-    --color-series-latency-wait: #5cadb6;
+    --color-series-latency-downstream: #c56f9b;
+    --color-series-latency-cclb: #5d98f4;
+    --color-series-latency-net: #6f9436;
+    --color-series-latency-wait: #6dd9d6;
     --chart-fill-opacity: 0.12;
     --color-input-bg: #161719;
     --color-overlay-shadow: rgb(0 0 0 / 0.5);
@@ -287,10 +290,10 @@
     --color-series-opus: #6a5647;
     --color-series-overage: #616366;
     --color-series-unified: #83868c;
-    --color-series-latency-downstream: #00525c;
-    --color-series-latency-cclb: #0070ab;
-    --color-series-latency-net: #34823b;
-    --color-series-latency-wait: #5191a1;
+    --color-series-latency-downstream: #6b2f57;
+    --color-series-latency-cclb: #234f99;
+    --color-series-latency-net: #547d2b;
+    --color-series-latency-wait: #279592;
     --chart-fill-opacity: 0.1;
     --color-input-bg: #f7f8f9;
     --color-overlay-shadow: rgb(24 25 28 / 0.16);
@@ -353,10 +356,10 @@
       --color-series-opus: #6a5647;
       --color-series-overage: #616366;
       --color-series-unified: #83868c;
-      --color-series-latency-downstream: #00525c;
-      --color-series-latency-cclb: #0070ab;
-      --color-series-latency-net: #34823b;
-      --color-series-latency-wait: #5191a1;
+      --color-series-latency-downstream: #6b2f57;
+      --color-series-latency-cclb: #234f99;
+      --color-series-latency-net: #547d2b;
+      --color-series-latency-wait: #279592;
       --chart-fill-opacity: 0.1;
       --color-input-bg: #f7f8f9;
       --color-overlay-shadow: rgb(24 25 28 / 0.16);

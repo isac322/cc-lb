@@ -27,7 +27,7 @@ function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
 }
 
 describe('buildStageDetails', () => {
-  it('assigns index and groupCount so stages within a group can be shaded distinctly', () => {
+  it('indexes stages within a group and gives each a distinct shade', () => {
     const stages = buildStageDetails(
       ev({
         duration_ms: 100,
@@ -47,7 +47,6 @@ describe('buildStageDetails', () => {
       'sign',
     ]);
     expect(internalPre.map((s) => s.index)).toEqual([0, 1, 2, 3, 4]);
-    expect(internalPre.map((s) => s.groupCount)).toEqual([5, 5, 5, 5, 5]);
     const uniqueFills = new Set(internalPre.map((s) => s.fill));
     expect(uniqueFills.size).toBe(5);
   });

@@ -43,6 +43,7 @@ All notable changes to this project will be documented in this file.
 
 - Dragging across the Logs histogram to pick a time range no longer leaves trailing afterimages or flickers. The selection, its handles and the time hint now move together with the pointer.
 - Releasing a drag on the Logs histogram no longer blanks the bars for a moment, which left the selection alone on an empty strip. The histogram now keeps its data when a range is selected instead of refetching it.
+- Latency breakdown colours are now easy to tell apart. The responsibility segments in the request log table, its hover breakdown and the request detail sheet were three near-identical blue-teals (Downstream, cc-lb and Upstream wait); they are now magenta, blue, lime and teal, differing in lightness as well as hue so they stay distinct under colour-vision deficiency. In the detail sheet's request timeline, the ten or so internal setup stages no longer share a barely changing shade of one blue: each takes a distinct lightness and hue step, so neighbouring segments stand apart.
 
 ## [0.8.1] - 2026-09-26
 
