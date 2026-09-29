@@ -10,18 +10,17 @@ use std::time::{Duration, Instant};
 
 use cc_lb_admin::internal_partials::{InternalPartialsState, router as internal_partials_router};
 use cc_lb_admin::ports::{RetainedPartialPort, RetainedPartialSnapshot};
-use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_engine::{
-    ClockHandle, InMemoryBus, PartialRetentionCache, PgListener, PgNotifier, SystemClock,
-};
+use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_control::{InMemoryBus, RequestEventBus};
+use cc_lb_engine::{PartialRetentionCache, PgListener, PgNotifier};
 use cc_lb_request_log::{RequestEventPartial, RequestEventUpdate};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_postgres::PostgresStorage;
 use metrics_exporter_prometheus::PrometheusHandle;
 use secrecy::SecretString;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 const CLUSTER_TOKEN: &str = "test-cluster-token";
 const LARGE_PAYLOAD_MIN_BYTES: usize = 7_500;
@@ -199,7 +198,7 @@ async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
     let clock: ClockHandle = Arc::new(SystemClock);
     let pool = pg_pool(database_url, 1).await?;
     let storage = PostgresStorage::new(pool.clone(), clock);
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     sqlx::query("TRUNCATE request_events_v1 RESTART IDENTITY")
         .execute(&pool)
         .await?;
@@ -222,7 +221,7 @@ async fn pg_pool(database_url: &str, max_connections: u32) -> Result<PgPool, sql
 // mirrors `pg_listener_recovery::publish_until_received`.
 async fn publish_until_received(
     producer_tx: &mpsc::Sender<RequestEventUpdate>,
-    receiver: &mut BusReceiver,
+    receiver: &mut broadcast::Receiver<RequestEventUpdate>,
     partial: RequestEventPartial,
 ) -> TestResult<()> {
     let event_id = partial.event_id.clone();
@@ -241,13 +240,10 @@ async fn publish_until_received(
 }
 
 async fn try_receive_matching(
-    receiver: &mut BusReceiver,
+    rx: &mut broadcast::Receiver<RequestEventUpdate>,
     expected_event_id: &str,
     timeout: Duration,
 ) -> TestResult<bool> {
-    let BusReceiver::InMemory(rx) = receiver else {
-        return Err(error("remote bus receiver unsupported in this test"));
-    };
     match tokio::time::timeout(timeout, async {
         loop {
             if let RequestEventUpdate::Partial(partial) = rx.recv().await?
@@ -266,13 +262,10 @@ async fn try_receive_matching(
 }
 
 async fn wait_for_partial(
-    receiver: &mut BusReceiver,
+    rx: &mut broadcast::Receiver<RequestEventUpdate>,
     expected_event_id: &str,
     expect_delivery: bool,
 ) -> TestResult<()> {
-    let BusReceiver::InMemory(rx) = receiver else {
-        return Err(error("remote bus receiver unsupported in this test"));
-    };
     let timeout = if expect_delivery {
         receive_timeout()
     } else {

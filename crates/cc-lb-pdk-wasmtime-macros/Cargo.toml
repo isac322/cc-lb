@@ -4,7 +4,7 @@ version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Procedural macros (#[cc_lb_plugin], #[handler], #[derive(WireSchema)]) for cc-lb wasmtime plugins."
+description = "Procedural macros (#[cc_lb_plugin], #[handler]) for cc-lb wasmtime plugins."
 repository = "https://github.com/isac322/cc-lb"
 readme = "README.md"
 keywords = ["cc-lb", "plugin", "wasm", "macros", "schema"]
@@ -17,4 +17,3 @@ proc-macro = true
 syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-blake3 = { workspace = true, features = ["pure"] }

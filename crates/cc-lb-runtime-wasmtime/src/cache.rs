@@ -2,8 +2,8 @@
 //!
 //! Every wasm call goes through one of [`call_filter_hook`] /
 //! [`call_shape_hook`] / the response transform hooks. They all share
-//! the same alloc → write → call → read → free flow; only the
-//! typed-func name differs.
+//! the same alloc → write → call → read flow; only the typed-func name
+//! differs.
 //!
 //! Each call builds a fresh [`Store`] via
 //! [`PluginCell::instance_pre`] and drops it on return — no
@@ -18,18 +18,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use cc_lb_plugin_wire::schema::HookKind;
+
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
 mod hooks;
 mod worker;
 
-pub use hooks::{
-    call_filter_hook, call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook,
-};
 pub(crate) use hooks::{
-    call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
-    call_transform_sse_event_hook_scoped,
+    call_filter_hook, call_filter_hook_scoped, call_shape_hook, call_shape_hook_scoped,
+    call_transform_response_hook, call_transform_response_hook_scoped,
+    call_transform_sse_event_hook, call_transform_sse_event_hook_scoped,
 };
 use worker::{WorkerInstance, build_worker_instance};
 
@@ -49,46 +49,12 @@ fn trap_phase_label(err: &WasmtimeRuntimeError) -> &'static str {
 }
 
 /// Default archive alignment for rkyv 0.8 root types.
-pub const DEFAULT_ALIGN: u32 = 16;
-
-/// Pick a hook `TypedFunc` out of a [`WorkerInstance`] by internal
-/// hook name. The runtime guarantees the chosen variant is populated
-/// for the slot kind (via [`crate::inspect::inspect_wasm`]).
-#[derive(Clone, Copy)]
-enum HookFn {
-    Filter,
-    Shape,
-    TransformResponse,
-    TransformSseEvent,
-}
-
-impl HookFn {
-    fn export_name(self) -> &'static str {
-        match self {
-            HookFn::Filter => "cc_lb_filter",
-            HookFn::Shape => "cc_lb_shape",
-            HookFn::TransformResponse => "cc_lb_transform_response",
-            HookFn::TransformSseEvent => "cc_lb_transform_sse_event",
-        }
-    }
-
-    // Short label used as the `hook` dimension on RFC-0001 plugin
-    // metrics. Kept distinct from `export_name` so metric label
-    // vocabulary doesn't drift when guest export names change.
-    fn metric_label(self) -> &'static str {
-        match self {
-            HookFn::Filter => "filter",
-            HookFn::Shape => "shape",
-            HookFn::TransformResponse => "transform_response",
-            HookFn::TransformSseEvent => "transform_sse_event",
-        }
-    }
-}
+const DEFAULT_ALIGN: u32 = 16;
 
 fn call_hook_scoped<R, F>(
     cell: &Arc<PluginCell>,
     input: &[u8],
-    hook: HookFn,
+    hook: HookKind,
     with_output: F,
 ) -> Result<R, WasmtimeRuntimeError>
 where
@@ -113,7 +79,7 @@ fn execute_call_scoped<R, F>(
     wi: &mut WorkerInstance,
     cell: &PluginCell,
     input: &[u8],
-    hook: HookFn,
+    hook: HookKind,
     with_output: F,
 ) -> Result<R, WasmtimeRuntimeError>
 where
@@ -124,7 +90,7 @@ where
     // per emission — SharedString accepts `Arc<str>` directly, avoiding
     // an owned-String heap alloc per hook call.
     let plugin: Arc<str> = Arc::clone(&cell.plugin_name);
-    let hook_label = hook.metric_label();
+    let hook_label = hook.as_str();
 
     let result = execute_call_inner_scoped(wi, input, hook, with_output);
 
@@ -154,7 +120,7 @@ where
 fn execute_call_inner_scoped<R, F>(
     wi: &mut WorkerInstance,
     input: &[u8],
-    hook: HookFn,
+    hook: HookKind,
     with_output: F,
 ) -> Result<R, WasmtimeRuntimeError>
 where
@@ -164,7 +130,6 @@ where
         store,
         memory,
         alloc_fn,
-        free_fn,
         filter_fn,
         shape_fn,
         transform_response_fn,
@@ -172,10 +137,10 @@ where
     } = wi;
 
     let hook_fn = match hook {
-        HookFn::Filter => filter_fn.as_ref(),
-        HookFn::Shape => shape_fn.as_ref(),
-        HookFn::TransformResponse => transform_response_fn.as_ref(),
-        HookFn::TransformSseEvent => transform_sse_event_fn.as_ref(),
+        HookKind::Filter => filter_fn.as_ref(),
+        HookKind::Shape => shape_fn.as_ref(),
+        HookKind::TransformResponse => transform_response_fn.as_ref(),
+        HookKind::TransformSseEvent => transform_sse_event_fn.as_ref(),
     }
     .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
         reason: format!(
@@ -258,18 +223,14 @@ where
             ),
         });
     }
-    let output = with_output(&mem_view[out_ptr as usize..out_end]);
-
     // Skip `cc_lb_free(out_ptr, out_len, ..)` on the output
-    // buffer: the surrounding pure-mode contract drops the whole
-    // `Store` on function return, so the pool immediately
-    // reclaims every memory page. Calling the guest allocator to
-    // "free" bytes that are about to vanish costs a host↔guest
-    // transition. `cc_lb_free` for the INPUT
+    // buffer: the `Store` is dropped on function return, so the
+    // pool immediately reclaims every memory page. Calling the
+    // guest allocator to "free" bytes that are about to vanish
+    // costs a host↔guest transition. `cc_lb_free` for the INPUT
     // buffer is still driven by the guest PDK (see the comment
-    // above `hook_fn.call`) — we're only skipping the OUTPUT
-    // free because it happens AFTER `hook_fn` returns.
-    let _ = free_fn;
+    // above `hook_fn.call`).
+    let output = with_output(&mem_view[out_ptr as usize..out_end]);
 
     Ok(output)
 }

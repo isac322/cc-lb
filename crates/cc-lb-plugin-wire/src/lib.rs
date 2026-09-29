@@ -12,7 +12,6 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
-extern crate self as cc_lb_plugin_wire;
 
 #[cfg(feature = "std")]
 extern crate std;

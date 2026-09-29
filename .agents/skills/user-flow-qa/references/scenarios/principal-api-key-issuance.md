@@ -433,8 +433,7 @@ Label contract: the issue request may omit `label` or send an empty string;
 both produce an unlabeled key. A non-empty invalid label (NUL bytes or the
 reserved `system.` prefix) is rejected with `400 invalid_input` naming the
 `label` field, and no key is minted. An unlabeled key serializes as
-`label: null` in this v1 list response but as an empty string in the legacy
-`GET /admin/principals/{id}/keys/{key_id}` response.
+`label: null` in the v1 list response.
 
 ### 1.3 Gate state
 

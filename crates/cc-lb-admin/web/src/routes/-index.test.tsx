@@ -24,7 +24,6 @@ import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
-  PoolQuotaLegend,
   Route,
   type TopPrincipal,
   TopPrincipalsSection,
@@ -40,7 +39,6 @@ vi.mock('../lib/queries', async () => {
     useSubscriptionQuotaAggregate: vi.fn(),
     useSubscriptionQuotaPoolHistory: vi.fn(),
     useSummary: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
     useUsage: vi.fn(),
     useUpstreams: vi.fn(),
   };
@@ -251,16 +249,6 @@ function usageBucket(
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
-    proxy_setup_ms_sum: 0,
-    proxy_setup_ms_count: 0,
-    shape_ms_sum: 0,
-    shape_ms_count: 0,
-    sign_ms_sum: 0,
-    sign_ms_count: 0,
-    upstream_ttfb_ms_sum: 0,
-    upstream_ttfb_ms_count: 0,
-    upstream_body_ms_sum: 0,
-    upstream_body_ms_count: 0,
     ...overrides,
   };
 }
@@ -312,11 +300,6 @@ const SUMMARY_FIXTURE: DashboardSummaryResponse = {
     error_rate: 24 / 540,
     virtual_cost_micros: 7_500_000,
     avg_latency_ms: 200,
-    avg_proxy_setup_ms: 0,
-    avg_shape_ms: 0,
-    avg_sign_ms: 0,
-    avg_upstream_ttfb_ms: 0,
-    avg_upstream_body_ms: 0,
   },
   sparkline: { buckets: SUMMARY_BUCKETS },
   observed: true,
@@ -491,7 +474,6 @@ function mockPendingOverviewQueries() {
     isLoading: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
   vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
     data: undefined,
     isPending: true,
@@ -800,26 +782,6 @@ describe('Overview pool quota usage', () => {
         .getByRole('link', { name: 'Manage upstreams' })
         .getAttribute('href'),
     ).toBe('/upstreams');
-  });
-});
-
-describe('PoolQuotaLegend', () => {
-  it('renders 7d (Fable) only when the selected range has Fable data', () => {
-    const { rerender } = render(
-      <PoolQuotaLegend
-        latest={{ '5h': 20, '7d': 40, '7d_fable': null }}
-        showFable={false}
-      />,
-    );
-    expect(screen.queryByText(/Fable/)).toBeNull();
-
-    rerender(
-      <PoolQuotaLegend
-        latest={{ '5h': 20, '7d': 40, '7d_fable': 28 }}
-        showFable
-      />,
-    );
-    expect(screen.getByText(/Fable/).textContent).toBe('7d (Fable) · 28% used');
   });
 });
 

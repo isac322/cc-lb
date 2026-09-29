@@ -411,7 +411,6 @@ function editorResponse(overrides: Record<string, unknown> = {}) {
       fingerprint: 'sha256:current',
     },
     overrides: [],
-    restart_required: false,
     ...overrides,
   };
 }
@@ -2444,12 +2443,11 @@ test('config file save exposes pending state and keeps failures in the editor', 
 test('restart drift, pending download, and failed download fallback stay visible', async () => {
   const pending = Promise.withResolvers<void>();
   apiMocks.downloadConfigDraft.mockReturnValue(pending.promise);
-  setSettingsLoaded(editorResponse({ restart_required: true }));
+  setSettingsLoaded(editorResponse());
   render(<SettingsComponent />);
 
-  // restart_required is always true server-side, so the old unconditional
-  // notice is gone; the drift banner is the real pending-restart signal and
-  // lives in the status zone.
+  // The drift banner is the pending-restart signal and lives in the status
+  // zone.
   const zone = screen.getByTestId('config-status-zone');
   expect(screen.queryByText('Restart required after saving')).toBeNull();
   const downloadButton = screen.getByRole('button', { name: 'Download TOML' });
@@ -2489,7 +2487,6 @@ test('restart drift survives config save draft clearing through latest history m
     onSuccess: (response: {
       revision: number;
       saved_at_unix_secs: number;
-      restart_required: boolean;
       fingerprint: string;
     }) => void;
   };
@@ -2497,7 +2494,6 @@ test('restart drift survives config save draft clearing through latest history m
     options.onSuccess({
       revision: 7,
       saved_at_unix_secs: 1_789_473_600,
-      restart_required: true,
       fingerprint: 'sha256:saved',
     }),
   );

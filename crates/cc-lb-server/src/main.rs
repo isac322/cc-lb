@@ -80,15 +80,6 @@ fn main() -> ExitCode {
 
 fn serve_error_exit_code(error: &ServeError) -> ExitCode {
     match error {
-        ServeError::Build(BuildError::Storage(
-            cc_lb_storage_api::StorageError::BackendKindMismatch { .. },
-        ))
-        | ServeError::Build(BuildError::StorageFactory(
-            cc_lb_server::storage_factory::StorageFactoryError::BackendKindMismatch { .. },
-        )) => ExitCode::from(2),
-        ServeError::Build(BuildError::StorageFactory(
-            cc_lb_server::storage_factory::StorageFactoryError::InitFailed { message },
-        )) if message.contains("backend kind mismatch") => ExitCode::from(2),
         ServeError::Build(BuildError::StorageKeyMissing { .. }) => ExitCode::from(2),
         _ => ExitCode::FAILURE,
     }
@@ -103,15 +94,13 @@ fn version_requested() -> bool {
 fn run() -> Result<(), RunError> {
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
-    let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = std::sync::Arc::new(cc_lb_clock::SystemClock);
 
     match cli.command {
         Some(Command::Serve {
             config,
             data_dir,
             strict_preflight,
-            skip_handshake_if_fresh,
-            force_handshake,
         }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -122,14 +111,12 @@ fn run() -> Result<(), RunError> {
                     &config,
                     data_dir.as_deref(),
                     strict_preflight,
-                    skip_handshake_if_fresh,
-                    force_handshake,
                     clock.clone(),
                 ))
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {
-            command: ConfigCommand::Validate { config, .. },
+            command: ConfigCommand::Validate { config },
         }) => validate::run(&config, clock.clone()).map_err(RunError::Validation),
         Some(Command::Doctor {
             command: DoctorCommand::ListAbandonedChainEntries,

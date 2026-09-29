@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    OverviewExcludedErrorBucket, RequestEvent, RequestEventUpstream, StorageError, StorageResult,
-    UsageRollup, UsageRollupResolution, UsageRollupRun, UsageRollupStore,
-    normalize_usage_rollup_dimension,
+    OverviewExcludedErrorBucket, RequestEvent, StorageError, StorageResult, UsageRollup,
+    UsageRollupResolution, UsageRollupRun, UsageRollupStore, normalize_usage_rollup_dimension,
 };
 use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -115,24 +114,6 @@ impl UsageRollupStore for PostgresStorage {
         rollup_usage_once_inner(self).await
     }
 
-    async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>> {
-        let rows = sqlx::query(
-            "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
-              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
-              cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
-              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
-              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
-              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
-              upstream_body_ms_sum, virtual_cost_micros \
-              FROM usage_rollups_v2 ORDER BY bucket_start_unix_secs ASC",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_usage_rollup).collect()
-    }
-
     async fn query_usage_rollups_in_range(
         &self,
         resolution: UsageRollupResolution,
@@ -216,13 +197,6 @@ impl UsageRollupStore for PostgresStorage {
             .map(|value| i64_to_u64(value, "usage rollup checkpoint"))
             .transpose()
     }
-
-    async fn advance_rollup_checkpoint_and_persist(
-        &self,
-        _run: &UsageRollupRun,
-    ) -> StorageResult<()> {
-        rollup_usage_once_inner(self).await.map(|_| ())
-    }
 }
 
 async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<UsageRollupRun> {
@@ -267,7 +241,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     let rows = sqlx::query(
         "SELECT seq, tx_id::text AS tx_id_text, payload, upstream_id FROM request_events_v1 \
           WHERE (tx_id, seq) > ($1::xid8, $2) \
-            AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
+            AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
           ORDER BY tx_id ASC, seq ASC LIMIT $3",
     )
     .bind(&previous_xid)
@@ -451,7 +425,7 @@ fn is_overview_excluded_status(status: u16) -> bool {
 
 async fn load_upstream_identities(
     tx: &mut Transaction<'_, Postgres>,
-) -> StorageResult<HashMap<String, UpstreamIdentity>> {
+) -> StorageResult<HashMap<Uuid, UpstreamIdentity>> {
     let rows = sqlx::query("SELECT id, name FROM upstream_spec_v1 WHERE deleted_at IS NULL")
         .fetch_all(&mut **tx)
         .await
@@ -462,8 +436,7 @@ async fn load_upstream_identities(
             id: row.try_get("id").map_err(map_sqlx_error)?,
             name: row.try_get("name").map_err(map_sqlx_error)?,
         };
-        upstreams.insert(identity.id.to_string(), identity.clone());
-        upstreams.insert(identity.name.clone(), identity);
+        upstreams.insert(identity.id, identity);
     }
     Ok(upstreams)
 }
@@ -471,7 +444,7 @@ async fn load_upstream_identities(
 fn resolve_upstream_identity(
     event: &RequestEvent,
     table_upstream_id: Option<Uuid>,
-    upstreams: &HashMap<String, UpstreamIdentity>,
+    upstreams: &HashMap<Uuid, UpstreamIdentity>,
 ) -> UpstreamIdentity {
     if let Some(upstream_id) = event.upstream_id.or(table_upstream_id) {
         if let Some(name) = event.upstream_name.clone() {
@@ -480,7 +453,7 @@ fn resolve_upstream_identity(
                 name,
             };
         }
-        if let Some(identity) = upstreams.get(&upstream_id.to_string()) {
+        if let Some(identity) = upstreams.get(&upstream_id) {
             return identity.clone();
         }
         return UpstreamIdentity {
@@ -488,11 +461,10 @@ fn resolve_upstream_identity(
             name: event_upstream_name(event),
         };
     }
-    let name = event_upstream_name(event);
-    upstreams.get(&name).cloned().unwrap_or(UpstreamIdentity {
+    UpstreamIdentity {
         id: Uuid::nil(),
-        name,
-    })
+        name: event_upstream_name(event),
+    }
 }
 
 fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
@@ -632,17 +604,8 @@ fn event_ts_secs(event: &RequestEvent) -> u64 {
 fn event_upstream_name(event: &RequestEvent) -> String {
     event
         .upstream_name
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .or_else(|| event.upstream.map(upstream_dimension))
+        .clone()
         .unwrap_or_else(|| normalize_usage_rollup_dimension(None))
-}
-
-fn upstream_dimension(upstream: RequestEventUpstream) -> String {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-    }
-    .to_owned()
 }
 
 fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i64>> {

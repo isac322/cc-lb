@@ -76,7 +76,7 @@ sequenceDiagram
     actor CClient as Consumer Client
 
     %% Handshake & Backfill
-    Client->>Admin: GET /admin/events/stream (Last-Event-ID)
+    Client->>Admin: GET /admin/v1/events/stream (Last-Event-ID)
     Admin->>Storage: current_request_event_cursor()
     Storage-->>Admin: current_cursor
     Admin->>Storage: query_request_events_between_cursors(start, current, 500)

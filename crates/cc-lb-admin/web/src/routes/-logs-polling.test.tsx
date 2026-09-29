@@ -111,7 +111,6 @@ vi.mock('../lib/queries', async () => {
         ? routeState.cursorRecent
         : routeState.recent;
     },
-    useUpstreamNameMap: () => new Map(),
     useUpstreams: () => ({ data: { upstreams: [] } }),
   };
 });

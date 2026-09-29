@@ -9,7 +9,7 @@ use crate::cache::{
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
 use crate::policy::{PluginWireBounds, ShapeOriginPolicy};
-use crate::{HotEngineConfig, SlotKind};
+use crate::{HookKind, HotEngineConfig};
 
 /// Wire-level dispatch handle for a single loaded plugin slot.
 ///
@@ -22,7 +22,7 @@ use crate::{HotEngineConfig, SlotKind};
 /// the host↔wire type conversion.
 pub struct WasmPluginWireDispatch {
     pub(crate) cell: Arc<PluginCell>,
-    pub(crate) kind: SlotKind,
+    pub(crate) kind: HookKind,
     pub(crate) config: Arc<HotEngineConfig>,
 }
 
@@ -34,8 +34,8 @@ impl WasmPluginWireDispatch {
         Self { cell, kind, config }
     }
 
-    /// The [`SlotKind`] this dispatch handle was built for.
-    pub fn kind(&self) -> SlotKind {
+    /// The [`HookKind`] this dispatch handle was built for.
+    pub fn kind(&self) -> HookKind {
         self.kind
     }
 
@@ -59,13 +59,9 @@ impl WasmPluginWireDispatch {
         self.config.cookie_redaction
     }
 
-    /// Dispatch a filter call. `input` must be rkyv-encoded `FilterRequest` bytes.
-    /// Returns rkyv-encoded `FilterResponse` bytes.
-    pub fn call_filter(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.call_filter_scoped(input, <[u8]>::to_vec)
-    }
-
     /// Dispatch a filter call and consume its checked output while guest memory is borrowed.
+    /// `input` must be rkyv-encoded `FilterRequest` bytes; the callback receives
+    /// rkyv-encoded `FilterResponse` bytes.
     ///
     /// The callback receives only the bounded guest-memory slice. Its higher-ranked lifetime
     /// prevents that slice from escaping in the return value:
@@ -91,13 +87,9 @@ impl WasmPluginWireDispatch {
         call_filter_hook_scoped(&self.cell, input, with_output)
     }
 
-    /// Dispatch a shape call. `input` must be rkyv-encoded `ShapeRequest` bytes.
-    /// Returns rkyv-encoded `ShapeResponse` bytes.
-    pub fn call_shape(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.call_shape_scoped(input, <[u8]>::to_vec)
-    }
-
     /// Dispatch a shape call and consume its checked output before the fresh Store is dropped.
+    /// `input` must be rkyv-encoded `ShapeRequest` bytes; the callback receives
+    /// rkyv-encoded `ShapeResponse` bytes.
     pub fn call_shape_scoped<R, F>(
         &self,
         input: &[u8],

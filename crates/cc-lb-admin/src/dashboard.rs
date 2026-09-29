@@ -271,26 +271,6 @@ pub async fn build_dashboard_summary(
     })
 }
 
-pub async fn build_dashboard_usage(
-    storage: &dyn Storage,
-    range: DashboardRange,
-    step: UsageRollupResolution,
-    group_by: UsageGroupBy,
-    upstream_id: Option<Uuid>,
-    now_unix_secs: u64,
-) -> Result<DashboardUsageResponse, StorageError> {
-    build_dashboard_usage_with_projection(
-        storage,
-        range,
-        step,
-        group_by,
-        upstream_id,
-        now_unix_secs,
-        UsageProjection::Full,
-    )
-    .await
-}
-
 async fn build_dashboard_usage_with_projection(
     storage: &dyn Storage,
     range: DashboardRange,
@@ -356,20 +336,6 @@ async fn build_dashboard_usage_with_projection(
         truncated_series_count,
         observed,
     })
-}
-
-pub async fn build_dashboard_usage_checked(
-    storage: &dyn Storage,
-    range: DashboardRange,
-    step: UsageRollupResolution,
-    group_by: UsageGroupBy,
-    upstream_id: Option<Uuid>,
-    now_unix_secs: u64,
-) -> Result<DashboardUsageResponse, DashboardBuildError> {
-    validate_step_for_range(range, step)?;
-    build_dashboard_usage(storage, range, step, group_by, upstream_id, now_unix_secs)
-        .await
-        .map_err(Into::into)
 }
 
 pub(crate) async fn build_dashboard_usage_projected_checked(
@@ -1156,15 +1122,6 @@ mod tests {
             _event: &cc_lb_storage_api::RequestEvent,
         ) -> cc_lb_storage_api::StorageResult<u64> {
             Ok(0)
-        }
-
-        async fn query_request_events(
-            &self,
-            _since: u64,
-            _until: u64,
-            _limit: usize,
-        ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::RequestEvent>> {
-            Ok(Vec::new())
         }
     }
 

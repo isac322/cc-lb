@@ -49,28 +49,6 @@ fn wasm_registry_entry_defaults_missing_metadata_to_none() {
 }
 
 #[test]
-fn legacy_wasm_registry_entry_defaults_supported_slots_to_empty() {
-    let sha: [u8; 32] = [1; 32];
-    let value = json!({
-        "id": Uuid::new_v4(),
-        "sha256": sha,
-        "name": "legacy",
-        "original_filename": "legacy.wasm",
-        "label": null,
-        "uploaded_at_unix_secs": 1_800_000_000u64,
-        "uploaded_by_admin_id": Uuid::new_v4(),
-        "refcount": 0u64,
-        "revision": 0u64,
-        "kind": "filter",
-        "wire_version": 1,
-        "is_builtin": false
-    });
-
-    let entry: WasmRegistryEntry = serde_json::from_value(value).unwrap();
-    assert!(entry.supported_slots.is_empty());
-}
-
-#[test]
 fn wasm_registry_entry_round_trips_with_supported_slots() {
     let mut entry = uploaded_entry(None);
     entry.supported_slots = vec![PluginSlotKind::Router, PluginSlotKind::Shape];
@@ -98,7 +76,6 @@ fn builtin_subscription_preference_entry_synthesizes_metadata() {
 
 fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
     WasmRegistryEntry {
-        schema_hash: None,
         id: Uuid::new_v4(),
         sha256: [1; 32],
         name: "uploaded".to_owned(),

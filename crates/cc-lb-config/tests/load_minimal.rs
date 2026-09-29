@@ -41,40 +41,6 @@ fn load_minimal_toml_applies_plan_defaults() {
     );
 }
 
-/// An operator upgrading across this release still has an `[oauth.anthropic]`
-/// section that names the pre-existing scope set, including `org:create_api_key`.
-/// The default scope list narrowed to profile+inference so Anthropic will grant a
-/// year-long token, but an explicit operator value must never be silently
-/// replaced by that new default.
-#[test]
-fn explicitly_configured_oauth_scopes_survive_the_narrowed_default() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"
-[listener]
-
-[oauth.anthropic]
-client_id = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-auth_url = "https://claude.ai/oauth/authorize"
-token_url = "https://console.anthropic.com/v1/oauth/token"
-redirect_uri = "https://console.anthropic.com/oauth/code/callback"
-scopes = ["org:create_api_key", "user:profile", "user:inference"]
-"#,
-    );
-
-    let config = Config::load(&path).expect("pre-upgrade config still loads");
-
-    let anthropic = config.oauth.anthropic.expect("anthropic oauth configured");
-    // Preserved verbatim, not narrowed to the new profile+inference default.
-    assert_eq!(
-        anthropic.scopes,
-        vec![
-            "org:create_api_key".to_owned(),
-            "user:profile".to_owned(),
-            "user:inference".to_owned(),
-        ]
-    );
-}
-
 #[test]
 fn upstream_affinity_ttl_loads_from_toml() {
     let (_dir, path) = crate::common::temp_config(

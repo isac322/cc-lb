@@ -51,7 +51,6 @@ vi.mock('../lib/queries', async () => {
     useCacheKeepaliveSummary: vi.fn(),
     useRecentEvents: vi.fn(),
     usePrincipalNameMap: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
     usePrincipalKeys: vi.fn(),
     useIssueKey: vi.fn(),
     useRevokeKey: vi.fn(),
@@ -167,7 +166,6 @@ beforeEach(() => {
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
   vi.mocked(queries.usePrincipalKeys).mockReturnValue({
     data: { keys: [] },
     isLoading: false,
@@ -341,7 +339,6 @@ test('recent requests delegates pending geometry to the structured table', () =>
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
     new Map([[principal.id, principal.name]]),
   );
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
   vi.mocked(queries.useRecentEvents).mockReturnValue({
     data: undefined,
     isLoading: true,

@@ -292,10 +292,10 @@ the database upstream selected for the request.
 Use the case-specific `x-claude-code-session-id` values above as correlation keys. Do not select the newest row without a correlation predicate.
 
 - **Storage**: query only with `sqlite3 -readonly "$TMP_DIR/cc-lb.sqlite"`. The timing fields must match both the JSON payload and the SQLite `list_*` columns.
-- **Recent API**: `GET /admin/events/recent?limit=100`; select the event whose `thread_id` equals the case session.
+- **Recent API**: `GET /admin/v1/events/recent?limit=100`; select the event whose `thread_id` equals the case session.
 - **Delta API**: let the Logs page issue its real delta request, replay that exact URL in the browser, and select the same `request_id`. This avoids hard-coding cursor syntax.
 - **Detail API**: open the matching drawer, capture the real detail resource URL from the browser performance entries, replay it, and select the same `request_id`.
-- **SSE**: `curl -sS -N -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/events/stream"`.
+- **SSE**: `curl -sS -N -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/v1/events/stream"`.
 - **UI**: `http://127.0.0.1:$vite_port/logs`.
 
 The commands below save a before snapshot from every available surface before each mutation and an after snapshot after the final event. A detail response does not exist before a request ID exists; the in-progress SSE event and open drawer are its before state, and the final detail response is its after state.
@@ -304,7 +304,7 @@ The commands below save a before snapshot from every available surface before ea
 recent_event_for_session() {
   local session=$1
   curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
-    "http://127.0.0.1:$admin_port/admin/events/recent?limit=100" |
+    "http://127.0.0.1:$admin_port/admin/v1/events/recent?limit=100" |
     jq -c --arg session "$session" '[.events[] | select(.thread_id == $session)] | first // empty'
 }
 
@@ -341,7 +341,6 @@ assert_normal_residual() {
       $e.request_body_bytes == $expected_bytes
       and $e.request_body_read_ms != null
       and $e.finalize_ms != null
-      and $e.finalize_ms >= ($e.limit_reconcile_ms // 0)
       and (if $expected_stream == "stream"
            then $e.stream_total_ms != null
            else $e.stream_total_ms == null and $e.upstream_body_ms != null
@@ -354,7 +353,6 @@ assert_normal_residual() {
       request_body_read_ms,
       request_body_bytes,
       finalize_ms,
-      limit_reconcile_ms,
       stream_total_ms,
       upstream_body_ms,
       accounted_ms: $accounted,
@@ -489,7 +487,7 @@ CURL_PID_D=$!
 deadline=$((SECONDS + 45))
 case_d_event=""
 while [ $SECONDS -lt $deadline ]; do
-  case_d_event=$(curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/events/recent?limit=100" | jq -c '[.events[] | select(.status == 504 and .error_code == "tower_timeout")] | first // empty')
+  case_d_event=$(curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/v1/events/recent?limit=100" | jq -c '[.events[] | select(.status == 504 and .error_code == "tower_timeout")] | first // empty')
   if [ -n "$case_d_event" ]; then
     break
   fi
@@ -520,7 +518,7 @@ curl -sS -i -X POST -H "x-api-key: $CLIENT_KEY" -H "anthropic-version: 2023-06-0
 deadline=$((SECONDS + 10))
 case_e_api=""
 while [ $SECONDS -lt $deadline ]; do
-  case_e_api=$(curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/events/recent?limit=100" | jq -c '[.events[] | select(.status == 429 and (.upstream_error_message | startswith("forced fake long rate limit response")))] | first // empty')
+  case_e_api=$(curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://127.0.0.1:$admin_port/admin/v1/events/recent?limit=100" | jq -c '[.events[] | select(.status == 429 and (.upstream_error_message | startswith("forced fake long rate limit response")))] | first // empty')
   if [ -n "$case_e_api" ]; then
     break
   fi
@@ -634,7 +632,7 @@ let deltaUrls = [];
 while (Date.now() < deadline && deltaUrls.length === 0) {
   deltaUrls = [...new Set(performance.getEntriesByType('resource')
     .map((entry) => entry.name)
-    .filter((url) => url.includes('/admin/events/delta')))];
+    .filter((url) => url.includes('/admin/v1/events/delta')))];
   if (deltaUrls.length === 0) await new Promise((resolve) => setTimeout(resolve, 200));
 }
 if (deltaUrls.length === 0) throw new Error('No Logs delta request observed before mutation');
@@ -716,7 +714,7 @@ let deltaUrls = [];
 let deltaEvent = null;
 while (Date.now() < deadline && !deltaEvent) {
   const resourcesNow = performance.getEntriesByType('resource').map((entry) => entry.name);
-  deltaUrls = [...new Set(resourcesNow.filter((url) => url.includes('/admin/events/delta')))];
+  deltaUrls = [...new Set(resourcesNow.filter((url) => url.includes('/admin/v1/events/delta')))];
   for (const url of deltaUrls) {
     const response = await fetch(url, {headers: {Authorization: 'Bearer ' + token}});
     if (!response.ok) throw new Error('Delta replay failed: ' + response.status + ' ' + url);
@@ -1111,7 +1109,7 @@ timing_keys = {
     "request_body_read_ms", "request_body_bytes", "finalize_ms",
     "bulkhead_wait_ms", "dns_ms", "connect_ms", "shape_ms", "sign_ms",
     "upstream_ttfb_ms", "stream_total_ms", "upstream_body_ms",
-    "first_body_chunk_ms", "proxy_setup_ms", "limit_reconcile_ms",
+    "first_body_chunk_ms", "proxy_setup_ms",
     "json_parse_ms", "cache_tokenizer_queue_ms", "cache_structure_ms",
     "cache_serialize_ms", "cache_token_key_ms", "cache_count_lookup_ms",
     "cache_tokenize_ms", "prepare_signer_ms", "auth_ms", "route_ms",

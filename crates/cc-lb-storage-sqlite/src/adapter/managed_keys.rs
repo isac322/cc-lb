@@ -1,9 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError, StorageResult,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
-    validate_identifier,
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
+    StoredApiKeyRecord, validate_identifier,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -113,7 +112,7 @@ impl ManagedKeyStore for SqliteStorage {
             return Ok(());
         };
 
-        apply_mutation(&mut record, mutation, self.clock());
+        apply_mutation(&mut record, mutation);
         update_record(self, principal_id, key_id, &record).await
     }
 
@@ -156,7 +155,6 @@ async fn insert_record(
     key_id: &str,
     record: &StoredApiKeyRecord,
 ) -> StorageResult<()> {
-    let id = composite_id(principal_id, key_id);
     let limit_overrides = serde_json::to_string(&record.limit_overrides)?;
     let issued_at = u64_to_i64(record.issued_at_unix_secs, "issued_at_unix_secs")?;
     let expires_at = option_u64_to_i64(record.expires_at_unix_secs, "expires_at_unix_secs")?;
@@ -164,13 +162,11 @@ async fn insert_record(
 
     sqlx::query(
         "INSERT INTO managed_keys_v1 \
-         (id, name, secret_hash, created_at, expires_at, status, principal_id, key_id, label, \
+         (secret_hash, created_at, expires_at, status, principal_id, key_id, label, \
           revoked_at, verify_hash, secret_salt, limit_overrides, last_4, description, \
           index_hash, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&id)
-    .bind(&id)
     .bind(&record.key_hash_b64)
     .bind(issued_at)
     .bind(expires_at)
@@ -291,7 +287,7 @@ fn row_to_record(row: SqliteRow) -> StorageResult<StoredApiKeyRecord> {
     })
 }
 
-fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clock: &dyn Clock) {
+fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
     if let Some(label) = mutation.label {
         record.label = label;
     }
@@ -303,12 +299,6 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clo
     }
     if let Some(limit_overrides) = mutation.limit_overrides {
         record.limit_overrides = limit_overrides;
-    }
-    if let Some(status) = mutation.status {
-        if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(unix_secs(clock.now()));
-        }
-        record.status = status;
     }
 }
 
@@ -339,7 +329,6 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
 fn parse_key_status(value: &str) -> StorageResult<KeyStatus> {
     match value {
         "active" => Ok(KeyStatus::Active),
-        "disabled" => Ok(KeyStatus::Disabled),
         "revoked" => Ok(KeyStatus::Revoked),
         value => Err(corrupted_enum("status", value)),
     }
@@ -354,13 +343,8 @@ fn corrupted_enum(field: &str, value: &str) -> StorageError {
 fn key_status_as_str(value: KeyStatus) -> &'static str {
     match value {
         KeyStatus::Active => "active",
-        KeyStatus::Disabled => "disabled",
         KeyStatus::Revoked => "revoked",
     }
-}
-
-fn composite_id(principal_id: &str, key_id: &str) -> String {
-    format!("{principal_id}/{key_id}")
 }
 
 fn base64_url_no_pad(value: &[u8]) -> String {

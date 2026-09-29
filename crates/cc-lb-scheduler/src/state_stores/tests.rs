@@ -25,9 +25,7 @@ macro_rules! exercise_stores {
         assert_eq!(cursor.attempt_count, 2);
 
         let compat = AnthropicCompatEtagsStore::new($pool.clone());
-        compat
-            .upsert_value("models", Some("etag-1"), "hash-1", 3_000)
-            .await?;
+        compat.upsert_value("models", "hash-1", 3_000).await?;
         assert_eq!(
             compat.read("models").await?.unwrap().last_value_hash,
             "hash-1"
@@ -55,6 +53,11 @@ async fn idempotency_sqlite_stores_cover_insert_read_ttl_and_atomic_bump() -> Re
     .await?;
     sqlx::raw_sql(include_str!(
         "../../migrations/sqlite/0008_slim_oauth_usage_poll_cursors.sql"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/sqlite/0010_drop_anthropic_compat_etag.sql"
     ))
     .execute(&pool)
     .await?;
@@ -88,6 +91,10 @@ async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> 
     .await?;
     pool.execute(include_str!(
         "../../migrations/postgres/0008_slim_oauth_usage_poll_cursors.sql"
+    ))
+    .await?;
+    pool.execute(include_str!(
+        "../../migrations/postgres/0010_drop_anthropic_compat_etag.sql"
     ))
     .await?;
     let outcome = exercise_stores!(pool);

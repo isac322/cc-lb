@@ -4,11 +4,11 @@ use async_trait::async_trait;
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
-    MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, RepoError,
-    StorageError, StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete,
-    WasmRegistryEntry, WasmRegistryEntryInput, WasmRegistryReference,
-    WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order, validate_identifier,
+    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, StorageError, StorageResult,
+    WasmBlob, WasmBlobRecord, WasmRegistryCascadeDelete, WasmRegistryEntry, WasmRegistryEntryInput,
+    WasmRegistryReference, WasmRegistryReferenceFingerprint, WasmRegistryReferences, sparse_order,
+    validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -32,14 +32,13 @@ impl PluginRegistryStore for SqliteStorage {
         validate_blob(&blob)?;
 
         let mut tx = self.begin_immediate().await?;
-        let now = unix_secs_to_i64(blob.parse_validated_at_unix_secs, "wasm_blob.created_at")?;
+        let now = unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_blob.created_at")?;
         let blob_insert = sqlx::query(
-            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
-        .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await
@@ -47,7 +46,7 @@ impl PluginRegistryStore for SqliteStorage {
 
         let id = Uuid::new_v4();
         let registry_insert = sqlx::query(
-            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, original_filename, label, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, original_filename, label, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(id.to_string())
         .bind(blob.sha256.as_slice())
@@ -60,7 +59,6 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(&input.usage)
         .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(slots_to_json(&input.supported_slots)?)
-        .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.created_at")?)
         .bind(unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.updated_at")?)
         .execute(&mut *tx)
@@ -202,24 +200,21 @@ impl PluginRegistryStore for SqliteStorage {
             });
         }
 
-        let validated_at =
-            unix_secs_to_i64(blob.parse_validated_at_unix_secs, "wasm_blob.created_at")?;
+        let uploaded_at =
+            unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
         sqlx::query(
-            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
-        .bind(validated_at)
-        .bind(validated_at)
+        .bind(uploaded_at)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
 
-        let uploaded_at =
-            unix_secs_to_i64(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
         let result = sqlx::query(
-            "UPDATE wasm_registry_v2 SET sha256 = ?, plugin_version = ?, original_filename = ?, uploaded_by_admin_id = ?, revision = revision + 1, description = ?, usage = ?, hook_metadata = ?, supported_slots = ?, schema_hash = ?, created_at = ?, updated_at = ? WHERE id = ? AND revision = ?",
+            "UPDATE wasm_registry_v2 SET sha256 = ?, plugin_version = ?, original_filename = ?, uploaded_by_admin_id = ?, revision = revision + 1, description = ?, usage = ?, hook_metadata = ?, supported_slots = ?, created_at = ?, updated_at = ? WHERE id = ? AND revision = ?",
         )
         .bind(blob.sha256.as_slice())
         .bind(&input.version)
@@ -229,7 +224,6 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(&input.usage)
         .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(slots_to_json(&input.supported_slots)?)
-        .bind(input.schema_hash.as_ref().map(|hash| hash.as_slice()))
         .bind(uploaded_at)
         .bind(uploaded_at)
         .bind(current.id.to_string())
@@ -342,20 +336,6 @@ impl PluginRegistryStore for SqliteStorage {
         self.get_registry_entry_by_id(id)
             .await?
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
-    }
-
-    async fn update_supported_slots(
-        &self,
-        id: Uuid,
-        supported_slots: Vec<PluginSlotKind>,
-    ) -> StorageResult<()> {
-        sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = ? WHERE id = ?")
-            .bind(slots_to_json(&supported_slots)?)
-            .bind(id.to_string())
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
     }
 
     async fn delete_registry_entry(
@@ -699,49 +679,6 @@ impl PluginRegistryStore for SqliteStorage {
     }
 }
 
-#[async_trait]
-impl PluginBlobRepo for SqliteStorage {
-    async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
-        sqlx::query(
-            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES (?, ?, ?, NULL, unixepoch()) ON CONFLICT(sha256) DO UPDATE SET bytes = excluded.bytes, size_bytes = excluded.size_bytes",
-        )
-        .bind(sha256.as_slice())
-        .bind(bytes)
-        .bind(usize_to_i64(bytes.len(), "wasm_blob.size_bytes")?)
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlite_error)?;
-        Ok(())
-    }
-
-    async fn get_blob(&self, sha256: &[u8; 32]) -> Result<Option<Vec<u8>>, RepoError> {
-        sqlx::query_scalar("SELECT bytes FROM wasm_blobs_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_sqlx_error)
-    }
-
-    async fn delete_blob(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
-        sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlite_error)?;
-        Ok(())
-    }
-
-    async fn list_blob_keys(&self) -> Result<Vec<[u8; 32]>, RepoError> {
-        let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT sha256 FROM wasm_blobs_v2 ORDER BY sha256 ASC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter().map(|row| sha_to_array(&row)).collect()
-    }
-}
-
 impl SqliteStorage {
     async fn get_chain_by_id(&self, id: Uuid) -> StorageResult<Option<PluginChainEntry>> {
         let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = ?")
@@ -813,11 +750,6 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         &row.try_get::<String, _>("supported_slots")
             .map_err(map_sqlx_error)?,
     )?;
-    let schema_hash = row
-        .try_get::<Option<Vec<u8>>, _>("schema_hash")
-        .map_err(map_sqlx_error)?
-        .map(|bytes| sha_to_array(&bytes))
-        .transpose()?;
     Ok(WasmRegistryEntry {
         id,
         sha256,
@@ -842,7 +774,6 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
         is_builtin: false,
         metadata: None,
         supported_slots,
-        schema_hash,
     })
 }
 
@@ -983,10 +914,6 @@ fn validate_blob(blob: &WasmBlob) -> StorageResult<()> {
 }
 
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
-    let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    };
     existing.name == input.name
         && existing.version == input.version
         && existing.original_filename == input.original_filename
@@ -995,7 +922,6 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         && existing.usage == input.usage
         && existing.hook_metadata == input.hook_metadata
         && existing.supported_slots == input.supported_slots
-        && schema_hash_ok
 }
 
 fn is_singleton_slot(slot: PluginSlotKind) -> bool {

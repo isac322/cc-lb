@@ -2,18 +2,17 @@
 
 - Status: Proposed
 - Date: 2026-07-07
-- Supersedes: ADR 0004/0005's assumption that exact-prefix observations plus thread memory are sufficient long-term cache-locality signals.
-- Related incident data: `.omo/ulw-research/20260707-171508/full-post-v10-snapshot.json` captured 129 post-v10 request rows, 126 cache-positive rows, and 129/129 `request_id`-keyed routing decisions.
+- Supersedes: the retired cache-weighted and thread-keyed WRH subscription-preference assumption that exact-prefix observations plus thread memory are sufficient long-term cache-locality signals.
 
 ## Context
 
-The v10 subscription-preference route used this effective shape inside a quota tier:
+The prior subscription-preference route used this effective shape inside a quota tier:
 
 ```text
 effective_weight_i = quota_weight_i * exp(beta * cache_ratio_i)
 ```
 
-That failed because `cache_ratio_i` was fed by exact local prefix observations only. A cacheable request with no exact local warm prefix produced a creation-only `CacheScore` (`read = 0`, `create > 0`), and that `Some(CacheScore)` masked same-thread provider-usage memory. The router then saw no positive priced cache value, used `request_id` WRH, and scattered cache-positive sessions across upstreams.
+Feeding `cache_ratio_i` only from exact local prefix observations can hide useful same-thread memory. A cacheable request with no exact local warm prefix produces a creation-only `CacheScore` (`read = 0`, `create > 0`), and that `Some(CacheScore)` can mask same-thread provider-usage memory. Without positive priced cache value, the router falls back to `request_id` WRH and can scatter cache-positive sessions across upstreams.
 
 The deeper design gap is that a route decision needs an expected cache value, not a binary exact-prefix hit flag. Anthropic exposes provider-side usage after a request (`cache_read_input_tokens`, `cache_creation_input_tokens`, TTL class), but it does not expose the provider's internal prompt-cache hash/key algorithm or the exact prefix hash that was read. A local simulator therefore cannot be a byte-for-byte Anthropic oracle. It can, however, maintain a deterministic proxy-local fingerprint of the same rendered prefix structure and combine it with TTL, lookback, token estimates, and observed provider usage.
 

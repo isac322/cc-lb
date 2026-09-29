@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use cc_lb_clock::TestClock;
 use cc_lb_storage_api::{
     ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery,
-    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult, BackendKind, MetaStore,
+    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult, MetaStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
@@ -43,7 +43,7 @@ fn api_key_usage_contracts() {
 async fn run_contracts(pool: &PgPool) -> Result<()> {
     let clock = Arc::new(TestClock::new_at_secs(NOW));
     let storage = PostgresStorage::new(pool.clone(), clock.clone());
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let first = Uuid::now_v7();
     let second = Uuid::now_v7();
     for (writer, requests) in [(first, 2), (second, 3)] {

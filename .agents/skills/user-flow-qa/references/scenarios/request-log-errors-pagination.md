@@ -23,7 +23,7 @@ least 60 newer 200 events without errors, all within the window:
 
 1. Inspect the SQLite rows (including `list_status` and `error_code`) and
    confirm exactly three match `list_status >= 400 OR error_code IS NOT NULL`.
-2. Authenticated `GET /admin/events/recent?status_class=errors&limit=2` must
+2. Authenticated `GET /admin/v1/events/recent?status_class=errors&limit=2` must
    return the two newest *matching* events. Follow the returned `ts_ms` and
    `event_id` as `until_ts_ms`/`until_event_id`: the next response contains the
    remaining error, and a further request returns no events. Compare the

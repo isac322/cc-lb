@@ -4,19 +4,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_clock::SystemClock;
+use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config, SchedulerConfig, StorageConfig};
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::Upstream;
+use cc_lb_engine::ApiKeyAwareSignerFactory;
 use cc_lb_engine::cache_keepalive::{
     DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RequestSnapshot,
 };
-use cc_lb_engine::clock::{ClockHandle, TestClock};
-use cc_lb_engine::{ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, SystemClock};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_runtime_wasmtime::{HotEngineConfig, WasmtimeRuntime};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::oauth_refresh::RefreshOutcome;
@@ -25,7 +26,7 @@ use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamUpdate,
 };
-use cc_lb_storage_api::{BackendKind, MetaStore, Storage, StorageError, StorageResult};
+use cc_lb_storage_api::{MetaStore, Storage, StorageError, StorageResult};
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
@@ -345,10 +346,7 @@ impl DispatchFixture {
                 .await
                 .expect("open sqlite"),
         );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
+        storage.initialize().await.expect("initialize sqlite");
         let scheduler = crate::scheduler_factory::open_scheduler_storage(
             &StorageConfig::Sqlite {
                 path: sqlite_path.clone(),
@@ -418,7 +416,6 @@ impl DispatchFixture {
         let dynamic_view = Arc::new(DynamicViewHolder::new(
             DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(StubSignerFactory))
-                .global_router(Arc::new(NoRouteRouter))
                 .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
                 .build(),
         ));
@@ -726,21 +723,6 @@ impl Signer for StubSigner {
 
     async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
-    }
-}
-
-struct NoRouteRouter;
-
-impl RouterPlugin for NoRouteRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "unused in oauth dispatch tests".to_owned(),
-        })
     }
 }
 

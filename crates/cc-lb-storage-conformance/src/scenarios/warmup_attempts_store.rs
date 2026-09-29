@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_engine::ClockHandle;
+use cc_lb_clock::ClockHandle;
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
     WarmupAttemptStatus, WarmupAttemptSummary, WarmupPermanentFailureReason, WarmupSkipReason,

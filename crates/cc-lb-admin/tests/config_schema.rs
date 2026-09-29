@@ -39,7 +39,6 @@ async fn editor_returns_schema_defaults_file_effective_and_metadata() {
             .unwrap()
             .starts_with("sha256:")
     );
-    assert_eq!(json["restart_required"], true);
 }
 
 #[tokio::test]
@@ -105,20 +104,6 @@ async fn editor_redacts_storage_url_as_whole_value() {
         cc_lb_config::STORAGE_URL_REDACTION_SENTINEL
     );
     assert!(!String::from_utf8_lossy(&bytes).contains(secret));
-}
-
-#[tokio::test]
-async fn legacy_current_and_schema_routes_are_removed() {
-    let (dir, storage) = temp_storage().await;
-    let config = config_admin_common::minimal_config();
-    let path = write_config_file(dir.path(), &config);
-    let state = test_state_with_config_path(config, Some(storage), path);
-
-    for route in ["/admin/v1/config/current", "/admin/v1/config/schema"] {
-        let (status, _, _) =
-            config_admin_common::authed_bytes(app(state.clone()), "GET", route, None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
 }
 
 #[tokio::test]

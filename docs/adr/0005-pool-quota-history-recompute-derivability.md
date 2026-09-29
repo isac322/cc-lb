@@ -65,7 +65,7 @@ Subscription-quota observations are kept forever. Remove the `CronJob::QuotaGc` 
 - **SCD2 writes must be transactional**: close the open row and insert the replacement in one transaction; idempotent no-op when the open row already matches; partial unique index guarantees one open row per logical key; treat a concurrent close/open as a conflict, not a silent duplicate.
 - **Ratio validation**: reject non-finite / zero / negative ratios in Rust *and* via SQL CHECK (`isfinite(...)` on Postgres).
 - **Rebind coverage**: the refresh path — not only the admin path — must rebind after tier-history changes.
-- **Retention removal**: observations grow unbounded (accepted; lean rows). Handle queued `quota_gc` job deserialization.
+- **Retention removal**: observations grow unbounded (accepted; lean rows). Queued `quota_gc` jobs are purged by a scheduler migration.
 
 ### Neutral
 

@@ -112,7 +112,7 @@ Mutation primitives (apply Template T with these deltas):
 - **M7 cleanup/backfill**: `cc-lb compact-subscription-quota-history --storage-path $TDB [--drop-raw-observations]`. Writes meta markers `subscription_quota_checkpoint_backfill_v1_complete` / `_cleanup_v1_complete`; idempotent (marker present ⇒ returns cached report, no destructive work).
 - **Live trigger** (no SQL): `curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:52252/admin/v1/upstreams/<id>/warmup/fire-now` ⇒ real warmup, header-source observation persisted.
 
-Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_batch]`, `put_subscription_quota_checkpoint(s)`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs:283-350, traits.rs:259-283).
+Programmatic seed alt: `UpstreamSubscriptionQuotaStore::record_subscription_quota_samples`, `put_subscription_quota_checkpoints`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs, traits.rs).
 
 ## 3. Part A — Point-in-time QA
 
@@ -120,7 +120,7 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 - latest upserted every accepted observation; checkpoint only on semantic change; evidence-only change ⇒ no checkpoint.
 - series returns last-checkpoint-before-`since` (left anchor) + checkpoints in `[since,until]`; NEVER fabricates leading zeroes (ADR 0007; test `subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes`).
 
-### 3.2 HTTP endpoint contracts (all paths also under legacy `/admin/…`)  — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
+### 3.2 HTTP endpoint contracts — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
 | Endpoint | Required params | Key defaults | Guardrail → 400 error code |
 |---|---|---|---|
 | `GET /admin/v1/subscription-quotas/latest` | — | windows=all, source=merged, upstream_ids=all-active-oauth, max_staleness=routing cfg | `invalid_source` / `invalid_window` / `invalid_upstream_id` |
@@ -246,28 +246,14 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
 - Frontend chart transform + carry-forward/no-zeroes: `crates/cc-lb-admin/web/src/components/upstreams/buildQuotaChartData.test.ts`; card/legend: ApiUsageCard/QuotaObservedAt tests.
-- OAuth ingestion and PR #394 `is_active` semantics: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs` (`is_active` marks the binding limit; weekly-scoped Fable observations are ingested regardless).
+- OAuth ingestion and `is_active` semantics: `crates/cc-lb-server/src/scheduler_dispatch/usage/tests.rs` (`is_active` marks the binding limit; weekly-scoped Fable observations are ingested regardless).
 - Unified header parsing: `crates/cc-lb-engine/src/rate_limit_headers.rs`.
 - Fable routing preference: `crates/cc-lb-engine/src/builtin_filters/subscription_preference/tests.rs`.
 - Proxy path E2E: `crates/cc-lb-server/tests/claude_fable_5_proxy_path.rs`.
 - **Gaps → manual only**: UI live auto-refresh (T9), UI status/color transitions (T3/T6), reset marker rendering (T4), routing reaction (T10). These MUST be executed by hand per §4.
 
 ## 6. Execution log / verdict
-| Case | Layer(s) | Result | Evidence |
-|------|----------|--------|----------|
-| §3.2 endpoint contracts | API | PASS | /series + /latest HTTP 200 with correct payloads during T1/T4 |
-| T14 analysis range rejection/recovery | API | Retired | `/analysis` endpoint removed 2026-09-28 |
-| §3.1 storage invariants | storage | PASS | +1 checkpoint only on semantic change; latest guarded by observed_at>= |
-| §3.3 TC-1..8 (frontend) | UI | PASS (prior run) | subscription-quota-frontend.md verdict PASS |
-| **T1 utilization ↑** | storage→API | **PASS** | /series last bucket `utilization_last` 0.82→0.917; checkpoints 5402→5403 (+1) |
-| **T4 window reset** | storage→API | **PASS** | /series `markers` gained `kind:"reset"` at mutation bucket; last bucket → 0.05 |
-| **T9 UI live auto-refresh** | UI | **VERIFIED** | detail page observed-at + Quota History chart updated live WITHOUT reload (driven by real writer path) |
-| T2,T3,T5,T6,T7,T8,T10 | storage/API/UI | documented, not executed | §4 specs; T10 routing flagged for hands-on |
-| §3.5 Fable point-in-time | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota point-in-time case |
-| **T11 Fable transition** | storage/API/UI | documented, not executed | Fable 5 model-scoped weekly quota state-transition case |
-| **C1.1 Point-in-time** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
-| **C1.2 State transition** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
-| **C1.3 State transition** | storage, API | **PASS** | Verified live 2026-07-13 via F5, see plan `memory-allocation-root-fixes` |
 
-PASS = every executed case meets Expected. Part B (T1–T13) carries equal weight to Part A.
-Representative subset (T1/T4/T9) executed & verified on 2026-07-09 against an isolated `.backup` copy of prod; C1.1/C1.2/C1.3 executed & verified on 2026-07-13 against a fresh throwaway instance with a disposable temp SQLite DB (see `memory-allocation-root-fixes` plan, F5); prod left untouched in both cases.
+Record results only from the current isolated run. Do not copy operational snapshots, private database counts, host identifiers, or execution evidence into this public scenario.
+
+PASS = every executed case meets its expected outcome. A case that was not executed remains unverified.

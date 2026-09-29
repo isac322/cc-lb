@@ -6,7 +6,7 @@ error[E0308]: mismatched types
   |                   |
   |                   arguments to this function are incorrect
   |
-  = note: expected struct `Reservation`
+  = note: expected struct `cc_lb_control::api_keys::limit_engine::Reservation`
                found enum `Option<_>`
 note: associated function defined here
  --> src/attempt_rail.rs

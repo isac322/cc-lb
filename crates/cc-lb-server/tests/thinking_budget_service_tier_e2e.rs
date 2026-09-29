@@ -2,7 +2,7 @@ use crate::common;
 
 use std::sync::Arc;
 
-use cc_lb_storage_api::{RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore, RequestEventStreamFilters};
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, MessageScript, ScriptedMessageResponse};
 use serde_json::json;
@@ -11,18 +11,29 @@ const MODEL: &str = "claude-sonnet-4-5-20250929";
 
 async fn persisted_model_event(server: &common::TestServer) -> RequestEvent {
     let database_url = format!("sqlite://{}", server.sqlite_path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("open server SQLite storage");
     // The final RequestEvent row is written asynchronously by the lifecycle
     // assembler task after the proxy response returns, so poll until it lands
     // rather than racing the single write (which flakes under CI load).
     for _ in 0..400 {
+        let cursor = storage
+            .current_request_event_cursor()
+            .await
+            .expect("current request event cursor");
         let found = storage
-            .query_recent_request_events(0, u64::MAX, 10)
+            .query_request_events_between_cursors(
+                0,
+                cursor,
+                500,
+                &RequestEventStreamFilters::default(),
+            )
             .await
             .expect("query persisted request events")
             .into_iter()
+            .rev()
+            .map(|(_, event)| event)
             .find(|event| event.model.as_deref() == Some(MODEL));
         if let Some(event) = found {
             return event;

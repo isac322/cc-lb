@@ -22,8 +22,7 @@ where
     override_absent_as_empty_scd2(Arc::clone(&backend)).await?;
     override_idempotent(Arc::clone(&backend)).await?;
     upstream_tier_scd2_and_as_of(Arc::clone(&backend)).await?;
-    upstream_tier_unknown(Arc::clone(&backend)).await?;
-    super::plan_tier_store_backfill::upstream_tier_backfill_intervals(backend).await
+    upstream_tier_unknown(backend).await
 }
 
 macro_rules! scenario {

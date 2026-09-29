@@ -32,18 +32,12 @@ fn stage(tier: Option<SubscriptionTier>) -> StageDecision {
         subscription_preference: tier.map(|chosen_tier| SubscriptionPreferenceTrace {
             chosen_tier,
             candidates: Vec::new(),
-            previous_tier: None,
             formula_version: None,
             cache_cost_basis_version: None,
             formula_winner_upstream_id: None,
             kept_upstream_id: None,
-            incumbent_upstream_id: None,
-            estimated_switch_cache_loss_micros: None,
-            cache_loss_status: None,
             switch_gate_reason: None,
             bucket_v3_cache_key: None,
-            lineage_would_have_predicted_read_tokens: None,
-            lineage_would_have_picked_upstream_id: None,
         }),
     }
 }
@@ -73,8 +67,6 @@ fn route_completed(event_id: &str, tier: Option<SubscriptionTier>) -> LifecycleE
             quota_urgency_7d: None,
             quota_urgency_combined: None,
             quota_warning_multiplier: None,
-            lineage_would_have_predicted_read_tokens: None,
-            lineage_would_have_picked_upstream_id: None,
         }),
         routing_trace: Some(RoutingTrace {
             stages: vec![stage(tier)],
@@ -102,7 +94,6 @@ fn terminated(event_id: &str) -> LifecycleEvent {
         connect_ms: None,
         connection_reused: None,
         internal_errors: Vec::new(),
-        limit_reconcile_ms: None,
         proxy_setup_ms: None,
         setup_timings: Default::default(),
         io_timings: Default::default(),

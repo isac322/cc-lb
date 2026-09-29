@@ -35,7 +35,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
   });
 
   const principalNameMap = new Map<string, string>();
-  const upstreamNameMap = new Map<string, string>();
 
   describe('RequestOutcome', () => {
     it('renders Client disconnected for 499 + client_closed_request', () => {
@@ -56,7 +55,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -82,7 +80,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -108,7 +105,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -134,7 +130,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -158,7 +153,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       <RequestEventsTable
         events={[partialEvent]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -178,7 +172,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       <RequestEventsTable
         events={[finalEvent]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -208,7 +201,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -234,7 +226,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={[partialEvent]}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -258,7 +249,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={[richerPartialEvent]}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -280,7 +270,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={[finalEvent]}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -291,11 +280,7 @@ describe('RequestEventsTable - Live & Outcomes', () => {
 
       // Rerender without the event (e.g. it was removed or scrolled out)
       rerender(
-        <RequestEventsTable
-          events={[]}
-          principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
-        />,
+        <RequestEventsTable events={[]} principalNameMap={principalNameMap} />,
       );
 
       // Drawer should close cleanly (or at least not show the stale event)
@@ -320,7 +305,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={[partialEvent]}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -341,7 +325,6 @@ describe('RequestEventsTable - Live & Outcomes', () => {
         <RequestEventsTable
           events={[finalEvent]}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 

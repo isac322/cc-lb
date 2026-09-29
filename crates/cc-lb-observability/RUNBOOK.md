@@ -138,7 +138,7 @@ sum(rate(cc_lb_cache_observation_write_failed_total[1m])) > 0
 
 ### Interpretation
 
-This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the WRH within-tier selection actually placed candidates in, and which upstream captured the pick.
+This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the cost-first within-tier selection actually placed candidates in, and which upstream captured the pick.
 
 - `tier` ∈ `{known_base, partial_base, overage, unknown_probe}` from the `SubscriptionTier` enum.
 - `upstream` matches the upstream name (same convention as `cc_lb_requests_total` / `cc_lb_cache_hit_total`), NOT the UUID.
@@ -158,7 +158,7 @@ sum by (tier) (rate(cc_lb_routing_tier_selections_total[15m]))
 
 ### Suggested Alerting Threshold
 
-An alert `RoutingUpstreamFunneling` in `deploy/alerts/routing-anomaly.yml` fires when any single upstream captures more than 70% of decisions within a tier over 15 minutes, sustained for 10 minutes, guarded by a low-volume floor (`> 2` req/s per tier). This detects regression of the WRH within-tier distribution shipped in PR #312.
+An alert `RoutingUpstreamFunneling` in `deploy/alerts/routing-anomaly.yml` fires when any single upstream captures more than 70% of decisions within a tier over 15 minutes, sustained for 10 minutes, guarded by a low-volume floor (`> 2` req/s per tier). This detects unexpected concentration of the cost-first within-tier selection.
 
 ```promql
 (

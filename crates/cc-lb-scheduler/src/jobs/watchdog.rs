@@ -1,6 +1,5 @@
 //! Watchdog jobs for monitoring and health checks.
 
-use apalis_core::task::{Task, builder::TaskBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::middleware::TraceparentCarrier;
@@ -21,21 +20,6 @@ impl WarmupWatchdogJob {
             tick_unix_secs,
             traceparent: None,
         }
-    }
-
-    pub fn idempotency_key(&self) -> String {
-        format!("maintenance:warmup_watchdog:{}", self.tick_unix_secs)
-    }
-
-    pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
-    where
-        Ctx: Default,
-    {
-        let idempotency_key = self.idempotency_key();
-        TaskBuilder::<Self, Ctx, IdType>::new(self)
-            .run_at_timestamp(run_at_unix_secs)
-            .with_idempotency_key(idempotency_key)
-            .build()
     }
 }
 
@@ -62,21 +46,6 @@ impl OAuthRefreshWatchdogJob {
             tick_unix_secs,
             traceparent: None,
         }
-    }
-
-    pub fn idempotency_key(&self) -> String {
-        format!("maintenance:oauth_refresh_watchdog:{}", self.tick_unix_secs)
-    }
-
-    pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
-    where
-        Ctx: Default,
-    {
-        let idempotency_key = self.idempotency_key();
-        TaskBuilder::<Self, Ctx, IdType>::new(self)
-            .run_at_timestamp(run_at_unix_secs)
-            .with_idempotency_key(idempotency_key)
-            .build()
     }
 }
 

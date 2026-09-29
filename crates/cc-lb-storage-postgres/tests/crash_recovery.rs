@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventStore, RequestEventUpstream, UsageRollup,
-    UsageRollupResolution, UsageRollupStore,
+    MetaStore, RequestEvent, RequestEventStore, UsageRollup, UsageRollupResolution,
+    UsageRollupStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
@@ -144,7 +144,7 @@ impl CrashFixture {
         let pool = schema_pool(url, schema, &app_name, 1).await?;
         let storage =
             PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock));
-        storage.initialize(BackendKind::Postgres).await?;
+        storage.initialize().await?;
         install_checkpoint_sleep_trigger(&pool, checkpoint_sleep_secs).await?;
         seed_request_events(&storage).await?;
 
@@ -174,7 +174,14 @@ impl CrashFixture {
 
     async fn consistency(&self) -> Result<Consistency, Box<dyn std::error::Error>> {
         let checkpoint = self.storage.usage_rollup_checkpoint().await?;
-        let rollups = self.storage.query_usage_rollups().await?;
+        let mut rollups = Vec::new();
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            rollups.extend(
+                self.storage
+                    .query_usage_rollups_in_range(resolution, 0, i64::MAX.unsigned_abs())
+                    .await?,
+            );
+        }
 
         if checkpoint == Some(EVENTS_PER_ITERATION) && expected_rollups_visible(&rollups) {
             return Ok(Consistency::AllVisible);
@@ -219,7 +226,7 @@ impl CrashFixture {
     async fn wait_for_events_eligible(&self) -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..600 {
             let eligible = sqlx::query_scalar::<_, bool>(
-                "SELECT NOT EXISTS (                      SELECT 1 FROM request_events_v1                      WHERE COALESCE(tx_id, '0'::xid8) >= pg_snapshot_xmin(pg_current_snapshot())                  )",
+                "SELECT NOT EXISTS (                      SELECT 1 FROM request_events_v1                      WHERE tx_id >= pg_snapshot_xmin(pg_current_snapshot())                  )",
             )
             .fetch_one(&self.pool)
             .await?;
@@ -342,10 +349,11 @@ async fn seed_request_events(storage: &PostgresStorage) -> Result<(), Box<dyn st
         storage
             .append_request_event(&RequestEvent {
                 ts: 1_800_000_000,
+                ts_ms: Some(1_800_000_000_000),
                 request_id: format!("crash-recovery-{index}"),
+                event_id: Some(format!("crash-recovery-event-{index}")),
                 principal_id: Some("crash-recovery-principal".to_owned()),
                 principal_kind: Some("account".to_owned()),
-                upstream: Some(RequestEventUpstream::AnthropicDirect),
                 upstream_id: Some(Uuid::nil()),
                 upstream_name: Some("anthropic_direct".to_owned()),
                 model: Some("claude-sonnet-4-5".to_owned()),

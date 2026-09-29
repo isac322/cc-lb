@@ -10,10 +10,9 @@ use cc_lb_admin::{AdminState, DynamicViewRebinder, router};
 use cc_lb_config::Config;
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, RouteDecision, RouteError, RouterPlugin,
-    RoutingContext, UpstreamStatusEntry, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicView, DynamicViewBuilder, UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_domain::Upstream;
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
@@ -56,7 +55,6 @@ impl DynamicViewRebinder for SnapshotRebinder {
         let principal_view = Arc::new(PrincipalView::from_db(&[], HashMap::new()));
         Ok(DynamicViewBuilder::new(current_generation)
             .signer_factory(Arc::new(NoopSignerFactory))
-            .global_router(Arc::new(NoopRouter))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
                 entries,
@@ -87,21 +85,6 @@ impl SignerFactory for NoopSignerFactory {
     }
 }
 
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "noop test router".to_owned(),
-        })
-    }
-}
-
 #[tokio::test]
 async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
     let dir = tempfile::tempdir().expect("temp admin dir");
@@ -128,7 +111,6 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),

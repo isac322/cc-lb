@@ -68,7 +68,7 @@ impl<'a> HeuristicClassifier<'a> {
 
     pub fn classify(&self, request_body: &Value, response_body: &Value) -> TurnDecision {
         let decision = self.classify_inner(request_body, response_body);
-        metrics::record_classifier_decision(decision.as_metric_label(), "heuristic");
+        metrics::record_classifier_decision(decision.as_metric_label());
         decision
     }
 

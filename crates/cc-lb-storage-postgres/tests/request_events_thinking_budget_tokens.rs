@@ -1,6 +1,6 @@
 use std::{error::Error, str::FromStr, sync::Arc};
 
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, PgPool,
@@ -119,7 +119,7 @@ impl Fixture {
             )
             .await?;
         let storage = PostgresStorage::new(pool, Arc::new(cc_lb_clock::SystemClock));
-        if let Err(error) = storage.initialize(BackendKind::Postgres).await {
+        if let Err(error) = storage.initialize().await {
             storage.pool().close().await;
             sqlx::query(AssertSqlSafe(format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
@@ -153,6 +153,7 @@ impl Fixture {
 fn request_event(event_id: &str, thinking_budget_tokens: Option<u64>) -> RequestEvent {
     RequestEvent {
         ts: 1_800_300_100,
+        ts_ms: Some(1_800_300_100_000),
         request_id: format!("request-{event_id}"),
         event_id: Some(event_id.to_owned()),
         thinking_budget_tokens,

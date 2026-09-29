@@ -216,7 +216,6 @@ const ANCHOR_RADII_SECS: ReadonlyArray<readonly [string, number]> = [
 interface RequestEventsTableProps {
   events: readonly RequestEventWithPhase[];
   principalNameMap: Map<string, string>;
-  upstreamNameMap: Map<string, string>;
   loading?: boolean;
   reservedRowCount?: number;
   emptyTitle?: string;
@@ -512,7 +511,6 @@ interface ColumnSpec {
 export const RequestEventsTable = memo(function RequestEventsTable({
   events,
   principalNameMap,
-  upstreamNameMap,
   loading,
   reservedRowCount = 5,
   emptyTitle = 'No requests',
@@ -650,12 +648,7 @@ export const RequestEventsTable = memo(function RequestEventsTable({
                       event.principal_id ??
                       DASH
                     }
-                    upstreamName={
-                      upstreamNameMap.get(event.upstream ?? '') ??
-                      event.upstream_name ??
-                      event.upstream ??
-                      DASH
-                    }
+                    upstreamName={event.upstream_name ?? DASH}
                     showPrincipal={showPrincipal}
                     showUpstream={showUpstream}
                     showSession={showSession}

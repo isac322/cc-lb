@@ -13,14 +13,6 @@ export const OUTCOME_LABEL: Record<WarmupAttemptStatus, string> = {
   permanent_failure: 'Failed',
 };
 
-// Short narrative used in card body — "Last attempt {RelativeTime}: {desc}"
-export const OUTCOME_DESCRIPTION: Record<WarmupAttemptStatus, string> = {
-  success: 'started a fresh 5h window',
-  skipped: 'skipped',
-  transient_failure: 'failed transiently — background loop will retry',
-  permanent_failure: 'failed — operator action required',
-};
-
 export const REASON_LABEL: Record<
   | WarmupSuccessReason
   | WarmupSkipReason

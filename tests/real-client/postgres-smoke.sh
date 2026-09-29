@@ -206,39 +206,4 @@ fi
 
 cp "$TMP_DIR/proxy.log" "$EVIDENCE_DIR/postgres-e2e-proxy.log" || true
 
-echo "===> step 5: tear down healthy cc-lb instance"
-kill "$PROXY_PID" 2>/dev/null || true
-wait "$PROXY_PID" 2>/dev/null || true
-PROXY_PID=""
-
-echo "===> step 6: tamper meta.backend_kind to 'sqlite' to simulate a wrong-backend startup"
-psql "$CI_POSTGRES_URL" -c "UPDATE meta SET value = 'sqlite' WHERE key = 'backend_kind'" > /dev/null
-new_kind=$(psql "$CI_POSTGRES_URL" -tAc "SELECT value FROM meta WHERE key = 'backend_kind'")
-[ "$new_kind" = "sqlite" ] || { echo "FAIL: tamper did not stick"; exit 1; }
-
-echo "===> step 7: restart cc-lb against tampered DB - expect fatal exit (BackendKindMismatch)"
-mismatch_log="$TMP_DIR/proxy-mismatch.log"
-set +e
-CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
-CC_LB_ADMIN_TOKEN=test \
-CC_LB_CLUSTER_TOKEN=0000000000000000000000000000000000000000000000000000000000000001 \
-timeout 30 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
-  > "$mismatch_log" 2>&1
-exit_code=$?
-set -e
-echo "exit_code=$exit_code"
-cat "$mismatch_log" || true
-if [ "$exit_code" -eq 0 ]; then
-  echo "FAIL: expected non-zero exit when backend kind mismatches, got 0" >&2
-  exit 1
-fi
-if ! grep -qi 'backend.kind\|mismatch' "$mismatch_log"; then
-  echo "FAIL: expected backend kind mismatch message in log" >&2
-  exit 1
-fi
-cp "$mismatch_log" "$EVIDENCE_DIR/postgres-e2e-mismatch.log" || true
-
-echo "===> step 8: restore meta.backend_kind to 'postgres' for clean teardown"
-psql "$CI_POSTGRES_URL" -c "UPDATE meta SET value = 'postgres' WHERE key = 'backend_kind'" > /dev/null
-
-echo "PASS postgres-backed e2e smoke (200 round-trip + backend_kind mismatch fatal exit)"
+echo "PASS postgres-backed e2e smoke (200 round-trip + backend_kind stamp)"

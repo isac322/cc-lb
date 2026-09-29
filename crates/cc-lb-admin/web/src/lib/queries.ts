@@ -6,7 +6,6 @@ import {
   type InfiniteData,
   type QueryClient,
   queryOptions,
-  experimental_streamedQuery as streamedQuery,
   useInfiniteQuery,
   useIsMutating,
   useMutation,
@@ -40,17 +39,14 @@ import {
   type OAuthFallbackReason,
   type OAuthTokenMode,
   type PoolHistoryResponse,
-  type PrincipalLimitsResponse,
   patchJson,
   postJson,
   putJson,
   type RecentEventsPayload,
   type RequestEvent,
-  type RequestEventUpdate,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
   startOauthDraft,
-  streamRequestEventUpdates,
   triggerSubscriptionMetadataRefresh,
   type UpstreamOAuthStatusResponse,
 } from './api';
@@ -289,9 +285,6 @@ export const qk = {
   principals: ['principals'] as const,
   principal: (id: string) => ['principal', id] as const,
   routerTerminal: (id: string) => ['router-terminal', id] as const,
-  principalUsage: (id: string, range: string, step: string) =>
-    ['principal-usage', id, range, step] as const,
-  principalLimits: (id: string) => ['principal-limits', id] as const,
   principalKeys: (id: string) => ['principal-keys', id] as const,
   pluginRegistry: ['plugins', 'registry'] as const,
   pluginChain: (pid: string, slot?: ChainSlot) =>
@@ -367,7 +360,7 @@ export function useSummary(range: string) {
       queryKey: qk.summary(range),
       queryFn: () =>
         getJson<DashboardSummaryResponse>(
-          `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
+          `/admin/v1/dashboard/summary?range=${encodeURIComponent(range)}`,
         ),
     },
     POLLING_INTERVALS.SUMMARY_MS,
@@ -392,7 +385,7 @@ export function useUsage(
         if (upstreamId) params.set('upstream_id', upstreamId);
         if (projection) params.set('projection', projection);
         return getJson<DashboardUsageResponse>(
-          `/admin/usage?${params.toString()}`,
+          `/admin/v1/dashboard/usage?${params.toString()}`,
           { signal },
         );
       },
@@ -422,14 +415,6 @@ export function usePrincipals() {
   return useQuery({
     queryKey: qk.principals,
     queryFn: () => getJson<PrincipalListResp>('/admin/v1/principals'),
-  });
-}
-export function usePrincipalLimits(id: string | null) {
-  return useQuery({
-    queryKey: qk.principalLimits(id ?? ''),
-    queryFn: () =>
-      getJson<PrincipalLimitsResponse>(`/admin/v1/principals/${id}/limits`),
-    enabled: !!id,
   });
 }
 export function usePrincipalKeys(id: string | null) {
@@ -475,7 +460,7 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
       queryKey: qk.events(filters),
       queryFn: ({ signal }) =>
         getJson<RecentEventsPayload>(
-          `/admin/events/recent?${params.toString()}`,
+          `/admin/v1/events/recent?${params.toString()}`,
           { signal },
         ),
       placeholderData: (previousData, previousQuery) =>
@@ -586,7 +571,7 @@ export function fetchRecentEventsPage(
   }
   params.set('limit', String(pageParam.limit));
   return getJson<RecentEventsPayload>(
-    `/admin/events/recent?${params.toString()}`,
+    `/admin/v1/events/recent?${params.toString()}`,
   );
 }
 
@@ -653,49 +638,6 @@ export function useRecentEventsInfinite(
   });
 }
 
-import type { RequestEventWithPhase } from './RequestEventTypes';
-
-function upsertLiveRequestEvent(
-  acc: RequestEventWithPhase[],
-  update: RequestEventUpdate,
-  cap: number,
-): RequestEventWithPhase[] {
-  let newEvent: RequestEventWithPhase;
-  let key: string | undefined;
-
-  if (update.phase === 'final') {
-    newEvent = { ...update.payload.event, _phase: 'final' };
-    key = update.payload.event.event_id ?? update.payload.event.request_id;
-  } else {
-    newEvent = { ...update.payload, _phase: 'partial' };
-    key = update.payload.event_id ?? update.payload.request_id;
-  }
-
-  const idx = acc.findIndex((e) => (e.event_id ?? e.request_id) === key);
-  if (idx >= 0) {
-    const out = acc.slice();
-    out[idx] = newEvent;
-    return out;
-  }
-  return [newEvent, ...acc].slice(0, cap);
-}
-
-export function useLiveRequestEvents(enabled: boolean, cap = 500) {
-  return useQuery({
-    queryKey: ['request-events', 'live', cap] as const,
-    enabled,
-    staleTime: Infinity,
-    gcTime: Infinity,
-    retry: false,
-    queryFn: streamedQuery<RequestEventUpdate, RequestEventWithPhase[]>({
-      streamFn: ({ signal }) => streamRequestEventUpdates(signal),
-      initialValue: [],
-      reducer: (acc, next) => upsertLiveRequestEvent(acc, next, cap),
-      refetchMode: 'reset',
-    }),
-  });
-}
-
 export function usePrincipalNameMap(): Map<string, string> {
   const principals = usePrincipals();
   return useMemo(() => {
@@ -721,7 +663,7 @@ export function useAudit(filters: Record<string, string | undefined>) {
   return useQuery({
     queryKey: qk.audit(filters),
     queryFn: () =>
-      getJson<AuditQueryResponse>(`/admin/audit?${params.toString()}`),
+      getJson<AuditQueryResponse>(`/admin/v1/audit?${params.toString()}`),
   });
 }
 export function useUpstreamOAuthStatus(id: string | null | undefined) {
@@ -1689,17 +1631,7 @@ export type WarmupPermanentFailureReason =
   | 'not_found'
   | 'dialect_plugin_failed';
 
-export type WarmupAttemptOutcome =
-  | { status: 'success'; reason: WarmupSuccessReason }
-  | { status: 'skipped'; reason: WarmupSkipReason }
-  | { status: 'transient_failure'; reason: WarmupTransientFailureReason }
-  | { status: 'permanent_failure'; reason: WarmupPermanentFailureReason };
-
 export type WarmupDispatchKind = 'not_dispatched' | 'http' | 'dialect_plugin';
-
-export function attemptOutcome(a: WarmupAttempt): WarmupAttemptOutcome {
-  return { status: a.status, reason: a.reason } as WarmupAttemptOutcome;
-}
 
 export type WarmupTrigger = 'scheduled' | 'manual';
 

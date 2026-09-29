@@ -3,19 +3,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_clock::{Clock, TestClock, unix_secs};
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::Upstream;
 use cc_lb_engine::cache_keepalive::{AnthropicKeepaliveDispatcher, RequestSnapshot};
-use cc_lb_engine::clock::{Clock, TestClock, unix_secs};
-use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
-    UpstreamDispatch,
-};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
+use cc_lb_engine::{ApiKeyAwareSignerFactory, DispatchError, UpstreamDispatch};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest,
-    CacheKeepaliveSessionRecord, CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
+    CacheKeepaliveSessionStore, CacheTtl, MetaStore, UpstreamStore,
 };
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -50,7 +47,7 @@ impl RenewalFixture {
                 .expect("open sqlite storage"),
         );
         storage
-            .initialize(BackendKind::Sqlite)
+            .initialize()
             .await
             .expect("initialize sqlite storage");
         let upstream = UpstreamStore::create(
@@ -74,7 +71,6 @@ impl RenewalFixture {
         let view = Arc::new(DynamicViewHolder::new(
             DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(RenewalSignerFactory))
-                .global_router(Arc::new(NoRouteRouter))
                 .principal_view(principal_view)
                 .upstream_records(vec![upstream.clone()])
                 .build(),
@@ -176,21 +172,6 @@ impl Signer for RenewalSigner {
 
     async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
         RetryDecision::Fail
-    }
-}
-
-struct NoRouteRouter;
-
-impl RouterPlugin for NoRouteRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "renewal dispatch uses its persisted upstream".to_owned(),
-        })
     }
 }
 

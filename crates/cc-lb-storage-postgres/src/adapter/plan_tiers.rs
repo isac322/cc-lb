@@ -1,12 +1,11 @@
-mod backfill;
 mod metadata_overrides;
 mod ratios;
 mod upstreams;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BackfillApplyOutcome, MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore,
-    StorageResult, UpstreamPlanTierRecord,
+    MetadataTierMappingOverrideRecord, PlanTierRatioRecord, PlanTierStore, StorageResult,
+    UpstreamPlanTierRecord,
 };
 
 use crate::adapter::PostgresStorage;
@@ -67,23 +66,6 @@ impl PlanTierStore for PostgresStorage {
         record: &UpstreamPlanTierRecord,
     ) -> StorageResult<()> {
         upstreams::append(self, record).await
-    }
-
-    async fn backfill_upstream_plan_tier_intervals(
-        &self,
-        upstream_id: uuid::Uuid,
-        intervals: &[UpstreamPlanTierRecord],
-        terminal_cap_unix_millis: i64,
-        provenance: &str,
-    ) -> StorageResult<BackfillApplyOutcome> {
-        backfill::apply(
-            self,
-            upstream_id,
-            intervals,
-            terminal_cap_unix_millis,
-            provenance,
-        )
-        .await
     }
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {

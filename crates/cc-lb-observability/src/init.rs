@@ -96,7 +96,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 44] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -106,16 +106,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
         name: "cc_lb_request_duration_seconds",
         kind: MetricKind::Histogram,
         description: "End-to-end proxied request duration in seconds.",
-    },
-    MetricDefinition {
-        name: "cc_lb_quota_active_principals_total",
-        kind: MetricKind::Gauge,
-        description: "Number of principals with active quota windows.",
-    },
-    MetricDefinition {
-        name: "cc_lb_quota_rejected_total",
-        kind: MetricKind::Counter,
-        description: "Quota rejections by principal and quota kind.",
     },
     MetricDefinition {
         name: "cc_lb_dropped_events_total",
@@ -240,11 +230,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 51] = [
     PROMETHEUS14_METRIC_DEFINITIONS[10],
     PROMETHEUS14_METRIC_DEFINITIONS[11],
     PROMETHEUS14_METRIC_DEFINITIONS[12],
-    PROMETHEUS14_METRIC_DEFINITIONS[13],
-    PROMETHEUS14_METRIC_DEFINITIONS[14],
-    PROMETHEUS14_METRIC_DEFINITIONS[15],
-    PROMETHEUS14_METRIC_DEFINITIONS[16],
-    PROMETHEUS14_METRIC_DEFINITIONS[17],
     MetricDefinition {
         name: "cc_lb_prompt_cache_analysis_duration_seconds",
         kind: MetricKind::Histogram,
@@ -366,16 +351,6 @@ pub fn register_metrics() {
         "cc_lb_request_duration_seconds",
         Unit::Seconds,
         "End-to-end proxied request duration in seconds."
-    );
-    metrics::describe_gauge!(
-        "cc_lb_quota_active_principals_total",
-        Unit::Count,
-        "Number of principals with active quota windows."
-    );
-    metrics::describe_counter!(
-        "cc_lb_quota_rejected_total",
-        Unit::Count,
-        "Quota rejections by principal and quota kind."
     );
     metrics::describe_counter!(
         "cc_lb_dropped_events_total",
@@ -592,13 +567,6 @@ fn touch_metrics() {
         "model" => "unknown"
     )
     .record(0.0);
-    metrics::gauge!("cc_lb_quota_active_principals_total").set(0.0);
-    metrics::counter!(
-        "cc_lb_quota_rejected_total",
-        "principal" => "unknown",
-        "kind" => "unknown"
-    )
-    .increment(0);
     metrics::counter!("cc_lb_dropped_events_total", "reason" => "none").increment(0);
     metrics::gauge!("cc_lb_circuit_breaker_state", "upstream" => "unknown").set(0.0);
     metrics::counter!("cc_lb_panic_total").increment(0);

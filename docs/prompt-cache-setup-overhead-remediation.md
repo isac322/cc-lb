@@ -179,7 +179,6 @@ The admin-web latency timeline and latency cell show only stages that delay the 
 
 - `computeStageGroups.ts`
   - Timeline total keeps the existing `duration_ms`
-  - Internal post computes only `limit_reconcile_ms`
 - `LatencyTimeline.tsx`
   - Stage percentages and unaccounted keep the existing `duration_ms` basis
 - `LatencyCell.tsx`

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 use sqlx::Row;
 
@@ -68,16 +68,14 @@ async fn test_storage(filename: &str) -> (tempfile::TempDir, SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (temp_dir, storage)
 }
 
 fn request_event(event_id: &str, reasoning_effort: Option<String>) -> RequestEvent {
     RequestEvent {
         ts: 1_800_300_100,
+        ts_ms: Some(1_800_300_100_000),
         request_id: format!("request-{event_id}"),
         event_id: Some(event_id.to_owned()),
         reasoning_effort,

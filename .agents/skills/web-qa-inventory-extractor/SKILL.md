@@ -23,7 +23,7 @@ A generated row count, an old catalog, a route mount, a representative entity, o
 
 ## 1. Freeze the source audit boundary
 
-Record the source commit and the plan-defined UI/backend directories before extracting. A recorded `source_commit` may name the base commit a candidate was built on; it does not by itself prove which source produced the audited tree. Preserve the catalog's `source_state` object (`kind`, `base_commit`, `note`), the actual file hashes or provenance manifest, and the separate deployed commit. For an approved uncommitted snapshot, the current catalog uses `kind: approved_uncommitted_candidate`. Keep candidate and deployed evidence distinguishable, and treat source as authoritative when it disagrees with an existing inventory.
+Record the source commit and the plan-defined UI/backend directories before extracting. A recorded `source_commit` may name the base commit a candidate was built on; it does not by itself prove which source produced the audited tree. Preserve the catalog's `source_state` object (`kind`, `base_commit`, `note`) and the actual file hashes or provenance manifest. For an approved uncommitted snapshot, the current catalog uses `kind: approved_uncommitted_candidate`. Keep candidate and deployed evidence distinguishable, and treat source as authoritative when it disagrees with an existing inventory.
 
 Use two independent passes. Do not derive one pass from the output of the other:
 
@@ -40,7 +40,6 @@ Each UI item must record:
 
 ```yaml
 source_id: <file#symbol:trigger>
-existing_ids: []
 page: <route or shared surface>
 component: <component>
 source: { file: <path>, symbol: <symbol>, line: <line> }

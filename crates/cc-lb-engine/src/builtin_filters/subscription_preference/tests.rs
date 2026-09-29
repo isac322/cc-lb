@@ -2160,7 +2160,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 
@@ -2179,7 +2178,6 @@ fn oauth_with(
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
         observed_at_unix_secs: 0,
         cache_score: None,
@@ -2226,7 +2224,6 @@ fn api_key(name: &str, id_seed: u8) -> UpstreamCandidate {
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicApiKey,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: Vec::new(),
         observed_at_unix_secs: 0,
         cache_score: None,

@@ -54,7 +54,6 @@ describe('RequestEventsTable', () => {
   });
 
   const principalNameMap = new Map<string, string>();
-  const upstreamNameMap = new Map<string, string>();
 
   it('skips unchanged row work across identical and single-event updates', () => {
     const events: RequestEventWithPhase[] = Array.from(
@@ -73,7 +72,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -91,7 +89,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
     expect(requestOutcomeWork).not.toHaveBeenCalled();
@@ -106,7 +103,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={changedEvents}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -125,7 +121,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={[]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
         loading
         reservedRowCount={3}
         columns={{ session: false }}
@@ -186,7 +181,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={[]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
         loading
         reservedRowCount={1}
       />,
@@ -202,7 +196,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={[event]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -217,7 +210,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={[]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
         loading
         reservedRowCount={4}
       />,
@@ -230,7 +222,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={[]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
         reservedRowCount={4}
       />,
     );
@@ -270,7 +261,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -312,7 +302,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -359,7 +348,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -418,7 +406,6 @@ describe('RequestEventsTable', () => {
           } satisfies RequestEventWithPhase,
         ]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -449,7 +436,6 @@ describe('RequestEventsTable', () => {
       <RequestEventsTable
         events={events}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -478,7 +464,6 @@ describe('RequestEventsTable', () => {
           { ...base, event_id: 'evt_b', request_id: 'req_b', input_tokens: 20 },
         ]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
     const headers = Array.from(
@@ -523,7 +508,6 @@ describe('RequestEventsTable', () => {
           { ...base, event_id: 'evt_d', request_id: 'req_d' },
         ]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -560,7 +544,6 @@ describe('RequestEventsTable', () => {
           { ...base, event_id: 'a2', request_id: 'a2', thread_id: 'sess-a-1' },
         ]}
         principalNameMap={principalNameMap}
-        upstreamNameMap={upstreamNameMap}
       />,
     );
 
@@ -601,7 +584,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
           minWidthClass={minWidthClass}
         />,
       );
@@ -643,7 +625,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -712,7 +693,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -770,7 +750,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -798,7 +777,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -826,7 +804,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -852,7 +829,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -879,7 +855,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -906,7 +881,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 
@@ -932,7 +906,6 @@ describe('RequestEventsTable', () => {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
         />,
       );
 

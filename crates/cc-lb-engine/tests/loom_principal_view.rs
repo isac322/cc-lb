@@ -5,10 +5,10 @@ mod principal_view_swap {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
-    use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
-    use cc_lb_engine::api_keys::principal_view::{
+    use cc_lb_control::api_keys::principal_view::{
         DialectCache, PrincipalView, RouterPipelineCache,
     };
+    use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
     use cc_lb_routing::RoutingContext;
     use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
     use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
@@ -67,8 +67,6 @@ mod principal_view_swap {
             allowed_upstreams: vec![],
             default_limits: Vec::new(),
             enabled: true,
-            last_apply_error: None,
-            last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
             created_at_unix_secs: Duration::ZERO.as_secs(),

@@ -47,7 +47,7 @@ SELECT \
     session_key_hash, \
     principal_id, \
     upstream_id, \
-    COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms, \
+    last_message_at_ms, \
     ttl, \
     generation, \
     NULL::BIGINT AS refresh_count, \
@@ -68,7 +68,7 @@ const RECENT_VISIBLE_DECISION_COUNT_SQL: &str = "\
 SELECT COUNT(*) \
 FROM cache_keepalive_decisions \
 WHERE principal_id = $1 \
-  AND COALESCE(last_message_at_ms, ts * 1000) >= $2 \
+  AND last_message_at_ms >= $2 \
   AND NOT EXISTS (\
       SELECT 1 FROM cache_keepalive_turns turn_row \
       WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id\
@@ -227,7 +227,7 @@ fn push_decision_list_branch(
     push_decision_filter(builder, query.filter);
     push_page_bounds(
         builder,
-        "COALESCE(last_message_at_ms, ts * 1000)",
+        "last_message_at_ms",
         "('decision:' || source_ref_id)",
         horizon_start_ms,
         cursor_last_message_at_ms,

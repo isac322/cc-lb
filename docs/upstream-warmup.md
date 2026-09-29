@@ -54,23 +54,7 @@ WHERE kind = 'anthropic_oauth' AND deleted_at IS NULL;
 
 ## Manual fire
 
-To manually trigger a warm-up cycle or reconcile all jobs immediately, send a POST request to the scheduler reconcile endpoint. This triggers a full reconciliation of all active upstreams and enqueues any missing warmup jobs.
-
-```bash
-curl -X POST http://localhost:8080/admin/scheduler/reconcile \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-
-The endpoint returns:
-
-- **202 Accepted**: The reconciliation job was successfully enqueued.
-  ```json
-  {
-    "status": "enqueued"
-  }
-  ```
-
-Note that there is no per-row manual fire endpoint in this version. All manual triggers are handled via the global scheduler reconciliation endpoint.
+There is no manual fire endpoint. The scheduler watchdog enqueues a warm-up job with a fresh idempotency key whenever an upstream's warm-up is due.
 
 ## What you'll see
 

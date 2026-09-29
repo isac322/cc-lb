@@ -1,7 +1,7 @@
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use cc_lb_engine::api_keys::concurrent_guard::{ConcurrencyRejected, KeyConcurrencyManager};
+use cc_lb_control::api_keys::concurrent_guard::{ConcurrencyRejected, KeyConcurrencyManager};
 
 #[test]
 fn cap_two_third_reject() {

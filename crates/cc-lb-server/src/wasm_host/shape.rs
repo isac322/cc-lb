@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use cc_lb_domain::{Principal, Upstream};
-use cc_lb_plugin_wire::metadata::HookMode;
 use cc_lb_plugin_wire::schema::WireVersion;
 use cc_lb_plugin_wire::{
-    ArchivedTransformResponseResult, ArchivedTransformSseEventResult, ClaimRef, HeaderRef,
-    PrincipalRef, QueryRef, SseEvent, SseEventRef, TransformResponseRequestRef,
-    TransformSseEventRequestRef, UpstreamRef,
+    ArchivedTransformResponseResult, ArchivedTransformSseEventResult, HeaderRef, PrincipalRef,
+    QueryRef, SseEvent, SseEventRef, TransformResponseRequestRef, TransformSseEventRequestRef,
+    UpstreamRef,
 };
 use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntimeError};
 use cc_lb_upstream::{
@@ -35,7 +34,6 @@ impl WasmtimeUpstreamDialect {
             Some(WasmtimeResponseTransformHook {
                 dispatch: Arc::clone(&dispatch),
                 wire_version: dispatch.shape_wire_version(),
-                mode: HookMode::Active,
             })
         } else {
             None
@@ -44,7 +42,6 @@ impl WasmtimeUpstreamDialect {
             Some(WasmtimeSseEventTransformHook {
                 dispatch: Arc::clone(&dispatch),
                 wire_version: dispatch.shape_wire_version(),
-                mode: HookMode::Active,
             })
         } else {
             None
@@ -132,7 +129,6 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
 struct WasmtimeResponseTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
-    mode: HookMode,
 }
 
 impl ResponseTransformHook for WasmtimeResponseTransformHook {
@@ -140,9 +136,6 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
         &self,
         request: TransformResponseRequest,
     ) -> Result<TransformResponseResult, ResponseTransformError> {
-        if self.mode.is_noop() {
-            return Ok(TransformResponseResult::Unchanged);
-        }
         let in_bytes = host_to_wire_transform_response(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformResponseRequest: {e}"))
         })?;
@@ -166,7 +159,6 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
 struct WasmtimeSseEventTransformHook {
     dispatch: Arc<WasmPluginWireDispatch>,
     wire_version: Option<WireVersion>,
-    mode: HookMode,
 }
 
 impl SseEventTransformHook for WasmtimeSseEventTransformHook {
@@ -174,9 +166,6 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         &self,
         request: TransformSseEventRequest,
     ) -> Result<TransformSseEventResult, ResponseTransformError> {
-        if self.mode.is_noop() {
-            return Ok(TransformSseEventResult::Unchanged);
-        }
         let in_bytes = host_to_wire_transform_sse_event(&request).map_err(|e| {
             response_runtime_error(format!("rkyv encode TransformSseEventRequest: {e}"))
         })?;
@@ -205,18 +194,6 @@ fn with_wire_shape_request<R>(
     with_bytes: impl for<'a> FnOnce(&'a [u8]) -> R,
 ) -> Result<R, RkyvError> {
     let principal_kind_str = principal_kind_to_wire(principal);
-    let claim_bufs: Vec<(&str, Vec<u8>)> = principal
-        .claims
-        .iter()
-        .filter_map(|(k, v)| serde_json::to_vec(v).ok().map(|bytes| (k.as_str(), bytes)))
-        .collect();
-    let claim_refs: Vec<ClaimRef<'_>> = claim_bufs
-        .iter()
-        .map(|(k, v)| ClaimRef {
-            key: k,
-            value: v.as_slice(),
-        })
-        .collect();
     let header_refs: Vec<HeaderRef<'_>> = context
         .downstream_headers
         .iter()
@@ -243,7 +220,7 @@ fn with_wire_shape_request<R>(
         principal: PrincipalRef {
             id: principal.id.as_str(),
             kind: principal_kind_str,
-            claims: &claim_refs,
+            claims: &[],
         },
         upstream: upstream_ref,
     };
@@ -369,8 +346,6 @@ fn host_to_wire_transform_response(
     request: &TransformResponseRequest,
 ) -> Result<AlignedVec<16>, RkyvError> {
     let principal_kind = principal_kind_to_wire(&request.principal);
-    let claim_bufs = claim_buffers(&request.principal);
-    let claim_refs = claim_refs_from_bufs(&claim_bufs);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
     let upstream = UpstreamRef::AnthropicDirect {
@@ -381,7 +356,7 @@ fn host_to_wire_transform_response(
         principal: PrincipalRef {
             id: request.principal.id.as_str(),
             kind: principal_kind,
-            claims: &claim_refs,
+            claims: &[],
         },
         upstream,
         request_method: request.request_method.as_str(),
@@ -398,8 +373,6 @@ fn host_to_wire_transform_sse_event(
     request: &TransformSseEventRequest,
 ) -> Result<AlignedVec<16>, RkyvError> {
     let principal_kind = principal_kind_to_wire(&request.principal);
-    let claim_bufs = claim_buffers(&request.principal);
-    let claim_refs = claim_refs_from_bufs(&claim_bufs);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
     let upstream = UpstreamRef::AnthropicDirect {
@@ -414,7 +387,7 @@ fn host_to_wire_transform_sse_event(
         principal: PrincipalRef {
             id: request.principal.id.as_str(),
             kind: principal_kind,
-            claims: &claim_refs,
+            claims: &[],
         },
         upstream,
         request_method: request.request_method.as_str(),
@@ -498,28 +471,6 @@ fn reject_oversized_output(bytes: &[u8], bound: u64) -> Result<(), ResponseTrans
         )));
     }
     Ok(())
-}
-
-fn claim_buffers(principal: &Principal) -> Vec<(&str, Vec<u8>)> {
-    principal
-        .claims
-        .iter()
-        .filter_map(|(key, value)| {
-            serde_json::to_vec(value)
-                .ok()
-                .map(|bytes| (key.as_str(), bytes))
-        })
-        .collect()
-}
-
-fn claim_refs_from_bufs<'a>(claim_bufs: &'a [(&'a str, Vec<u8>)]) -> Vec<ClaimRef<'a>> {
-    claim_bufs
-        .iter()
-        .map(|(key, value)| ClaimRef {
-            key,
-            value: value.as_slice(),
-        })
-        .collect()
 }
 
 fn header_refs_from_map(headers: &http::HeaderMap) -> Vec<HeaderRef<'_>> {

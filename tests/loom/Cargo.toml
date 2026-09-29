@@ -21,12 +21,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
-
-arc-swap.workspace = true
-cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
-dashmap.workspace = true
-globset.workspace = true
-metrics.workspace = true
-serde = { workspace = true, features = ["derive"] }
-parking_lot = "0.12"
-bincode.workspace = true

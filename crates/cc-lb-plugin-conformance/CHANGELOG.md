@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove `conformance_engine_config` (and its prelude re-export). `ConformanceSuite` now defaults to `HotEngineConfig::default()`, which raises the plugin memory ceiling from 1024 pages (64 MiB) to 2048 pages (128 MiB) to match production.
+- Remove the `SlotKind` prelude re-export; the prelude exports `HookKind`, and `PluginSession::kind` returns it.
+- Remove `ConformanceSuite::assert_static_admission`; use `inspect` or `assert_recognisable_by_current_host`.
+
 ## [0.2.4](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.3...cc-lb-plugin-conformance-v0.2.4) - 2026-07-15
 
 ### Added

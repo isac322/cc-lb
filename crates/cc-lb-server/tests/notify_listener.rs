@@ -3,15 +3,14 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::DynamicViewHolder;
+use cc_lb_control::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    BackendKind, ChangeChannel, ChangeEvent, RateLimitKind, RuntimeChangeNotifier, StorageError,
-    StorageResult, SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+    ChangeChannel, ChangeEvent, RateLimitKind, RuntimeChangeNotifier, StorageError, StorageResult,
+    SubscriptionQuotaSample, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
     UpstreamRateLimitObservationRecord, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
@@ -223,7 +222,6 @@ struct Fixture {
     _dir: tempfile::TempDir,
     storage: Arc<Storage>,
     stores: Arc<Stores>,
-    oauth: Arc<AnthropicOAuthConfig>,
     aead: Arc<AeadService>,
     runtime: Arc<WasmtimeRuntime>,
     holder: Arc<DynamicViewHolder>,
@@ -234,10 +232,10 @@ async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("notify.sqlite");
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("storage opens");
-    cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
+    cc_lb_storage_api::MetaStore::initialize(&storage)
         .await
         .expect("initialize");
     let storage = Arc::new(storage);
@@ -254,13 +252,11 @@ async fn fixture() -> Fixture {
         anthropic_compatibility_kv: storage.clone(),
         audit: None,
     });
-    let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
     let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let quota_cache = Arc::new(cc_lb_server::SubscriptionQuotaCache::new());
     let initial = build_dynamic_view(
         &stores,
-        &oauth,
         aead.clone(),
         None,
         0,
@@ -268,8 +264,7 @@ async fn fixture() -> Fixture {
         dir.path(),
         quota_cache.clone(),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         Arc::new(cc_lb_clock::SystemClock),
     )
@@ -280,7 +275,6 @@ async fn fixture() -> Fixture {
         _dir: dir,
         storage,
         stores,
-        oauth,
         aead,
         runtime,
         quota_cache,
@@ -299,17 +293,15 @@ async fn spawn_listener(
         cancel,
         holder: fixture.holder.clone(),
         stores,
-        oauth_cfg: fixture.oauth.clone(),
         runtime: fixture.runtime.clone(),
         aead: fixture.aead.clone(),
         data_dir: fixture._dir.path().to_path_buf(),
         lazy_refresher: None,
         subscription_quota_cache: fixture.quota_cache.clone(),
-        prompt_cache_thread_usage: None,
         prompt_cache_grace_margin_secs: 30,
-        prompt_cache_observation_sink: None,
+        prompt_cache_observation_sink: Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         subscription_quota_routing_max_staleness_secs: 1800,
-        clock: Arc::new(cc_lb_engine::SystemClock),
+        clock: Arc::new(cc_lb_clock::SystemClock),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -496,7 +488,7 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
     fixture
         .stores
         .upstream_subscription_quotas
-        .record_subscription_quota_sample(&SubscriptionQuotaSample {
+        .record_subscription_quota_samples(&[SubscriptionQuotaSample {
             upstream_id: upstream.id,
             window: SubscriptionQuotaWindow::FiveHour,
             source: SubscriptionQuotaSource::Header,
@@ -518,7 +510,7 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
             extra_usage_monthly_limit: None,
             extra_usage_used_credits: None,
             ingested_at_unix_millis: 1_800_000_000_000,
-        })
+        }])
         .await
         .expect("quota sample stored");
 

@@ -3,11 +3,11 @@
 //! Shared types between host (`cc-lb-runtime-wasmtime`) and guest
 //! (`cc-lb-pdk-wasmtime`) compiled in lockstep.
 //!
-//! Wire types for the hooks the wasmtime runtime ships: filter (Phase 1),
-//! shape (Phase 2), and the response transform hooks. Signer extension is
-//! intentionally not exposed across the plugin boundary — host-side
-//! built-in Anthropic API-key and OAuth signers handle credential signing
-//! in-process.
+//! Wire types for the hooks the wasmtime runtime ships: filter, shape,
+//! transform_response, and transform_sse_event. Signer
+//! extension is intentionally not exposed across the plugin boundary —
+//! host-side built-in Anthropic API-key and OAuth signers handle
+//! credential signing in-process.
 //!
 //! rkyv derives `Archive` + `Serialize` + `Deserialize` for every wire type.
 //! The host calls `rkyv::access::<ArchivedFilterRequest, rkyv::rancor::Error>`
@@ -33,14 +33,14 @@
 //!   round-trips and for round-trip test fixtures.
 //! * **Borrowed ref** (`FilterRequestRef<'a>`, `ShapeRequestRef<'a>`,
 //!   ...) — `&'a str` / `&'a [u8]` fields with `#[rkyv(with =
-//!   InlineAsBox)]`. Used by the host in `wire_to_host_wire_request`
+//!   InlineAsBox)]`. Used by the host when encoding hook requests
 //!   so the request body (up to 100 MiB on `/v1/files`) is serialised
 //!   IN PLACE from the request pipeline's `bytes::Bytes` without any
 //!   `.to_vec()` copy.
 //!
 //! Both variants archive to the same `ArchivedBox<ArchivedSlice<u8>>`
 //! / `ArchivedBox<ArchivedStr>` byte layouts — verified by the wire
-//! round-trip tests in `crates/cc-lb-plugin-wire/tests/borrowed_wire_roundtrip.rs`.
+//! round-trip tests in `crates/cc-lb-plugin-wire/tests/wire_roundtrip.rs`.
 //! When either variant is written to guest memory, the guest reads it
 //! via `rkyv::access::<ArchivedFilterRequest, _>` — the archived
 //! type name is identical because the owned type is the sole `Archive`

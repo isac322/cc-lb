@@ -47,7 +47,6 @@ vi.mock('../lib/queries', async () => {
     useSubscriptionQuotaSeries: vi.fn(),
     useTriggerSubscriptionMetadataRefresh: vi.fn(),
     useUpdateUpstreamWarmupSettings: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
     useUpstreamOAuthStatus: vi.fn(),
     useUpstreamSubscriptionMetadata: vi.fn(),
     useUpstreams: vi.fn(),
@@ -267,16 +266,6 @@ function usageData(key: string, bucketTokens: number, costMicros: number) {
             virtual_cost_micros: costMicros,
             latency_ms_sum: 100,
             latency_count: 1,
-            proxy_setup_ms_sum: 0,
-            proxy_setup_ms_count: 0,
-            shape_ms_sum: 0,
-            shape_ms_count: 0,
-            sign_ms_sum: 0,
-            sign_ms_count: 0,
-            upstream_ttfb_ms_sum: 0,
-            upstream_ttfb_ms_count: 0,
-            upstream_body_ms_sum: 0,
-            upstream_body_ms_count: 0,
           },
         ],
       },
@@ -284,7 +273,7 @@ function usageData(key: string, bucketTokens: number, costMicros: number) {
   };
 }
 
-function recentData(target: Upstream, model: string) {
+function recentData(model: string) {
   return {
     events: [
       {
@@ -292,7 +281,6 @@ function recentData(target: Upstream, model: string) {
         request_id: `request-${model}`,
         ts: NOW_UNIX_SECS - 30,
         ts_ms: (NOW_UNIX_SECS - 30) * 1_000,
-        upstream: target.id,
         event_kind: 'messages',
         model,
         status: 200,
@@ -470,12 +458,6 @@ beforeEach(() => {
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(
-    new Map([
-      [upstream.id, upstream.name],
-      [apiKeyUpstream.id, apiKeyUpstream.name],
-    ]),
-  );
 
   vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue(
     mutationResult() as never,
@@ -823,7 +805,7 @@ describe('/upstreams refresh retention', () => {
       }),
     );
     vi.mocked(queries.useRecentEvents).mockImplementation(() =>
-      queryResult(recentData(upstream, phaseData[phase].requestModel), {
+      queryResult(recentData(phaseData[phase].requestModel), {
         isPlaceholderData,
       }),
     );
@@ -944,10 +926,7 @@ describe('/upstreams refresh retention', () => {
     });
     vi.mocked(queries.useRecentEvents).mockImplementation(() =>
       queryResult(
-        recentData(
-          apiKeyUpstream,
-          phase === 'old' ? 'old-request-model' : 'new-request-model',
-        ),
+        recentData(phase === 'old' ? 'old-request-model' : 'new-request-model'),
         { isPlaceholderData },
       ),
     );
@@ -1034,7 +1013,7 @@ describe('/upstreams refresh retention', () => {
     );
     vi.mocked(queries.useRecentEvents).mockImplementation((options) =>
       options.upstream_id === upstream.id
-        ? queryResult(recentData(upstream, 'identity-old-model'))
+        ? queryResult(recentData('identity-old-model'))
         : queryResult(undefined, { isLoading: true, isPending: true }),
     );
 

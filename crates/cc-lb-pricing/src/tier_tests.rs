@@ -84,7 +84,6 @@ fn total_for(service_tier: Option<&str>, with_explicit_tiers: bool) -> i64 {
         1_000_000,
         1_000_000,
         1_000_000,
-        None,
         service_tier,
     )
     .total_micros
@@ -98,7 +97,7 @@ fn lookup_resolves_tier_prices_and_preserves_discovered_rates() {
 
     // When priority pricing is looked up.
     let pricing = catalog
-        .lookup(MODEL, None, Some("priority"))
+        .lookup(MODEL, Some("priority"))
         .expect("model should be present");
 
     // Then the base fields are resolved while all discovered tiers remain available.
@@ -204,7 +203,7 @@ fn estimate_max_uses_batch_fallback_when_catalog_has_no_tier_keys() {
     catalog.install_snapshot(tier_snapshot(false));
 
     // When a batch maximum cost is estimated.
-    let estimate = catalog.estimate_max(MODEL, 1_000_000, 1_000_000, None, Some("batch"));
+    let estimate = catalog.estimate_max(MODEL, 1_000_000, 1_000_000, Some("batch"));
 
     // Then both base prices are halved exactly.
     assert_eq!(estimate, Some(5_000_000));

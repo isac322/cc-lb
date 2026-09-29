@@ -51,6 +51,6 @@ The list is ordered `last_message_at_ms DESC` with a stable tiebreak on the opaq
 ## Verification
 
 - `cargo test -p cc-lb-admin cache_keepalive` — view-model, P&L worked examples, and admin endpoint contract (summary/list/detail, `limit=0`, filters, cursor).
-- `cargo test -p cc-lb-storage-sqlite cache_keepalive` and `cargo test -p cc-lb-storage-postgres cache_keepalive --features postgres` — SQLite/Postgres read-model parity, ordering, and cursor pagination.
+- `cargo test -p cc-lb-storage-sqlite cache_keepalive` and `cargo test -p cc-lb-storage-postgres cache_keepalive` — SQLite/Postgres read-model parity, ordering, and cursor pagination.
 - `cargo test --workspace` — proves renewal/accounting rows and event sequences are unchanged by the projection writes.
 - In `crates/cc-lb-admin/web`: `bun run test`, `bun run typecheck`, `bun run lint`, `bun run build` — typed client decoding, component behavior (card, drawers, session detail, live merge, FLIP/flash, accessibility/responsive).

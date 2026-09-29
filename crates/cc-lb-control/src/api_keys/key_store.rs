@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    ManagedKeyStore, StorageError,
-    types::{ApiKeyMutation, IssueParams, KeyStatus, Limit, StoredApiKeyRecord},
+    ApiKeyMutation, IssueParams, Limit, ManagedKeyStore, StorageError, StoredApiKeyRecord,
 };
 use thiserror::Error;
 
@@ -27,11 +26,6 @@ pub struct CreateParams {
 pub enum KeyStoreError {
     #[error(transparent)]
     Storage(#[from] StorageError),
-    #[error("api key {principal_id}/{key_id} is already revoked")]
-    KeyAlreadyRevoked {
-        principal_id: String,
-        key_id: String,
-    },
 }
 
 impl KeyStore {
@@ -93,47 +87,6 @@ impl KeyStore {
 
     pub async fn list_all(&self) -> Result<Vec<(String, String, StoredApiKeyRecord)>> {
         Ok(self.storage.list_all().await?)
-    }
-
-    pub async fn disable(&self, principal_id: &str, key_id: &str) -> Result<()> {
-        self.storage
-            .update(
-                principal_id,
-                key_id,
-                ApiKeyMutation {
-                    status: Some(KeyStatus::Disabled),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn enable(&self, principal_id: &str, key_id: &str) -> Result<()> {
-        if matches!(
-            self.storage.get(principal_id, key_id).await?,
-            Some(StoredApiKeyRecord {
-                status: KeyStatus::Revoked,
-                ..
-            })
-        ) {
-            return Err(KeyStoreError::KeyAlreadyRevoked {
-                principal_id: principal_id.to_owned(),
-                key_id: key_id.to_owned(),
-            });
-        }
-
-        self.storage
-            .update(
-                principal_id,
-                key_id,
-                ApiKeyMutation {
-                    status: Some(KeyStatus::Active),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        Ok(())
     }
 
     pub async fn revoke(&self, principal_id: &str, key_id: &str) -> Result<()> {

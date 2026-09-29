@@ -288,24 +288,6 @@ impl LifecycleKeepalive {
                 self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
                     .await;
             }
-            super::TurnDecision::Ambiguous if config.classifier.llm_judge.is_some() => {
-                tracing::warn!(
-                    target: "cache_keepalive",
-                    principal_id = principal.id.as_str(),
-                    "cache keep-alive llm_judge is configured but unsupported in this release; treating ambiguous response as user turn"
-                );
-                self.record_not_tracked(
-                    &session_key,
-                    principal,
-                    upstream_id,
-                    ttl,
-                    config,
-                    &CacheKeepaliveDisplayReason::AmbiguousTurn.to_string(),
-                )
-                .await;
-                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
-                    .await;
-            }
             super::TurnDecision::Ambiguous => {
                 self.record_not_tracked(
                     &session_key,
@@ -394,7 +376,7 @@ pub(crate) struct StreamingKeepaliveResponse {
 
 impl StreamingKeepaliveResponse {
     pub(crate) fn observe(&mut self, event: &ParsedSseEvent<'_>) {
-        let Some(value) = event.first_observed_value() else {
+        let Ok(Some(value)) = event.value() else {
             return;
         };
         match event.event_name() {
@@ -523,18 +505,5 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(2)
         );
-    }
-
-    #[test]
-    fn invalid_joined_multiline_preserves_first_parseable_keepalive_value() {
-        let event = crate::usage_parser::parse_sse_event(
-            b"event: message_start\ndata: {\"message\":{\"id\":\"first\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\ndata: {\"message\":{\"id\":\"second\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
-        );
-        let mut response = StreamingKeepaliveResponse::default();
-
-        response.observe(&event);
-        let value = response.into_value().expect("legacy first value captured");
-
-        assert_eq!(value.get("id").and_then(Value::as_str), Some("first"));
     }
 }

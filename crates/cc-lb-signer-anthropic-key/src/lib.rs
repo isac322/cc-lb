@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_domain::{CredentialStrategy, Upstream};
+use cc_lb_domain::Upstream;
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
@@ -64,21 +64,12 @@ impl Signer for AnthropicKeySigner {
 
 #[derive(Clone)]
 pub struct AnthropicKeySignerFactory {
-    auth_strategy: CredentialStrategy,
     api_key: SecretString,
 }
 
 impl AnthropicKeySignerFactory {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            auth_strategy: CredentialStrategy::ApiKey,
-            api_key: SecretString::new(api_key.into().into_boxed_str()),
-        }
-    }
-
-    pub fn with_strategy(auth_strategy: CredentialStrategy, api_key: impl Into<String>) -> Self {
-        Self {
-            auth_strategy,
             api_key: SecretString::new(api_key.into().into_boxed_str()),
         }
     }
@@ -88,7 +79,6 @@ impl fmt::Debug for AnthropicKeySignerFactory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicKeySignerFactory")
-            .field("auth_strategy", &self.auth_strategy)
             .field("credential", &"[REDACTED]")
             .finish()
     }
@@ -96,14 +86,7 @@ impl fmt::Debug for AnthropicKeySignerFactory {
 
 #[async_trait]
 impl SignerFactory for AnthropicKeySignerFactory {
-    async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-        let _ = upstream;
-        if self.auth_strategy != CredentialStrategy::ApiKey {
-            return Err(SignerError::WrongStrategy {
-                strategy: self.auth_strategy.clone(),
-            });
-        }
-
+    async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
         Ok(Arc::new(AnthropicKeySigner {
             api_key: self.api_key.clone(),
         }))
@@ -134,7 +117,6 @@ mod tests {
         let principal = cc_lb_domain::Principal {
             id: "principal".to_owned(),
             kind: cc_lb_domain::PrincipalKind::ApiKey,
-            claims: serde_json::Map::new(),
         };
         shape_request(
             &DirectDialect,

@@ -14,7 +14,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock, TestClock};
+use cc_lb_clock::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
 };
@@ -22,13 +22,12 @@ use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, cache_keepalive_session_reads,
-        organization_metadata_store, plan_tier_store, plan_tier_store_backfill,
-        plugin_registry_store, pool_quota_history_store, price_catalog, principal_store,
-        prompt_cache_observation_store, request_event_key_usage, request_event_list,
-        request_event_principal_costs, storage_roundtrips, storage_roundtrips_cache_split,
-        storage_roundtrips_latency_stages, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
-        warmup_attempts_store,
+        organization_metadata_store, plan_tier_store, plugin_registry_store,
+        pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
+        request_event_list, request_event_principal_costs, storage_roundtrips,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -76,7 +75,7 @@ impl ConformanceBackend for PostgresConformanceBackend {
             )
             .await?;
         PostgresStorage::new(pool.clone(), system_clock())
-            .initialize(BackendKind::Postgres)
+            .initialize()
             .await?;
 
         Ok(PostgresFixture {
@@ -177,10 +176,34 @@ fn config_draft_optimistic_revision_postgres() {
 }
 
 #[test]
+fn config_history_cap_50_postgres() {
+    run_postgres_scenario(
+        "config_history_cap_50",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_history_cap_50,
+    );
+}
+
+#[test]
+fn config_last_validated_revision_postgres() {
+    run_postgres_scenario(
+        "config_last_validated_revision",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_last_validated_revision,
+    );
+}
+
+#[test]
 fn meta_compare_and_put_postgres() {
     run_postgres_scenario(
         "meta_compare_and_put",
         cc_lb_storage_conformance::scenarios::revisioning_meta::meta_compare_and_put,
+    );
+}
+
+#[test]
+fn meta_backend_kind_stamp_postgres() {
+    run_postgres_scenario(
+        "meta_backend_kind_stamp",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_backend_kind_stamp,
     );
 }
 
@@ -229,14 +252,6 @@ fn request_event_principal_cost_components_postgres() {
     run_postgres_scenario(
         "request_event_principal_cost_components",
         request_event_principal_costs::principal_cost_components_aggregate_without_fabrication,
-    );
-}
-
-#[test]
-fn request_event_key_usage_materialized_columns_postgres() {
-    run_postgres_scenario(
-        "request_event_key_usage_materialized_columns",
-        request_event_key_usage::materialized_key_usage_preserves_bucket_contract,
     );
 }
 
@@ -466,10 +481,10 @@ fn upstream_subscription_quota_checkpoint_writer_decrease_postgres() {
 }
 
 #[test]
-fn upstream_subscription_quota_checkpoint_series_anchor_merge_postgres() {
+fn upstream_subscription_quota_slim_checkpoints_select_per_source_left_anchors_postgres() {
     run_postgres_scenario(
-        "upstream_subscription_quota_checkpoint_series_anchor_merge",
-        upstream_subscription_quota_store::checkpoint_series_anchor_merge,
+        "upstream_subscription_quota_slim_checkpoints_select_per_source_left_anchors",
+        upstream_subscription_quota_store::slim_checkpoints_select_per_source_left_anchors,
     );
 }
 
@@ -515,14 +530,6 @@ fn organization_metadata_store_postgres() {
 #[test]
 fn plan_tier_store_postgres() {
     run_postgres_scenario("plan_tier_store", plan_tier_store::run_all);
-}
-
-#[test]
-fn plan_tier_store_backfill_postgres() {
-    run_postgres_scenario(
-        "plan_tier_store_backfill",
-        plan_tier_store_backfill::upstream_tier_backfill_intervals,
-    );
 }
 
 macro_rules! prompt_cache_observation_postgres_test {
@@ -670,10 +677,8 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
         sha256: [42; 32],
         bytes: b"concurrent-upload".to_vec(),
         size_bytes: b"concurrent-upload".len() as u64,
-        parse_validated_at_unix_secs: 1_800_000_000,
     };
     let input = WasmRegistryEntryInput {
-        schema_hash: None,
         name: "plugin-concurrent-upload".to_owned(),
         version: None,
         original_filename: "plugin-concurrent-upload.wasm".to_owned(),

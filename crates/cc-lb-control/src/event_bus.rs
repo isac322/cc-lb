@@ -30,34 +30,17 @@ use tokio::sync::{broadcast, mpsc};
 /// `Lagged(n)`.
 pub const DEFAULT_LIFECYCLE_BROADCAST_CAPACITY: usize = 2048;
 
-/// Receiver side of [`RequestEventBus::subscribe`] for ephemeral consumers.
-#[derive(Debug)]
-pub enum BusReceiver {
-    InMemory(broadcast::Receiver<RequestEventUpdate>),
-    Remote(mpsc::Receiver<RequestEventUpdate>),
-}
-
-/// Receiver side of [`RequestEventBus::subscribe_lifecycle`].
-///
-/// `None` is returned by trait implementations that do not publish lifecycle
-/// events, such as test doubles that only exercise the `RequestEvent` path.
-#[derive(Debug)]
-pub enum LifecycleBusReceiver {
-    None,
-    InMemory(broadcast::Receiver<LifecycleEvent>),
-}
-
 /// Transport-agnostic event sink used by lifecycle producers and admin SSE consumers.
 pub trait RequestEventBus: Send + Sync + 'static {
     /// Publish an event update. Synchronous and non-blocking.
     fn publish(&self, update: RequestEventUpdate);
 
     /// Subscribe an ephemeral consumer. Slow consumers may observe `Lagged(n)`.
-    fn subscribe(&self) -> BusReceiver;
+    fn subscribe(&self) -> broadcast::Receiver<RequestEventUpdate>;
 
     fn publish_lifecycle(&self, event: LifecycleEvent);
 
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver;
+    fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent>;
 
     /// Detached overflow tasks currently parked on a full
     /// lifecycle-assembler channel. The assembler polls this during its
@@ -91,50 +74,7 @@ pub const DEFAULT_LIFECYCLE_LIMIT_REJECTION_AUDIT_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_API_KEY_METRICS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_CACHE_HIT_MISS_CAPACITY: usize = 4096;
 pub const DEFAULT_LIFECYCLE_ROUTING_TIER_CAPACITY: usize = 4096;
-/// Errors surfaced by [`RequestEventBus`] implementations.
-#[derive(Debug, thiserror::Error)]
-pub enum BusError {
-    #[error("event bus closed")]
-    Closed,
-    #[error("event bus backend failure: {0}")]
-    Backend(String),
-}
 
-#[async_trait::async_trait]
-pub trait EventFanout: Send + Sync {
-    async fn publish_partial(&self, update: RequestEventUpdate) -> Result<(), BusError>;
-
-    fn subscribe(&self) -> BusReceiver;
-}
-
-#[derive(Clone)]
-pub struct InMemoryFanout {
-    bus: InMemoryBus,
-}
-
-impl InMemoryFanout {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            bus: InMemoryBus::with_capacity(capacity),
-        }
-    }
-
-    pub fn bus(&self) -> InMemoryBus {
-        self.bus.clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl EventFanout for InMemoryFanout {
-    async fn publish_partial(&self, update: RequestEventUpdate) -> Result<(), BusError> {
-        self.bus.publish(update);
-        Ok(())
-    }
-
-    fn subscribe(&self) -> BusReceiver {
-        RequestEventBus::subscribe(&self.bus)
-    }
-}
 /// Default single-process implementation.
 ///
 /// Holds a broadcast channel for ephemeral SSE subscribers and an optional
@@ -461,8 +401,8 @@ impl RequestEventBus for InMemoryBus {
         let _ = self.inner.broadcast_tx.send(update);
     }
 
-    fn subscribe(&self) -> BusReceiver {
-        BusReceiver::InMemory(self.inner.broadcast_tx.subscribe())
+    fn subscribe(&self) -> broadcast::Receiver<RequestEventUpdate> {
+        self.inner.broadcast_tx.subscribe()
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
@@ -723,8 +663,8 @@ impl RequestEventBus for InMemoryBus {
         }
     }
 
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
-        LifecycleBusReceiver::InMemory(self.inner.lifecycle_broadcast_tx.subscribe())
+    fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent> {
+        self.inner.lifecycle_broadcast_tx.subscribe()
     }
 
     fn assembler_overflow_in_flight(&self) -> usize {
@@ -735,14 +675,6 @@ impl RequestEventBus for InMemoryBus {
 /// Convenience: wrap an [`InMemoryBus`] in an `Arc<dyn RequestEventBus>`.
 pub fn new_in_memory_bus() -> Arc<dyn RequestEventBus> {
     Arc::new(InMemoryBus::new())
-}
-
-/// Record a `sse_lagged` event in dropped-event metrics.
-///
-/// Kept at this path for backward compatibility with code that imported it
-/// from the (now removed) `dashboard_broadcaster` module.
-pub fn record_dashboard_sse_lagged(skipped: u64) {
-    record_dropped_events_by("sse_lagged", skipped);
 }
 
 fn record_dropped_events_by(reason: &'static str, count: u64) {
@@ -780,9 +712,7 @@ mod tests {
     #[tokio::test]
     async fn publish_delivers_to_sse_subscribers() {
         let bus = InMemoryBus::new();
-        let BusReceiver::InMemory(mut rx_sse) = bus.subscribe() else {
-            panic!("InMemoryBus should yield InMemory receiver");
-        };
+        let mut rx_sse = bus.subscribe();
 
         bus.publish(RequestEventUpdate::partial(sample_partial("req-1")));
         bus.publish(RequestEventUpdate::final_(sample_event("req-2"), 2));
@@ -804,9 +734,7 @@ mod tests {
     #[tokio::test]
     async fn sse_subscriber_receives_lagged_when_falling_behind() {
         let bus = InMemoryBus::with_capacity(2);
-        let BusReceiver::InMemory(mut rx) = bus.subscribe() else {
-            panic!("InMemoryBus should yield InMemory receiver");
-        };
+        let mut rx = bus.subscribe();
         bus.publish(RequestEventUpdate::final_(sample_event("a"), 1));
         bus.publish(RequestEventUpdate::final_(sample_event("b"), 2));
         bus.publish(RequestEventUpdate::final_(sample_event("c"), 3));
@@ -818,11 +746,6 @@ mod tests {
             }
             other => panic!("expected Lagged, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn lag_helper_increments_dropped_event_counter() {
-        record_dashboard_sse_lagged(3);
     }
 
     fn sample_lifecycle_event(request_id: &str) -> LifecycleEvent {
@@ -840,9 +763,7 @@ mod tests {
     #[tokio::test]
     async fn publish_lifecycle_fans_out_to_broadcast_and_writer() {
         let bus = InMemoryBus::new();
-        let LifecycleBusReceiver::InMemory(mut rx_sse) = bus.subscribe_lifecycle() else {
-            panic!("InMemoryBus should yield InMemory lifecycle receiver");
-        };
+        let mut rx_sse = bus.subscribe_lifecycle();
         let mut rx_writer = bus.attach_lifecycle_writer(8);
 
         bus.publish_lifecycle(sample_lifecycle_event("req-1"));
@@ -862,9 +783,7 @@ mod tests {
     #[tokio::test]
     async fn request_log_upstream_error_routes_only_to_assembler() {
         let bus = InMemoryBus::new();
-        let LifecycleBusReceiver::InMemory(mut broadcast_rx) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut broadcast_rx = bus.subscribe_lifecycle();
         let mut assembler_rx = bus.attach_lifecycle_assembler(1);
         let mut writer_rx = bus.attach_lifecycle_writer(1);
         let event = LifecycleEvent::RequestLogUpstreamErrorObserved {

@@ -381,8 +381,8 @@ jobs:
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
       # Alias the same Postgres URL under DATABASE_URL and DATABASE_URL_TEST so
       # tests that check one of the latter env vars (cc-lb-scheduler integration
-      # tests; cc-lb-storage-postgres migration_0037/0040 regression tests) run
-      # instead of silently returning Ok(()) after an eprintln!("skip: ...").
+      # tests) run instead of silently returning Ok(()) after an
+      # eprintln!("skip: ...").
       # Literal URL (not ${{ env.CI_POSTGRES_URL }}) — same-map GitHub Actions
       # env aliasing is not portable.
       DATABASE_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test

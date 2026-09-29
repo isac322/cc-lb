@@ -300,8 +300,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         }
@@ -318,7 +316,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,

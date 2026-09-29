@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
 
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::layers::limit::ConcurrencyLimitLayer;
@@ -26,16 +25,6 @@ pub struct AdaptiveWorker {
 }
 
 impl AdaptiveWorker {
-    pub async fn run_for(self, duration: Duration) -> Result<(), WorkerError> {
-        let cancel = CancellationToken::new();
-        let stop = cancel.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(duration).await;
-            stop.cancel();
-        });
-        self.run_until_cancelled(cancel).await
-    }
-
     pub async fn run_until_cancelled(self, cancel: CancellationToken) -> Result<(), WorkerError> {
         (self.run)(cancel).await
     }

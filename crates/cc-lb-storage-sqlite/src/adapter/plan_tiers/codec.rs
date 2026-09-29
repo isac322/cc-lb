@@ -94,7 +94,6 @@ pub(super) fn parse_resolution_source(value: &str) -> StorageResult<TierResoluti
     match value {
         "override" => Ok(TierResolutionSource::Override),
         "builtin" => Ok(TierResolutionSource::Builtin),
-        "backfill" => Ok(TierResolutionSource::Backfill),
         "unknown" => Ok(TierResolutionSource::Unknown),
         value => Err(StorageError::Corrupted {
             message: format!("invalid tier resolution source {value}"),

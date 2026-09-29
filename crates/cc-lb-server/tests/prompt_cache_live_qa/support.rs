@@ -117,10 +117,21 @@ pub async fn wait_for_lookback_event(pool: &SqlitePool, model: &str) -> CacheEve
     loop {
         interval.tick().await;
         let row = sqlx::query(
-            "SELECT upstream_id, matched_v3_cache_key, breakpoint_content_block_index, \
-             matched_content_block_index, lookback_distance, predicted_cache_read_tokens, \
-             predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, \
-             token_estimate_source FROM request_events_v1 \
+            "SELECT upstream_id, \
+             json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
+             json_extract(payload, '$.breakpoint_content_block_index') \
+             AS breakpoint_content_block_index, \
+             json_extract(payload, '$.matched_content_block_index') \
+             AS matched_content_block_index, \
+             json_extract(payload, '$.lookback_distance') AS lookback_distance, \
+             json_extract(payload, '$.predicted_cache_read_tokens') \
+             AS predicted_cache_read_tokens, \
+             json_extract(payload, '$.predicted_cache_creation_tokens_5m') \
+             AS predicted_cache_creation_tokens_5m, \
+             json_extract(payload, '$.predicted_cache_creation_tokens_1h') \
+             AS predicted_cache_creation_tokens_1h, \
+             json_extract(payload, '$.token_estimate_source') AS token_estimate_source \
+             FROM request_events_v1 \
              WHERE model = ? AND cache_read_input_tokens > 0 ORDER BY id DESC LIMIT 1",
         )
         .bind(model)
@@ -142,8 +153,10 @@ pub async fn wait_for_lookback_event(pool: &SqlitePool, model: &str) -> CacheEve
         }
         if tokio::time::Instant::now() >= deadline {
             let latest = sqlx::query(
-                "SELECT id, upstream_id, cache_read_input_tokens, matched_v3_cache_key, \
-                 lookback_distance FROM request_events_v1 ORDER BY id DESC LIMIT 1",
+                "SELECT id, upstream_id, cache_read_input_tokens, \
+                 json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
+                 json_extract(payload, '$.lookback_distance') AS lookback_distance \
+                 FROM request_events_v1 ORDER BY id DESC LIMIT 1",
             )
             .fetch_optional(pool)
             .await
@@ -230,8 +243,13 @@ pub async fn wait_for_settled_event(pool: &SqlitePool, model: &str, after_id: i6
     loop {
         interval.tick().await;
         let row = sqlx::query(
-            "SELECT id, upstream_id, cache_prefix_hash, cache_control_block_count, \
-             matched_v3_cache_key, predicted_cache_read_tokens, cache_breakpoints \
+            "SELECT id, upstream_id, \
+             json_extract(payload, '$.cache_prefix_hash') AS cache_prefix_hash, \
+             json_extract(payload, '$.cache_control_block_count') AS cache_control_block_count, \
+             json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
+             json_extract(payload, '$.predicted_cache_read_tokens') \
+             AS predicted_cache_read_tokens, \
+             json_extract(payload, '$.cache_breakpoints') AS cache_breakpoints \
              FROM request_events_v1 \
              WHERE model = ? AND id > ? AND upstream_id IS NOT NULL \
              ORDER BY id ASC LIMIT 1",

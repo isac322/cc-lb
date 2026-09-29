@@ -4,7 +4,7 @@ use cc_lb_plugin_wire::v1::{
     ArchivedFilterResponse, CachePricingSummary, FilterRequest, FilterResponse, Principal,
 };
 use cc_lb_plugin_wire::{HookKind, WireVersion};
-use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmtimeRuntime};
+use cc_lb_runtime_wasmtime::{RuntimeSlotKey, WasmtimeRuntime, admit_wasm};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 
@@ -22,9 +22,14 @@ fn filter_plugin_admits_and_receives_service_tier() {
     let wasm =
         std::fs::read(wasm_path()).expect("build script produces filter service-tier fixture");
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
-    let inspection = runtime
-        .admit_wasm(HookKind::Filter, &wasm)
-        .expect("filter admission and probe");
+    let (_, inspection) = admit_wasm(
+        runtime.engine(),
+        runtime.linker(),
+        HookKind::Filter,
+        &wasm,
+        runtime.config(),
+    )
+    .expect("filter admission and probe");
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
         Some(&WireVersion::V1)

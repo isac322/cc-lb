@@ -3,8 +3,6 @@ use std::{error::Error, fmt};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::BackendKind;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginChainConflictReason {
     InvalidOrderGap,
@@ -30,19 +28,12 @@ pub enum StorageError {
     },
     #[error("conflict: {message}")]
     Conflict { message: String },
-    #[error("schema mismatch: found={found}, expected={expected}")]
-    SchemaMismatch { found: u32, expected: u32 },
     #[error("unavailable: {message}")]
     Unavailable { message: String },
     #[error("corrupted: {message}")]
     Corrupted { message: String },
     #[error("fatal: {message}")]
     Fatal { message: String },
-    #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
-    BackendKindMismatch {
-        stored: BackendKind,
-        configured: BackendKind,
-    },
     #[error("serialization: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("aead: {0}")]

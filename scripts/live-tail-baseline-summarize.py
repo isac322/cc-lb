@@ -35,7 +35,6 @@ COUNTER_METRICS = {
     "sse_backfill_pages_total",
     "sse_backfill_rows_total",
     "sse_reset_events_sent_total",
-    "sse_lagged_resync_total",
     "sse_reconnects_total",
     "sse_malformed_frames_total",
     "sse_storage_tail_polls_total",

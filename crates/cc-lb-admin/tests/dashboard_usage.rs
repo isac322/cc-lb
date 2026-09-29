@@ -25,7 +25,7 @@ async fn usage_returns_200_grouped_by_model() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;
@@ -56,9 +56,10 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
         Some(storage.clone()),
         clock,
     ));
-    let usage_uri = "/admin/usage?range=1h&step=minute&group_by=model";
-    let principal_uri = "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals";
-    let summary_uri = "/admin/dashboard/summary?range=1h";
+    let usage_uri = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=model";
+    let principal_uri =
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&projection=totals";
+    let summary_uri = "/admin/v1/dashboard/summary?range=1h";
     let (usage_status, usage_headers, _) =
         authed_bytes(admin_app.clone(), "GET", usage_uri, None).await;
     let (summary_status, summary_headers, _) =
@@ -173,32 +174,6 @@ async fn dashboard_etags_short_circuit_rollup_scans_before_response_building() {
 }
 
 #[tokio::test]
-async fn usage_legacy_dashboard_alias_matches_v1_body() {
-    let (_dir, storage) = temp_storage().await;
-    let state = test_state(Config::default(), Some(storage));
-    let admin_app = app(state);
-
-    let (legacy_status, _, legacy_body, _) = authed_json(
-        admin_app.clone(),
-        "GET",
-        "/admin/dashboard/usage?range=1h&group_by=model",
-        None,
-    )
-    .await;
-    let (v1_status, _, v1_body, _) = authed_json(
-        admin_app,
-        "GET",
-        "/admin/v1/dashboard/usage?range=1h&group_by=model",
-        None,
-    )
-    .await;
-
-    assert_eq!(legacy_status, StatusCode::OK);
-    assert_eq!(v1_status, StatusCode::OK);
-    assert_eq!(legacy_body, v1_body);
-}
-
-#[tokio::test]
 async fn usage_returns_200_grouped_by_principal() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
@@ -206,7 +181,7 @@ async fn usage_returns_200_grouped_by_principal() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -262,14 +237,14 @@ async fn usage_totals_projection_preserves_full_series_totals() {
     let (full_status, _, full, _) = authed_json(
         admin_app.clone(),
         "GET",
-        "/admin/usage?range=1h&step=minute&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal",
         None,
     )
     .await;
     let (totals_status, _, totals, _) = authed_json(
         admin_app,
         "GET",
-        "/admin/usage?range=1h&step=minute&group_by=principal&projection=totals",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&projection=totals",
         None,
     )
     .await;
@@ -311,7 +286,7 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
         Some(storage.clone()),
         clock.clone(),
     ));
-    let uri = "/admin/usage?range=1h&step=minute&group_by=principal";
+    let uri = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal";
     let (baseline_full, baseline_totals) = usage_projection_pair(&admin_app, uri).await;
     assert_usage_totals_match_full_collapse(&baseline_full, &baseline_totals);
     assert_usage_bucket_fields(
@@ -330,7 +305,7 @@ async fn usage_totals_projection_preserves_components_across_rollup_lag() {
 
     let mut unrolled = rolled.clone();
     unrolled.request_id = "req-totals-lag-unrolled".to_owned();
-    unrolled.event_id = None;
+    unrolled.event_id = Some("event-req-totals-lag-unrolled".to_owned());
     unrolled.ts_ms = Some(now.saturating_sub(1) * 1_000);
     unrolled.cost_usd_micros = Some(5);
     unrolled.cost_input_micros = Some(5);
@@ -395,7 +370,7 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
 
     let mut zero_tail = rolled.clone();
     zero_tail.request_id = "req-totals-zero-tail".to_owned();
-    zero_tail.event_id = None;
+    zero_tail.event_id = Some("event-req-totals-zero-tail".to_owned());
     zero_tail.ts_ms = Some(now.saturating_sub(1) * 1_000);
     zero_tail.cost_input_micros = Some(0);
     zero_tail.cost_output_micros = Some(0);
@@ -411,7 +386,7 @@ async fn usage_totals_projection_preserves_unrolled_recorded_zero_components() {
     ));
     let (full, totals) = usage_projection_pair(
         &admin_app,
-        "/admin/usage?range=1h&step=minute&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal",
     )
     .await;
     assert_usage_totals_match_full_collapse(&full, &totals);
@@ -464,7 +439,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         "other-upstream",
         100,
     );
-    other.principal_id = Some("principal-b".to_owned());
+    other.principal_id = Some(Uuid::from_u128(0xB1).to_string());
     other.cost_usd_micros = Some(100);
     other.cost_input_micros = Some(100);
     storage.append_request_event(&other).await.unwrap();
@@ -476,12 +451,15 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         clock.clone(),
     ));
     let target_uri = format!(
-        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={target_upstream_id}"
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&upstream_id={target_upstream_id}"
     );
     let (target_full, target_totals) = usage_projection_pair(&admin_app, target_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&target_full, &target_totals);
     assert_eq!(target_totals["series"].as_array().unwrap().len(), 1);
-    assert_eq!(target_totals["series"][0]["key"], "principal-a");
+    assert_eq!(
+        target_totals["series"][0]["key"],
+        Uuid::from_u128(0xA1).to_string()
+    );
     assert_usage_bucket_fields(
         &target_totals["series"][0]["buckets"][0],
         &[
@@ -500,7 +478,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
     );
 
     let empty_uri = format!(
-        "/admin/usage?range=1h&step=minute&group_by=principal&upstream_id={initially_empty_upstream_id}"
+        "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal&upstream_id={initially_empty_upstream_id}"
     );
     let (empty_full, empty_totals) = usage_projection_pair(&admin_app, empty_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&empty_full, &empty_totals);
@@ -514,7 +492,7 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         "new-upstream",
         17,
     );
-    newly_observed.principal_id = Some("principal-c".to_owned());
+    newly_observed.principal_id = Some(Uuid::from_u128(0xB2).to_string());
     newly_observed.cost_usd_micros = Some(9);
     newly_observed.cost_input_micros = Some(9);
     storage.append_request_event(&newly_observed).await.unwrap();
@@ -525,7 +503,10 @@ async fn usage_totals_projection_matches_upstream_filter_and_empty_transition() 
         usage_projection_pair(&admin_app, empty_uri.as_str()).await;
     assert_usage_totals_match_full_collapse(&observed_full, &observed_totals);
     assert_eq!(observed_totals["observed"], true);
-    assert_eq!(observed_totals["series"][0]["key"], "principal-c");
+    assert_eq!(
+        observed_totals["series"][0]["key"],
+        Uuid::from_u128(0xB2).to_string()
+    );
     assert_usage_bucket_fields(
         &observed_totals["series"][0]["buckets"][0],
         &[
@@ -545,7 +526,7 @@ async fn usage_rejects_invalid_projection() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal&projection=dense",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal&projection=dense",
         None,
     )
     .await;
@@ -560,7 +541,7 @@ async fn usage_rejects_invalid_group_by() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=bogus",
+        "/admin/v1/dashboard/usage?range=1h&group_by=bogus",
         None,
     )
     .await;
@@ -601,7 +582,7 @@ async fn usage_filters_by_upstream_id() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        &format!("/admin/usage?range=24h&group_by=model&upstream_id={upstream_id}"),
+        &format!("/admin/v1/dashboard/usage?range=24h&group_by=model&upstream_id={upstream_id}"),
         None,
     )
     .await;
@@ -633,7 +614,8 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
         "target-upstream",
         1,
     );
-    modern.principal_id = Some("  principal/A  ".to_owned());
+    let principal = Uuid::from_u128(0xA2).to_string();
+    modern.principal_id = Some(principal.clone());
     modern.source_kind = Some("renewal".to_owned());
     modern.cost_usd_micros = Some(15);
     modern.cost_input_micros = Some(1);
@@ -650,7 +632,9 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
         "target-upstream",
         1,
     );
-    legacy.principal_id = Some("principal A".to_owned());
+    // Legacy rows record only a total cost; both rows share one canonical UUID
+    // principal so the mixed total enriches with the modern row's components.
+    legacy.principal_id = Some(principal.clone());
     legacy.cost_usd_micros = Some(10);
     storage.append_request_event(&legacy).await.unwrap();
     storage.rollup_usage_once().await.unwrap();
@@ -659,13 +643,13 @@ async fn usage_principal_enriches_mixed_legacy_and_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    let principal = normalize_usage_rollup_dimension(Some("principal A"));
+    let principal = normalize_usage_rollup_dimension(Some(principal.as_str()));
     let series = body["series"]
         .as_array()
         .unwrap()
@@ -698,6 +682,8 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
         "target-upstream",
         1,
     );
+    // NULL principal ids are bucketed as "unknown" and still aggregate costs.
+    event.principal_id = None;
     event.cost_input_micros = Some(0);
     event.cost_output_micros = Some(0);
     event.cost_cache_creation_5m_micros = Some(0);
@@ -710,12 +696,13 @@ async fn usage_principal_preserves_recorded_zero_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["series"][0]["key"], "unknown");
     let bucket = body["series"][0]["buckets"]
         .as_array()
         .unwrap()
@@ -753,7 +740,7 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
 
     let mut unrolled = rolled.clone();
     unrolled.request_id = "req-principal-unrolled".to_owned();
-    unrolled.event_id = None;
+    unrolled.event_id = Some("event-req-principal-unrolled".to_owned());
     unrolled.ts_ms = Some((bucket_ts + 1) * 1_000);
     unrolled.cost_usd_micros = Some(5);
     unrolled.cost_input_micros = Some(5);
@@ -763,7 +750,7 @@ async fn usage_principal_omits_components_when_request_events_are_ahead() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=principal",
+        "/admin/v1/dashboard/usage?range=1h&group_by=principal",
         None,
     )
     .await;
@@ -809,7 +796,7 @@ async fn usage_non_principal_grouping_does_not_expose_component_costs() {
     let (status, _, body, _) = authed_json(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;
@@ -851,8 +838,13 @@ async fn summary_error_rate_excludes_client_navigation_statuses() {
     storage.rollup_usage_once().await.unwrap();
 
     let state = test_state_with_clock(Config::default(), Some(storage), clock);
-    let (status, _, body, _) =
-        authed_json(app(state), "GET", "/admin/dashboard/summary?range=1h", None).await;
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/v1/dashboard/summary?range=1h",
+        None,
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["totals"]["request_count"], 5);
@@ -866,7 +858,7 @@ async fn usage_503_when_storage_missing() {
     let (status, _, _) = authed_bytes(
         app(state),
         "GET",
-        "/admin/usage?range=1h&group_by=model",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
         None,
     )
     .await;
@@ -1005,8 +997,9 @@ fn usage_event(
 ) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(ts * 1000),
+        event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
-        principal_id: Some("principal-a".to_owned()),
+        principal_id: Some(Uuid::from_u128(0xA1).to_string()),
         key_id: Some("test-key".to_owned()),
         upstream_id: Some(upstream_id),
         upstream_name: Some(upstream_name.to_owned()),

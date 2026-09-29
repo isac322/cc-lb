@@ -96,7 +96,6 @@ import {
   useTogglePrincipal,
   useUpdatePrincipalDefaultLimits,
   useUpdateRouterTerminalStrategy,
-  useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
 import {
@@ -257,7 +256,6 @@ function PrincipalDetailLoadingShell() {
             <RequestEventsTable
               events={[]}
               principalNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
-              upstreamNameMap={EMPTY_PRINCIPAL_DETAIL_NAME_MAP}
               loading
               columns={{
                 principal: false,
@@ -710,7 +708,6 @@ function PrincipalDetail({
 
 export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const principalNameMap = usePrincipalNameMap();
-  const upstreamNameMap = useUpstreamNameMap();
   const recent = useRecentEvents({
     principal_id: principal.id,
     limit: '5',
@@ -753,7 +750,6 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
         <RequestEventsTable
           events={events}
           principalNameMap={principalNameMap}
-          upstreamNameMap={upstreamNameMap}
           loading={loading}
           columns={{
             principal: false,

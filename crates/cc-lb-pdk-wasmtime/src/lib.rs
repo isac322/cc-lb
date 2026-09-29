@@ -62,7 +62,7 @@ mod wasm32_glue {
     }
 }
 
-pub use cc_lb_pdk_wasmtime_macros::{WireSchema, cc_lb_plugin, handler, plugin};
+pub use cc_lb_pdk_wasmtime_macros::{cc_lb_plugin, handler, plugin};
 
 /// Wire types shared with the host.
 pub use cc_lb_plugin_wire as types;

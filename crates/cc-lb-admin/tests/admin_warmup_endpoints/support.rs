@@ -94,7 +94,6 @@ fn test_state(
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: crate::admin_test_common::limit_engine_with_clock(clock.clone()),
         lifecycle: None,
-        subscription_metadata_hook: None,
         lazy_refresher: None,
         runtime: None,
         data_dir: None,

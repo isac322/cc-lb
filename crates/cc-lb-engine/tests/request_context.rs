@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use cc_lb_domain::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
-    CachePricingSummary, TtlClass,
+    CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, TtlClass,
 };
+use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_engine::request_context::RequestContext;
 use http::{HeaderMap, Method};
 
@@ -67,12 +67,11 @@ fn breakpoint() -> CacheBreakpoint {
         prefix_hash: "hash123".to_owned(),
         prefix_token_count: 150,
         requested_ttl: TtlClass::Ephemeral1h,
-        origin: BreakpointOrigin::Explicit,
         lookback_prefixes: vec![CacheLookbackPrefix {
             prefix_hash: "hash123".to_owned(),
             content_block_index: 1,
             lookback_distance: 0,
         }],
-        token_estimate_source: Some("local_tiktoken_v1".to_owned()),
+        token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
     }
 }

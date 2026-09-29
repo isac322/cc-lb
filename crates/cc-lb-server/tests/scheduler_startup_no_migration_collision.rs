@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use cc_lb_config::{SchedulerConfig, StorageConfig};
 use cc_lb_server::scheduler_factory::{SchedulerBackend, open_scheduler_storage};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 
 #[tokio::test]
 async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_collision() {
@@ -13,11 +13,11 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let database_url = format!("sqlite://{}", database_path.display());
 
     let main_storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("main sqlite storage opens");
     main_storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("main sqlite migrations run");
 
@@ -33,7 +33,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
     let opened_scheduler = open_scheduler_storage(
         &storage_config,
         &SchedulerConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("scheduler storage opens after main migrations using derived sqlite file");

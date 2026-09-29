@@ -47,7 +47,7 @@ METRICS_BODY="$(curl -sS --max-time 5 "$METRICS_URL")" || {
 # Whitelist of live-tail metrics from docs/metrics-live-tail.md. Keeps the
 # JSONL compact — full /metrics is ~10 KB per scrape × ~2000 scrapes per week
 # = 20 MB unfiltered. Filtered to live-tail we stay under 2 MB.
-LIVE_TAIL_METRICS='^(sse_partials_published_total|sse_partials_throttled_total|cc_lb_lifecycle_assembler_rows_total|sse_backfill_pages_total|sse_backfill_rows_total|sse_reset_events_sent_total|sse_lagged_resync_total|sse_reconnects_total|sse_malformed_frames_total|sse_storage_tail_polls_total|sse_storage_tail_lag_ms|sse_storage_tail_backlog_rows|sse_partial_notify_sent_total|sse_partial_notify_dropped_total|sse_notify_http_fetches_total|sse_notify_queue_usage_ratio|cc_lb_dropped_events_total)'
+LIVE_TAIL_METRICS='^(sse_partials_published_total|sse_partials_throttled_total|cc_lb_lifecycle_assembler_rows_total|sse_backfill_pages_total|sse_backfill_rows_total|sse_reset_events_sent_total|sse_reconnects_total|sse_malformed_frames_total|sse_storage_tail_polls_total|sse_storage_tail_lag_ms|sse_storage_tail_backlog_rows|sse_partial_notify_sent_total|sse_partial_notify_dropped_total|sse_notify_http_fetches_total|sse_notify_queue_usage_ratio|cc_lb_dropped_events_total)'
 
 # Strip HELP/TYPE lines, keep only sample lines matching the whitelist.
 # Sample line format: `metric_name{label1="v1",label2="v2"} <value> [<timestamp>]`

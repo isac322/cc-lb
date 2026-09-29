@@ -21,18 +21,18 @@ This scenario is read-only. It does not mutate storage or production data.
 3. Authenticate through the SPA using a local admin token. Never print the
    token or place it in screenshots.
 4. Open `/logs` in a real Chromium browser. Record the viewport, initial row
-   count, DOM element count, JS heap, and `/admin/events/recent` requests.
+   count, DOM element count, JS heap, and `/admin/v1/events/recent` requests.
 5. Keep DevTools resource timing available. Do not use wall-clock thresholds as
    an automated assertion; record them as manual evidence.
 
 ## Context discovery
 
-- API: `GET /admin/events/recent?limit=200`.
+- API: `GET /admin/v1/events/recent?limit=200`.
 - Browser rows: `document.querySelectorAll('tbody tr').length`.
 - DOM size: `document.querySelectorAll('*').length`.
 - Heap when available: `performance.memory.usedJSHeapSize`.
 - Recent requests: filter `performance.getEntriesByType('resource')` for
-  `/admin/events/recent` and inspect only query strings/counts.
+  `/admin/v1/events/recent` and inspect only query strings/counts.
 
 ## Point-in-time cases
 
@@ -154,7 +154,7 @@ Given live tail remains open while new finalized and partial events arrive, obse
   filtering plus recent/SSE `status_class` query mapping.
 - `crates/cc-lb-engine/src/lifecycle_event_assembler.rs` tests: in-progress
   display estimate gating, usage inputs, and authoritative-cost precedence.
-- `src/components/ui/{LogSelect,TimeRangeSelect,CalendarPopover,CostCell,Hint}.test.tsx`
+- `src/components/ui/{Select,CalendarPopover,Hint}.test.tsx`
   plus `src/lib/calendarDate.test.ts`: geometry contract, calendar open/select/
   Escape behavior, draft Apply/Cancel, timezone/range validation, Cost row gate,
   and lazy Hint.

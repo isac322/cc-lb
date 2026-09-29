@@ -93,7 +93,7 @@ async fn preview_all_on_pace_uses_deterministic_uniform_factor() {
     let second = fixture.preview("preview-v11-uniform").await;
     let trace = subscription_trace(&first);
 
-    // Then: v11 uses uniform neutral factors and a stable WRH winner.
+    // Then: cost-first-v2 uses uniform neutral factors and a deterministic winner.
     assert_eq!(first.winner_upstream_id, second.winner_upstream_id);
     assert_eq!(first.winner_upstream_name, second.winner_upstream_name);
     assert_eq!(trace.formula_version.as_deref(), Some("cost-first-v2"));

@@ -44,8 +44,8 @@ impl Schedule<Utc> for FixedTicks {
     }
 }
 
-fn conformance_job() -> CronConformanceJob {
-    CronConformanceJob {
+fn conformance_factory() -> fn(u64) -> CronConformanceJob {
+    |_| CronConformanceJob {
         name: "cron-conformance".to_owned(),
     }
 }
@@ -71,18 +71,16 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
     let tick = shared_tick();
     let replica_one = FixedTicks::once(tick);
     let replica_two = FixedTicks::once(tick);
-    let worker_one = WorkerBuilder::singleton_queue(
-        queue,
+    let worker_one = WorkerBuilder::singleton_queue_factory(
         replica_one.clone(),
         SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
-        conformance_job(),
+        conformance_factory(),
     )
     .max_ticks(1);
-    let worker_two = WorkerBuilder::singleton_queue(
-        queue,
+    let worker_two = WorkerBuilder::singleton_queue_factory(
         replica_two.clone(),
         SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
-        conformance_job(),
+        conformance_factory(),
     )
     .max_ticks(1);
 
@@ -157,18 +155,16 @@ mod postgres_tests {
         let tick = shared_tick();
         let replica_one = FixedTicks::once(tick);
         let replica_two = FixedTicks::once(tick);
-        let worker_one = WorkerBuilder::singleton_queue(
-            queue,
+        let worker_one = WorkerBuilder::singleton_queue_factory(
             replica_one.clone(),
             PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
-            conformance_job(),
+            conformance_factory(),
         )
         .max_ticks(1);
-        let worker_two = WorkerBuilder::singleton_queue(
-            queue,
+        let worker_two = WorkerBuilder::singleton_queue_factory(
             replica_two.clone(),
             PostgresStorage::<CronConformanceJob>::new_with_config(pool, &config),
-            conformance_job(),
+            conformance_factory(),
         )
         .max_ticks(1);
 

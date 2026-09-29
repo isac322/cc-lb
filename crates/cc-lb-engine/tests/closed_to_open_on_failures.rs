@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_engine::{BreakerRuntimeConfig, BreakerState, CircuitBreaker, TestClock};
+use cc_lb_clock::TestClock;
+use cc_lb_engine::{BreakerRuntimeConfig, BreakerState, CircuitBreaker};
 
 #[test]
 fn five_failures_within_window_open_breaker() -> Result<(), Box<dyn std::error::Error>> {

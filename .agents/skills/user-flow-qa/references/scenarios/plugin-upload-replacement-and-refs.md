@@ -37,7 +37,7 @@ Expected fixture invariant: storage/API/UI show one plugin row whose supported s
 
 ### 2.2 Admin API
 
-- `POST /admin/v1/plugins/wasm` accepts a valid multipart wasm upload without `slot_kind` and returns the detected registry entry.
+- `POST /admin/v1/plugins/wasm` accepts a valid multipart wasm upload and returns the detected registry entry.
 - `GET /admin/v1/plugins/registry` returns the plugin with `version`, `refcount: 2`, detected `supported_slots`, and hook metadata.
 - `GET /admin/v1/plugins/registry/{id}/references` returns `registry`, `refcount: 2`, `reference_fingerprint`, and both reference kinds.
 - `DELETE /admin/v1/plugins/registry/{id}` without cascade returns `409 plugin_registry_referenced`.

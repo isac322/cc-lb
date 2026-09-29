@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
 
-use crate::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 
 pub const DEFAULT_PRINCIPAL_LIMIT_STATE_CHANNEL_CAPACITY: usize = 1024;
 

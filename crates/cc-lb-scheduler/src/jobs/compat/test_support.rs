@@ -89,8 +89,8 @@ impl AnthropicCompatibilityKvStore for RecordingCompatibilityKv {
     }
 }
 
-/// In-memory etag repository for exercising the all-keys dispatch loop without
-/// standing up a database.
+/// In-memory compat-hash repository for exercising the all-keys dispatch loop
+/// without standing up a database.
 #[derive(Default)]
 pub(super) struct RecordingCompatEtags {
     rows: Mutex<HashMap<String, AnthropicCompatEtag>>,
@@ -114,7 +114,6 @@ impl CompatEtagRepository for RecordingCompatEtags {
     fn upsert_compat_value<'a>(
         &'a self,
         key: &'a str,
-        etag: Option<&'a str>,
         hash: &'a str,
         now_unix_secs: u64,
     ) -> CompatJobFuture<'a, Result<()>> {
@@ -123,7 +122,6 @@ impl CompatEtagRepository for RecordingCompatEtags {
                 key.to_owned(),
                 AnthropicCompatEtag {
                     key: key.to_owned(),
-                    etag: etag.map(str::to_owned),
                     last_applied_at_unix_secs: now_unix_secs,
                     last_value_hash: hash.to_owned(),
                 },

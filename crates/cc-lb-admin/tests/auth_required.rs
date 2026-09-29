@@ -12,6 +12,7 @@ use cc_lb_admin::{
 };
 use cc_lb_config::Config;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
@@ -37,7 +38,6 @@ fn test_state_with_auth(admin_auth: Arc<AdminAuthenticator>) -> AdminState {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -50,14 +50,10 @@ async fn test_auth_required() {
     let app = router(test_state());
 
     let endpoints = vec![
-        ("/admin/principals/alice/usage", "GET"),
-        ("/admin/principals/alice/limits", "GET"),
-        ("/admin/principals/alice/keys/key-1", "GET"),
-        ("/admin/principals/alice/keys/key-1/revoke", "POST"),
-        ("/admin/principals/alice/keys/key-1/disable", "POST"),
-        ("/admin/principals/alice/keys/key-1/enable", "POST"),
-        ("/admin/principals/alice/keys/key-1/usage", "GET"),
-        ("/admin/audit", "GET"),
+        ("/admin/v1/principals/alice/keys", "GET"),
+        ("/admin/v1/principals/alice/keys", "POST"),
+        ("/admin/v1/principals/alice/keys/key-1/revoke", "POST"),
+        ("/admin/v1/audit", "GET"),
         ("/admin/v1/config/editor", "GET"),
         ("/admin/v1/config/draft", "GET"),
         ("/admin/v1/config/draft", "PUT"),
@@ -134,6 +130,25 @@ async fn test_auth_success() {
 
     let response = app.oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_401_sleeps_100ms() {
+    let app = router(test_state());
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/admin/v1/config/editor")
+        .header("Authorization", "Bearer wrong-token")
+        .body(Body::empty())
+        .unwrap();
+
+    let started = Instant::now();
+    let response = app.oneshot(req).await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(elapsed >= Duration::from_millis(100));
 }
 
 #[derive(Clone, Copy)]

@@ -53,7 +53,7 @@ jobs:
 
       - name: Run Postgres storage stress tests
         run: |
-          cargo test -p cc-lb-storage-postgres --features postgres \
+          cargo test -p cc-lb-storage-postgres \
             --test integration crash_recovery \
             -- --test-threads=1
 

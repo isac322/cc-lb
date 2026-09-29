@@ -9,20 +9,16 @@ use tokio::sync::oneshot;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, StorageConfig};
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
-    global_catalog,
-};
-use cc_lb_server::drain::DrainController;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::DrainController;
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore,
+    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore, RequestEvent, RequestEventStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{ApiKeyMutation, KeyStatus, Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -852,8 +848,7 @@ async fn health_endpoints_persist_no_request_events() -> Result<(), Box<dyn std:
     Ok(())
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_expired_and_disabled_keys_record_authn_reason()
--> Result<(), Box<dyn std::error::Error>> {
+async fn terminal_expired_key_records_authn_reason() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -863,8 +858,8 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
     let sqlite_path = dir.path().join("term-obs.sqlite");
     seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
 
-    // Issue an expired key and a disabled key for the same principal. The
-    // seeded key stays valid so the server has a working view.
+    // Issue an expired key for the principal. The seeded key stays valid so
+    // the server has a working view.
     let storage = sqlite_storage(&sqlite_path).await?;
     let key_store =
         KeyStore::new(Arc::clone(&storage) as Arc<dyn cc_lb_storage_api::ManagedKeyStore>);
@@ -879,28 +874,6 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
             },
         )
         .await?;
-    let (_disabled_record, disabled_plaintext) = key_store
-        .create(
-            "u1",
-            CreateParams {
-                label: "disabled".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![],
-            },
-        )
-        .await?;
-    let (disabled_key_id, _) = cc_lb_engine::api_keys::secret::parse(disabled_plaintext.expose())?;
-    ManagedKeyStore::update(
-        storage.as_ref(),
-        "u1",
-        &disabled_key_id,
-        ApiKeyMutation {
-            status: Some(KeyStatus::Disabled),
-            ..Default::default()
-        },
-    )
-    .await?;
 
     let config = base_config(sqlite_path.clone(), litellm.uri());
     let server = StartedServer::start(config).await?;
@@ -926,28 +899,6 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
             "stage": "authn",
             "kind": "invalid_input",
             "message": "api key expired"
-        }])
-    );
-
-    let disabled = client
-        .request(
-            "POST",
-            &format!("{}/v1/messages", server.proxy_url),
-            &[
-                ("content-type", "application/json"),
-                ("x-api-key", disabled_plaintext.expose()),
-            ],
-            &sample_request_body(false),
-        )
-        .await?;
-    assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
-    let row = wait_for_request_event_status(&sqlite_path, 403).await?;
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "api key disabled"
         }])
     );
 
@@ -1454,7 +1405,15 @@ async fn terminal_connection_reused() -> Result<(), Box<dyn std::error::Error>> 
     let second = send_messages(&server, &plaintext_key, false).await?;
     assert_eq!(second.status(), StatusCode::OK);
 
-    let row = wait_for_request_event(&sqlite_path).await?;
+    // Both rows are status 200 and the writer commits asynchronously, so the
+    // latest row alone may still be the first request's. Wait for both rows
+    // and select the second request by its start time.
+    let storage = sqlite_storage(&sqlite_path).await?;
+    let rows = wait_for_request_event_count(&storage, 2).await?;
+    let row = rows
+        .into_iter()
+        .max_by_key(|row| row.ts_ms)
+        .expect("two request_event rows");
     assert_eq!(row.status, 200);
     assert_eq!(row.connection_reused, Some(true));
     assert!(row.connect_ms.is_none());
@@ -1659,7 +1618,7 @@ impl StartedServer {
         } = reserved;
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+        let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         let drain_controller = app.drain_controller();
@@ -1955,7 +1914,18 @@ fn internal_errors_json(row: &RequestEvent) -> Value {
 async fn all_request_events(
     storage: &SqliteStorage,
 ) -> Result<Vec<RequestEvent>, Box<dyn std::error::Error>> {
-    Ok(RequestEventStore::query_request_events(storage, 0, u64::MAX, 100).await?)
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
 }
 
 /// Poll until at least `expected` request-event rows exist, then settle and
@@ -1994,10 +1964,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
-            .is_some()
-        {
+        if global_catalog().lookup(MODEL, None).is_some() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -2032,8 +1999,8 @@ fn seed_price_catalog() {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-    let clock = cc_lb_engine::SystemClock;
+    use cc_lb_clock::Clock as _;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -2209,7 +2176,7 @@ async fn seed_runtime_state_full_v2(
             },
         )
         .await?;
-    let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())?;
+    let (key_id, _) = cc_lb_control::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
@@ -2241,8 +2208,8 @@ fn free_addr() -> SocketAddr {
 
 async fn sqlite_storage(path: &Path) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }
 

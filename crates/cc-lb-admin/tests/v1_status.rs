@@ -226,10 +226,8 @@ async fn seed_registry(
                 sha256: [seed; 32],
                 bytes: vec![seed; seed as usize],
                 size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),

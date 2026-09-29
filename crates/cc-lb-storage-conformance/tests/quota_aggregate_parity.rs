@@ -3,12 +3,12 @@
 use std::{str::FromStr, sync::Arc};
 
 use anyhow::Result;
-use cc_lb_engine::SystemClock;
+use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
+    SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
     UpstreamSubscriptionQuotaStore, UsageTokenInterval, UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -27,14 +27,14 @@ async fn quota_aggregate_parity_is_byte_equal() -> Result<()> {
     };
     let postgres = PostgresFixture::create(&url).await?;
     let postgres_storage = PostgresStorage::new(postgres.pool.clone(), Arc::new(SystemClock));
-    postgres_storage.initialize(BackendKind::Postgres).await?;
+    postgres_storage.initialize().await?;
     let sqlite_dir = tempfile::tempdir()?;
     let sqlite_url = format!(
         "sqlite://{}",
         sqlite_dir.path().join("quota-parity.sqlite").display()
     );
     let sqlite_storage = open_sqlite(&sqlite_url, Arc::new(SystemClock)).await?;
-    sqlite_storage.initialize(BackendKind::Sqlite).await?;
+    sqlite_storage.initialize().await?;
     let sqlite_pool = SqlitePool::connect(&sqlite_url).await?;
     let upstream_id = Uuid::from_u128(7);
     let checkpoints = vec![

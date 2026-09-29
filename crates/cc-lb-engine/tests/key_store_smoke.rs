@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
-use cc_lb_engine::api_keys::secret;
-use cc_lb_storage_api::types::{ApiKeyMutation, KeyStatus, Limit, LimitKind};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_control::api_keys::secret;
+use cc_lb_storage_api::MetaStore;
+use cc_lb_storage_api::{ApiKeyMutation, KeyStatus, Limit, LimitKind};
 
 #[tokio::test]
 async fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,25 +66,6 @@ async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn disable_keeps_index() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
-    let (record, secret) = store
-        .create("principal-1", create_params("managed key"))
-        .await?;
-    let (key_id, _) = secret::parse(secret.expose())?;
-
-    store.disable("principal-1", &key_id).await?;
-
-    let lookup = store
-        .lookup_by_index_hash(&record.index_hash)
-        .await?
-        .expect("disabled key remains indexed");
-    assert_eq!(lookup.2.status, KeyStatus::Disabled);
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, store) = new_store().await?;
     let (_record, secret) = store
@@ -110,32 +91,13 @@ async fn patch_label_change_reflected_in_list() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-#[tokio::test]
-async fn enable_on_revoked_returns_err() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, store) = new_store().await?;
-    let (_record, secret) = store
-        .create("principal-1", create_params("managed key"))
-        .await?;
-    let (key_id, _) = secret::parse(secret.expose())?;
-
-    store.revoke("principal-1", &key_id).await?;
-    let error = store
-        .enable("principal-1", &key_id)
-        .await
-        .expect_err("revoked key cannot be enabled");
-
-    assert!(matches!(error, KeyStoreError::KeyAlreadyRevoked { .. }));
-
-    Ok(())
-}
-
 async fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let database_url = format!("sqlite://{}", dir.path().join("key_store.sqlite").display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok((dir, KeyStore::new(Arc::new(storage))))
 }
 

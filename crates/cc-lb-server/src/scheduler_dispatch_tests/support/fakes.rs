@@ -4,9 +4,8 @@ use ::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_domain::Upstream;
 use cc_lb_engine::{ApiKeyAwareSignerFactory, UpstreamDispatch};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_upstream::{
@@ -131,21 +130,6 @@ impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
 }
 
 struct RecordingSigner;
-
-pub(super) struct NoRouteRouter;
-
-impl RouterPlugin for NoRouteRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "test routes through stored upstream".to_owned(),
-        })
-    }
-}
 
 #[async_trait]
 impl SignerFactory for RecordingSigner {

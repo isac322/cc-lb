@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker, TestClock};
+use cc_lb_clock::TestClock;
+use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker};
 use tokio::sync::Barrier;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

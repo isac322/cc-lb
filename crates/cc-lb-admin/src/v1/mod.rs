@@ -21,25 +21,6 @@ use crate::AdminState;
 pub const CC_LB_GENERATION_HEADER: HeaderName = HeaderName::from_static("x-cc-lb-generation");
 pub const CC_LB_REBIND_STATUS_HEADER: HeaderName = HeaderName::from_static("x-cc-lb-rebind-status");
 
-pub struct AdminCtx<'a> {
-    pub state: &'a AdminState,
-    pub scheduler: &'a cc_lb_scheduler::admin::SchedulerAdminHandle,
-}
-
-impl<'a> AdminCtx<'a> {
-    pub fn from_state(state: &'a AdminState) -> anyhow::Result<Self> {
-        let scheduler = state
-            .scheduler
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("scheduler backend unavailable"))?;
-        Ok(Self { state, scheduler })
-    }
-}
-
-pub fn admin_ctx(state: &AdminState) -> anyhow::Result<AdminCtx<'_>> {
-    AdminCtx::from_state(state)
-}
-
 pub async fn apply_dynamic_view_after_mutation(state: &AdminState) -> anyhow::Result<u64> {
     let rebinder = state
         .dynamic_view_rebinder

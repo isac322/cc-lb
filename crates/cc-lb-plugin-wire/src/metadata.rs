@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::string::String;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 /// Top-level plugin metadata. Written by the `#[cc_lb_plugin(...)]`
 /// proc-macro into the wasm's `cc_lb.plugin.v1` custom section as
@@ -21,11 +21,10 @@ pub struct PluginMetadata {
 }
 
 /// Whether a declared hook should be executed by the host.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookMode {
     /// Host calls the wasm export for this hook.
-    #[default]
     Active,
     /// Host treats this hook as an explicit no-op and skips the wasm call.
     Noop,
@@ -38,37 +37,12 @@ impl HookMode {
 }
 
 /// Per-hook metadata declared by the plugin author.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookMetadata {
     pub wire_version: u8,
     pub description: String,
     pub usage: String,
-    #[serde(default)]
     pub mode: HookMode,
-}
-
-impl<'de> Deserialize<'de> for HookMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawHookMetadata {
-            wire_version: u8,
-            description: String,
-            usage: String,
-            #[serde(default)]
-            mode: HookMode,
-        }
-
-        let raw = RawHookMetadata::deserialize(deserializer)?;
-        Ok(Self {
-            wire_version: raw.wire_version,
-            description: raw.description,
-            usage: raw.usage,
-            mode: raw.mode,
-        })
-    }
 }
 
 /// Errors returned by [`PluginMetadata::parse`].
@@ -154,16 +128,6 @@ impl PluginMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hook_mode_defaults_active_when_metadata_omits_mode() {
-        let metadata = PluginMetadata::parse(
-            br#"{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{"shape":{"wire_version":1,"description":"shape hook","usage":"call shape"}}}"#,
-        )
-        .expect("metadata parses");
-
-        assert_eq!(metadata.hooks["shape"].mode, HookMode::Active);
-    }
 
     #[test]
     fn hook_mode_parses_explicit_noop() {

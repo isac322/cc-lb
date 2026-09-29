@@ -3,20 +3,17 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method};
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{MetaStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
     SignerFactory, UpstreamDialect, shape_request, sign_request,
 };
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use tokio::net::TcpListener;
 use url::Url;
 use uuid::Uuid;
 
@@ -25,21 +22,18 @@ struct Fixture {
     storage: Arc<Storage>,
     _stores: Arc<Stores>,
     aead: Arc<AeadService>,
-    _oauth_cfg: Arc<AnthropicOAuthConfig>,
-    _fake_base: String,
 }
 
 impl Fixture {
     async fn new() -> Self {
-        let fake_addr = spawn_fake_anthropic().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage"),
         );
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        storage.initialize().await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -54,21 +48,11 @@ impl Fixture {
             audit: Some(storage.clone()),
         });
         let aead = Arc::new(AeadService::from_master_key([32; 32]));
-        let fake_base = format!("http://{fake_addr}");
-        let oauth_cfg = Arc::new(AnthropicOAuthConfig {
-            client_id: "test-client".to_owned(),
-            auth_url: Url::parse(&format!("{fake_base}/oauth/authorize")).expect("auth url"),
-            token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
-            redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
-            scopes: vec!["messages".to_owned()],
-        });
         Self {
             _dir: dir,
             storage,
             _stores: stores,
             aead,
-            _oauth_cfg: oauth_cfg,
-            _fake_base: fake_base,
         }
     }
 
@@ -170,7 +154,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-test",
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let signer = factory
@@ -235,7 +219,6 @@ async fn router_choice_selects_matching_oauth_upstream() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
-        fixture._oauth_cfg.as_ref(),
         fixture.aead.clone(),
         None,
         0,
@@ -243,10 +226,9 @@ async fn router_choice_selects_matching_oauth_upstream() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -279,7 +261,6 @@ async fn empty_router_choice_errors() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture._stores.as_ref(),
-        fixture._oauth_cfg.as_ref(),
         fixture.aead.clone(),
         None,
         0,
@@ -287,10 +268,9 @@ async fn empty_router_choice_errors() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -324,7 +304,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         fixture.storage.clone(),
         fixture.aead.clone(),
         "oauth-missing",
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let result = factory
@@ -344,22 +324,6 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         Ok(_) => panic!("expected MissingCredentials error, got Ok"),
         Err(other) => panic!("expected MissingCredentials error, got: {:?}", other),
     }
-}
-
-async fn spawn_fake_anthropic() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    let app = fake_anthropic_app(AppConfig::default());
-    tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-    addr.to_string()
 }
 
 fn encrypted(
@@ -382,7 +346,6 @@ fn shaped_request() -> ShapedRequest {
     let principal = Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::OAuthSubject,
-        claims: serde_json::Map::new(),
     };
     shape_request(
         &DirectDialect,
@@ -413,9 +376,9 @@ impl UpstreamDialect for DirectDialect {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
+    use cc_lb_clock::Clock as _;
 
-    let clock = cc_lb_engine::SystemClock;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)

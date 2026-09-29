@@ -19,6 +19,8 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
         include_str!("../migrations/sqlite/0006_rename_queue_names.sql"),
         include_str!("../migrations/sqlite/0007_purge_legacy_oauth_usage_poll_jobs.sql"),
         include_str!("../migrations/sqlite/0008_slim_oauth_usage_poll_cursors.sql"),
+        include_str!("../migrations/sqlite/0009_purge_retired_job_payloads.sql"),
+        include_str!("../migrations/sqlite/0010_drop_anthropic_compat_etag.sql"),
     ];
 }
 
@@ -32,6 +34,8 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Postgres {
         include_str!("../migrations/postgres/0006_rename_queue_names.sql"),
         include_str!("../migrations/postgres/0007_purge_legacy_oauth_usage_poll_jobs.sql"),
         include_str!("../migrations/postgres/0008_slim_oauth_usage_poll_cursors.sql"),
+        include_str!("../migrations/postgres/0009_purge_retired_job_payloads.sql"),
+        include_str!("../migrations/postgres/0010_drop_anthropic_compat_etag.sql"),
     ];
 }
 

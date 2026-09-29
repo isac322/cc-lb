@@ -45,7 +45,6 @@ async fn sign_sets_api_key_and_drops_inherited_authorization() {
     let principal = Principal {
         id: "alice".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let shaped = shape_request(
         &DirectDialect,

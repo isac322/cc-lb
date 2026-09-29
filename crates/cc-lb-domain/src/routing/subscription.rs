@@ -106,8 +106,6 @@ pub struct SubscriptionPreferenceTrace {
     pub chosen_tier: SubscriptionTier,
     /// Candidates that participated in tier assessment.
     pub candidates: Vec<CandidateUrgency>,
-    /// Previous tier for the same thread, when known.
-    pub previous_tier: Option<SubscriptionTier>,
     /// Version of the deterministic winner-selection formula.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formula_version: Option<String>,
@@ -120,25 +118,10 @@ pub struct SubscriptionPreferenceTrace {
     /// Upstream retained after switch gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kept_upstream_id: Option<Uuid>,
-    /// Prior same-tier owner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incumbent_upstream_id: Option<Uuid>,
-    /// Estimated incremental switch cache cost.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_switch_cache_loss_micros: Option<u64>,
-    /// Pricing and cache availability for the estimate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_loss_status: Option<String>,
     /// Machine-readable switch-gate outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_gate_reason: Option<String>,
     /// Bucket-level v3 cache key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_v3_cache_key: Option<String>,
-    /// Analysis-only predicted cache reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_predicted_read_tokens: Option<u32>,
-    /// Analysis-only predicted upstream.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
 }

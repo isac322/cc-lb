@@ -47,14 +47,8 @@ const GROUP_META: Record<
   wait: { label: 'Wait', hue: 190, chroma: 0.09 },
   upstream: { label: 'Upstream', hue: 150, chroma: 0.11 },
   body: { label: 'Body', hue: 335, chroma: 0.11 },
-  internal_post: { label: 'Internal post', hue: 260, chroma: 0.012 },
+  internal_post: { label: 'Finalize', hue: 260, chroma: 0.012 },
 };
-
-function getGroupLabel(group: StageGroup, hasFinalizeTiming: boolean): string {
-  return group === 'internal_post' && hasFinalizeTiming
-    ? 'Finalize'
-    : GROUP_META[group].label;
-}
 
 const PROXY_GROUP_ORDER: StageGroup[] = [
   'internal_pre',
@@ -113,8 +107,6 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
     'Non-stream response body download from response headers until the complete body was collected.',
   finalize:
     'Mandatory accounting and finalization after the response body completed or cancellation was observed, ending immediately before the terminal event is published.',
-  limit_reconcile:
-    'Legacy timing for reconciling actual token usage against the reserved budget.',
   renewal_cycle:
     'The complete cache-keepalive renewal cycle performed by the scheduler. This is not a proxy request breakdown.',
 };
@@ -296,29 +288,7 @@ export function buildStageDetails(e: RequestEventWithPhase): StageDetail[] {
         );
       }
 
-      if (e.finalize_ms != null) {
-        const reconcileMs = e.limit_reconcile_ms ?? 0;
-        const finalizeDetail =
-          e.limit_reconcile_ms != null
-            ? `Limit reconcile: ${fmtMs(reconcileMs)} · Other finalize: ${fmtMs(
-                Math.max(0, (e.finalize_ms ?? 0) - reconcileMs),
-              )}`
-            : undefined;
-        pushRecorded(
-          'finalize',
-          'Finalize',
-          'internal_post',
-          e.finalize_ms,
-          finalizeDetail,
-        );
-      } else {
-        push(
-          'limit_reconcile',
-          'Limit reconcile',
-          'internal_post',
-          e.limit_reconcile_ms,
-        );
-      }
+      pushRecorded('finalize', 'Finalize', 'internal_post', e.finalize_ms);
     }
   }
 
@@ -1225,13 +1195,11 @@ function StageDetailsList({
   total,
   unaccounted,
   active,
-  hasFinalizeTiming,
 }: {
   stages: StageDetail[];
   total: number;
   unaccounted: number;
   active: ActiveKeyApi;
-  hasFinalizeTiming: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const count = stages.length + (unaccounted > 0 ? 1 : 0);
@@ -1270,7 +1238,7 @@ function StageDetailsList({
             ms={s.ms}
             setupTiming={s.setupTiming}
             total={total}
-            hint={getGroupLabel(s.group, hasFinalizeTiming)}
+            hint={GROUP_META[s.group].label}
             description={STAGE_DESCRIPTIONS[s.key]}
             detail={s.detail}
           />
@@ -1493,7 +1461,6 @@ export function LatencyTimeline({
   const stages = useMemo(() => buildStageDetails(event), [event]);
   const groups = computeStageGroups(event);
   const markers = useMemo(() => buildSseMarkers(event), [event]);
-  const hasFinalizeTiming = event.finalize_ms != null;
   const isFinalRenewal =
     event._phase === 'final' && event.source_kind === 'renewal';
   const groupOrder = isFinalRenewal ? RENEWAL_GROUP_ORDER : PROXY_GROUP_ORDER;
@@ -1618,7 +1585,7 @@ export function LatencyTimeline({
                 );
                 const anyActive = items.some((it) => active.isActive(it.key));
                 const groupItems = stages.filter((s) => s.group === g);
-                const groupLabel = getGroupLabel(g, hasFinalizeTiming);
+                const groupLabel = GROUP_META[g].label;
                 return (
                   <div key={g}>
                     <div className="flex items-center justify-between text-caption mb-0.5">
@@ -1686,7 +1653,6 @@ export function LatencyTimeline({
         total={total}
         unaccounted={unaccounted}
         active={active}
-        hasFinalizeTiming={hasFinalizeTiming}
       />
       {showStreamLane && <SseDetailsList markers={markers} active={active} />}
     </div>

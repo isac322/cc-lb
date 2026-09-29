@@ -166,19 +166,13 @@ async fn cur_02_cursor_scope_principal_and_filter_mismatches_stay_bad_request() 
     assert_eq!(status, StatusCode::OK, "first page: {first:?}");
     let cursor = first["next_cursor"].as_str().expect("next cursor");
 
-    let mut legacy_cursor = decode_cursor(cursor);
-    legacy_cursor
+    let mut untagged_cursor = decode_cursor(cursor);
+    untagged_cursor
         .as_object_mut()
         .expect("cursor object")
         .remove("horizon");
-    let legacy_cursor = encode_cursor(&legacy_cursor);
-    let legacy_uri = format!("{first_uri}&cursor={legacy_cursor}");
-    let (status, legacy_page) = get_json(state.clone(), &legacy_uri).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "same-cutoff legacy cursor regressed: {legacy_page:?}"
-    );
+    let untagged_cursor = encode_cursor(&untagged_cursor);
+    let untagged_uri = format!("{first_uri}&cursor={untagged_cursor}");
 
     let wrong_requested_horizon = format!(
         "/admin/v1/principals/{principal_id}/cache-keepalive?horizon=7d&limit=1&cursor={cursor}"
@@ -218,6 +212,7 @@ async fn cur_02_cursor_scope_principal_and_filter_mismatches_stay_bad_request() 
         ("tampered horizon tag", tampered_scope_uri),
         ("tampered horizon start shape", tampered_start_uri),
         ("null horizon tag", null_scope_uri),
+        ("missing horizon tag", untagged_uri),
     ] {
         let (status, body) = get_json(state.clone(), &uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body:?}");

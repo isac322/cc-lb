@@ -2,7 +2,9 @@ use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
+use cc_lb_storage_api::{
+    BackendKind, RequestEvent, RequestEventListQuery, RequestEventStore, Storage as StorageTrait,
+};
 
 #[async_trait]
 pub trait ConformanceBackend: Send + Sync + 'static {
@@ -80,4 +82,34 @@ where
 
 pub fn scenario_applies_to_backend(kind: BackendKind, allowed: &[BackendKind]) -> bool {
     allowed.contains(&kind)
+}
+
+/// Reads every stored request event (all source kinds) oldest first: the
+/// list view enumerates the rows, and the detail API returns each full
+/// payload byte-identically. Every row must carry an `event_id`.
+pub async fn stored_request_events<S>(storage: &S) -> Result<Vec<RequestEvent>>
+where
+    S: RequestEventStore + ?Sized,
+{
+    let items = storage
+        .list_request_events(&RequestEventListQuery {
+            since_unix_secs: 0,
+            until_unix_secs: u64::MAX,
+            limit: 500,
+            source_kind: Some("all".to_owned()),
+            ..Default::default()
+        })
+        .await?;
+    let mut events = Vec::with_capacity(items.len());
+    for item in items.into_iter().rev() {
+        let event_id = item.event_id.ok_or_else(|| {
+            anyhow::anyhow!("listed request event {} has no event_id", item.request_id)
+        })?;
+        let event = storage
+            .get_request_event(&event_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("listed request event {event_id} has no detail row"))?;
+        events.push(event);
+    }
+    Ok(events)
 }

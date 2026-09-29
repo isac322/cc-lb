@@ -197,7 +197,7 @@ impl PluginRegistryStore for PostgresStorage {
             .collect();
         let uploaded_at =
             unix_secs_to_datetime(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
-        let result = sqlx::query("UPDATE wasm_registry_v2 SET sha256 = $1, plugin_version = $2, original_filename = $3, uploaded_at = $4, uploaded_by_admin_id = $5, revision = revision + 1, description = $6, usage = $7, hook_metadata = $8, supported_slots = $9, schema_hash = $10 WHERE id = $11 AND revision = $12")
+        let result = sqlx::query("UPDATE wasm_registry_v2 SET sha256 = $1, plugin_version = $2, original_filename = $3, uploaded_at = $4, uploaded_by_admin_id = $5, revision = revision + 1, description = $6, usage = $7, hook_metadata = $8, supported_slots = $9 WHERE id = $10 AND revision = $11")
             .bind(blob.sha256.as_slice())
             .bind(&input.version)
             .bind(&input.original_filename)
@@ -207,7 +207,6 @@ impl PluginRegistryStore for PostgresStorage {
             .bind(&input.usage)
             .bind(hook_metadata_to_json(&input.hook_metadata)?)
             .bind(&supported_slots)
-            .bind(input.schema_hash.as_ref().map(|hash| hash.as_slice()))
             .bind(current.id)
             .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
             .execute(&mut *tx)
@@ -335,24 +334,6 @@ impl PluginRegistryStore for PostgresStorage {
         self.get_registry_entry_by_id(row.try_get("id").map_err(map_sqlx_error)?)
             .await?
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
-    }
-
-    async fn update_supported_slots(
-        &self,
-        id: Uuid,
-        supported_slots: Vec<PluginSlotKind>,
-    ) -> StorageResult<()> {
-        let slots: Vec<String> = supported_slots
-            .iter()
-            .map(|slot| slot.as_str().to_owned())
-            .collect();
-        sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = $1 WHERE id = $2")
-            .bind(&slots)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
     }
 
     async fn delete_registry_entry(
@@ -805,15 +786,10 @@ async fn insert_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     blob: &WasmBlob,
 ) -> StorageResult<bool> {
-    let validated_at = unix_secs_to_datetime(
-        blob.parse_validated_at_unix_secs,
-        "wasm_blob.parse_validated_at",
-    )?;
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
-        .bind(validated_at)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -832,7 +808,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -845,7 +821,6 @@ async fn insert_registry_in_tx(
         .bind(&input.usage)
         .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(&supported_slots)
-        .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -972,19 +947,10 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             .into_iter()
             .filter_map(|s| PluginSlotKind::parse(&s))
             .collect(),
-        schema_hash: row
-            .try_get::<Option<Vec<u8>>, _>("schema_hash")
-            .map_err(map_sqlx_error)?
-            .map(|bytes| sha_to_array(&bytes))
-            .transpose()?,
     })
 }
 
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
-    let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    };
     existing.name == input.name
         && existing.version == input.version
         && existing.original_filename == input.original_filename
@@ -993,7 +959,6 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         && existing.usage == input.usage
         && existing.hook_metadata == input.hook_metadata
         && existing.supported_slots == input.supported_slots
-        && schema_hash_ok
 }
 
 fn is_singleton_slot(slot: PluginSlotKind) -> bool {

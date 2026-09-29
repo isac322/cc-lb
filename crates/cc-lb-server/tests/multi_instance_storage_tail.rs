@@ -8,10 +8,10 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
+use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
-use cc_lb_engine::{ClockHandle, SystemClock};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{ManagedKeyStore, MetaStore, RequestEvent, RequestEventStore};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http_body_util::BodyExt;
@@ -99,7 +99,7 @@ async fn reset_request_event_tables(database_url: &str) -> TestResult<()> {
         .connect(database_url)
         .await?;
     let storage = PostgresStorage::new(pool.clone(), clock);
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     sqlx::query("TRUNCATE request_events_v1 RESTART IDENTITY")
         .execute(&pool)
         .await?;
@@ -114,7 +114,7 @@ async fn build_running_app(database_url: &str, label: &'static str) -> TestResul
         .connect(database_url)
         .await?;
     let storage = Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     seed_app_testing_storage(storage.as_ref(), None, &*clock).await?;
 
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
@@ -156,7 +156,7 @@ fn test_config(database_url: &str, label: &str) -> Config {
 fn admin_stream_request() -> TestResult<Request<Body>> {
     Ok(Request::builder()
         .method("GET")
-        .uri("/admin/events/stream")
+        .uri("/admin/v1/events/stream")
         .header("Authorization", format!("Bearer {ADMIN_TOKEN}"))
         .body(Body::empty())?)
 }

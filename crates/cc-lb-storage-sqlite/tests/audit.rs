@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_clock::TestClock;
-use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, MetaStore};
 
 const NOW: u64 = 10_000;
 const AUTHORITY: &str = "https://identity.example";
@@ -17,10 +17,7 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(TestClock::new_at_secs(NOW)))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("migrate sqlite");
+    storage.initialize().await.expect("migrate sqlite");
     (directory, storage)
 }
 
@@ -88,7 +85,7 @@ async fn query_audit_by_actor_filters_before_limit() {
 }
 
 #[tokio::test]
-async fn query_audit_preserves_append_order() {
+async fn append_audit_entries_preserves_append_order() {
     let (_directory, storage) = storage().await;
     let entries = [
         audit_entry("first-newer", NOW + 2, AUTHORITY, SUBJECT),
@@ -101,13 +98,14 @@ async fn query_audit_preserves_append_order() {
         .expect("append audit entries");
 
     let rows = storage
-        .query_audit(None, NOW, NOW + 2, 10)
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 2, 10, false)
         .await
-        .expect("query audit");
+        .expect("query recent audit");
 
+    // Newest first; the timestamp tie is broken by reverse append order.
     assert_eq!(
         request_ids(&rows),
-        ["first-newer", "second-backfilled", "third-same-timestamp"]
+        ["third-same-timestamp", "first-newer", "second-backfilled"]
     );
 }
 
@@ -254,8 +252,8 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
     admin_old.admin_action = Some("principal_update".to_owned());
     let mut admin_new = audit_entry("admin-action-new", NOW + 300, AUTHORITY, SUBJECT);
     admin_new.admin_action = Some("config_apply".to_owned());
-    let mut kind_only = audit_entry("kind-only", NOW + 299, AUTHORITY, "bob");
-    kind_only.kind = Some("admin".to_owned());
+    let mut bob_admin = audit_entry("bob-admin", NOW + 299, AUTHORITY, "bob");
+    bob_admin.admin_action = Some("upstream_update".to_owned());
     let mut other_principal_admin =
         audit_entry("other-principal-admin", NOW + 298, AUTHORITY, SUBJECT);
     other_principal_admin.principal_id = "other-principal".to_owned();
@@ -270,7 +268,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
             SUBJECT,
         ));
     }
-    entries.push(kind_only);
+    entries.push(bob_admin);
     entries.push(other_principal_admin);
     entries.push(admin_new);
     storage
@@ -293,7 +291,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
     assert!(
         default_rows
             .iter()
-            .any(|entry| { entry.admin_action.is_none() && entry.kind.is_none() })
+            .any(|entry| entry.admin_action.is_none())
     );
     // The older admin action survives the limit once admin_only filters first.
     let admin_rows = storage
@@ -304,7 +302,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         request_ids(&admin_rows),
         [
             "admin-action-new",
-            "kind-only",
+            "bob-admin",
             "other-principal-admin",
             "admin-action-old"
         ]
@@ -323,7 +321,7 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         .expect("query recent audit admin only by principal");
     assert_eq!(
         request_ids(&principal_admin_rows),
-        ["admin-action-new", "kind-only", "admin-action-old"]
+        ["admin-action-new", "bob-admin", "admin-action-old"]
     );
 
     let actor_admin_rows = storage
@@ -355,6 +353,6 @@ async fn query_recent_audit_admin_only_filters_before_limit() {
         .expect("query recent audit admin only bounded");
     assert_eq!(
         request_ids(&bounded_admin_rows),
-        ["kind-only", "other-principal-admin"]
+        ["bob-admin", "other-principal-admin"]
     );
 }

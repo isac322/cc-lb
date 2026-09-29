@@ -17,7 +17,7 @@ use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageC
 use cc_lb_server::app::{
     App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
 };
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
+use cc_lb_storage_api::{ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http::header::RETRY_AFTER;
@@ -204,7 +204,7 @@ async fn connect_probe(url: &str) -> Result<(), sqlx::Error> {
 async fn build_api_key_app_for_testing_postgres(
     database_url: &str,
 ) -> TestResult<(App, RunningUpstream)> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let fixture_app = build_app_for_testing_postgres(database_url, clock.clone()).await?;
     drop(fixture_app);
     reset_managed_key_tables(database_url).await?;
@@ -242,13 +242,13 @@ async fn build_api_key_app_for_testing_postgres(
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
         .await?;
     let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone(), clock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;

@@ -28,7 +28,7 @@ pub struct HeaderSnapshot {
     /// identity slots (`anthropic-organization-id`, etc.). Downstream
     /// subscribers reconstruct a `HeaderMap` and hand it to the existing
     /// `parse_anthropic_rate_limit_headers` / `parse_anthropic_unified_headers`
-    /// parsers in `cc_lb_engine::rate_limit_headers`.
+    /// parsers in `cc_lb_quota::rate_limit_headers`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub anthropic_headers: BTreeMap<String, String>,
 }

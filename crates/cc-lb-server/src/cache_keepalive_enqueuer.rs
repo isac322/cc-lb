@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
+use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest, CancelReason,
 };
-use cc_lb_engine::{ClockHandle, clock::unix_secs};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::{
@@ -207,14 +207,9 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
 
 fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalReason {
     match reason {
-        CancelReason::MaxRefreshes => CacheKeepaliveTerminalReason::MaxRefreshes,
-        CancelReason::MaxDuration => CacheKeepaliveTerminalReason::MaxDuration,
-        CancelReason::UpstreamGone => CacheKeepaliveTerminalReason::Stale,
-        CancelReason::NewRequest
-        | CancelReason::NoCacheControl
-        | CancelReason::UserTurnDetected
-        | CancelReason::SnapshotTooLarge
-        | CancelReason::Shutdown => CacheKeepaliveTerminalReason::Cancelled,
+        CancelReason::UserTurnDetected | CancelReason::SnapshotTooLarge => {
+            CacheKeepaliveTerminalReason::Cancelled
+        }
     }
 }
 

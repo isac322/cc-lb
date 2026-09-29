@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery,
-    RequestEventUpstream, StatusClass, StorageError, StorageResult, model_filter_like_pattern,
+    RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, StatusClass,
+    StorageError, StorageResult, model_filter_like_pattern,
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
@@ -35,7 +35,6 @@ SELECT \
     r.thinking_budget_tokens, \
     r.thinking_tokens, \
     r.service_tier, \
-    r.list_upstream AS upstream, \
     r.list_status AS status, \
     r.error_code, \
     r.upstream_error_type, \
@@ -73,7 +72,6 @@ pub(super) struct ListRow {
     pub(super) thinking_budget_tokens: Option<i64>,
     pub(super) thinking_tokens: Option<i64>,
     pub(super) service_tier: Option<String>,
-    pub(super) upstream: Option<String>,
     pub(super) status: Option<i32>,
     pub(super) error_code: Option<String>,
     pub(super) upstream_error_type: Option<String>,
@@ -123,10 +121,6 @@ pub(super) async fn list_request_events(
     if let Some(thread_id) = query.filters.thread_id.as_deref() {
         builder.push(" AND r.thread_id = ");
         builder.push_bind(thread_id);
-    }
-    if let Some(upstream) = query.filters.upstream {
-        builder.push(" AND r.list_upstream = ");
-        builder.push_bind(upstream_as_str(upstream));
     }
     if let Some(status_class) = query.filters.status_class {
         let (status_min, status_max) = status_class_range(status_class);
@@ -202,12 +196,6 @@ pub(super) async fn get_request_event(
     payload
         .map(|payload| serde_json::from_slice(&payload).map_err(Into::into))
         .transpose()
-}
-
-pub(super) fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-    }
 }
 
 pub(super) fn status_class_range(class: StatusClass) -> (i32, i32) {

@@ -1,52 +1,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_domain::{CacheScore, SubscriptionQuotaCandidateSnapshot};
-use cc_lb_storage_api::SubscriptionQuotaSample;
-use cc_lb_storage_api::types::{ApiKeyMutation, PrincipalLimitState, StoredApiKeyRecord};
+use cc_lb_domain::SubscriptionQuotaCandidateSnapshot;
+use cc_lb_storage_api::{ApiKeyMutation, StoredApiKeyRecord, SubscriptionQuotaSample};
 use uuid::Uuid;
 
 use crate::api_keys::key_store::KeyStore;
 use crate::api_keys::key_store::{CreateParams, KeyStoreError};
-use crate::api_keys::limit_engine::LimitEngine;
-use crate::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
-use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::secret::RedactedSecret;
 use crate::audit_writer::AuditWriterSink;
 use crate::dynamic_view::{DynamicView, DynamicViewHolder};
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PromptCacheThreadUsage {
-    pub cache_read_input_tokens: u64,
-    pub cache_creation_input_tokens_5m: u64,
-    pub cache_creation_input_tokens_1h: u64,
-}
-
-/// Diagnostic thread-usage tracker. This is a separate lineage from the
-/// shared prompt-cache observation store: it records per-thread provider
-/// cache usage for counterfactual diagnostics only and is never a warmth
-/// authority for routing.
-pub trait PromptCacheThreadUsageTrackerLike: Send + Sync {
-    fn thread_usage_score(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _thread_id: &str,
-        _now_unix_secs: u64,
-    ) -> Option<CacheScore> {
-        None
-    }
-
-    fn record_thread_usage(
-        &self,
-        _upstream_id: Uuid,
-        _canonical_model: &str,
-        _thread_id: &str,
-        _usage: PromptCacheThreadUsage,
-        _now_unix_secs: u64,
-    ) {
-    }
-}
 
 pub trait SubscriptionQuotaCacheLike: Send + Sync {
     fn upsert_observation(&self, record: &SubscriptionQuotaSample);
@@ -73,6 +36,18 @@ pub enum PromptCacheObservationEnqueueError {
 }
 
 #[derive(Debug, Default)]
+pub struct NoopPromptCacheObservationSink;
+
+impl PromptCacheObservationSinkLike for NoopPromptCacheObservationSink {
+    fn enqueue(
+        &self,
+        _record: cc_lb_storage_api::PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct NoopSubscriptionQuotaCache;
 
 impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
@@ -96,12 +71,6 @@ pub trait ManagedKeyControl: Send + Sync {
         params: CreateParams,
     ) -> Result<(StoredApiKeyRecord, RedactedSecret), KeyStoreError>;
 
-    async fn get_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> Result<Option<StoredApiKeyRecord>, KeyStoreError>;
-
     async fn list_keys_by_principal(
         &self,
         principal_id: &str,
@@ -111,10 +80,6 @@ pub trait ManagedKeyControl: Send + Sync {
         &self,
     ) -> Result<Vec<(String, String, StoredApiKeyRecord)>, KeyStoreError>;
 
-    async fn disable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
-
-    async fn enable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
-
     async fn revoke_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
 
     async fn patch_key(
@@ -123,17 +88,6 @@ pub trait ManagedKeyControl: Send + Sync {
         key_id: &str,
         mutation: ApiKeyMutation,
     ) -> Result<(), KeyStoreError>;
-}
-
-pub trait LimitControl: Send + Sync {
-    fn snapshot_for_principal(
-        &self,
-        view: &PrincipalView,
-        principal_id: &str,
-        identity_filter: IdentityFilter,
-    ) -> PrincipalLimitsSnapshot;
-
-    fn record_principal_limit_state(&self, state: &PrincipalLimitState);
 }
 
 pub trait DynamicViewControl: Send + Sync {
@@ -180,14 +134,6 @@ impl ManagedKeyControl for KeyStore {
         self.create(principal_id, params).await
     }
 
-    async fn get_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> Result<Option<StoredApiKeyRecord>, KeyStoreError> {
-        self.get(principal_id, key_id).await
-    }
-
     async fn list_keys_by_principal(
         &self,
         principal_id: &str,
@@ -201,14 +147,6 @@ impl ManagedKeyControl for KeyStore {
         self.list_all().await
     }
 
-    async fn disable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {
-        self.disable(principal_id, key_id).await
-    }
-
-    async fn enable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {
-        self.enable(principal_id, key_id).await
-    }
-
     async fn revoke_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {
         self.revoke(principal_id, key_id).await
     }
@@ -220,21 +158,6 @@ impl ManagedKeyControl for KeyStore {
         mutation: ApiKeyMutation,
     ) -> Result<(), KeyStoreError> {
         self.patch(principal_id, key_id, mutation).await
-    }
-}
-
-impl LimitControl for LimitEngine {
-    fn snapshot_for_principal(
-        &self,
-        view: &PrincipalView,
-        principal_id: &str,
-        identity_filter: IdentityFilter,
-    ) -> PrincipalLimitsSnapshot {
-        LimitEngine::snapshot_for_principal(self, view, principal_id, identity_filter)
-    }
-
-    fn record_principal_limit_state(&self, state: &PrincipalLimitState) {
-        LimitEngine::record_principal_limit_state(self, state);
     }
 }
 

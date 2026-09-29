@@ -2,17 +2,16 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
-    model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
+    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
+    RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
+    model_filter_like_pattern, model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
 use std::collections::BTreeMap;
 
-use super::request_event_list_sql::{self, parse_event_kind, status_class_range, upstream_as_str};
+use super::request_event_list_sql::{self, parse_event_kind, status_class_range};
 use crate::{
     adapter::{
         PostgresStorage, i64_to_u64, u64_to_i64, unix_secs_to_datetime,
@@ -38,12 +37,12 @@ impl CacheKeepaliveProjectionStore for PostgresStorage {
 #[async_trait]
 impl RequestEventStore for PostgresStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
-        let event_id = storage_event_id(event);
+        let event_id = required_event_id(event)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let inserted_seq = insert_request_event_in_tx(&mut tx, event, &event_id).await?;
+        let inserted_seq = insert_request_event_in_tx(&mut tx, event, event_id).await?;
         let seq = match inserted_seq {
             Some(seq) => seq,
-            None => select_existing_event_id_in_tx(&mut tx, &event_id).await?,
+            None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(seq, "request event cursor")
@@ -54,12 +53,12 @@ impl RequestEventStore for PostgresStorage {
         event: &RequestEvent,
         projections: &RequestEventProjections,
     ) -> StorageResult<u64> {
-        let event_id = storage_event_id(event);
+        let event_id = required_event_id(event)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let inserted_seq = insert_request_event_in_tx(&mut tx, event, &event_id).await?;
+        let inserted_seq = insert_request_event_in_tx(&mut tx, event, event_id).await?;
         let seq = match inserted_seq {
             Some(seq) => seq,
-            None => select_existing_event_id_in_tx(&mut tx, &event_id).await?,
+            None => select_existing_event_id_in_tx(&mut tx, event_id).await?,
         };
         if let Some(turn) = projections.turn.as_ref() {
             insert_keepalive_turn_in_tx(&mut tx, turn).await?;
@@ -67,68 +66,6 @@ impl RequestEventStore for PostgresStorage {
         insert_keepalive_decision_in_tx(&mut tx, &projections.decision).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(seq, "request event cursor")
-    }
-
-    async fn query_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-        let Some(since) = unix_secs_to_datetime_lower(since, "request event since")? else {
-            return Ok(Vec::new());
-        };
-        let until = unix_secs_to_datetime_upper(until, "request event until")?;
-
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
-        )
-        .bind(since)
-        .bind(until)
-        .bind(u64_to_i64(limit as u64, "request event limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter()
-            .map(|(source_kind, source_ref_id, event_kind, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
-            })
-            .collect()
-    }
-
-    async fn query_recent_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-        let Some(since) = unix_secs_to_datetime_lower(since, "request event since")? else {
-            return Ok(Vec::new());
-        };
-        let until = unix_secs_to_datetime_upper(until, "request event until")?;
-
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
-        )
-        .bind(since)
-        .bind(until)
-        .bind(u64_to_i64(limit as u64, "request event limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter()
-            .map(|(source_kind, source_ref_id, event_kind, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
-            })
-            .collect()
     }
 
     async fn prune_request_events_before(
@@ -202,7 +139,7 @@ impl RequestEventStore for PostgresStorage {
         >(
             "SELECT seq, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
                  WHERE seq > $1 AND seq <= $2 \
-                   AND COALESCE(tx_id, '0'::xid8) < pg_snapshot_xmin(pg_current_snapshot()) \
+                   AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
                  ORDER BY seq ASC LIMIT $3",
         )
         .bind(u64_to_i64(after, "request event cursor after")?)
@@ -241,13 +178,6 @@ impl RequestEventStore for PostgresStorage {
         query: &RequestEventKeyLastUsedQuery,
     ) -> StorageResult<Vec<RequestEventKeyLastUsed>> {
         request_event_key_last_used(self, query).await
-    }
-
-    async fn request_event_key_usage(
-        &self,
-        query: &RequestEventKeyUsageQuery,
-    ) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
-        request_event_key_usage(self, query).await
     }
 
     async fn request_event_principal_costs(
@@ -314,80 +244,6 @@ async fn request_event_key_last_used(
         .collect()
 }
 
-async fn request_event_key_usage(
-    storage: &PostgresStorage,
-    query: &RequestEventKeyUsageQuery,
-) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
-    if query.bucket_count == 0 || query.step_ms == 0 || query.range_end_ms < query.range_start_ms {
-        return Ok(Vec::new());
-    }
-
-    let bucket_count = usize::try_from(query.bucket_count).map_err(|_| StorageError::Fatal {
-        message: "request event key usage bucket_count cannot be represented as usize".to_owned(),
-    })?;
-    let mut buckets = vec![RequestEventKeyUsageBucket::default(); bucket_count];
-    for (index, bucket) in buckets.iter_mut().enumerate() {
-        let bucket_start_ms = query
-            .range_start_ms
-            .saturating_add((index as u64).saturating_mul(query.step_ms));
-        bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
-    }
-
-    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
-                COUNT(*)::bigint AS request_count, \
-                COALESCE(SUM(COALESCE(input_tokens, 0) \
-                    + COALESCE(cache_creation_input_tokens, 0) \
-                    + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, \
-                COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, \
-                COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros \
-         FROM request_events_v1 \
-         WHERE principal_id = $4 \
-           AND key_id = $5 \
-           AND list_ts_ms BETWEEN $6 AND $7 \
-         GROUP BY bucket_index",
-    )
-    .bind(u64_to_i64(
-        query.range_start_ms,
-        "request event key usage range start",
-    )?)
-    .bind(u64_to_i64(query.step_ms, "request event key usage step")?)
-    .bind(u64_to_i64(
-        query.bucket_count.saturating_sub(1),
-        "request event key usage last bucket",
-    )?)
-    .bind(query.principal_id.as_str())
-    .bind(query.key_id.as_str())
-    .bind(u64_to_i64(
-        query.range_start_ms,
-        "request event key usage lower bound",
-    )?)
-    .bind(u64_to_i64(
-        query.range_end_ms,
-        "request event key usage upper bound",
-    )?)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    for (bucket_index, request_count, input_tokens, output_tokens, cost_usd_micros) in rows {
-        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
-            message: "request event key usage bucket index is negative".to_owned(),
-        })?;
-        let Some(bucket) = buckets.get_mut(bucket_index) else {
-            return Err(StorageError::Corrupted {
-                message: "request event key usage bucket index is out of range".to_owned(),
-            });
-        };
-        bucket.request_count = i64_to_u64(request_count, "request event key usage request count")?;
-        bucket.input_tokens = i64_to_u64(input_tokens, "request event key usage input tokens")?;
-        bucket.output_tokens = i64_to_u64(output_tokens, "request event key usage output tokens")?;
-        bucket.cost_usd_micros = cost_usd_micros;
-    }
-
-    Ok(buckets)
-}
-
 fn is_canonical_uuid_principal(value: &str) -> bool {
     value.len() == 36 && uuid::Uuid::parse_str(value).is_ok()
 }
@@ -422,10 +278,9 @@ const PRINCIPAL_COST_AGGREGATE_SUFFIX: &str = ") matched \
 const UUID_PRINCIPAL_COST_SOURCE_SQL: &str = include_str!("request_event_principal_cost_uuid.sql");
 const FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
     include_str!("request_event_principal_cost_uuid_filtered.sql");
-const NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
-    include_str!("request_event_principal_cost_normalized.sql");
-const FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL: &str =
-    include_str!("request_event_principal_cost_normalized_filtered.sql");
+const NULL_PRINCIPAL_COST_SOURCE_SQL: &str = include_str!("request_event_principal_cost_null.sql");
+const FILTERED_NULL_PRINCIPAL_COST_SOURCE_SQL: &str =
+    include_str!("request_event_principal_cost_null_filtered.sql");
 
 async fn fetch_principal_cost_rows(
     storage: &PostgresStorage,
@@ -433,40 +288,22 @@ async fn fetch_principal_cost_rows(
     range_start_ms: i64,
     bucket_width_ms: i64,
     range_end_ms: i64,
-    principal_keys: &Vec<String>,
+    upstream_id: Option<uuid::Uuid>,
+    principal_keys: Option<&[String]>,
 ) -> StorageResult<Vec<PrincipalCostRow>> {
-    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
-        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
-    )))
-    .bind(range_start_ms)
-    .bind(bucket_width_ms)
-    .bind(range_end_ms)
-    .bind(principal_keys)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)
-}
-
-async fn fetch_filtered_principal_cost_rows(
-    storage: &PostgresStorage,
-    source_sql: &'static str,
-    range_start_ms: i64,
-    bucket_width_ms: i64,
-    range_end_ms: i64,
-    upstream_id: uuid::Uuid,
-    principal_keys: &Vec<String>,
-) -> StorageResult<Vec<PrincipalCostRow>> {
-    sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(format!(
-        "{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}"
-    )))
-    .bind(range_start_ms)
-    .bind(bucket_width_ms)
-    .bind(range_end_ms)
-    .bind(upstream_id)
-    .bind(principal_keys)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)
+    let sql =
+        format!("{PRINCIPAL_COST_AGGREGATE_PREFIX}{source_sql}{PRINCIPAL_COST_AGGREGATE_SUFFIX}");
+    let mut query = sqlx::query_as::<_, PrincipalCostRow>(AssertSqlSafe(sql))
+        .bind(range_start_ms)
+        .bind(bucket_width_ms)
+        .bind(range_end_ms);
+    if let Some(upstream_id) = upstream_id {
+        query = query.bind(upstream_id);
+    }
+    if let Some(principal_keys) = principal_keys {
+        query = query.bind(principal_keys);
+    }
+    query.fetch_all(&storage.pool).await.map_err(map_sqlx_error)
 }
 
 async fn request_event_principal_costs(
@@ -501,57 +338,44 @@ async fn request_event_principal_costs(
     let mut rows = Vec::<PrincipalCostRow>::new();
 
     if !uuid_keys.is_empty() {
-        rows.extend(match query.upstream_id {
-            Some(upstream_id) => {
-                fetch_filtered_principal_cost_rows(
-                    storage,
-                    FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL,
-                    range_start_ms,
-                    bucket_width_ms,
-                    range_end_ms,
-                    upstream_id,
-                    &uuid_keys,
-                )
-                .await?
-            }
-            None => {
-                fetch_principal_cost_rows(
-                    storage,
-                    UUID_PRINCIPAL_COST_SOURCE_SQL,
-                    range_start_ms,
-                    bucket_width_ms,
-                    range_end_ms,
-                    &uuid_keys,
-                )
-                .await?
-            }
-        });
-    }
-    rows.extend(match query.upstream_id {
-        Some(upstream_id) => {
-            fetch_filtered_principal_cost_rows(
-                storage,
-                FILTERED_NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
-                range_start_ms,
-                bucket_width_ms,
-                range_end_ms,
-                upstream_id,
-                &query.principal_keys,
-            )
-            .await?
-        }
-        None => {
+        let source_sql = if query.upstream_id.is_some() {
+            FILTERED_UUID_PRINCIPAL_COST_SOURCE_SQL
+        } else {
+            UUID_PRINCIPAL_COST_SOURCE_SQL
+        };
+        rows.extend(
             fetch_principal_cost_rows(
                 storage,
-                NON_UUID_PRINCIPAL_COST_SOURCE_SQL,
+                source_sql,
                 range_start_ms,
                 bucket_width_ms,
                 range_end_ms,
-                &query.principal_keys,
+                query.upstream_id,
+                Some(&uuid_keys),
             )
-            .await?
-        }
-    });
+            .await?,
+        );
+    }
+    let unknown_principal = normalize_usage_rollup_dimension(None);
+    if query.principal_keys.contains(&unknown_principal) {
+        let source_sql = if query.upstream_id.is_some() {
+            FILTERED_NULL_PRINCIPAL_COST_SOURCE_SQL
+        } else {
+            NULL_PRINCIPAL_COST_SOURCE_SQL
+        };
+        rows.extend(
+            fetch_principal_cost_rows(
+                storage,
+                source_sql,
+                range_start_ms,
+                bucket_width_ms,
+                range_end_ms,
+                query.upstream_id,
+                None,
+            )
+            .await?,
+        );
+    }
 
     let mut buckets = BTreeMap::<(String, u64), RequestEventPrincipalCostBucket>::new();
     for (
@@ -724,10 +548,6 @@ async fn request_event_histogram(
         builder.push(" AND r.thread_id = ");
         builder.push_bind(thread_id);
     }
-    if let Some(upstream) = query.filters.upstream {
-        builder.push(" AND r.list_upstream = ");
-        builder.push_bind(upstream_as_str(upstream));
-    }
     if let Some(status_class) = query.filters.status_class {
         let (status_min, status_max) = status_class_range(status_class);
         builder.push(" AND r.list_status BETWEEN ");
@@ -809,29 +629,26 @@ async fn insert_request_event_in_tx(
     event: &RequestEvent,
     event_id: &str,
 ) -> StorageResult<Option<i64>> {
+    let ts_ms = event.ts_ms.ok_or_else(|| StorageError::InvalidInput {
+        field: "request_event.ts_ms".to_owned(),
+        reason: "must be present".to_owned(),
+    })?;
     let payload = serde_json::to_vec(event)?;
-    let cache_breakpoints = serde_json::to_value(&event.cache_breakpoints)?;
     sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
-              (ts, source_kind, source_ref_id, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
-               message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
+              (ts, source_kind, source_ref_id, principal_id, upstream_id, key_id, model, upstream_name, thread_id, \
                 input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
                  event_id, error_code, upstream_error_type, upstream_error_message, \
-                 thinking_tokens, web_search_requests, web_fetch_requests, \
-                  service_tier, inference_geo, \
+                 thinking_tokens, service_tier, \
                   cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
-                  matched_v3_cache_key, breakpoint_content_block_index, matched_content_block_index, lookback_distance, \
-                  predicted_cache_read_tokens, predicted_cache_creation_tokens_5m, predicted_cache_creation_tokens_1h, \
-                   token_estimate_source, cache_value_micros, formula_winner_upstream_id, kept_upstream_id, \
-                   quota_urgency_5h, quota_urgency_7d, quota_urgency_combined, quota_warning_multiplier, \
-                   lineage_would_have_predicted_read_tokens, lineage_would_have_picked_upstream_id, \
+                   token_estimate_source, \
                    thinking_budget_tokens, reasoning_effort, \
                    observed_session_id, request_kind, \
-                   list_ts_ms, list_event_key, list_upstream, list_status, \
+                   list_ts_ms, list_event_key, list_status, \
                    list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
                    list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, \
-                   list_cost_components_materialized, payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, event_kind, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$70,NOW()) \
+                   payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, event_kind, created_at) \
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,NOW()) \
                ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
                RETURNING seq",
         )
@@ -843,29 +660,7 @@ async fn insert_request_event_in_tx(
         .bind(event.key_id.as_deref())
         .bind(event.model.as_deref())
         .bind(event.upstream_name.as_deref())
-        .bind(event.cache_state.map(|state| state.as_str()))
         .bind(event.thread_id.as_deref())
-        .bind(event.message_id.as_deref())
-        .bind(
-            event
-                .message_index
-                .map(|value| u64_to_i64(value, "request event message_index"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .message_count
-                .map(|value| u64_to_i64(value, "request event message_count"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .cache_control_block_count
-                .map(|value| u64_to_i64(value, "request event cache_control_block_count"))
-                .transpose()?,
-        )
-        .bind(cache_breakpoints)
-        .bind(event.cache_prefix_hash.as_deref())
         .bind(
             event
                 .input_tokens
@@ -900,20 +695,7 @@ async fn insert_request_event_in_tx(
                 .map(|value| u64_to_i64(value, "request event thinking_tokens"))
                 .transpose()?,
         )
-        .bind(
-            event
-                .web_search_requests
-                .map(|value| u64_to_i64(value, "request event web_search_requests"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .web_fetch_requests
-                .map(|value| u64_to_i64(value, "request event web_fetch_requests"))
-                .transpose()?,
-        )
         .bind(event.service_tier.as_deref())
-        .bind(event.inference_geo.as_deref())
         .bind(
             event
                 .cache_creation_input_tokens_5m
@@ -926,58 +708,7 @@ async fn insert_request_event_in_tx(
                 .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
                 .transpose()?,
         )
-        .bind(event.matched_v3_cache_key.as_deref())
-        .bind(
-            event
-                .breakpoint_content_block_index
-                .map(|value| u64_to_i64(value, "request event breakpoint_content_block_index"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .matched_content_block_index
-                .map(|value| u64_to_i64(value, "request event matched_content_block_index"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .lookback_distance
-                .map(|value| u64_to_i64(value, "request event lookback_distance"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .predicted_cache_read_tokens
-                .map(|value| u64_to_i64(value, "request event predicted_cache_read_tokens"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .predicted_cache_creation_tokens_5m
-                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_5m"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .predicted_cache_creation_tokens_1h
-                .map(|value| u64_to_i64(value, "request event predicted_cache_creation_tokens_1h"))
-                .transpose()?,
-        )
         .bind(event.token_estimate_source.as_deref())
-        .bind(event.cache_value_micros)
-        .bind(event.formula_winner_upstream_id)
-        .bind(event.kept_upstream_id)
-        .bind(event.quota_urgency_5h)
-        .bind(event.quota_urgency_7d)
-        .bind(event.quota_urgency_combined)
-        .bind(event.quota_warning_multiplier)
-        .bind(
-            event
-                .lineage_would_have_predicted_read_tokens
-                .map(|value| u64_to_i64(value, "request event lineage_would_have_predicted_read_tokens"))
-                .transpose()?,
-        )
-        .bind(event.lineage_would_have_picked_upstream_id)
         .bind(
             event
                 .thinking_budget_tokens
@@ -987,16 +718,8 @@ async fn insert_request_event_in_tx(
         .bind(event.reasoning_effort.as_deref())
         .bind(event.observed_session_id.as_deref())
         .bind(event.request_kind.as_deref())
-        .bind(u64_to_i64(
-            event
-                .ts_ms
-                .unwrap_or_else(|| event.ts.saturating_mul(1_000)),
-            "request event list_ts_ms",
-        )?)
+        .bind(u64_to_i64(ts_ms, "request event list_ts_ms")?)
         .bind(event_id)
-        .bind(event.upstream.map(|upstream| match upstream {
-            cc_lb_storage_api::RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        }))
         .bind(i32::from(event.status))
         .bind(event.cost_usd_micros)
         .bind(event.cost_input_micros)
@@ -1004,7 +727,6 @@ async fn insert_request_event_in_tx(
         .bind(event.cost_cache_creation_5m_micros)
         .bind(event.cost_cache_creation_1h_micros)
         .bind(event.cost_cache_read_micros)
-        .bind(true)
         .bind(payload)
         .bind(event.claude_agent_id.as_deref())
         .bind(event.claude_parent_agent_id.as_deref())
@@ -1016,6 +738,7 @@ async fn insert_request_event_in_tx(
         .await
         .map_err(map_sqlx_error)
 }
+
 async fn select_existing_event_id_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event_id: &str,
@@ -1101,11 +824,14 @@ fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {
     }
 }
 
-fn storage_event_id(event: &RequestEvent) -> String {
+fn required_event_id(event: &RequestEvent) -> StorageResult<&str> {
     event
         .event_id
-        .clone()
-        .unwrap_or_else(|| format!("{}-legacy-live-{}", event.ts, uuid::Uuid::now_v7()))
+        .as_deref()
+        .ok_or_else(|| StorageError::InvalidInput {
+            field: "request_event.event_id".to_owned(),
+            reason: "must be present".to_owned(),
+        })
 }
 
 fn request_event_matches_filters(
@@ -1124,11 +850,6 @@ fn request_event_matches_filters(
     }
     if let Some(model) = filters.model.as_deref()
         && !model_filter_matches(model, event.model.as_deref())
-    {
-        return false;
-    }
-    if let Some(upstream) = filters.upstream
-        && event.upstream != Some(upstream)
     {
         return false;
     }
@@ -1151,20 +872,6 @@ fn request_event_matches_filters(
         return false;
     }
     true
-}
-
-impl PostgresStorage {
-    pub async fn prune_request_events(&self, older_than: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM request_events_v1 WHERE ts < $1")
-            .bind(unix_secs_to_datetime(
-                older_than,
-                "request event prune cutoff",
-            )?)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
-    }
 }
 
 fn seconds_to_millis(value: u64, field: &str) -> StorageResult<i64> {

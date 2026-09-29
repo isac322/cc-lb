@@ -139,10 +139,6 @@ mod jobs {
                 })
             }
 
-            async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>> {
-                Ok(Vec::new())
-            }
-
             async fn query_usage_rollups_in_range(
                 &self,
                 _resolution: UsageRollupResolution,
@@ -154,13 +150,6 @@ mod jobs {
 
             async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
                 Ok(None)
-            }
-
-            async fn advance_rollup_checkpoint_and_persist(
-                &self,
-                _run: &UsageRollupRun,
-            ) -> StorageResult<()> {
-                Ok(())
             }
         }
 
@@ -190,10 +179,6 @@ mod jobs {
                 })
             }
 
-            async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>> {
-                Ok(Vec::new())
-            }
-
             async fn query_usage_rollups_in_range(
                 &self,
                 _resolution: UsageRollupResolution,
@@ -205,13 +190,6 @@ mod jobs {
 
             async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
                 Ok(None)
-            }
-
-            async fn advance_rollup_checkpoint_and_persist(
-                &self,
-                _run: &UsageRollupRun,
-            ) -> StorageResult<()> {
-                Ok(())
             }
         }
     }

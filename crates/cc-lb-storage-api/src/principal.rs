@@ -24,13 +24,10 @@ pub struct PrincipalRecord {
     pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
     pub enabled: bool,
-    pub last_apply_error: Option<String>,
-    pub last_apply_at_unix_secs: Option<u64>,
     pub deleted_at_unix_secs: Option<u64>,
     pub revision: u64,
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
-    #[serde(default)]
     pub router_terminal_strategy: cc_lb_domain::TerminalStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_keepalive: Option<CacheKeepaliveConfig>,
@@ -109,11 +106,4 @@ pub trait PrincipalStore: Send + Sync {
     ) -> StorageResult<Option<PrincipalRecord>>;
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<bool>;
-
-    async fn set_last_apply_error(
-        &self,
-        id: Uuid,
-        error: Option<String>,
-        applied_at_unix_secs: u64,
-    ) -> StorageResult<Option<PrincipalRecord>>;
 }

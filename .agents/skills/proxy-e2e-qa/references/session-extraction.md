@@ -10,7 +10,7 @@ Key correction preserved:
 
 Relevant paths from the source work:
 - `crates/cc-lb-server/src/app.rs`
-- `crates/cc-lb-core/src/lifecycle.rs`
+- `crates/cc-lb-engine/src/lifecycle.rs`
 - `crates/cc-lb-admin/web/vite.config.ts`
 - `crates/cc-lb-admin/web/src/lib/api.ts`
 - `crates/cc-lb-admin/web/src/routes/upstreams.tsx`

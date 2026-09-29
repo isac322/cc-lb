@@ -9,8 +9,8 @@
 //! 2. **Required exports per declared hook.** Every module requires
 //!    `memory`, `cc_lb_alloc`, `cc_lb_free`. On top of that each hook
 //!    listed in `cc_lb.plugin.v1` requires its matching export.
-//!    Signature validation is deferred to instantiate-time via
-//!    `instance.get_typed_func`.
+//!    Signature validation of `cc_lb_alloc` and the hook export is
+//!    deferred to call time via `instance.get_typed_func`.
 //! 3. **Schema fingerprints.** Each declared hook ships a
 //!    `cc_lb.schema.<hook>.v<N>` custom section holding the 32-byte
 //!    [`cc_lb_plugin_wire::WireSchema::FINGERPRINT`] for the matching
@@ -47,18 +47,6 @@ pub struct ModuleInspection {
     pub metadata: PluginMetadata,
     pub hook_versions: BTreeMap<HookKind, WireVersion>,
     pub hook_fingerprints: BTreeMap<HookKind, [u8; 32]>,
-}
-
-impl ModuleInspection {
-    /// Primary fingerprint — first declared hook fingerprint. Kept for
-    /// callers that still persist the historical single schema hash.
-    pub fn primary_schema_hash(&self) -> [u8; 32] {
-        self.hook_fingerprints
-            .values()
-            .next()
-            .copied()
-            .expect("PluginMetadata::parse guarantees at least one hook")
-    }
 }
 
 enum InspectionScope {
@@ -151,12 +139,6 @@ fn inspect_wasm_with_scope(
             .ok_or_else(|| WasmtimeRuntimeError::ModuleRejected {
                 reason: format!("missing required `{PLUGIN_META_SECTION}` custom section"),
             })?;
-    let metadata_json: serde_json::Value =
-        serde_json::from_slice(metadata_bytes).map_err(|error| {
-            WasmtimeRuntimeError::ModuleRejected {
-                reason: format!("invalid `{PLUGIN_META_SECTION}` metadata JSON: {error}"),
-            }
-        })?;
     let metadata = PluginMetadata::parse(metadata_bytes).map_err(|error| {
         WasmtimeRuntimeError::ModuleRejected {
             reason: format!("invalid `{PLUGIN_META_SECTION}` metadata: {error}"),
@@ -165,10 +147,8 @@ fn inspect_wasm_with_scope(
 
     reject_non_response_noop_modes(&metadata)?;
     match scope {
-        InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata, &metadata_json)?,
-        InspectionScope::DeclaredHooks => {
-            require_declared_hook_contracts(&metadata, &metadata_json)?
-        }
+        InspectionScope::Slot(kind) => require_hooks_for_slot(kind, &metadata)?,
+        InspectionScope::DeclaredHooks => require_declared_hook_contracts(&metadata)?,
     }
 
     if !found_memory_export {
@@ -261,22 +241,18 @@ fn inspect_wasm_with_scope(
 fn require_hooks_for_slot(
     kind: HookKind,
     metadata: &PluginMetadata,
-    metadata_json: &serde_json::Value,
 ) -> Result<(), WasmtimeRuntimeError> {
     match kind {
-        HookKind::Shape => require_shape_hook_contracts(metadata, metadata_json),
+        HookKind::Shape => require_shape_hook_contracts(metadata),
         HookKind::Filter => require_declared_hook(metadata, HookKind::Filter, "this slot"),
         HookKind::TransformResponse => reject_shape_owned_hook_as_slot(HookKind::TransformResponse),
         HookKind::TransformSseEvent => reject_shape_owned_hook_as_slot(HookKind::TransformSseEvent),
     }
 }
 
-fn require_declared_hook_contracts(
-    metadata: &PluginMetadata,
-    metadata_json: &serde_json::Value,
-) -> Result<(), WasmtimeRuntimeError> {
+fn require_declared_hook_contracts(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
     if metadata.hooks.contains_key(HookKind::Shape.as_str()) {
-        return require_shape_hook_contracts(metadata, metadata_json);
+        return require_shape_hook_contracts(metadata);
     }
 
     for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
@@ -292,22 +268,9 @@ fn require_declared_hook_contracts(
     Ok(())
 }
 
-fn require_shape_hook_contracts(
-    metadata: &PluginMetadata,
-    metadata_json: &serde_json::Value,
-) -> Result<(), WasmtimeRuntimeError> {
+fn require_shape_hook_contracts(metadata: &PluginMetadata) -> Result<(), WasmtimeRuntimeError> {
     for hook in SHAPE_OWNED_HOOKS {
         require_declared_hook(metadata, hook, "shape plugin")?;
-    }
-    for hook in [HookKind::TransformResponse, HookKind::TransformSseEvent] {
-        if !hook_mode_declared(metadata_json, hook) {
-            return Err(WasmtimeRuntimeError::ModuleRejected {
-                reason: format!(
-                    "shape plugin hook `{}` must explicitly declare mode `active` or `noop`",
-                    hook.as_str()
-                ),
-            });
-        }
     }
     Ok(())
 }
@@ -355,14 +318,6 @@ fn require_declared_hook(
     })
 }
 
-fn hook_mode_declared(metadata_json: &serde_json::Value, hook: HookKind) -> bool {
-    metadata_json
-        .get("hooks")
-        .and_then(|hooks| hooks.get(hook.as_str()))
-        .and_then(|hook_metadata| hook_metadata.get("mode"))
-        .is_some()
-}
-
 pub(crate) fn schema_section_name(hook: HookKind, version: WireVersion) -> String {
     format!("{}.{}", hook.section_prefix(), version.as_str())
 }
@@ -394,8 +349,6 @@ fn hex32(bytes: &[u8; 32]) -> String {
 }
 
 #[cfg(test)]
-mod filter_version_tests;
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -422,7 +375,7 @@ mod tests {
 
     fn metadata_section(hook: &str) -> Vec<u8> {
         format!(
-            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}"}}}}}}"#
+            r#"{{"name":"x","version":"0.0.1","description":"test plugin","usage":"test usage","hooks":{{"{hook}":{{"wire_version":1,"description":"{hook} hook","usage":"call {hook}","mode":"active"}}}}}}"#
         )
         .into_bytes()
     }
@@ -529,7 +482,6 @@ mod tests {
         let inspection = inspect_wasm(HookKind::Filter, &bytes).expect("filter plugin OK");
         assert_eq!(inspection.metadata.name, "x");
         assert_eq!(inspection.hook_fingerprints.len(), 1);
-        assert_eq!(inspection.primary_schema_hash().len(), 32);
         assert_eq!(inspection.hook_versions[&HookKind::Filter], WireVersion::V1);
     }
 
@@ -613,10 +565,7 @@ mod tests {
         );
         let err = inspect_wasm(HookKind::Shape, &bytes).expect_err("response mode required");
         let msg = format!("{err}");
-        assert!(
-            msg.contains("mode") && msg.contains("transform_response"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("missing field `mode`"), "got: {msg}");
     }
 
     #[test]

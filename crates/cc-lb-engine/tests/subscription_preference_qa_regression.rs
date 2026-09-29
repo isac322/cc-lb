@@ -168,7 +168,6 @@ fn oauth_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate 
         upstream_id: upstream_id(seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quota_snapshots(quota),
         observed_at_unix_secs: T0_SECS,
         cache_score: None,
@@ -297,7 +296,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 

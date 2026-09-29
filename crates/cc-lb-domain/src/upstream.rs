@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::{CacheScore, RateLimitObservation, SubscriptionQuotaCandidateSnapshot};
+use crate::{CacheScore, SubscriptionQuotaCandidateSnapshot};
 
 /// Upstream backends supported by the proxy routing contract.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -45,8 +45,6 @@ pub struct UpstreamCandidate {
     pub name: String,
     /// Upstream kind used to select compatible routing strategies.
     pub kind: UpstreamKind,
-    /// Latest rate-limit observations for this candidate.
-    pub observed_rate_limits: Vec<RateLimitObservation>,
     /// Latest subscription quota snapshots for this candidate.
     #[serde(default)]
     pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
@@ -70,18 +68,6 @@ pub struct UpstreamCandidate {
     /// Anthropic-reported seat tier for team plans.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat_tier: Option<String>,
-}
-
-/// Credential strategy expected by a selected upstream.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CredentialStrategy {
-    /// Anthropic-style `x-api-key` signing.
-    ApiKey,
-    /// Anthropic-style OAuth bearer signing.
-    OAuth,
-    /// Forward an internal credential supplied by upstream configuration.
-    InternalForwarded,
 }
 
 /// Stable registry id for the built-in subscription-preference router filter.

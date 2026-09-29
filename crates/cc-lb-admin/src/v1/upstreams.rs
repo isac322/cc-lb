@@ -27,11 +27,10 @@ use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
+    OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaSample,
     SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupAttemptTrigger,
-    WarmupDispatchKind, WarmupPermanentFailureReason, WarmupSkipReason,
-    WarmupTransientFailureReason,
+    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -926,7 +925,7 @@ async fn fire_now_upstream_warmup_inner(
         let client = warmup_http_client();
         match tokio::time::timeout(
             Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
-            dispatch_fire_now_warmup(&client, &access_token, &base_url, &holder),
+            dispatch_fire_now_warmup(&client, &access_token, &base_url),
         )
         .await
         {
@@ -945,8 +944,6 @@ async fn fire_now_upstream_warmup_inner(
             storage: storage.as_ref(),
             upstream: &upstream,
             scheduled_for_unix_secs: now_unix_secs,
-            trigger: WarmupAttemptTrigger::Manual,
-            replica_id: None,
             lease_holder: Some(holder.as_str()),
             expected_cycle_key: Some(candidate_cycle_key),
             attempted_at_unix_secs: now_unix_secs,
@@ -1012,7 +1009,7 @@ fn fire_now_not_fired_response(status: StatusCode, outcome: WarmupAttemptOutcome
 async fn latest_five_hour_quota(
     storage: &dyn Storage,
     upstream_id: Uuid,
-) -> Result<Option<SubscriptionQuotaLatestRecord>, UpstreamError> {
+) -> Result<Option<SubscriptionQuotaSample>, UpstreamError> {
     let latest = storage
         .list_latest_subscription_quota_for_upstreams(&[upstream_id])
         .await?;
@@ -1022,7 +1019,7 @@ async fn latest_five_hour_quota(
         .max_by_key(|record| record.observed_at_unix_millis))
 }
 
-fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaLatestRecord) -> Option<i64> {
+fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaSample) -> Option<i64> {
     latest
         .resets_at_unix_secs
         .and_then(|resets_at| i64::try_from(resets_at).ok())
@@ -1032,9 +1029,8 @@ async fn dispatch_fire_now_warmup(
     client: &WarmupHttpClient,
     access_token: &str,
     base_url: &Url,
-    holder: &str,
 ) -> FireNowDispatchAttempt {
-    let request = match build_fire_now_warmup_request(access_token, base_url, holder) {
+    let request = match build_fire_now_warmup_request(access_token, base_url) {
         Ok(request) => request,
         Err(error) => {
             return FireNowDispatchAttempt::PermanentFailure {
@@ -1063,7 +1059,6 @@ async fn dispatch_fire_now_warmup(
 fn build_fire_now_warmup_request(
     access_token: &str,
     base_url: &Url,
-    _holder: &str,
 ) -> Result<Request<Full<Bytes>>, String> {
     let url = base_url
         .join("v1/messages")
@@ -1223,8 +1218,6 @@ async fn record_fire_now_skip(
             storage,
             upstream,
             scheduled_for_unix_secs: now_unix_secs,
-            trigger: WarmupAttemptTrigger::Manual,
-            replica_id: None,
             lease_holder: None,
             expected_cycle_key: None,
             attempted_at_unix_secs: now_unix_secs,
@@ -1260,8 +1253,6 @@ async fn record_fire_now_failure(
             storage,
             upstream,
             scheduled_for_unix_secs: now_unix_secs,
-            trigger: WarmupAttemptTrigger::Manual,
-            replica_id: None,
             lease_holder: holder,
             expected_cycle_key: Some(candidate_cycle_key),
             attempted_at_unix_secs: now_unix_secs,
@@ -2092,11 +2083,10 @@ mod tests {
     use cc_lb_control::api_keys::limit_engine::LimitEngine;
     use cc_lb_control::api_keys::principal_view::PrincipalView;
     use cc_lb_control::{
-        DynamicView, DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError,
-        RouterPlugin, RoutingContext, UpstreamStatusSnapshot,
+        DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
     };
-    use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-    use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
+    use cc_lb_domain::Upstream;
+    use cc_lb_storage_api::{MetaStore, UpstreamStore};
     use cc_lb_upstream::{
         ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
         SignerFactory, SigningCapability, UpstreamError,
@@ -2109,16 +2099,13 @@ mod tests {
 
     type TestStorage = cc_lb_storage_sqlite::SqliteStorage;
 
-    const TEST_FIRE_NOW_HOLDER: &str = "fire-now:00000000-0000-4000-8000-000000000000";
-
-    fn fire_now_warmup_request(holder: &str) -> Request<Full<Bytes>> {
+    fn fire_now_warmup_request() -> Request<Full<Bytes>> {
         let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
-        build_fire_now_warmup_request("test-token", &base_url, holder)
-            .expect("request builds successfully")
+        build_fire_now_warmup_request("test-token", &base_url).expect("request builds successfully")
     }
 
-    async fn fire_now_warmup_body_from_request(holder: &str) -> Value {
-        let bytes = fire_now_warmup_request(holder)
+    async fn fire_now_warmup_body_from_request() -> Value {
+        let bytes = fire_now_warmup_request()
             .into_body()
             .collect()
             .await
@@ -2129,7 +2116,7 @@ mod tests {
 
     #[test]
     fn fire_now_request_shape_includes_minimal_headers() {
-        let request = fire_now_warmup_request(TEST_FIRE_NOW_HOLDER);
+        let request = fire_now_warmup_request();
 
         assert_eq!(request.uri().path(), "/v1/messages");
         assert_eq!(request.method(), Method::POST);
@@ -2145,7 +2132,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_request_shape_has_no_system_or_tools_or_stream() {
-        let body = fire_now_warmup_body_from_request(TEST_FIRE_NOW_HOLDER).await;
+        let body = fire_now_warmup_body_from_request().await;
 
         assert!(body.get("system").is_none());
         assert_eq!(body.get("max_tokens"), Some(&json!(1)));
@@ -2155,7 +2142,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_request_shape_has_no_metadata() {
-        let body = fire_now_warmup_body_from_request(TEST_FIRE_NOW_HOLDER).await;
+        let body = fire_now_warmup_body_from_request().await;
 
         assert!(body.get("metadata").is_none());
     }
@@ -2209,21 +2196,6 @@ mod tests {
 
         async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
             RetryDecision::Fail
-        }
-    }
-
-    struct TestRouter;
-
-    impl RouterPlugin for TestRouter {
-        fn route(
-            &self,
-            _ctx: &RoutingContext,
-            _principal: &Principal,
-            _candidates: &[UpstreamCandidate],
-        ) -> Result<RouteDecision, RouteError> {
-            Err(RouteError::NoRoute {
-                reason: "test router has no route".to_owned(),
-            })
         }
     }
 
@@ -2291,13 +2263,6 @@ mod tests {
                     WarmupAttemptOutcome::Skipped(reason),
                     cycle_key,
                     error_detail.map(str::to_owned),
-                ),
-                crate::ports::WarmupAttemptResult::PreflightActiveWindow { cycle_key } => (
-                    WarmupAttemptOutcome::Success(
-                        cc_lb_storage_api::WarmupSuccessReason::WindowAlreadyActive,
-                    ),
-                    Some(cycle_key),
-                    None,
                 ),
             };
             crate::ports::WarmupAttemptOutcomeSnapshot {
@@ -2400,10 +2365,7 @@ mod tests {
             cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage opens");
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("storage initializes");
+        storage.initialize().await.expect("storage initializes");
         let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
         let state = AdminState {
@@ -2420,7 +2382,6 @@ mod tests {
                 warmup: Some(Arc::new(TestWarmupPort)),
                 ..crate::AdminPorts::default()
             }),
-            subscription_metadata_hook: None,
             lazy_refresher: None,
             runtime: None,
             data_dir: None,
@@ -2447,7 +2408,6 @@ mod tests {
         let principal_view = Arc::new(PrincipalView::from_db(&[], HashMap::new()));
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(TestSignerFactory))
-            .global_router(Arc::new(TestRouter))
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

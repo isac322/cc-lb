@@ -245,7 +245,6 @@ export function computeLatencyAttribution(
   const bulkheadWaitMs = timingField(event, 'bulkhead_wait_ms') ?? 0;
   const dnsMs = timingField(event, 'dns_ms') ?? 0;
   const connectMs = timingField(event, 'connect_ms') ?? 0;
-  const limitReconcileMs = timingField(event, 'limit_reconcile_ms') ?? 0;
   const proxySetupValue = timingField(event, 'proxy_setup_ms');
   const hasSetupBreakdown = hasSetupTimingBreakdown(event);
   const proxySetupMs =
@@ -256,7 +255,7 @@ export function computeLatencyAttribution(
       (hasSetupBreakdown
         ? setupTimingTotal(event)
         : deriveSetupOverhead(event));
-  const finalizationMs = timingField(event, 'finalize_ms') ?? limitReconcileMs;
+  const finalizationMs = timingField(event, 'finalize_ms') ?? 0;
   const upstreamHeaderWaitMs = Math.max(
     0,
     (timingField(event, 'upstream_ttfb_ms') ?? 0) -
@@ -357,7 +356,6 @@ export function computeLatencyAttribution(
         timingField(event, 'bulkhead_wait_ms'),
         responseBodyProcessValue,
         timingField(event, 'finalize_ms'),
-        timingField(event, 'limit_reconcile_ms'),
       ].some((value) => value != null) || hasSetupBreakdown,
     ],
     [
@@ -488,7 +486,7 @@ export function computeStageGroups(e: RequestEventWithPhase): StageGroups {
   );
   const upstream = (e.connect_ms ?? 0) + upstreamPostHandshake;
   const body = responseBodyDuration(e);
-  const internalPost = e.finalize_ms ?? e.limit_reconcile_ms ?? 0;
+  const internalPost = e.finalize_ms ?? 0;
   const accounted = internalPre + wait + upstream + body + internalPost;
   const rawResidual = total - accounted;
   const unaccounted = Math.max(0, rawResidual);

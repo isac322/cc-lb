@@ -256,7 +256,6 @@ function editorResponse(): ConfigEditorResponse {
         effective_value: 9100,
       },
     ],
-    restart_required: true,
   };
 }
 

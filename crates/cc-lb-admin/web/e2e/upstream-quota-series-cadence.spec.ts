@@ -170,7 +170,7 @@ async function installAppFixtures(
         ],
       });
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       const untilUnixSecs = Math.floor(INITIAL_TIME.getTime() / 1000);
       return json(200, {
         range: url.searchParams.get('range') ?? '24h',
@@ -182,7 +182,7 @@ async function installAppFixtures(
         series: [],
       });
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     if (pathname === '/admin/v1/subscription-quotas/latest') {

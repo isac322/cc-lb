@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove `PluginCell::version_id`; hot-swap identity is `content_hash` plus `ArcSwap` pointer identity.
+- Remove `LoadedPluginSlot::name`; `LoadedPluginSlot::new` now takes `(kind, initial)`. The plugin name lives on `PluginCell::plugin_name`.
+- Remove `compile_module`; use `admit_wasm` / `admit_wasm_agnostic` or `WasmtimeRuntime::register_*`.
+- Remove the crate-root re-exports `DEFAULT_ALIGN`, `call_filter_hook`, `call_shape_hook`, and `call_observe_hook`; dispatch through `WasmPluginWireDispatch` or `WasmtimeRuntime::call_*`.
+- Remove `WasmPluginWireDispatch::call_filter` and `call_shape`; use `call_filter_scoped` / `call_shape_scoped`.
+- Remove `impl Default for HostState`; use `HostState::new(memory_max_pages)`.
+- Remove `ModuleInspection::primary_schema_hash`; use `hook_fingerprints`.
+- Plugin metadata must declare `mode` on every hook (see `cc-lb-plugin-wire`).
+- Remove the `SlotKind` alias; use `HookKind`.
+- Remove the `WasmtimeRuntime::admit_wasm(kind, bytes)` method; use the free `admit_wasm(engine, linker, kind, bytes, config)` or `WasmtimeRuntime::admit_wasm_agnostic`.
+
 ## [0.1.4](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.3...cc-lb-runtime-wasmtime-v0.1.4) - 2026-07-15
 
 ### Added

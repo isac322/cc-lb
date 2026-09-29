@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use cc_lb_storage_api::{CacheKeepaliveConfig, CacheTtl};
 
-use crate::api_keys::limit_engine::Reservation;
 use crate::attempt_rail::ResponseAccountingGuard;
+use cc_lb_control::api_keys::limit_engine::Reservation;
 
 use super::request_snapshot::RequestSnapshot;
 

@@ -288,9 +288,7 @@ function AuditPage() {
     const entries = (audit.data?.entries ?? []) as unknown as AuditEntryLike[];
     const identityOccurrences = new Map<string, number>();
     return entries
-      .filter(
-        (r) => (r.admin_action ?? null) != null || (r.kind ?? null) != null,
-      )
+      .filter((r) => (r.admin_action ?? null) != null)
       .map((entry): AuditRow => {
         const identity = JSON.stringify([
           entry.request_id,
@@ -301,7 +299,6 @@ function AuditPage() {
           entry.route ?? null,
           entry.upstream ?? null,
           entry.admin_action ?? null,
-          entry.kind ?? null,
           entry.status,
         ]);
         const occurrence = identityOccurrences.get(identity) ?? 0;
@@ -676,9 +673,7 @@ function AuditPage() {
                         <div className="flex min-w-0 items-baseline gap-1.5 text-caption text-text-faint">
                           <span
                             className="min-w-0 shrink-0 truncate font-mono text-data @4xl:shrink"
-                            title={
-                              entry.admin_action ?? entry.kind ?? undefined
-                            }
+                            title={entry.admin_action ?? undefined}
                           >
                             {parsed.name}
                           </span>

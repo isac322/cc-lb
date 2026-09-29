@@ -707,10 +707,8 @@ matches the row count 1:1. No behaviour change. ~400 LOC.
   legacy rows carry `event_id = <legacy uuid>, shadow_event_id = NULL`.
   This lets both paths coexist without collision on the partial unique
   index.
-- During the migration phase, the shadow writer was enabled for an overnight
-  comparison before the clean cutover.
-- Add a comparison SQL query documented in `docs/runbook/lifecycle-shadow.md`
-  that diffs shadow vs legacy rows for the same `request_id`.
+- Compare shadow vs legacy rows for the same `request_id` with a diff SQL
+  query before the clean cutover.
 
 **Deliverable**: both paths writing rows in shadow mode. `error_code`,
 `status`, `event_id` present on both. ~600 LOC + 2 migrations. Legacy path

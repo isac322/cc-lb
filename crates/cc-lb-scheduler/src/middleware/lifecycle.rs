@@ -19,7 +19,6 @@ pub enum JobOutcomeStatus {
     Retry,
     Skip,
     Panicked,
-    DuplicateEffect,
     Noop,
 }
 
@@ -31,7 +30,6 @@ impl JobOutcomeStatus {
             Self::Retry => "retry",
             Self::Skip => "skip",
             Self::Panicked => "panicked",
-            Self::DuplicateEffect => "duplicate_effect",
             Self::Noop => "noop",
         }
     }
@@ -66,7 +64,6 @@ impl SchedulerMetricPayload for CronJob {
         match self {
             Self::UsageRollup(_) => "cron:usage_rollup",
             Self::UsagePrune(_) => "cron:usage_prune",
-            Self::QuotaGc(_) => "cron:quota_gc",
             Self::PromptCachePurge(_) => "cron:prompt_cache_purge",
             Self::UpstreamAffinityPurge(_) => "cron:upstream_affinity_purge",
             Self::PriceCatalogRefresh(_) => "cron:price_catalog_refresh",

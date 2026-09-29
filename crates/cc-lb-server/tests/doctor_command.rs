@@ -2,8 +2,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlotKind, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
+    MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
+    WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalStore},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -25,11 +25,16 @@ async fn list_abandoned_chain_entries_empty_storage_outputs_empty_report() -> an
 }
 
 #[tokio::test]
-async fn list_abandoned_chain_entries_reports_empty_supported_slots() -> anyhow::Result<()> {
+async fn list_abandoned_chain_entries_reports_unsupported_slot() -> anyhow::Result<()> {
     let (dir, storage) = open_storage().await?;
     let principal_id = create_principal(&storage, "doctor-abandoned-principal").await?;
-    let registry_entry =
-        upload_plugin(&storage, "doctor-abandoned-plugin", [11; 32], Vec::new()).await?;
+    let registry_entry = upload_plugin(
+        &storage,
+        "doctor-abandoned-plugin",
+        [11; 32],
+        vec![PluginSlotKind::Shape],
+    )
+    .await?;
     let chain_entry = insert_router_chain(&storage, principal_id, registry_entry.id, 300).await?;
     let path = storage_path(&dir);
     drop(storage);
@@ -87,10 +92,10 @@ async fn open_sqlite_storage(path: &Path) -> anyhow::Result<SqliteStorage> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = cc_lb_storage_sqlite::open_sqlite(
         &database_url,
-        std::sync::Arc::new(cc_lb_engine::SystemClock),
+        std::sync::Arc::new(cc_lb_clock::SystemClock),
     )
     .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
@@ -128,10 +133,8 @@ async fn upload_plugin(
                 sha256,
                 size_bytes: bytes.len() as u64,
                 bytes,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),

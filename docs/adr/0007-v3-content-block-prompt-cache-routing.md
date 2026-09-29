@@ -3,14 +3,14 @@
 - Status: Proposed
 - Date: 2026-07-08
 - Ships with: pending
-- Supersedes: ADR 0006's transitional exact-prefix/thread-memory merge, ADR 0005's thread-keyed cache-positive WRH keying, and every v1/v2 prompt-cache routing assumption.
-- Research source: `.omo/ulw-research/20260708-v3-cache-research/`.
+- Supersedes: ADR 0006's transitional exact-prefix/thread-memory merge, the retired thread-keyed cache-positive WRH keying, and every v1/v2 prompt-cache routing assumption.
+- Research source: internal design notes are not included in the public tree.
 - Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>.
 - Retrieved: 2026-07-27.
 
 ## Context
 
-The v10 cold-stuck investigation found seven stuck cache-positive cases whose behavior could not be explained by exact-prefix math. The observed pattern was `predicted_cache_read_tokens > 0` with `predicted_cache_creation_tokens_* = 0` in situations where local exact-prefix matching alone should have produced a creation-only score. Cross-checking the frozen local database (`/home/example/.local/share/cc-lb/storage.sqlite`) showed the active routing input was thread lineage, not exact prefix state.
+The v10 cold-stuck investigation found several stuck cache-positive cases whose behavior could not be explained by exact-prefix math. The observed pattern was `predicted_cache_read_tokens > 0` with `predicted_cache_creation_tokens_* = 0` in situations where local exact-prefix matching alone should have produced a creation-only score. Cross-checking a local database showed the active routing input was thread lineage, not exact prefix state.
 
 Thread lineage was valuable as a post-route hint, but it was also the source of the bug class: `select_cache_score_by_value(exact_score, thread_score)` could select a lineage-derived `CacheScore`, and `subscription_preference` used `thread_id` as the WRH routing key whenever a bucket had positive priced cache value. That pinned or scattered traffic by caller session identity rather than by a provider-cacheable prefix. It also made the router appear warm even when the local prefix simulator did not know which provider-cacheable prefix would be read.
 

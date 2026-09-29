@@ -10,20 +10,21 @@ use std::time::Duration;
 
 use ::http::{HeaderMap, HeaderValue, Method};
 use bytes::Bytes;
+use cc_lb_clock::SystemClock;
 use cc_lb_config::{SchedulerConfig, StorageConfig};
+use cc_lb_control::DynamicViewBuilder;
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::cache_keepalive::{
     AnthropicKeepaliveDispatcher, CacheKeepaliveEnqueueRequest, KeepaliveDispatcher,
     RequestSnapshot, ScheduleParams,
 };
-use cc_lb_engine::{DynamicViewBuilder, SystemClock};
 use cc_lb_runtime_wasmtime::HotEngineConfig;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, Filter, TaskStatus};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
-use cc_lb_storage_api::{BackendKind, CacheTtl, MetaStore, PrincipalStore, UpstreamStore};
+use cc_lb_storage_api::{CacheTtl, MetaStore, PrincipalStore, UpstreamStore};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -36,7 +37,7 @@ use crate::dynamic_view_builder::Stores;
 pub(super) use fakes::{FailingPusher, RecordingHttp};
 
 use self::data::{principal_record_with_id, principal_with_keepalive};
-use self::fakes::{NoRouteRouter, RecordingSignerFactory};
+use self::fakes::RecordingSignerFactory;
 
 pub(super) struct Fixture {
     _dir: TempDir,
@@ -66,10 +67,7 @@ impl Fixture {
                 .await
                 .expect("open sqlite"),
         );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
+        storage.initialize().await.expect("initialize sqlite");
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
@@ -102,7 +100,6 @@ impl Fixture {
                 .signer_factory(Arc::new(RecordingSignerFactory {
                     calls: Arc::clone(&signer_calls),
                 }))
-                .global_router(Arc::new(NoRouteRouter))
                 .principal_view(Arc::new(PrincipalView::from_db(
                     &[principal_record_with_id("principal")],
                     std::collections::HashMap::new(),

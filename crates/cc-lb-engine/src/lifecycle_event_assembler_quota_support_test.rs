@@ -52,18 +52,12 @@ fn quota_trace(
             subscription_preference: Some(SubscriptionPreferenceTrace {
                 chosen_tier: SubscriptionTier::KnownBase,
                 candidates,
-                previous_tier: None,
                 formula_version: None,
                 cache_cost_basis_version: None,
                 formula_winner_upstream_id: Some(formula_winner_upstream_id),
                 kept_upstream_id: Some(resolved_upstream_id),
-                incumbent_upstream_id: Some(resolved_upstream_id),
-                estimated_switch_cache_loss_micros: None,
-                cache_loss_status: None,
                 switch_gate_reason: Some("kept_incumbent".to_owned()),
                 bucket_v3_cache_key: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
         }],
         terminal_decision: Some(TerminalDecision {
@@ -104,8 +98,6 @@ fn route_info_from_trace(resolved_upstream_id: Uuid, routing_trace: RoutingTrace
         quota_urgency_7d: selected_fields.urgency_7d,
         quota_urgency_combined: selected_fields.urgency_combined,
         quota_warning_multiplier: selected_fields.warning_multiplier,
-        lineage_would_have_predicted_read_tokens: None,
-        lineage_would_have_picked_upstream_id: None,
     }
 }
 
@@ -131,14 +123,12 @@ async fn assemble_route(
     event_id: &str,
     route: RouteInfo,
 ) -> (RequestEventPartial, RequestEvent, RequestEvent) {
-    use crate::event_bus::InMemoryBus;
+    use cc_lb_control::event_bus::InMemoryBus;
 
     let (tx, rx) = mpsc::channel(8);
     let store = Arc::new(CapturingStore::default());
     let bus = Arc::new(InMemoryBus::new());
-    let BusReceiver::InMemory(mut updates) = bus.subscribe() else {
-        panic!("expected in-memory request event receiver");
-    };
+    let mut updates = bus.subscribe();
     let handle = spawn_request_event_assembler(
         rx,
         store.clone(),
@@ -170,7 +160,6 @@ async fn assemble_route(
     duration_ms: 42,
     first_body_chunk_ms: None,
     internal_errors: Vec::new(),
-    limit_reconcile_ms: None,
     proxy_setup_ms: None,
     request_body_read_ms: None,
     request_body_bytes: None,

@@ -1,8 +1,8 @@
 use std::{str::FromStr, sync::Arc, time::Duration};
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore,
-    RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tokio::time::timeout;
@@ -24,10 +24,7 @@ async fn storage() -> (
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (temp_dir, database_url, storage)
 }
 
@@ -44,6 +41,7 @@ fn sqlite_url(temp_dir: &tempfile::TempDir) -> String {
 fn event(event_id: &str) -> RequestEvent {
     RequestEvent {
         ts: 1_800_000_000,
+        ts_ms: Some(1_800_000_000_000),
         request_id: "renewal-request".to_owned(),
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some("session-hash:7".to_owned()),

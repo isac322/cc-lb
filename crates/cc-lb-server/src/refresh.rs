@@ -4,9 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::clock::{Clock, ClockHandle, unix_secs};
-use cc_lb_engine::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
+use cc_lb_control::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -855,7 +855,6 @@ async fn emit_audit(
         actor_subject: Some(subject),
         actor_kind: Some(kind),
         actor_email: email,
-        kind: Some(payload.to_string()),
         payload: None,
     };
     if let Err(error) = audit.append_audit(&entry).await {
@@ -893,7 +892,7 @@ fn lazy_scheduler_error(error: cc_lb_scheduler::error::SchedulerError) -> LazyRe
     }
 }
 
-fn lazy_metadata_hook_error(error: cc_lb_engine::MetadataHookEnqueueError) -> LazyRefreshError {
+fn lazy_metadata_hook_error(error: cc_lb_control::MetadataHookEnqueueError) -> LazyRefreshError {
     LazyRefreshError::Failed {
         reason: error.to_string(),
     }
@@ -938,11 +937,11 @@ mod tests {
     use axum::routing::post;
     use axum::{Json, Router};
     use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_clock::{ClockHandle, TestClock};
     use cc_lb_config::AnthropicOAuthConfig;
-    use cc_lb_engine::clock::{ClockHandle, TestClock};
     use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
     use cc_lb_storage_api::upstream::UpstreamKind;
-    use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
+    use cc_lb_storage_api::{MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
     use tokio::net::TcpListener;
     use tokio::sync::{Notify, watch};
     use tokio_util::sync::CancellationToken;
@@ -1123,15 +1122,12 @@ mod tests {
             let storage = Arc::new(
                 cc_lb_storage_sqlite::open_sqlite(
                     &database_url,
-                    Arc::new(cc_lb_engine::SystemClock),
+                    Arc::new(cc_lb_clock::SystemClock),
                 )
                 .await
                 .expect("storage opens"),
             );
-            storage
-                .initialize(BackendKind::Sqlite)
-                .await
-                .expect("storage initializes");
+            storage.initialize().await.expect("storage initializes");
             let scheduler_db_url =
                 format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
             use std::str::FromStr as _;
@@ -1150,7 +1146,7 @@ mod tests {
             let scheduler_backend =
                 SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerBackend::new(
                     scheduler_pool,
-                    Arc::new(cc_lb_engine::SystemClock),
+                    Arc::new(cc_lb_clock::SystemClock),
                 ));
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),

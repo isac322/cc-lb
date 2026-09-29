@@ -182,8 +182,8 @@ When a job exhausts its retry class, it remains in a terminal `Failed` or `Kille
 The scheduler emits a comprehensive set of Prometheus metrics to monitor health and performance. These metrics are defined in `crates/cc-lb-scheduler/src/scheduler_metrics.rs`.
 
 - `cclb_scheduler_jobs_total` (Counter): Tracks job lifecycle events.
-  - Labels: `job_type`, `status` (started, done, retry, skip, panicked, duplicate_effect, noop)
-  - Cardinality: bounded registered job types * 7 statuses; includes `adaptive:cache_keepalive`.
+  - Labels: `job_type`, `status` (started, done, retry, skip, panicked, noop)
+  - Cardinality: bounded registered job types * 6 statuses; includes `adaptive:cache_keepalive`.
 - `cclb_scheduler_job_duration_seconds` (Histogram): Tracks job handler execution duration.
   - Labels: `job_type`
   - Cardinality: 12
@@ -228,7 +228,7 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
   2. Inspect `apalis.jobs` for the affected `job_type` and idempotency key pattern; a stuck row will show `status = 'Running'` with a stale `run_at`.
   3. Check the logs for database connection errors or lock contention.
   4. Verify that the worker threads are not blocked by long-running external HTTP calls.
-- **Resolution**: Restart the scheduler workers or trigger a manual reconciliation via `POST /admin/scheduler/reconcile`.
+- **Resolution**: Restart the scheduler workers; the watchdog and enqueue paths create new work with a new idempotency key.
 
 ### Duplicate Effect
 - **Symptom**: Multiple warmup requests or token refreshes are observed for the same cycle.

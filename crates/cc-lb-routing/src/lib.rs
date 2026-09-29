@@ -4,13 +4,11 @@
 #![warn(missing_docs)]
 
 mod context;
-mod error;
 mod traits;
 mod types;
 
 pub use context::RoutingContext;
-pub use error::RouteError;
-pub use traits::{FilterError, FilterOutput, FilterPlugin, RouterPlugin};
+pub use traits::{FilterError, FilterOutput, FilterPlugin};
 pub use types::{PerCandidateReason, RouteDecision};
 
 #[cfg(test)]

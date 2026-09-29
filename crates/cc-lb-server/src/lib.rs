@@ -15,14 +15,12 @@ pub(crate) mod cache_keepalive_payload;
 pub mod chaos;
 pub mod cli;
 pub mod doctor;
-pub mod drain;
 pub mod dynamic_view_builder;
 pub(crate) mod local_storage_path;
 pub mod notify_listener;
 mod plugin_manifest;
 pub mod preflight;
 pub mod prompt_cache_observation_sink;
-pub mod prompt_cache_thread_usage;
 pub mod reconcile;
 pub mod refresh;
 pub mod replica;
@@ -45,4 +43,4 @@ pub(crate) use plugin_manifest::PluginManifest;
 pub use scheduler_factory::{
     OpenedScheduler, SchedulerBackend, SchedulerFactoryError, open_scheduler_storage,
 };
-pub use subscription_quota_cache::{MergedQuotaSnapshot, MergedSource, SubscriptionQuotaCache};
+pub use subscription_quota_cache::SubscriptionQuotaCache;

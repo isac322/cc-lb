@@ -47,7 +47,7 @@ JSON
 
 ## 1. Context data
 
-The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `input_cost_per_token=0.000001` and `output_cost_per_token=0.000001`. The fake non-streaming Anthropic response reports exactly `usage.input_tokens=100` and `usage.output_tokens=20`. Therefore, one completed request must add exactly `virtual_cost_micros=120` to `/admin/usage`.
+The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `input_cost_per_token=0.000001` and `output_cost_per_token=0.000001`. The fake non-streaming Anthropic response reports exactly `usage.input_tokens=100` and `usage.output_tokens=20`. Therefore, one completed request must add exactly `virtual_cost_micros=120` to `/admin/v1/usage`.
 
 ## 2. Deterministic state mutation, THE ENGINE
 
@@ -67,13 +67,13 @@ The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `in
     -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
     -H 'x-request-id: c4-v1-0001' --data-binary "@$QA_ROOT/message.json"
   curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
-    "$QA_ADMIN/admin/usage?range=1h&step=minute&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
+    "$QA_ADMIN/admin/v1/usage?range=1h&step=minute&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
     -o "$QA_ROOT/c4-usage-v1.json"
   curl -fsS "$QA_FIXTURE/catalog" -o "$QA_ROOT/c4-catalog-unchanged.json"
   jq -e '.observed == true and ([.series[].buckets[].virtual_cost_micros] | add == 120)' "$QA_ROOT/c4-usage-v1.json"
   jq -e '.revision == 1 and .served_document == "catalog-v1"' "$QA_ROOT/c4-catalog-unchanged.json"
   ```
-- **Expected observable result:** The proxied request and `/admin/usage` both return `200`. Usage is observed and the only bucket total is exactly `virtual_cost_micros:120`. Re-reading an unchanged catalog leaves fixture revision `1` and the same usage price. No changed or missing fallback is invented.
+- **Expected observable result:** The proxied request and `/admin/v1/usage` both return `200`. Usage is observed and the only bucket total is exactly `virtual_cost_micros:120`. Re-reading an unchanged catalog leaves fixture revision `1` and the same usage price. No changed or missing fallback is invented.
 
 ## 4. Part B, State-transition cases
 
@@ -90,7 +90,7 @@ The fixture catalog at `$QA_FIXTURE/catalog` starts with `qa-price-model` at `in
     -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' \
     -H 'x-request-id: c4-v2-0002' --data-binary "@$QA_ROOT/message.json"
   curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
-    "$QA_ADMIN/admin/usage?range=1h&step=minute&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
+    "$QA_ADMIN/admin/v1/usage?range=1h&step=minute&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
     -o "$QA_ROOT/c4-usage-v2.json"
   jq -e '.revision == 2 and .served_document == "catalog-v2"' "$QA_ROOT/c4-catalog-after-refresh.json"
   jq -e '.observed == true and ([.series[].buckets[].virtual_cost_micros] | add == 380)' "$QA_ROOT/c4-usage-v2.json"

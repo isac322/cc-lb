@@ -32,6 +32,5 @@ impl Limit {
 pub enum KeyStatus {
     #[default]
     Active,
-    Disabled,
     Revoked,
 }
