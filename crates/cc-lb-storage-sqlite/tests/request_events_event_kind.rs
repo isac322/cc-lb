@@ -394,10 +394,17 @@ async fn event_kind_roundtrips_through_event_reads() {
         .expect("event present");
     assert_eq!(stored.event_kind, Some(RequestEventKind::CountTokens));
 
-    let recent = storage
-        .query_recent_request_events(BASE - 10, BASE + 10, 10)
+    let cursor = storage
+        .current_request_event_cursor()
         .await
-        .expect("recent events");
-    assert_eq!(recent.len(), 1);
-    assert_eq!(recent[0].event_kind, Some(RequestEventKind::CountTokens));
+        .expect("current cursor");
+    let streamed = storage
+        .query_request_events_between_cursors(0, cursor, 10, &RequestEventStreamFilters::default())
+        .await
+        .expect("cursor events");
+    assert_eq!(streamed.len(), 1);
+    assert_eq!(
+        streamed[0].1.event_kind,
+        Some(RequestEventKind::CountTokens)
+    );
 }

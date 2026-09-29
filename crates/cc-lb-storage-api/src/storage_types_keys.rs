@@ -46,7 +46,6 @@ pub struct ApiKeyMutation {
     pub description: Option<Option<String>>,
     pub expires_at_unix_secs: Option<Option<u64>>,
     pub limit_overrides: Option<Vec<Limit>>,
-    pub status: Option<KeyStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

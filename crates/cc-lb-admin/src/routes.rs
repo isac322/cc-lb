@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, Path, Query, State},
+    extract::{Extension, Query, State},
     http::{HeaderValue, Response, StatusCode, header},
     middleware,
     response::IntoResponse,
@@ -17,29 +17,11 @@ use crate::{
     AdminState,
     audit::{AdminAuditEvent, record_admin_audit},
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
-    principals::principal_key_usage,
     static_assets::{serve_asset, serve_index},
 };
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
-        .route("/admin/principals/{id}/keys/{key_id}", get(get_api_key))
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/revoke",
-            post(revoke_api_key),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/disable",
-            post(disable_api_key),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/enable",
-            post(enable_api_key),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/usage",
-            get(principal_key_usage),
-        )
         .route("/admin/v1/audit", get(query_audit))
         .route("/admin/v1/config/editor", get(get_config_editor))
         .route(
@@ -147,131 +129,6 @@ fn validation_field_from_message(message: &str) -> Option<String> {
         .nth(1)
         .filter(|field| !field.is_empty())
         .map(ToOwned::to_owned)
-}
-
-async fn get_api_key(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path((principal_id, key_id)): Path<(String, String)>,
-) -> Result<Json<Value>, StatusCode> {
-    authorize(&identity, AdminAction::SensitiveRead).map_err(|_| StatusCode::FORBIDDEN)?;
-    let key_store = state
-        .key_store
-        .as_ref()
-        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    let record = key_store
-        .get(&principal_id, &key_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(json!({
-        "id": key_id,
-        "principal_id": principal_id,
-        "label": record.label,
-        "status": record.status,
-        "last_4": record.last_4,
-        "expires_at_unix_secs": record.expires_at_unix_secs,
-    })))
-}
-
-async fn disable_api_key(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path((principal_id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    mutate_api_key(&state, &identity, &principal_id, &key_id, false).await
-}
-
-async fn enable_api_key(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path((principal_id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    mutate_api_key(&state, &identity, &principal_id, &key_id, true).await
-}
-
-async fn revoke_api_key(
-    State(state): State<AdminState>,
-    Extension(identity): Extension<AdminIdentity>,
-    Path((principal_id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    let Some(key_store) = state.key_store.as_ref() else {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
-    };
-    if key_store.revoke(&principal_id, &key_id).await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    let action = "principal_key_revoke";
-    let route = format!("/admin/principals/{principal_id}/keys/{key_id}/revoke");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: &route,
-            target_principal_id: Some(&principal_id),
-            target_upstream: None,
-            api_key_id: Some(&key_id),
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        return audit_write_failed_response(action, &error);
-    }
-
-    Json(json!({ "status": "ok" })).into_response()
-}
-
-async fn mutate_api_key(
-    state: &AdminState,
-    identity: &AdminIdentity,
-    principal_id: &str,
-    key_id: &str,
-    enable: bool,
-) -> axum::response::Response {
-    let Some(key_store) = state.key_store.as_ref() else {
-        return StatusCode::NOT_IMPLEMENTED.into_response();
-    };
-    let result = if enable {
-        key_store.enable(principal_id, key_id).await
-    } else {
-        key_store.disable(principal_id, key_id).await
-    };
-    if result.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    let operation = if enable { "enable" } else { "disable" };
-    let action = if enable {
-        "principal_key_enable"
-    } else {
-        "principal_key_disable"
-    };
-    let route = format!("/admin/principals/{principal_id}/keys/{key_id}/{operation}");
-    if let Err(error) = record_admin_audit(
-        state,
-        AdminAuditEvent {
-            identity: Some(identity),
-            system_component: None,
-            action,
-            route: &route,
-            target_principal_id: Some(principal_id),
-            target_upstream: None,
-            api_key_id: Some(key_id),
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        return audit_write_failed_response(action, &error);
-    }
-
-    Json(json!({ "status": "ok" })).into_response()
 }
 
 async fn health(State(state): State<AdminState>) -> Json<Value> {

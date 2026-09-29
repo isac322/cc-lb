@@ -128,35 +128,6 @@ impl AuditStore for PostgresStorage {
         Ok(())
     }
 
-    async fn query_audit(
-        &self,
-        principal_id: Option<&str>,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<AuditEntry>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-        let Some(since) = unix_secs_to_datetime_lower(since, "audit since")? else {
-            return Ok(Vec::new());
-        };
-        let until = unix_secs_to_datetime_upper(until, "audit until")?;
-
-        let rows = sqlx::query(
-            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
-        )
-        .bind(since)
-        .bind(until)
-        .bind(principal_id)
-        .bind(u64_to_i64(limit as u64, "audit limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_audit_entry).collect()
-    }
-
     async fn query_audit_by_actor(
         &self,
         authority: &str,

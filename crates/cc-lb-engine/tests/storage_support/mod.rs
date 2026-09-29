@@ -34,16 +34,6 @@ impl storage_api::AuditStore for TestStorage {
         Ok(())
     }
 
-    async fn query_audit(
-        &self,
-        _principal_id: Option<&str>,
-        _since: u64,
-        _until: u64,
-        _limit: usize,
-    ) -> storage_api::StorageResult<Vec<storage_api::AuditEntry>> {
-        Ok(Vec::new())
-    }
-
     async fn query_recent_audit(
         &self,
         _scope: storage_api::AuditQueryScope<'_>,
@@ -83,21 +73,6 @@ impl storage_api::RequestEventStore for TestStorage {
     ) -> storage_api::StorageResult<u64> {
         lock_or_storage_error(&self.request_events)?.push(event.clone());
         Ok(self.request_event_cursor.fetch_add(1, Ordering::Relaxed) + 1)
-    }
-
-    async fn query_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> storage_api::StorageResult<Vec<storage_api::RequestEvent>> {
-        let mut events = lock_or_storage_error(&self.request_events)?
-            .iter()
-            .filter(|event| event.ts >= since && event.ts <= until)
-            .cloned()
-            .collect::<Vec<_>>();
-        events.truncate(limit);
-        Ok(events)
     }
 
     async fn current_request_event_cursor(&self) -> storage_api::StorageResult<u64> {

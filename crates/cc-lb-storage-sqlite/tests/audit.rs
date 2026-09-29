@@ -85,7 +85,7 @@ async fn query_audit_by_actor_filters_before_limit() {
 }
 
 #[tokio::test]
-async fn query_audit_preserves_append_order() {
+async fn append_audit_entries_preserves_append_order() {
     let (_directory, storage) = storage().await;
     let entries = [
         audit_entry("first-newer", NOW + 2, AUTHORITY, SUBJECT),
@@ -98,13 +98,14 @@ async fn query_audit_preserves_append_order() {
         .expect("append audit entries");
 
     let rows = storage
-        .query_audit(None, NOW, NOW + 2, 10)
+        .query_recent_audit(AuditQueryScope::All, NOW, NOW + 2, 10, false)
         .await
-        .expect("query audit");
+        .expect("query recent audit");
 
+    // Newest first; the timestamp tie is broken by reverse append order.
     assert_eq!(
         request_ids(&rows),
-        ["first-newer", "second-backfilled", "third-same-timestamp"]
+        ["third-same-timestamp", "first-newer", "second-backfilled"]
     );
 }
 

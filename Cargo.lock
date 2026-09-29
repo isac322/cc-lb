@@ -773,7 +773,6 @@ dependencies = [
  "hex",
  "http",
  "http-body-util",
- "humantime",
  "hyper-rustls",
  "hyper-util",
  "insta",
@@ -793,6 +792,7 @@ dependencies = [
  "sonic-rs",
  "sqlx 0.8.6",
  "sqlx 0.9.0",
+ "subtle",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -811,7 +811,6 @@ version = "0.8.1"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
- "secrecy",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -923,7 +922,6 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures-core",
- "globset",
  "h2",
  "hickory-resolver",
  "http",
@@ -1047,7 +1045,6 @@ dependencies = [
 name = "cc-lb-plugin-conformance"
 version = "0.2.4"
 dependencies = [
- "blake3",
  "cc-lb-plugin-wire",
  "cc-lb-runtime-wasmtime",
  "rkyv",
@@ -1075,11 +1072,9 @@ dependencies = [
  "cc-lb-request-log",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
- "futures-lite",
  "hex",
  "http",
  "http-body-util",
- "hyper",
  "hyper-rustls",
  "hyper-util",
  "metrics",
@@ -1149,7 +1144,6 @@ dependencies = [
  "blake3",
  "bytes",
  "cc-lb-plugin-wire",
- "http",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
@@ -1159,7 +1153,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
- "uuid",
  "wasmparser 0.259.0",
  "wasmtime",
  "wat",
@@ -1311,7 +1304,6 @@ dependencies = [
  "cc-lb-upstream",
  "fake-anthropic",
  "http",
- "http-body-util",
  "secrecy",
  "serde_json",
  "tokio",
@@ -1333,7 +1325,6 @@ dependencies = [
  "dashmap",
  "http",
  "http-body-util",
- "hyper",
  "hyper-rustls",
  "hyper-util",
  "oauth2",
@@ -1409,7 +1400,6 @@ dependencies = [
  "cc-lb-domain",
  "cc-lb-plugin-wire",
  "cc-lb-storage-api",
- "cc-lb-storage-conformance",
  "chrono",
  "metrics",
  "serde",
@@ -1481,7 +1471,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
- "url",
 ]
 
 [[package]]
@@ -2542,19 +2531,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
-name = "futures-lite"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
-dependencies = [
- "fastrand",
- "futures-core",
- "futures-io",
- "parking",
- "pin-project-lite",
-]
-
-[[package]]
 name = "futures-macro"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2974,12 +2950,6 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
-
-[[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
 
 [[package]]
 name = "hybrid-array"
@@ -3731,13 +3701,11 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "http",
- "http-body-util",
  "ring",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "tokio",
- "tower",
  "url",
 ]
 
@@ -5344,19 +5312,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.2",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6153,7 +6108,6 @@ dependencies = [
  "cc-lb-storage-sqlite",
  "http",
  "serde_json",
- "serde_yaml",
  "sqlx 0.9.0",
  "tempfile",
  "tokio",
@@ -6792,12 +6746,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

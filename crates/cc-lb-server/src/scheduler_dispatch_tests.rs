@@ -336,11 +336,7 @@ async fn observe_only_renewal_writes_priced_durable_row_and_projection_without_l
     // Then
     assert!(matches!(outcome, JobOutcome::Done));
     assert_eq!(request_event_count(&fixture).await, 1);
-    let events = fixture
-        .storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("query renewal events");
+    let events = stored_request_events(&fixture).await;
     assert_eq!(events[0].key_id, None);
     assert_eq!(events[0].cost_usd_micros, Some(140));
     let projection_key_id: Option<String> = sqlx::query_scalar(
@@ -416,11 +412,7 @@ async fn repeated_null_key_renewals_remain_observe_only() {
     .await
     .expect("load observe-only renewal projections");
     assert_eq!(projections, vec![(None, 140), (None, 140)]);
-    let events = fixture
-        .storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("query repeated observe-only renewal events");
+    let events = stored_request_events(&fixture).await;
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.key_id.is_none()));
     assert!(
@@ -551,11 +543,7 @@ async fn renewal_inline_price_matches_pricing_subscriber_priced_event() {
 
     // Then
     assert!(matches!(outcome, JobOutcome::Done));
-    let events = fixture
-        .storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("query renewal events");
+    let events = stored_request_events(&fixture).await;
     let inline_cost = events[0].cost_usd_micros;
     let mut subscriber_cost = None;
     while let Ok(event) = lifecycle_rx.try_recv() {
@@ -670,11 +658,7 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
         .await
         .expect("count renewal event rows");
     assert_eq!(row_count, 1);
-    let events = fixture
-        .storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("query renewal events");
+    let events = stored_request_events(&fixture).await;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.event_id.as_deref(), Some("renewal:session-hash:1"));
@@ -811,6 +795,28 @@ async fn request_event_count(fixture: &Fixture) -> i64 {
         .fetch_one(fixture.storage.pool())
         .await
         .expect("count request events")
+}
+
+/// Reads every persisted request event in append order through the cursor API.
+async fn stored_request_events(fixture: &Fixture) -> Vec<cc_lb_storage_api::RequestEvent> {
+    let cursor = fixture
+        .storage
+        .current_request_event_cursor()
+        .await
+        .expect("current request event cursor");
+    fixture
+        .storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await
+        .expect("query request events")
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect()
 }
 
 fn install_test_pricing() {

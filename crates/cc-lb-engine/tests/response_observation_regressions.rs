@@ -17,7 +17,7 @@ use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
 use cc_lb_storage_api::RequestEvent;
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
@@ -192,7 +192,7 @@ async fn finite_gzip_eos_case(
     let final_event = final_event.expect("assembler publishes final request event");
     assert_eq!(final_event.status, StatusCode::OK.as_u16());
     assert_eq!(final_event.error_code, None);
-    let persisted = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10)
+    let persisted = common::stored_request_events(storage.as_ref())
         .await
         .expect("query persisted request event");
     assert_eq!(persisted.len(), 1);

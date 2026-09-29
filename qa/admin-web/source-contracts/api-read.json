@@ -4,7 +4,7 @@
  "source_state": {
   "kind": "merged_master",
   "base_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
-  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree."
+  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits."
  },
  "response_observability": {
   "scope": "server_admin_listener",
@@ -1319,63 +1319,6 @@
   },
   {
    "method": "GET",
-   "path": "/admin/principals/{id}/keys/{key_id}",
-   "source": "crates/cc-lb-admin/src/routes.rs:30",
-   "handler": "get_api_key",
-   "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-   "ui_clients": [
-    "backend-only: individual managed-key detail endpoint; built-in UI reads the principal key collection."
-   ],
-   "cache_or_no_query": "Direct single-key lookup in ManagedKeyStore",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-    "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get"
-   ],
-   "parameters": {
-    "path": [
-     "id",
-     "key_id"
-    ],
-    "query": [],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/principals/{id}/keys/{key_id}/usage",
-   "source": "crates/cc-lb-admin/src/routes.rs:43",
-   "handler": "principal_key_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: key-specific usage endpoint; no built-in admin web caller."
-   ],
-   "cache_or_no_query": "Validates the principal in in-memory dynamic_view.principal_view before storage (404/no-query on miss), then verifies the managed key, enforces the 7-day range maximum, and reads key-usage time buckets.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-    "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-    "sqlite:RequestEventStore::request_event_key_usage:SqliteStorage::request_event_key_usage",
-    "postgres:RequestEventStore::request_event_key_usage:PostgresStorage::request_event_key_usage"
-   ],
-   "parameters": {
-    "path": [
-     "id",
-     "key_id"
-    ],
-    "query": [
-     "range",
-     "step"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/principals/{id}/keys",
    "source": "crates/cc-lb-admin/src/v1/keys.rs:26",
    "handler": "list_keys",
@@ -1666,37 +1609,6 @@
       "76: .bind(entry.actor_email.as_deref())",
       "77: .bind(entry.kind.as_deref())",
       "78: .bind(payload)"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "postgres:AuditStore::query_audit:PostgresStorage::query_audit",
-   "engine": "postgres",
-   "trait_method": "AuditStore::query_audit",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-    "symbol": "PostgresStorage::query_audit",
-    "line_start": 134,
-    "line_end": 161,
-    "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-      "symbol": "query_audit",
-      "line_start": 150,
-      "line_end": 150
-     },
-     "branches": [],
-     "bind_parameters": [
-      "152: .bind(since)",
-      "153: .bind(until)",
-      "154: .bind(principal_id)",
-      "155: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
      ]
     }
    ]
@@ -2560,32 +2472,6 @@
      "bind_parameters": [
       "148: .bind(u64_to_i64(limit as u64, \"history limit\")?)"
      ]
-    }
-   ]
-  },
-  {
-   "id": "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-   "engine": "postgres",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-    "symbol": "PostgresManagedKeyStore::get",
-    "line_start": 93,
-    "line_end": 112,
-    "sha256": "724f8c19ed51b5c9ca3691d660388b9d5134bf52f125555f7c73c1e2a8c7d376"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 280,
-      "line_end": 282
-     },
-     "branches": [],
-     "bind_parameters": []
     }
    ]
   },
@@ -3462,40 +3348,6 @@
    ]
   },
   {
-   "id": "postgres:RequestEventStore::request_event_key_usage:PostgresStorage::request_event_key_usage",
-   "engine": "postgres",
-   "trait_method": "RequestEventStore::request_event_key_usage",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/request_events.rs",
-    "symbol": "PostgresStorage::request_event_key_usage",
-    "line_start": 242,
-    "line_end": 247,
-    "sha256": "bd106712a3cc0f8a24e665d2979e318634df25400d0d7a814ae1a6da7309d17b"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, COUNT(*)::bigint AS request_count, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros FROM request_events_v1 WHERE principal_id = $4 AND key_id = $5 AND list_ts_ms BETWEEN $6 AND $7 GROUP BY bucket_index",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/request_events.rs",
-      "symbol": "request_event_key_usage",
-      "line_start": 333,
-      "line_end": 344
-     },
-     "branches": [],
-     "bind_parameters": [
-      "346: .bind(u64_to_i64(",
-      "350: .bind(u64_to_i64(query.step_ms, \"request event key usage step\")?)",
-      "351: .bind(u64_to_i64(",
-      "355: .bind(query.principal_id.as_str())",
-      "356: .bind(query.key_id.as_str())",
-      "357: .bind(u64_to_i64(",
-      "361: .bind(u64_to_i64("
-     ]
-    }
-   ]
-  },
-  {
    "id": "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs",
    "engine": "postgres",
    "trait_method": "RequestEventStore::request_event_principal_costs",
@@ -4291,38 +4143,6 @@
       "233: .bind(entry.actor_email.as_deref())",
       "234: .bind(entry.kind.as_deref())",
       "235: .bind(payload.as_deref())"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "sqlite:AuditStore::query_audit:SqliteStorage::query_audit",
-   "engine": "sqlite",
-   "trait_method": "AuditStore::query_audit",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-    "symbol": "SqliteStorage::query_audit",
-    "line_start": 29,
-    "line_end": 59,
-    "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND (? IS NULL OR principal_id = ?) ORDER BY id ASC LIMIT ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-      "symbol": "query_audit",
-      "line_start": 41,
-      "line_end": 47
-     },
-     "branches": [],
-     "bind_parameters": [
-      "49: .bind(u64_to_i64(since, \"audit since\")?)",
-      "50: .bind(u64_to_i64_upper(until))",
-      "51: .bind(principal_id)",
-      "52: .bind(principal_id)",
-      "53: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
      ]
     }
    ]
@@ -5174,32 +4994,6 @@
    ]
   },
   {
-   "id": "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-   "engine": "sqlite",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "symbol": "SqliteStorage::get",
-    "line_start": 48,
-    "line_end": 64,
-    "sha256": "81d0988c73bb03a72a43d0fafb2e641502c8a0e1c518398044c411aa601785ad"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, description, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 140,
-      "line_end": 142
-     },
-     "branches": [],
-     "bind_parameters": []
-    }
-   ]
-  },
-  {
    "id": "sqlite:ManagedKeyStore::list_all:SqliteStorage::list_all",
    "engine": "sqlite",
    "trait_method": "ManagedKeyStore::list_all",
@@ -5757,40 +5551,6 @@
       "241: .bind(query.principal_id.as_str())",
       "242: .bind(u64_to_i64(",
       "246: .bind(u64_to_i64_upper(query.until_unix_secs))"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "sqlite:RequestEventStore::request_event_key_usage:SqliteStorage::request_event_key_usage",
-   "engine": "sqlite",
-   "trait_method": "RequestEventStore::request_event_key_usage",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/request_events.rs",
-    "symbol": "SqliteStorage::request_event_key_usage",
-    "line_start": 185,
-    "line_end": 194,
-    "sha256": "5eb8bf3976632c029491303b2ff41142e1727cea3df022d540b8bfca6c83358e"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT MIN(((list_ts_ms - ?) / ?), ?) AS bucket_index, COUNT(*) AS request_count, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)), 0) AS input_tokens, COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens, COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0) AS cost_usd_micros FROM request_events_v1 WHERE principal_id = ? AND key_id = ? AND list_ts_ms >= ? AND list_ts_ms <= ? GROUP BY bucket_index",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/request_events.rs",
-      "symbol": "request_event_key_usage",
-      "line_start": 284,
-      "line_end": 296
-     },
-     "branches": [],
-     "bind_parameters": [
-      "298: .bind(u64_to_i64(",
-      "302: .bind(u64_to_i64(query.step_ms, \"request event key usage step\")?)",
-      "303: .bind(u64_to_i64(",
-      "307: .bind(query.principal_id.as_str())",
-      "308: .bind(query.key_id.as_str())",
-      "309: .bind(u64_to_i64(",
-      "313: .bind(u64_to_i64_upper(query.range_end_ms))"
      ]
     }
    ]

@@ -13,10 +13,6 @@ const DECIMAL_DIGITS: &[u8; 10] = b"0123456789";
 pub struct SubscriptionQuotaSemanticFingerprint([u8; 32]);
 
 impl SubscriptionQuotaSemanticFingerprint {
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
     pub fn from_sample(record: &SubscriptionQuotaSample) -> Self {
         let mut bytes = Vec::with_capacity(256);
         bytes.push(SEMANTIC_FINGERPRINT_VERSION);
@@ -113,15 +109,6 @@ pub struct SubscriptionQuotaCheckpointRangeQuery {
     pub sources: Vec<SubscriptionQuotaSource>,
     pub since_unix_millis: u64,
     pub until_unix_millis: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SubscriptionQuotaCheckpointRange {
-    pub upstream_id: Uuid,
-    pub window: SubscriptionQuotaWindow,
-    pub source: SubscriptionQuotaSource,
-    pub left_anchor: Option<SubscriptionQuotaCheckpointRecord>,
-    pub checkpoints: Vec<SubscriptionQuotaCheckpointRecord>,
 }
 
 fn write_optional_f64(bytes: &mut Vec<u8>, value: Option<f64>) {

@@ -93,7 +93,7 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         .expect("read key status fixture");
     let key_statuses: Vec<KeyStatus> =
         serde_json::from_slice(&key_status_bytes).expect("deserialize key status fixture");
-    assert_eq!(key_statuses.len(), 3);
+    assert_eq!(key_statuses.len(), 2);
     assert_eq!(
         serde_json::to_vec(&key_statuses).expect("re-serialize key status fixture"),
         key_status_bytes
@@ -102,7 +102,6 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         let serialized = serde_json::to_string(&status).expect("serialize key status");
         match status {
             KeyStatus::Active => assert_eq!(serialized, "\"active\""),
-            KeyStatus::Disabled => assert_eq!(serialized, "\"disabled\""),
             KeyStatus::Revoked => assert_eq!(serialized, "\"revoked\""),
         }
     }
@@ -166,7 +165,7 @@ async fn generate_fixtures(output_dir: &Path) {
     .expect("write plugin slot fixture");
     fs::write(
         output_dir.join("key_statuses.json"),
-        serde_json::to_vec(&[KeyStatus::Active, KeyStatus::Disabled, KeyStatus::Revoked])
+        serde_json::to_vec(&[KeyStatus::Active, KeyStatus::Revoked])
             .expect("serialize key status fixture"),
     )
     .expect("write key status fixture");

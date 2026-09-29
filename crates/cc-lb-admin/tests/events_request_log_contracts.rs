@@ -93,10 +93,7 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
     assert_eq!(final_event["response_body_process_ms"], 0.0);
     assert_eq!(final_event["response_body_downstream_poll_gap_ms"], 0.75);
     assert_eq!(final_event["retry_overhead_ms"], 1.25);
-    let rows = storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("persisted stream contract row");
+    let rows = stored_request_events(storage.as_ref()).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].event_id.as_deref(), Some(EVENT_ID));
 }
@@ -168,10 +165,30 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     assert_eq!(dropped["error_code"], "terminal_dropped");
     assert_no_fabricated_diagnostics(dropped);
 
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10)
-        .await
-        .expect("all request-log contract rows persist");
+    let rows = stored_request_events(storage.as_ref()).await;
     assert_eq!(rows.len(), 4);
+}
+
+/// Reads every persisted request event in append order through the cursor API.
+async fn stored_request_events(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+) -> Vec<cc_lb_storage_api::RequestEvent> {
+    let cursor = storage
+        .current_request_event_cursor()
+        .await
+        .expect("current request event cursor");
+    storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await
+        .expect("persisted request events")
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect()
 }
 
 #[tokio::test]

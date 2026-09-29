@@ -112,7 +112,7 @@ impl ManagedKeyStore for SqliteStorage {
             return Ok(());
         };
 
-        apply_mutation(&mut record, mutation, self.clock());
+        apply_mutation(&mut record, mutation);
         update_record(self, principal_id, key_id, &record).await
     }
 
@@ -287,7 +287,7 @@ fn row_to_record(row: SqliteRow) -> StorageResult<StoredApiKeyRecord> {
     })
 }
 
-fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clock: &dyn Clock) {
+fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
     if let Some(label) = mutation.label {
         record.label = label;
     }
@@ -299,12 +299,6 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clo
     }
     if let Some(limit_overrides) = mutation.limit_overrides {
         record.limit_overrides = limit_overrides;
-    }
-    if let Some(status) = mutation.status {
-        if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(unix_secs(clock.now()));
-        }
-        record.status = status;
     }
 }
 
@@ -335,7 +329,6 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
 fn parse_key_status(value: &str) -> StorageResult<KeyStatus> {
     match value {
         "active" => Ok(KeyStatus::Active),
-        "disabled" => Ok(KeyStatus::Disabled),
         "revoked" => Ok(KeyStatus::Revoked),
         value => Err(corrupted_enum("status", value)),
     }
@@ -350,7 +343,6 @@ fn corrupted_enum(field: &str, value: &str) -> StorageError {
 fn key_status_as_str(value: KeyStatus) -> &'static str {
     match value {
         KeyStatus::Active => "active",
-        KeyStatus::Disabled => "disabled",
         KeyStatus::Revoked => "revoked",
     }
 }

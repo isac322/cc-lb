@@ -14,23 +14,9 @@ pub struct AeadService {
 
 impl AeadService {
     pub fn from_master_key(mut master_key: [u8; MASTER_KEY_LEN]) -> Self {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&master_key));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&master_key));
         master_key.zeroize();
         Self { cipher }
-    }
-
-    pub fn try_from_master_key(master_key: &[u8]) -> AeadResult<Self> {
-        if master_key.len() != MASTER_KEY_LEN {
-            return Err(AeadError::InvalidMasterKey {
-                got: master_key.len(),
-            });
-        }
-
-        let mut key = [0_u8; MASTER_KEY_LEN];
-        key.copy_from_slice(master_key);
-        let service = Self::from_master_key(key);
-        key.zeroize();
-        Ok(service)
     }
 
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> AeadResult<Vec<u8>> {
@@ -56,7 +42,7 @@ impl AeadService {
         }
 
         let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = <&Nonce>::try_from(nonce_bytes).map_err(|_| AeadError::CiphertextTooShort)?;
         let payload = Payload {
             msg: ciphertext,
             aad,
@@ -134,14 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_master_key_length_is_rejected() {
-        match AeadService::try_from_master_key(&[1, 2, 3]) {
-            Err(err) => assert_eq!(err, AeadError::InvalidMasterKey { got: 3 }),
-            Ok(_) => panic!("short key must be rejected"),
-        }
-    }
-
-    #[test]
     fn decrypts_current_nonce_ciphertext_format() {
         let master_key = [17; MASTER_KEY_LEN];
         let service = AeadService::from_master_key(master_key);
@@ -174,8 +152,8 @@ mod tests {
         plaintext: &[u8],
         aad: &[u8],
     ) -> Vec<u8> {
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&master_key));
-        let nonce = Nonce::from_slice(&[23; NONCE_LEN]);
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&master_key));
+        let nonce = <&Nonce>::from(&[23; NONCE_LEN]);
         let ciphertext = cipher
             .encrypt(
                 nonce,
@@ -187,7 +165,7 @@ mod tests {
             .expect("current format encrypts");
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        blob.extend_from_slice(nonce);
+        blob.extend_from_slice(nonce.as_slice());
         blob.extend_from_slice(&ciphertext);
         blob
     }
@@ -198,10 +176,10 @@ mod tests {
         aad: &[u8],
     ) -> Vec<u8> {
         let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&master_key));
+        let cipher = ChaCha20Poly1305::new(<&Key>::from(&master_key));
         cipher
             .decrypt(
-                Nonce::from_slice(nonce_bytes),
+                <&Nonce>::try_from(nonce_bytes).expect("blob carries a 12-byte nonce prefix"),
                 Payload {
                     msg: ciphertext,
                     aad,

@@ -5,13 +5,12 @@ use std::{
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaCheckpointRange,
-    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
-    SubscriptionQuotaSampleKind, SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSeries,
-    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
-    SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore,
+    StorageError, StorageResult, SubscriptionQuotaCheckpointRangeQuery,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
+    UpstreamSubscriptionQuotaStore,
 };
 use sqlx::{AssertSqlSafe, Row, sqlite::SqliteRow};
 use uuid::Uuid;
@@ -46,28 +45,6 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         list_latest_records_for_upstreams(self, upstream_ids).await
     }
 
-    async fn list_subscription_quota_series(
-        &self,
-        query: SubscriptionQuotaSeriesQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaSeries>> {
-        if query.upstream_ids.is_empty() || query.windows.is_empty() || query.sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        let requested_sources = filtered_sources(&query);
-        if requested_sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        let range_query = SubscriptionQuotaCheckpointRangeQuery {
-            upstream_ids: query.upstream_ids.clone(),
-            windows: query.windows.clone(),
-            sources: requested_sources,
-            since_unix_millis: query.since_unix_millis,
-            until_unix_millis: query.until_unix_millis,
-        };
-        let ranges = list_checkpoint_ranges_for_query(self, &range_query).await?;
-        Ok(build_series_from_checkpoint_ranges(ranges, &query))
-    }
-
     async fn put_subscription_quota_checkpoints(
         &self,
         records: &[SubscriptionQuotaCheckpointRecord],
@@ -81,20 +58,6 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(inserted)
-    }
-
-    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
-        &self,
-        upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-        list_latest_checkpoints_for_upstreams(self, upstream_ids).await
-    }
-
-    async fn list_subscription_quota_checkpoint_ranges(
-        &self,
-        query: SubscriptionQuotaCheckpointRangeQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
-        list_checkpoint_ranges_for_query(self, &query).await
     }
 }
 
@@ -158,8 +121,6 @@ async fn list_latest_records_for_upstreams(
 
     rows.into_iter().map(row_to_record).collect()
 }
-
-type CheckpointKey = (Uuid, SubscriptionQuotaWindow, SubscriptionQuotaSource);
 
 pub(super) async fn insert_checkpoint_if_changed(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -230,71 +191,6 @@ pub(super) async fn insert_checkpoint_if_changed(
     .await
     .map_err(map_sqlx_error)?;
     Ok(result.rows_affected() == 1)
-}
-
-async fn list_latest_checkpoints_for_upstreams(
-    storage: &SqliteStorage,
-    upstream_ids: &[Uuid],
-) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-    if upstream_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let placeholders = std::iter::repeat_n("?", upstream_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT checkpoint.* FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-         WHERE checkpoint.upstream_id IN ({placeholders}) \
-         AND NOT EXISTS ( \
-             SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer \
-             WHERE newer.upstream_id = checkpoint.upstream_id \
-             AND newer.window = checkpoint.window \
-             AND newer.source = checkpoint.source \
-             AND (newer.changed_at_unix_millis > checkpoint.changed_at_unix_millis \
-                  OR (newer.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
-                      AND newer.sample_id > checkpoint.sample_id)) \
-         ) \
-         ORDER BY checkpoint.upstream_id ASC, checkpoint.window ASC, checkpoint.source ASC"
-    );
-    let mut query = sqlx::query(AssertSqlSafe(sql));
-    for upstream_id in upstream_ids {
-        query = query.bind(upstream_id.to_string());
-    }
-    let rows = query
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-    rows.into_iter().map(row_to_checkpoint_record).collect()
-}
-
-async fn list_checkpoint_ranges_for_query(
-    storage: &SqliteStorage,
-    query: &SubscriptionQuotaCheckpointRangeQuery,
-) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
-    if query.upstream_ids.is_empty() || query.windows.is_empty() || query.sources.is_empty() {
-        return Ok(Vec::new());
-    }
-    let windows = query.windows.iter().copied().collect::<BTreeSet<_>>();
-    let sources = query.sources.iter().copied().collect::<BTreeSet<_>>();
-    let anchors = list_checkpoint_anchors(storage, query, &windows, &sources).await?;
-    let checkpoints = list_checkpoints_inside_range(storage, query, &windows, &sources).await?;
-    let mut ranges = BTreeMap::<CheckpointKey, SubscriptionQuotaCheckpointRange>::new();
-    for anchor in anchors {
-        let key = checkpoint_key(&anchor);
-        ranges
-            .entry(key)
-            .or_insert_with(|| range_for_key(key))
-            .left_anchor = Some(anchor);
-    }
-    for checkpoint in checkpoints {
-        let key = checkpoint_key(&checkpoint);
-        ranges
-            .entry(key)
-            .or_insert_with(|| range_for_key(key))
-            .checkpoints
-            .push(checkpoint);
-    }
-    Ok(ranges.into_values().collect())
 }
 
 async fn list_slim_checkpoints_for_query(
@@ -375,98 +271,6 @@ async fn list_slim_checkpoints_for_query(
     rows.into_iter().map(row_to_slim_checkpoint).collect()
 }
 
-async fn list_checkpoint_anchors(
-    storage: &SqliteStorage,
-    query: &SubscriptionQuotaCheckpointRangeQuery,
-    windows: &BTreeSet<SubscriptionQuotaWindow>,
-    sources: &BTreeSet<SubscriptionQuotaSource>,
-) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-    let upstream_placeholders = placeholders(query.upstream_ids.len());
-    let window_placeholders = placeholders(windows.len());
-    let source_placeholders = placeholders(sources.len());
-    let sql = format!(
-        "WITH anchor_ts AS ( \
-             SELECT upstream_id, window, source, MAX(changed_at_unix_millis) AS changed_at_unix_millis \
-             FROM upstream_subscription_quota_checkpoints_v1 \
-             WHERE upstream_id IN ({upstream_placeholders}) \
-             AND window IN ({window_placeholders}) \
-             AND source IN ({source_placeholders}) \
-             AND changed_at_unix_millis < ? \
-             GROUP BY upstream_id, window, source \
-         ), \
-         anchor_ids AS ( \
-             SELECT checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
-                    checkpoint.changed_at_unix_millis, MAX(checkpoint.sample_id) AS sample_id \
-             FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-             INNER JOIN anchor_ts anchor \
-               ON anchor.upstream_id = checkpoint.upstream_id \
-              AND anchor.window = checkpoint.window \
-              AND anchor.source = checkpoint.source \
-              AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
-             GROUP BY checkpoint.upstream_id, checkpoint.window, checkpoint.source, \
-                      checkpoint.changed_at_unix_millis \
-         ) \
-         SELECT checkpoint.* FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-         INNER JOIN anchor_ids anchor \
-           ON anchor.upstream_id = checkpoint.upstream_id \
-          AND anchor.window = checkpoint.window \
-          AND anchor.source = checkpoint.source \
-          AND anchor.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
-          AND anchor.sample_id = checkpoint.sample_id \
-         ORDER BY checkpoint.upstream_id ASC, checkpoint.window ASC, checkpoint.source ASC"
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql));
-    q = bind_checkpoint_filters(q, query, windows, sources);
-    q = q.bind(u64_to_i64(
-        query.since_unix_millis,
-        "subscription quota checkpoint since_unix_millis",
-    )?);
-    let start = Instant::now();
-    let rows_result = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error);
-    record_storage_operation("quota_checkpoint_anchor", start, &rows_result);
-    storage.record_pool_metrics();
-    let rows = rows_result?;
-    rows.into_iter().map(row_to_checkpoint_record).collect()
-}
-
-async fn list_checkpoints_inside_range(
-    storage: &SqliteStorage,
-    query: &SubscriptionQuotaCheckpointRangeQuery,
-    windows: &BTreeSet<SubscriptionQuotaWindow>,
-    sources: &BTreeSet<SubscriptionQuotaSource>,
-) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-    let upstream_placeholders = placeholders(query.upstream_ids.len());
-    let window_placeholders = placeholders(windows.len());
-    let source_placeholders = placeholders(sources.len());
-    let sql = format!(
-        "SELECT checkpoint.* FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
-         WHERE checkpoint.upstream_id IN ({upstream_placeholders}) \
-         AND checkpoint.window IN ({window_placeholders}) \
-         AND checkpoint.source IN ({source_placeholders}) \
-         AND checkpoint.changed_at_unix_millis >= ? \
-         AND checkpoint.changed_at_unix_millis <= ? \
-         ORDER BY checkpoint.upstream_id ASC, checkpoint.window ASC, checkpoint.source ASC, \
-                  checkpoint.changed_at_unix_millis ASC, checkpoint.sample_id ASC"
-    );
-    let mut q = sqlx::query(AssertSqlSafe(sql));
-    q = bind_checkpoint_filters(q, query, windows, sources);
-    q = q
-        .bind(u64_to_i64(
-            query.since_unix_millis,
-            "subscription quota checkpoint since_unix_millis",
-        )?)
-        .bind(u64_to_i64(
-            query.until_unix_millis,
-            "subscription quota checkpoint until_unix_millis",
-        )?);
-    let start = Instant::now();
-    let rows_result = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error);
-    record_storage_operation("quota_checkpoint_range", start, &rows_result);
-    storage.record_pool_metrics();
-    let rows = rows_result?;
-    rows.into_iter().map(row_to_checkpoint_record).collect()
-}
-
 fn record_storage_operation<T>(operation: &'static str, start: Instant, result: &StorageResult<T>) {
     let status = if result.is_ok() { "ok" } else { "error" };
     metrics::histogram!(
@@ -508,21 +312,6 @@ fn bind_checkpoint_filters<'q>(
         q = q.bind(source.as_str().to_owned());
     }
     q
-}
-
-fn checkpoint_key(record: &SubscriptionQuotaCheckpointRecord) -> CheckpointKey {
-    (record.upstream_id, record.window, record.source)
-}
-
-fn range_for_key(key: CheckpointKey) -> SubscriptionQuotaCheckpointRange {
-    let (upstream_id, window, source) = key;
-    SubscriptionQuotaCheckpointRange {
-        upstream_id,
-        window,
-        source,
-        left_anchor: None,
-        checkpoints: Vec::new(),
-    }
 }
 
 async fn upsert_latest(
@@ -671,77 +460,6 @@ pub(super) fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaSa
     })
 }
 
-pub(super) fn row_to_checkpoint_record(
-    row: SqliteRow,
-) -> StorageResult<SubscriptionQuotaCheckpointRecord> {
-    let window = parse_window(&row.try_get::<String, _>("window").map_err(map_sqlx_error)?)?;
-    let source = parse_source(&row.try_get::<String, _>("source").map_err(map_sqlx_error)?)?;
-    let sample_kind = parse_sample_kind(
-        &row.try_get::<String, _>("sample_kind")
-            .map_err(map_sqlx_error)?,
-    )?;
-    let status = row
-        .try_get::<Option<String>, _>("status")
-        .map_err(map_sqlx_error)?
-        .as_deref()
-        .map(parse_status)
-        .transpose()?;
-    let upstream_id = row
-        .try_get::<String, _>("upstream_id")
-        .map_err(map_sqlx_error)?;
-    let sample_id = row
-        .try_get::<String, _>("sample_id")
-        .map_err(map_sqlx_error)?;
-    let fingerprint = row
-        .try_get::<Vec<u8>, _>("semantic_fingerprint")
-        .map_err(map_sqlx_error)?;
-
-    Ok(SubscriptionQuotaCheckpointRecord {
-        upstream_id: parse_uuid(&upstream_id, "subscription quota checkpoint upstream_id")?,
-        window,
-        source,
-        changed_at_unix_millis: i64_to_u64(
-            row.try_get("changed_at_unix_millis")
-                .map_err(map_sqlx_error)?,
-            "subscription quota checkpoint changed_at_unix_millis",
-        )?,
-        semantic_fingerprint: fingerprint_from_vec(fingerprint)?,
-        sample_kind,
-        sample_id: parse_uuid(&sample_id, "subscription quota checkpoint sample_id")?,
-        representative_claim: row
-            .try_get("representative_claim")
-            .map_err(map_sqlx_error)?,
-        utilization: row.try_get("utilization").map_err(map_sqlx_error)?,
-        status,
-        resets_at_unix_secs: row
-            .try_get::<Option<i64>, _>("resets_at_unix_secs")
-            .map_err(map_sqlx_error)?
-            .map(|value| i64_to_u64(value, "subscription quota resets_at_unix_secs"))
-            .transpose()?,
-        surpassed_threshold: row.try_get("surpassed_threshold").map_err(map_sqlx_error)?,
-        fallback_percentage: row.try_get("fallback_percentage").map_err(map_sqlx_error)?,
-        fallback_available: row.try_get("fallback_available").map_err(map_sqlx_error)?,
-        overage_in_use: row.try_get("overage_in_use").map_err(map_sqlx_error)?,
-        overage_period_monthly_utilization: row
-            .try_get("overage_period_monthly_utilization")
-            .map_err(map_sqlx_error)?,
-        upgrade_paths: decode_upgrade_paths(row.try_get("upgrade_paths").map_err(map_sqlx_error)?)?,
-        disabled_reason: row.try_get("disabled_reason").map_err(map_sqlx_error)?,
-        extra_usage_enabled: row.try_get("extra_usage_enabled").map_err(map_sqlx_error)?,
-        extra_usage_monthly_limit: row
-            .try_get("extra_usage_monthly_limit")
-            .map_err(map_sqlx_error)?,
-        extra_usage_used_credits: row
-            .try_get("extra_usage_used_credits")
-            .map_err(map_sqlx_error)?,
-        ingested_at_unix_millis: i64_to_u64(
-            row.try_get("ingested_at_unix_millis")
-                .map_err(map_sqlx_error)?,
-            "subscription quota ingested_at_unix_millis",
-        )?,
-    })
-}
-
 fn row_to_slim_checkpoint(row: SqliteRow) -> StorageResult<SubscriptionQuotaSlimCheckpoint> {
     let upstream_id = row
         .try_get::<String, _>("upstream_id")
@@ -774,109 +492,6 @@ fn row_to_slim_checkpoint(row: SqliteRow) -> StorageResult<SubscriptionQuotaSlim
             .map(|value| i64_to_u64(value, "subscription quota resets_at_unix_secs"))
             .transpose()?,
     })
-}
-
-fn fingerprint_from_vec(bytes: Vec<u8>) -> StorageResult<SubscriptionQuotaSemanticFingerprint> {
-    let len = bytes.len();
-    let array = <[u8; 32]>::try_from(bytes).map_err(|_| StorageError::Corrupted {
-        message: format!("subscription quota checkpoint fingerprint has {len} bytes"),
-    })?;
-    Ok(SubscriptionQuotaSemanticFingerprint::from_bytes(array))
-}
-
-fn build_series_from_checkpoint_ranges(
-    ranges: Vec<SubscriptionQuotaCheckpointRange>,
-    query: &SubscriptionQuotaSeriesQuery,
-) -> Vec<SubscriptionQuotaSeries> {
-    let bucket_secs = query.bucket_secs.max(1);
-    let mut groups: BTreeMap<
-        (Uuid, SubscriptionQuotaWindow, u8),
-        Vec<SubscriptionQuotaCheckpointRange>,
-    > = BTreeMap::new();
-    for range in ranges {
-        groups
-            .entry((
-                range.upstream_id,
-                range.window,
-                source_merge_code(query.source_merge),
-            ))
-            .or_default()
-            .push(range);
-    }
-
-    let mut series = Vec::new();
-    for ((upstream_id, window, source_code), group_ranges) in groups {
-        let mut bucket_records = buckets_from_checkpoint_ranges(group_ranges, bucket_secs, query);
-        downsample(
-            &mut bucket_records,
-            usize::try_from(query.max_points_per_series).unwrap_or(usize::MAX),
-        );
-        series.push(SubscriptionQuotaSeries {
-            upstream_id,
-            window,
-            source: source_merge_from_code(source_code),
-            buckets: bucket_records,
-        });
-    }
-    series
-}
-
-#[derive(Debug, Clone)]
-struct CheckpointStream {
-    source: SubscriptionQuotaSource,
-    checkpoints: Vec<SubscriptionQuotaCheckpointRecord>,
-    index: usize,
-    current: Option<SubscriptionQuotaCheckpointRecord>,
-}
-
-#[derive(Debug)]
-struct BucketPoint {
-    record: SubscriptionQuotaSample,
-    is_change: bool,
-}
-
-fn buckets_from_checkpoint_ranges(
-    ranges: Vec<SubscriptionQuotaCheckpointRange>,
-    bucket_secs: u64,
-    query: &SubscriptionQuotaSeriesQuery,
-) -> Vec<SubscriptionQuotaBucket> {
-    let mut streams = ranges
-        .into_iter()
-        .map(stream_from_range)
-        .filter(|stream| stream.current.is_some() || !stream.checkpoints.is_empty())
-        .collect::<Vec<_>>();
-    streams.sort_by(|left, right| left.source.as_str().cmp(right.source.as_str()));
-    if streams.is_empty() {
-        return Vec::new();
-    }
-    let mut bucket_start = bucket_start_unix_secs(query.since_unix_millis, bucket_secs);
-    let end_bucket = bucket_start_unix_secs(query.until_unix_millis, bucket_secs);
-    let mut buckets = Vec::new();
-    while bucket_start <= end_bucket {
-        let mut points = Vec::new();
-        for stream in &mut streams {
-            push_bucket_points(stream, bucket_start, bucket_secs, &mut points);
-        }
-        if !points.is_empty() {
-            buckets.push(bucket_from_points(bucket_start, &points));
-        }
-        let Some(next_bucket) = bucket_start.checked_add(bucket_secs) else {
-            break;
-        };
-        bucket_start = next_bucket;
-    }
-    buckets
-}
-
-fn stream_from_range(range: SubscriptionQuotaCheckpointRange) -> CheckpointStream {
-    let mut checkpoints = range.checkpoints;
-    checkpoints.sort_by_key(|checkpoint| (checkpoint.changed_at_unix_millis, checkpoint.sample_id));
-    CheckpointStream {
-        source: range.source,
-        checkpoints,
-        index: 0,
-        current: range.left_anchor,
-    }
 }
 
 const PROVIDER_LOT_BUCKET_SECS: u64 = 60;
@@ -1119,158 +734,9 @@ const fn provider_lot_window_secs(window: SubscriptionQuotaWindow) -> Option<u64
     }
 }
 
-fn push_bucket_points(
-    stream: &mut CheckpointStream,
-    bucket_start: u64,
-    bucket_secs: u64,
-    points: &mut Vec<BucketPoint>,
-) {
-    let start_index = stream.index;
-    while stream.index < stream.checkpoints.len()
-        && bucket_start_unix_secs(
-            stream.checkpoints[stream.index].changed_at_unix_millis,
-            bucket_secs,
-        ) == bucket_start
-    {
-        let checkpoint = stream.checkpoints[stream.index].clone();
-        stream.current = Some(checkpoint.clone());
-        points.push(BucketPoint {
-            record: record_from_checkpoint(&checkpoint),
-            is_change: true,
-        });
-        stream.index += 1;
-    }
-    if stream.index == start_index
-        && let Some(checkpoint) = &stream.current
-    {
-        points.push(BucketPoint {
-            record: record_from_checkpoint(checkpoint),
-            is_change: false,
-        });
-    }
-}
-
 fn bucket_start_unix_secs(timestamp_unix_millis: u64, bucket_secs: u64) -> u64 {
     let timestamp_unix_secs = timestamp_unix_millis / 1_000;
     timestamp_unix_secs / bucket_secs * bucket_secs
-}
-
-fn record_from_checkpoint(
-    checkpoint: &SubscriptionQuotaCheckpointRecord,
-) -> SubscriptionQuotaSample {
-    SubscriptionQuotaSample {
-        upstream_id: checkpoint.upstream_id,
-        window: checkpoint.window,
-        source: checkpoint.source,
-        sample_kind: checkpoint.sample_kind,
-        observed_at_unix_millis: checkpoint.changed_at_unix_millis,
-        sample_id: checkpoint.sample_id,
-        utilization: checkpoint.utilization,
-        status: checkpoint.status,
-        resets_at_unix_secs: checkpoint.resets_at_unix_secs,
-        surpassed_threshold: checkpoint.surpassed_threshold,
-        representative_claim: checkpoint.representative_claim.clone(),
-        fallback_percentage: checkpoint.fallback_percentage,
-        fallback_available: checkpoint.fallback_available,
-        overage_in_use: checkpoint.overage_in_use,
-        overage_period_monthly_utilization: checkpoint.overage_period_monthly_utilization,
-        upgrade_paths: checkpoint.upgrade_paths.clone(),
-        disabled_reason: checkpoint.disabled_reason.clone(),
-        extra_usage_enabled: checkpoint.extra_usage_enabled,
-        extra_usage_monthly_limit: checkpoint.extra_usage_monthly_limit,
-        extra_usage_used_credits: checkpoint.extra_usage_used_credits,
-        ingested_at_unix_millis: checkpoint.ingested_at_unix_millis,
-    }
-}
-
-fn source_merge_code(source: SubscriptionQuotaSourceMerge) -> u8 {
-    match source {
-        SubscriptionQuotaSourceMerge::Header => 1,
-        SubscriptionQuotaSourceMerge::Api => 2,
-        SubscriptionQuotaSourceMerge::Merged => 3,
-    }
-}
-
-fn source_merge_from_code(code: u8) -> SubscriptionQuotaSourceMerge {
-    match code {
-        1 => SubscriptionQuotaSourceMerge::Header,
-        2 => SubscriptionQuotaSourceMerge::Api,
-        _ => SubscriptionQuotaSourceMerge::Merged,
-    }
-}
-
-fn bucket_from_points(
-    bucket_start_unix_secs: u64,
-    points: &[BucketPoint],
-) -> SubscriptionQuotaBucket {
-    let mut util_count = 0u32;
-    let mut util_sum = 0.0;
-    let mut util_min: Option<f64> = None;
-    let mut util_max: Option<f64> = None;
-    let mut last = &points[0].record;
-    let mut sources_seen = BTreeSet::new();
-    let mut sample_count = 0u32;
-
-    for point in points {
-        let record = &point.record;
-        sources_seen.insert(record.source);
-        if point.is_change {
-            sample_count = sample_count.saturating_add(1);
-        }
-        if record.observed_at_unix_millis >= last.observed_at_unix_millis {
-            last = record;
-        }
-        if let Some(utilization) = record.utilization {
-            util_count += 1;
-            util_sum += utilization;
-            util_min = Some(util_min.map_or(utilization, |value| value.min(utilization)));
-            util_max = Some(util_max.map_or(utilization, |value| value.max(utilization)));
-        }
-    }
-
-    SubscriptionQuotaBucket {
-        bucket_start_unix_secs,
-        observed: true,
-        sample_count,
-        utilization_min: util_min,
-        utilization_avg: (util_count > 0).then_some(util_sum / f64::from(util_count)),
-        utilization_max: util_max,
-        utilization_last: last.utilization,
-        status_last: last.status,
-        resets_at_unix_secs_last: last.resets_at_unix_secs,
-        observed_at_unix_millis_last: Some(last.observed_at_unix_millis),
-        sources_seen: sources_seen.into_iter().collect(),
-    }
-}
-
-fn downsample<T: Clone>(items: &mut Vec<T>, max_points: usize) {
-    if max_points == 0 {
-        items.clear();
-        return;
-    }
-    if items.len() <= max_points {
-        return;
-    }
-    if max_points == 1 {
-        items.truncate(1);
-        return;
-    }
-    let original = items.clone();
-    let last_index = original.len() - 1;
-    let mut sampled = Vec::with_capacity(max_points);
-    for point in 0..max_points {
-        sampled.push(original[point * last_index / (max_points - 1)].clone());
-    }
-    *items = sampled;
-}
-
-fn filtered_sources(query: &SubscriptionQuotaSeriesQuery) -> Vec<SubscriptionQuotaSource> {
-    query
-        .sources
-        .iter()
-        .copied()
-        .filter(|source| source_matches_merge(*source, query.source_merge))
-        .collect()
 }
 
 fn source_matches_merge(

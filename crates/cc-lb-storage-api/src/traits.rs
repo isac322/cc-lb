@@ -5,11 +5,10 @@ use crate::{
     ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
     PriceCatalogSnapshotFetch, RequestEvent, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventKeyUsageBucket, RequestEventKeyUsageQuery, RequestEventListItem,
-    RequestEventListQuery, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery,
-    RequestEventProjections, RequestEventStreamFilters, RuntimeChangeNotifier, StorageError,
-    StorageResult, StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun,
-    UsageTokenInterval, UsageTokenIntervalSum,
+    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStreamFilters,
+    RuntimeChangeNotifier, StorageError, StorageResult, StoredApiKeyRecord, UsageRollup,
+    UsageRollupResolution, UsageRollupRun, UsageTokenInterval, UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
@@ -34,14 +33,6 @@ pub trait AuditStore: Send + Sync {
         }
         Ok(())
     }
-
-    async fn query_audit(
-        &self,
-        principal_id: Option<&str>,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<AuditEntry>>;
 
     /// Returns matching entries newest first, with newer insertions first on timestamp ties.
     /// When `admin_only` is true, only entries with an admin action are matched,
@@ -83,31 +74,6 @@ pub trait RequestEventStore: Send + Sync {
     ) -> StorageResult<u64> {
         let _ = projections;
         self.append_request_event(event).await
-    }
-
-    async fn query_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>>;
-
-    /// Return at most `limit` events within `[since, until]` ordered by
-    /// timestamp DESCENDING (newest first). The descending direction is the
-    /// load-bearing contract: callers serving "recent events" rely on this to
-    /// not lose newly-written events when `limit` is small. Backends MUST
-    /// scan in reverse instead of pulling oldest-first and re-sorting.
-    async fn query_recent_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        let _ = (since, until, limit);
-        Err(StorageError::Fatal {
-            message: "query_recent_request_events is not implemented for this storage backend"
-                .to_owned(),
-        })
     }
 
     async fn prune_request_events_before(
@@ -164,17 +130,6 @@ pub trait RequestEventStore: Send + Sync {
         let _ = query;
         Err(StorageError::Fatal {
             message: "request_event_key_last_used is not implemented for this storage backend"
-                .to_owned(),
-        })
-    }
-
-    async fn request_event_key_usage(
-        &self,
-        query: &RequestEventKeyUsageQuery,
-    ) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
-        let _ = query;
-        Err(StorageError::Fatal {
-            message: "request_event_key_usage is not implemented for this storage backend"
                 .to_owned(),
         })
     }

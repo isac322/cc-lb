@@ -17,4 +17,3 @@ crate-type = ["rlib"]
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-runtime-wasmtime = { workspace = true }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
-blake3 = { workspace = true, features = ["std"] }

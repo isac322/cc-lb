@@ -1032,10 +1032,17 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
 
     // Payload reads surface the raw kind: stored on new writes, absent on
     // historical rows, never synthesized.
-    let events = storage.query_request_events(base, base + 4, 100).await?;
+    let events = storage
+        .query_request_events_between_cursors(
+            0,
+            until_cursor,
+            500,
+            &RequestEventStreamFilters::default(),
+        )
+        .await?;
     let kinds = events
         .into_iter()
-        .map(|event| (event.request_id.clone(), event.event_kind))
+        .map(|(_, event)| (event.request_id.clone(), event.event_kind))
         .collect::<BTreeMap<_, _>>();
     ensure!(
         kinds.get("ek-messages") == Some(&Some(RequestEventKind::Messages)),

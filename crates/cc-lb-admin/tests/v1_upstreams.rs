@@ -10,7 +10,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_storage_api::AuditStore;
+use cc_lb_storage_api::{AuditQueryScope, AuditStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -545,7 +545,10 @@ async fn enable_disable_emits_audit_and_persists_state() {
     assert_eq!(body(&enabled)["enabled"], true);
     assert_eq!(body(&enabled)["spec_revision"], 3);
 
-    let entries = storage.query_audit(None, 0, u64::MAX, 10).await.unwrap();
+    let entries = storage
+        .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 10, false)
+        .await
+        .unwrap();
     let disable_route = format!("/admin/v1/upstreams/{id}/disable");
     let enable_route = format!("/admin/v1/upstreams/{id}/enable");
     assert!(entries.iter().any(|entry| {

@@ -50,8 +50,6 @@ mod oauth_refresh;
 mod oauth_usage_proxy;
 #[path = "observation_failure_isolation.rs"]
 mod observation_failure_isolation;
-#[path = "postgres_full_storage_live.rs"]
-mod postgres_full_storage_live;
 #[path = "preflight.rs"]
 mod preflight;
 #[path = "preflight_common.rs"]

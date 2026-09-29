@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore as _, ConfigDraftState, ConfigStore as _, HistoryEntry,
+    AuditEntry, AuditQueryScope, AuditStore as _, ConfigDraftState, ConfigStore as _, HistoryEntry,
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEvent,
     RequestEventStore as _,
 };
 use serde_json::json;
 
-use crate::harness::{ConformanceBackend, ConformanceFixture};
+use crate::harness::{ConformanceBackend, ConformanceFixture, stored_request_events};
 
 macro_rules! assert_byte_identical_vec {
     ($actual:expr, $expected:expr, $label:expr) => {{
@@ -63,7 +63,11 @@ where
             storage.append_audit(entry).await?;
         }
 
-        let read_back = storage.query_audit(None, 0, u64::MAX, 10).await?;
+        let mut read_back = storage
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 10, false)
+            .await?;
+        // query_recent_audit returns newest first; the fixture is oldest first.
+        read_back.reverse();
         assert_byte_identical_vec!(read_back, entries, "AuditStore readback")?;
 
         Ok(())
@@ -88,7 +92,7 @@ where
             storage.append_request_event(event).await?;
         }
 
-        let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
+        let read_back = stored_request_events(storage.as_ref()).await?;
         assert_byte_identical_vec!(read_back, events, "RequestEventStore readback")?;
 
         Ok(())
@@ -153,7 +157,7 @@ where
             second_cursor
         );
 
-        let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
+        let read_back = stored_request_events(storage.as_ref()).await?;
         ensure!(
             read_back.len() == 1,
             "exactly one row expected after duplicate event_id write, got {}",

@@ -211,15 +211,6 @@ impl RequestEventStore for HorizonBlockedStorage {
         unreachable!("horizon-blocked storage is read-only for this test")
     }
 
-    async fn query_request_events(
-        &self,
-        _since: u64,
-        _until: u64,
-        _limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        unreachable!("horizon-blocked storage does not support timestamp queries")
-    }
-
     async fn current_request_event_cursor(&self) -> StorageResult<u64> {
         Ok(self.current.load(Ordering::SeqCst))
     }

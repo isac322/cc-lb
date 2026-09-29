@@ -1123,15 +1123,6 @@ mod tests {
         ) -> cc_lb_storage_api::StorageResult<u64> {
             Ok(0)
         }
-
-        async fn query_request_events(
-            &self,
-            _since: u64,
-            _until: u64,
-            _limit: usize,
-        ) -> cc_lb_storage_api::StorageResult<Vec<cc_lb_storage_api::RequestEvent>> {
-            Ok(Vec::new())
-        }
     }
 
     #[tokio::test]

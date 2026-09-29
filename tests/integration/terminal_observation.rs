@@ -14,8 +14,7 @@ use cc_lb_engine::DrainController;
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    ApiKeyMutation, KeyStatus, Limit as KeyLimit, LimitKind as KeyLimitKind, ManagedKeyStore,
-    MetaStore, RequestEvent, RequestEventStore,
+    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore, RequestEvent, RequestEventStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
@@ -849,8 +848,7 @@ async fn health_endpoints_persist_no_request_events() -> Result<(), Box<dyn std:
     Ok(())
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn terminal_expired_and_disabled_keys_record_authn_reason()
--> Result<(), Box<dyn std::error::Error>> {
+async fn terminal_expired_key_records_authn_reason() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     ensure_env();
 
@@ -860,8 +858,8 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
     let sqlite_path = dir.path().join("term-obs.sqlite");
     seed_runtime_state(&sqlite_path, upstream.uri(), "u1").await?;
 
-    // Issue an expired key and a disabled key for the same principal. The
-    // seeded key stays valid so the server has a working view.
+    // Issue an expired key for the principal. The seeded key stays valid so
+    // the server has a working view.
     let storage = sqlite_storage(&sqlite_path).await?;
     let key_store =
         KeyStore::new(Arc::clone(&storage) as Arc<dyn cc_lb_storage_api::ManagedKeyStore>);
@@ -876,28 +874,6 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
             },
         )
         .await?;
-    let (_disabled_record, disabled_plaintext) = key_store
-        .create(
-            "u1",
-            CreateParams {
-                label: "disabled".to_owned(),
-                description: None,
-                expires_at_unix_secs: None,
-                limit_overrides: vec![],
-            },
-        )
-        .await?;
-    let (disabled_key_id, _) = cc_lb_control::api_keys::secret::parse(disabled_plaintext.expose())?;
-    ManagedKeyStore::update(
-        storage.as_ref(),
-        "u1",
-        &disabled_key_id,
-        ApiKeyMutation {
-            status: Some(KeyStatus::Disabled),
-            ..Default::default()
-        },
-    )
-    .await?;
 
     let config = base_config(sqlite_path.clone(), litellm.uri());
     let server = StartedServer::start(config).await?;
@@ -923,28 +899,6 @@ async fn terminal_expired_and_disabled_keys_record_authn_reason()
             "stage": "authn",
             "kind": "invalid_input",
             "message": "api key expired"
-        }])
-    );
-
-    let disabled = client
-        .request(
-            "POST",
-            &format!("{}/v1/messages", server.proxy_url),
-            &[
-                ("content-type", "application/json"),
-                ("x-api-key", disabled_plaintext.expose()),
-            ],
-            &sample_request_body(false),
-        )
-        .await?;
-    assert_eq!(disabled.status(), StatusCode::FORBIDDEN);
-    let row = wait_for_request_event_status(&sqlite_path, 403).await?;
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "api key disabled"
         }])
     );
 
@@ -1960,7 +1914,18 @@ fn internal_errors_json(row: &RequestEvent) -> Value {
 async fn all_request_events(
     storage: &SqliteStorage,
 ) -> Result<Vec<RequestEvent>, Box<dyn std::error::Error>> {
-    Ok(RequestEventStore::query_request_events(storage, 0, u64::MAX, 100).await?)
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
 }
 
 /// Poll until at least `expected` request-event rows exist, then settle and

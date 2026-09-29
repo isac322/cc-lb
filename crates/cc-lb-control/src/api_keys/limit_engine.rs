@@ -187,7 +187,6 @@ struct ReservedAmount {
 pub enum RejectReason {
     PrincipalMissing,
     PrincipalDisabled,
-    KeyDisabled,
     KeyRevoked,
     Expired,
     ModelNotAllowed,
@@ -402,7 +401,6 @@ impl LimitEngine {
 
         match record.status {
             StoredKeyStatus::Active => {}
-            StoredKeyStatus::Disabled => return Err(RejectReason::KeyDisabled),
             StoredKeyStatus::Revoked => return Err(RejectReason::KeyRevoked),
         }
 

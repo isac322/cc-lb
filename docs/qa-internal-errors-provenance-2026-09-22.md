@@ -230,7 +230,7 @@
 - `unit` = `cargo test -p cc-lb-engine --lib lifecycle_event_assembler::tests` / `terminal_observer::tests` (인메모리 `mpsc` + `CapturingStore`, DB·네트워크 불필요)
 - `int` = `cargo test -p cc-lb-server --test integration rfc_0002_fix_live_qa::` / `proxy_error_fallbacks::` (`autotests=false` — 타깃 이름은 `integration`, 모듈 필터 필요) 및 `cargo test -p tests-integration --test integration terminal_observation::` (`tests/integration/terminal_observation.rs`, `spawn_test_server` 계열은 `crates/cc-lb-server/tests/common.rs`)
 - `live` = `/data/tmp/cc-lb-849-repro-ano_sbq8/` 스크래치 서버 방식(`config.toml` + SQLite 시드, proxy 51885/admin 51886/metrics 51887) — Main 베이스라인과 동일 절차
-- 공통 빌드 환경(Nix 링커 우회): `RUSTFLAGS='-A deprecated -C linker=/usr/bin/clang -C link-arg=-fuse-ld=/usr/bin/ld' CC=/usr/bin/clang CXX=/usr/bin/clang++ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk CC_LB_ADMIN_SKIP_SPA=1 SQLX_OFFLINE=true CC_LB_SKIP_WASM_FIXTURE_BUILD=1`
+- 공통 빌드 환경(Nix 링커 우회): `RUSTFLAGS='-C linker=/usr/bin/clang -C link-arg=-fuse-ld=/usr/bin/ld' CC=/usr/bin/clang CXX=/usr/bin/clang++ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk CC_LB_ADMIN_SKIP_SPA=1 SQLX_OFFLINE=true CC_LB_SKIP_WASM_FIXTURE_BUILD=1`
 
 ### 10.1 인증/파싱/바디
 

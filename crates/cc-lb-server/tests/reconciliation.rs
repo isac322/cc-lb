@@ -14,13 +14,11 @@ use cc_lb_storage_api::{
     PlanTierRatioRecord, PlanTierStore, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
     PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
-    SubscriptionQuotaCheckpointRange, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSeries,
-    SubscriptionQuotaSeriesQuery, UpstreamCreate, UpstreamPlanTierRecord,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
-    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, UpstreamCreate,
+    UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -509,32 +507,11 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         Ok(Vec::new())
     }
 
-    async fn list_subscription_quota_series(
-        &self,
-        _query: SubscriptionQuotaSeriesQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaSeries>> {
-        Ok(Vec::new())
-    }
-
     async fn put_subscription_quota_checkpoints(
         &self,
         _records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize> {
         Ok(0)
-    }
-
-    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
-        &self,
-        _upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_subscription_quota_checkpoint_ranges(
-        &self,
-        _query: SubscriptionQuotaCheckpointRangeQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
-        Ok(Vec::new())
     }
 }
 

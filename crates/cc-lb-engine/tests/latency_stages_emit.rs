@@ -23,7 +23,7 @@ use cc_lb_engine::{
 use cc_lb_observability::NoopMetricsHook;
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{KeyStatus, RequestEvent, StoredApiKeyRecord};
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -340,7 +340,7 @@ async fn single_event(storage: &SqliteStorage) -> RequestEvent {
 }
 
 async fn query_events(storage: &SqliteStorage) -> Vec<RequestEvent> {
-    RequestEventStore::query_request_events(storage, 0, u64::MAX, 100)
+    common::stored_request_events(storage)
         .await
         .expect("query request events")
 }

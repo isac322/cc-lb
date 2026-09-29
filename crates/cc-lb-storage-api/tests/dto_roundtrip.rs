@@ -750,7 +750,6 @@ fn batch_b_wire_snapshots_are_stable() {
     );
 
     assert_wire(KeyStatus::Active, json!("active"));
-    assert_wire(KeyStatus::Disabled, json!("disabled"));
     assert_wire(KeyStatus::Revoked, json!("revoked"));
 
     assert_wire(

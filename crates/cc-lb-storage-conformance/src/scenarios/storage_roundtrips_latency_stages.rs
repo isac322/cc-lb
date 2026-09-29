@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore as _};
 
-use crate::harness::{ConformanceBackend, with_conformance_fixture};
+use crate::harness::{ConformanceBackend, stored_request_events, with_conformance_fixture};
 
 pub async fn request_event_latency_stage_round_trip<B>(backend: Arc<B>) -> Result<()>
 where
@@ -78,7 +78,7 @@ where
         storage.append_request_event(&event_warm).await?;
         storage.append_request_event(&event_none).await?;
 
-        let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
+        let recent = stored_request_events(storage.as_ref()).await?;
 
         // --- Event 1: assert all 7 fields survived the round-trip ---
         let got_full = recent

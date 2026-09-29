@@ -60,15 +60,6 @@ impl RequestEventStore for PropertyStore {
         Ok(cursor)
     }
 
-    async fn query_request_events(
-        &self,
-        _since: u64,
-        _until: u64,
-        _limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        Ok(Vec::new())
-    }
-
     async fn current_request_event_cursor(&self) -> StorageResult<u64> {
         Ok(self.state.lock().expect("property store lock").next_cursor)
     }

@@ -34,8 +34,6 @@ pub enum BuiltinAuthError {
     NotFound,
     #[error("api key signature mismatch")]
     SignatureMismatch,
-    #[error("api key disabled")]
-    KeyDisabled,
     #[error("api key revoked")]
     KeyRevoked,
     #[error("api key expired")]
@@ -52,7 +50,7 @@ impl BuiltinAuthError {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::Unavailable => 503,
-            Self::KeyDisabled | Self::PrincipalDisabled => 403,
+            Self::PrincipalDisabled => 403,
             Self::MissingHeader
             | Self::InvalidFormat
             | Self::NotFound
@@ -93,7 +91,6 @@ impl BuiltinAuthn {
         }
         match record.status {
             KeyStatus::Active => {}
-            KeyStatus::Disabled => return Err(BuiltinAuthError::KeyDisabled),
             KeyStatus::Revoked => return Err(BuiltinAuthError::KeyRevoked),
         }
         if let Some(expires_at_unix_secs) = record.expires_at_unix_secs {
@@ -145,9 +142,7 @@ fn map_lookup_error(error: KeyStoreError) -> BuiltinAuthError {
         KeyStoreError::Storage(
             StorageError::Unavailable { .. } | StorageError::Transient { .. },
         ) => BuiltinAuthError::Unavailable,
-        KeyStoreError::Storage(_) | KeyStoreError::KeyAlreadyRevoked { .. } => {
-            BuiltinAuthError::NotFound
-        }
+        KeyStoreError::Storage(_) => BuiltinAuthError::NotFound,
     }
 }
 

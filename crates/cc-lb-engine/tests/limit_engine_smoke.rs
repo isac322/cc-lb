@@ -101,16 +101,6 @@ fn principal_disabled_rejects() {
 }
 
 #[test]
-fn record_disabled_rejects() {
-    let (engine, view) = engine(true);
-    let record = record(KeyStatus::Disabled, Vec::new());
-
-    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
-
-    assert_eq!(result.err(), Some(RejectReason::KeyDisabled));
-}
-
-#[test]
 fn reconcile_refund_leaves_actual_output_usage() {
     let (engine, view) = engine(true);
     let record = record(

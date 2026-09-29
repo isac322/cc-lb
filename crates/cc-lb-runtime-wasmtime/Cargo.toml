@@ -27,8 +27,6 @@ rkyv = { workspace = true, features = ["std", "bytecheck"] }
 blake3 = { workspace = true, features = ["std"] }
 wasmparser.workspace = true
 serde.workspace = true
-uuid = { version = "1", features = ["v4"] }
-http.workspace = true
 bytes.workspace = true
 url.workspace = true
 metrics.workspace = true

@@ -3,10 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::StorageResult;
-use crate::{
-    SubscriptionQuotaCheckpointRange, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord,
-};
+use crate::{SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SubscriptionQuotaWindow {
@@ -457,15 +454,6 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaSample>>;
 
-    /// Server-side bucketed downsample of the change-only checkpoint history.
-    /// The caller specifies bucket width and per-series point cap. The backend
-    /// MUST honor `query.sources` and `query.windows` filters and the
-    /// `query.source_merge` policy (per-source series vs merged-per-window).
-    async fn list_subscription_quota_series(
-        &self,
-        query: SubscriptionQuotaSeriesQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaSeries>>;
-
     /// Inserts semantic checkpoints, skipping a row when the latest persisted
     /// checkpoint for `(upstream_id, window, source)` has the same semantic
     /// fingerprint. Returns the number of rows inserted.
@@ -473,27 +461,13 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         &self,
         records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize>;
-
-    /// Returns the latest checkpoint for every physical `(upstream_id, window,
-    /// source)` key intersecting the given upstream IDs. Empty input returns empty.
-    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
-        &self,
-        upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>>;
-
-    /// Returns per-source checkpoint ranges. Each range includes the last
-    /// checkpoint before `since_unix_millis` as `left_anchor` when available,
-    /// plus all checkpoints inside `[since_unix_millis, until_unix_millis]`.
-    async fn list_subscription_quota_checkpoint_ranges(
-        &self,
-        query: SubscriptionQuotaCheckpointRangeQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>>;
 }
 
 #[async_trait]
 pub trait UpstreamSubscriptionQuotaAggregateStore: Send + Sync {
-    /// Returns slim checkpoint rows in stable key/time/sample order, including
-    /// the same per-key left anchor and inclusive range as checkpoint ranges.
+    /// Returns slim checkpoint rows in stable key/time/sample order: for each
+    /// key, the last checkpoint before `since_unix_millis` (left anchor) when
+    /// one exists, followed by every checkpoint inside the inclusive range.
     async fn list_subscription_quota_slim_checkpoints(
         &self,
         query: SubscriptionQuotaCheckpointRangeQuery,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cc_lb_clock::{Clock, ClockHandle, unix_secs};
+use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_storage_api::{
     ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, StorageError, StorageResult,
     StoredApiKeyRecord, validate_identifier,
@@ -192,11 +192,9 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
 
-        let clock = Arc::clone(&self.clock);
         retry::with_retry(&self.retry_policy, || {
             let pool = self.pool.clone();
             let mutation = mutation.clone();
-            let clock = Arc::clone(&clock);
             async move {
                 let mut tx = pool.begin().await?;
                 let Some(row) = sqlx::query(SELECT_BY_KEY_FOR_UPDATE_SQL)
@@ -210,7 +208,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 };
                 let mut record = row_to_record_sqlx(row)?;
 
-                apply_mutation(&mut record, mutation, &*clock);
+                apply_mutation(&mut record, mutation);
                 update_record(principal_id, key_id, &record, &mut tx).await?;
                 notify_principal_changed(&mut tx, principal_id).await?;
                 tx.commit().await?;
@@ -418,7 +416,7 @@ fn row_to_record_inner(row: PgRow) -> Result<StoredApiKeyRecord, sqlx::Error> {
     })
 }
 
-fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clock: &dyn Clock) {
+fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation) {
     if let Some(label) = mutation.label {
         record.label = label;
     }
@@ -430,12 +428,6 @@ fn apply_mutation(record: &mut StoredApiKeyRecord, mutation: ApiKeyMutation, clo
     }
     if let Some(limit_overrides) = mutation.limit_overrides {
         record.limit_overrides = limit_overrides;
-    }
-    if let Some(status) = mutation.status {
-        if status == KeyStatus::Revoked && record.revoked_at_unix_secs.is_none() {
-            record.revoked_at_unix_secs = Some(unix_secs(clock.now()));
-        }
-        record.status = status;
     }
 }
 
@@ -468,7 +460,6 @@ fn u64_from_i64_sqlx(value: i64, field: &str) -> Result<u64, sqlx::Error> {
 fn parse_key_status(value: &str) -> Result<KeyStatus, sqlx::Error> {
     match value {
         "active" => Ok(KeyStatus::Active),
-        "disabled" => Ok(KeyStatus::Disabled),
         "revoked" => Ok(KeyStatus::Revoked),
         value => Err(corrupted_enum("status", value)),
     }
@@ -486,7 +477,6 @@ fn corrupted_enum(field: &str, value: &str) -> sqlx::Error {
 fn key_status_as_str(value: KeyStatus) -> &'static str {
     match value {
         KeyStatus::Active => "active",
-        KeyStatus::Disabled => "disabled",
         KeyStatus::Revoked => "revoked",
     }
 }
@@ -587,19 +577,18 @@ mod tests {
                         window_secs: 120,
                         cap_micros: 55,
                     }]),
-                    status: Some(KeyStatus::Disabled),
                 },
             )
             .await?;
         let updated = store
             .lookup_by_index_hash(&index_hash)
             .await?
-            .ok_or("disabled key should remain indexed")?
+            .ok_or("updated key should remain indexed")?
             .2;
         assert_eq!(updated.label, "renamed");
         assert_eq!(updated.description, None);
         assert_eq!(updated.expires_at_unix_secs, None);
-        assert_eq!(updated.status, KeyStatus::Disabled);
+        assert_eq!(updated.status, KeyStatus::Active);
         assert_eq!(updated.limit_overrides[0].kind, LimitKind::OutputTokens);
 
         store.revoke_zero_secrets("principal-a", "key-a").await?;

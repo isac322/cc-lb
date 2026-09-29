@@ -4,8 +4,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    AuditStore, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainEntryInput, PluginRegistryStore,
-    PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob,
+    AuditQueryScope, AuditStore, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainEntryInput,
+    PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob,
     WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
@@ -823,7 +823,7 @@ async fn chain_rebalance_emits_chain_audit() {
     let expected_route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
     assert!(
         storage
-            .query_audit(None, 0, u64::MAX, 20)
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 20, false)
             .await
             .unwrap()
             .iter()

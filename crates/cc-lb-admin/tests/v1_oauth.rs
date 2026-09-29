@@ -17,7 +17,7 @@ use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AuditEntry, AuditStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -315,7 +315,7 @@ impl Fixture {
     async fn audit_entries(&self, needle: &str) -> Vec<AuditEntry> {
         let entries = self
             .storage
-            .query_audit(None, 0, u64::MAX, 100)
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 100, false)
             .await
             .expect("query audit");
         assert!(

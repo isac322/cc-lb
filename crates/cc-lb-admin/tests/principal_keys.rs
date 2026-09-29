@@ -4,7 +4,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use std::sync::Arc;
 
 use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_storage_api::{AuditStore, RequestEvent, RequestEventStore};
+use cc_lb_storage_api::{AuditQueryScope, AuditStore, RequestEvent, RequestEventStore};
 use serde_json::json;
 
 #[tokio::test]
@@ -153,14 +153,14 @@ async fn revoked_key_list_preserves_key_id_last4_and_audit_rows() {
 }
 
 #[tokio::test]
-async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() {
+async fn key_revoke_records_concrete_actor_aware_audit_without_secrets() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
         .post_json(
             "/admin/v1/principals",
             json!({
-                "name": "legacy-key-audit",
+                "name": "key-revoke-audit",
                 "kind": "machine",
                 "allowed_models": [],
                 "default_limits": []
@@ -174,57 +174,59 @@ async fn legacy_key_routes_record_concrete_actor_aware_audits_without_secrets() 
         .client
         .post_json(
             &format!("/admin/v1/principals/{principal_id}/keys"),
-            json!({ "label": "legacy-audit" }),
+            json!({ "label": "revoke-audit" }),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED);
     let key_id = issued["key_id"].as_str().unwrap();
 
-    let key_route = format!("/admin/principals/{principal_id}/keys/{key_id}");
-    let (status, _, key) = server.client.get(&key_route).await;
+    let route = format!("/admin/v1/principals/{principal_id}/keys/{key_id}/revoke");
+    let (status, _, body) = server.client.post_json(&route, json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(key["id"], key_id);
-    assert_eq!(key["principal_id"], principal_id);
-    assert!(key.get("plaintext_key").is_none());
+    assert_eq!(body["key_id"], key_id);
+    assert!(body.get("plaintext_key").is_none());
 
-    for (operation, action, expected_key_status) in [
-        ("disable", "principal_key_disable", "disabled"),
-        ("enable", "principal_key_enable", "active"),
-        ("revoke", "principal_key_revoke", "revoked"),
-    ] {
-        let route = format!("{key_route}/{operation}");
-        let (status, _, body) = server.client.post_json(&route, json!({})).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, json!({ "status": "ok" }));
+    let (status, _, listed) = server
+        .client
+        .get(&format!(
+            "/admin/v1/principals/{principal_id}/keys?status=revoked"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let keys = listed["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["key_id"], key_id);
+    assert!(keys[0].get("plaintext_key").is_none());
 
-        let (status, _, key) = server.client.get(&key_route).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(key["status"], expected_key_status);
-
-        let entries = server
-            .storage
-            .query_audit(Some(principal_id), 0, u64::MAX, 100)
-            .await
-            .unwrap();
-        let entry = entries
-            .iter()
-            .find(|entry| {
-                entry.admin_action.as_deref() == Some(action)
-                    && entry.api_key_id.as_deref() == Some(key_id)
-            })
-            .unwrap_or_else(|| panic!("missing {action} audit for key {key_id}"));
-        assert_eq!(entry.route, route);
-        assert_eq!(entry.principal_id, principal_id);
-        assert_eq!(entry.status, StatusCode::OK.as_u16());
-        assert_eq!(entry.actor_authority.as_deref(), Some("static-token"));
-        assert_eq!(entry.actor_subject.as_deref(), Some("test-static-token"));
-        assert_eq!(entry.actor_kind.as_deref(), Some("break_glass"));
-        assert!(entry.payload.is_none());
-    }
+    let entries = server
+        .storage
+        .query_recent_audit(
+            AuditQueryScope::Principal(principal_id),
+            0,
+            u64::MAX,
+            100,
+            false,
+        )
+        .await
+        .unwrap();
+    let entry = entries
+        .iter()
+        .find(|entry| {
+            entry.admin_action.as_deref() == Some("principal_key_revoke")
+                && entry.api_key_id.as_deref() == Some(key_id)
+        })
+        .unwrap_or_else(|| panic!("missing principal_key_revoke audit for key {key_id}"));
+    assert_eq!(entry.route, route);
+    assert_eq!(entry.principal_id, principal_id);
+    assert_eq!(entry.status, StatusCode::OK.as_u16());
+    assert_eq!(entry.actor_authority.as_deref(), Some("static-token"));
+    assert_eq!(entry.actor_subject.as_deref(), Some("test-static-token"));
+    assert_eq!(entry.actor_kind.as_deref(), Some("break_glass"));
+    assert!(entry.payload.is_none());
 }
 
 #[tokio::test]
-async fn principal_key_usage_uses_persisted_request_events() {
+async fn key_list_reports_last_used_from_persisted_request_events() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, _, principal) = server
         .client
@@ -280,23 +282,6 @@ async fn principal_key_usage_uses_persisted_request_events() {
         .find(|entry| entry["key_id"] == key_id)
         .expect("issued key is listed");
     assert_eq!(key["last_used_at_unix_secs"], event_ts);
-
-    let (status, _, usage_body) = server
-        .client
-        .get(&format!(
-            "/admin/principals/{principal_id}/keys/{key_id}/usage?range=7d&step=1d"
-        ))
-        .await;
-    assert_eq!(status, StatusCode::OK, "usage response: {usage_body}");
-    let observed = usage_body["series"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|bucket| bucket["request_count"] == 1)
-        .expect("usage bucket with request");
-    assert_eq!(observed["input_tokens"], 60);
-    assert_eq!(observed["output_tokens"], 40);
-    assert_eq!(observed["cost_usd_micros"], 50);
 }
 
 async fn wait_for_audit_action(
@@ -305,7 +290,10 @@ async fn wait_for_audit_action(
     key_id: &str,
 ) {
     for _ in 0..20 {
-        let entries = storage.query_audit(None, 0, u64::MAX, 100).await.unwrap();
+        let entries = storage
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 100, false)
+            .await
+            .unwrap();
         if entries.iter().any(|entry| {
             entry.api_key_id.as_deref() == Some(key_id)
                 && entry

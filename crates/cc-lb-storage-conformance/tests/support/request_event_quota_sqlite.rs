@@ -27,12 +27,11 @@ macro_rules! define_request_event_quota_sqlite_tests {
                     storage.append_request_event(&event).await?;
 
                     // Then payload reads and the stored payload JSON both retain the selected values.
-                    let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(read_back.len(), 1);
-                    request_event_quota_support::assert_populated_event(&read_back[0]);
-                    let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(recent.len(), 1);
-                    request_event_quota_support::assert_populated_event(&recent[0]);
+                    let read_back = storage
+                        .get_request_event(request_event_quota_support::SELECTED_EVENT_ID)
+                        .await?
+                        .expect("persisted request event");
+                    request_event_quota_support::assert_populated_event(&read_back);
                     let cursor = storage.current_request_event_cursor().await?;
                     let cursor_rows = storage
                         .query_request_events_between_cursors(

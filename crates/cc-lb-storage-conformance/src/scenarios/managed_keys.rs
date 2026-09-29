@@ -118,7 +118,6 @@ where
                         window_secs: 300,
                         cap_micros: 99,
                     }]),
-                    status: Some(KeyStatus::Disabled),
                 },
             )
             .await?;
@@ -126,7 +125,7 @@ where
         let updated = store
             .lookup_by_index_hash(&index_hash)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("disabled key should stay indexed"))?
+            .ok_or_else(|| anyhow::anyhow!("updated key should stay indexed"))?
             .2;
         ensure!(updated.label == "renamed-key", "label mutation not stored");
         ensure!(
@@ -138,8 +137,8 @@ where
             "expiry mutation not stored"
         );
         ensure!(
-            updated.status == KeyStatus::Disabled,
-            "status mutation not stored"
+            updated.status == KeyStatus::Active,
+            "update must not change status"
         );
         ensure!(
             updated.limit_overrides

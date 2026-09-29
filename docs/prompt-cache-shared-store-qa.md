@@ -62,9 +62,9 @@ CC_LB_ADMIN_SKIP_SPA=1 CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
 CC_LB_ADMIN_SKIP_SPA=1 CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
   cargo test -p cc-lb-admin --test integration
 
-# PostgreSQL storage adapter live tests (postgres feature + CI_POSTGRES_URL required)
+# PostgreSQL storage adapter live tests (CI_POSTGRES_URL required)
 CI_POSTGRES_URL="postgres://cc_lb:cc_lb@127.0.0.1:5432/cc_lb" \
-  cargo test -p cc-lb-storage-postgres --features postgres --test integration -- --test-threads=1
+  cargo test -p cc-lb-storage-postgres --test integration -- --test-threads=1
 
 # 2-replica + shared PostgreSQL 18 E2E (Docker required, DOCKER_HOST=tcp://localhost:2375)
 CC_LB_MULTI_REPLICA_E2E=1 \

@@ -439,6 +439,28 @@ pub async fn settle() {
     }
 }
 
+/// Reads every persisted request event in append order through the cursor
+/// API (at most 500 rows, far above any single test's volume).
+pub async fn stored_request_events<S>(
+    storage: &S,
+) -> StorageResult<Vec<cc_lb_storage_api::RequestEvent>>
+where
+    S: cc_lb_storage_api::RequestEventStore + ?Sized,
+{
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
+}
+
 pub async fn signed_request(base_url: &str) -> SignedRequest {
     let upstream = Upstream::AnthropicDirect { base_url: None };
     let ctx = DialectShapeContext {

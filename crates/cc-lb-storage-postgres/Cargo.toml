@@ -12,9 +12,6 @@ build = "build.rs"
 name = "integration"
 path = "tests/all.rs"
 
-[features]
-postgres = []
-
 [dependencies]
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-domain.workspace = true
@@ -36,4 +33,3 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance" }

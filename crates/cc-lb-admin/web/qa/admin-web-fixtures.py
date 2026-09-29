@@ -92,13 +92,6 @@ INVENTORY_RECONCILIATION = {
         "settings_audit": ["api-write.json", "api-read.json", "ui.json"],
         "auth_error_empty": ["api-read.json", "ui.json"],
     },
-    "aliases": {
-        "legacy_key_mutations": [
-            "/admin/principals/{id}/keys/{key_id}/revoke",
-            "/admin/principals/{id}/keys/{key_id}/disable",
-            "/admin/principals/{id}/keys/{key_id}/enable",
-        ],
-    },
 }
 
 ENGINE_MATRIX = {
@@ -139,7 +132,6 @@ COVERAGE_GROUPS: dict[str, list[dict[str, Any]]] = {
         {"id": "UI-PR-20", "method": "GET", "path": "/admin/v1/principals/{id}/keys", "fixture": "key.preexisting", "reset": "snapshot", "side_effect": "Audit write"},
         {"id": "UI-PR-21", "method": "POST", "path": "/admin/v1/principals/{id}/keys", "fixture": "principal.primary", "reset": "snapshot", "secret_rule": "plaintext response must never enter manifest/evidence"},
         {"id": "UI-PR-22", "method": "POST", "path": "/admin/v1/principals/{id}/keys/{key_id}/revoke", "fixture": "key.preexisting", "reset": "snapshot"},
-        {"id": "API-LEGACY-KEY-ENABLE", "method": "POST", "path": "/admin/principals/{id}/keys/{key_id}/{enable|disable}", "fixture": "key.preexisting", "reset": "snapshot", "ui": "backend-only legacy"},
     ],
     "router": [
         {"id": "UI-PR-14", "method": "PUT", "path": "/admin/v1/principals/{id}/router-terminal", "fixture": "principal.primary", "reset": "snapshot"},

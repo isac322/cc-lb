@@ -1,10 +1,9 @@
 # cc-lb Admin Web & API/Query QA Inventory
 
 > **Source base commit:** `fd3a15eb`  
-> **Source state:** `merged_master` — Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree.  
+> **Source state:** `merged_master` — Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits.  
 > **Source reconciliation:** `source_reconciled`  
 > **Runtime status:** `runtime_pending`  
-> **Production applicability:** `reconciled_from_deployed_delta`  
 > **Count basis:** Rows are rendered from source contracts and independently checked source/route denominators; counts alone are not completion evidence.
 
 Static reconciliation is not browser proof. Runtime entities, cursor termination, poll cycles, SSE behavior, production availability, and latency remain pending until the execution harness records them.
@@ -19,7 +18,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 |---|---|
 | UI parent actions | 203 |
 | UI atomic request occurrences | 142 |
-| Registered API method/path rows | 87 |
+| Registered API method/path rows | 82 |
 | Independent backend route scan | 87 |
 | Production UI source denominator | 90 files |
 | UI route denominator | 8 routes |
@@ -36,406 +35,371 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 
 ## 3. Master Interaction Index
 
-| ID | Type | Parent | Page / Component | Action or HTTP | Risk | Production |
-|---|---|---|---|---|---|---|
-| **UI-SRC-E63DB0A6963C** | `ui_action` | — | Global / AuthRequiredGate | Auto Session Verification on Mount/Storage Change | `read` | `not_deployed` |
-| **UI-ROOT-01** | `network_request` | UI-SRC-E63DB0A6963C | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` | `not_deployed` |
-| **UI-SRC-7EF8F6882B60** | `ui_action` | — | Global / AuthRequiredGate | Submit Static Admin Bearer Token | `read` | `not_deployed` |
-| **UI-ROOT-02** | `network_request` | UI-SRC-7EF8F6882B60 | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` | `not_deployed` |
-| **UI-SRC-15F5F1954403** | `ui_action` | — | Global / AuthRequiredGate | Admin Token Input Empty Validation | `read` | `available` |
-| **UI-SRC-9D6A6AA71D0F** | `ui_action` | — | Global / AuthRequiredGate | External Auth Required Retry Click | `read` | `not_deployed` |
-| **REQ-SRC-D9664AAE1B32** | `network_request` | UI-SRC-9D6A6AA71D0F | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` | `not_deployed` |
-| **UI-SRC-EB957D16B51D** | `ui_action` | — | Global / AuthRequiredGate | Auth Verification Error Retry Click | `read` | `not_deployed` |
-| **REQ-SRC-B038CDBE84D7** | `network_request` | UI-SRC-EB957D16B51D | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` | `not_deployed` |
-| **UI-SRC-F05A6A69408A** | `ui_action` | — | Global / AppShell / Topbar | Admin Server Health Poll | `read` | `available` |
-| **UI-ROOT-03** | `network_request` | UI-SRC-F05A6A69408A | Global / AppShell / Topbar | GET /admin/health | `read` | `available` |
-| **UI-TOP-01** | `ui_action` | — | Global / AppShell / Topbar | Desktop Sidebar Collapse Toggle Button | `read` | `available` |
-| **UI-TOP-03** | `ui_action` | — | Global / AppShell | Keyboard Shortcut Toggle Sidebar (Cmd+B / Ctrl+B) | `read` | `available` |
-| **UI-TOP-04** | `ui_action` | — | Global / AppShell / Topbar | Mobile Hamburger Navigation Drawer Trigger | `read` | `available` |
-| **UI-SRC-7963BABBB70A** | `ui_action` | — | Global / AppShell / Topbar | Command Palette Topbar Trigger Button | `read` | `available` |
-| **UI-TOP-05** | `ui_action` | — | Global / Sidebar / SidebarNav | Primary Navigation Links | `read` | `available` |
-| **UI-TOP-02** | `ui_action` | — | Global / ThemeToggle | Theme Mode Selection Dropdown | `read` | `available` |
-| **UI-CMD-01** | `ui_action` | — | Global / CommandPalette | Command Palette Keyboard Shortcut (Cmd+K / Ctrl+K) | `read` | `available` |
-| **UI-SRC-FD9DEB65904F** | `ui_action` | — | Global / CommandPalette | Command Palette Upstreams Background Query | `read` | `available` |
-| **UI-CMD-03** | `network_request` | UI-SRC-FD9DEB65904F | Global / CommandPalette | GET /admin/v1/upstreams | `read` | `available` |
-| **UI-SRC-036489E5DD6A** | `ui_action` | — | Global / CommandPalette | Command Palette Principals Background Query | `read` | `available` |
-| **UI-CMD-04** | `network_request` | UI-SRC-036489E5DD6A | Global / CommandPalette | GET /admin/v1/principals | `read` | `available` |
-| **UI-CMD-05** | `ui_action` | — | Global / CommandPalette | Command Palette Live Text Filter | `read` | `available` |
-| **UI-CMD-02** | `ui_action` | — | Global / CommandPalette | Command Palette Page or Action Navigation | `read` | `available` |
-| **UI-SRC-7B67C1B1E413** | `ui_action` | — | Global / CommandPalette | Command Palette Entity Deep Link Selection | `read` | `available` |
-| **UI-CMD-06** | `ui_action` | — | Global / CommandPalette | Command Palette Dismiss / Close | `read` | `available` |
-| **UI-SRC-014AD24226CE** | `ui_action` | — | Overview / KPI Tiles & Header | Overview Dashboard Summary & Sparkline Metrics Query | `read` | `available` |
-| **UI-OV-01** | `network_request` | UI-SRC-014AD24226CE | Overview / KPI Tiles & Header | GET /admin/v1/dashboard/summary | `read` | `available` |
-| **UI-SRC-6899B83C35F4** | `ui_action` | — | Overview / Top Principals Card | Overview Dashboard Principal Usage Query | `read` | `available` |
-| **UI-OV-02** | `network_request` | UI-SRC-6899B83C35F4 | Overview / Top Principals Card | GET /admin/v1/dashboard/usage | `read` | `available` |
-| **UI-SRC-6A947BA8B48A** | `ui_action` | — | Overview / Pool Quota Card / Stacked Bars | Subscription Quota Aggregate Snapshot Query | `read` | `available` |
-| **UI-OV-03** | `network_request` | UI-SRC-6A947BA8B48A | Overview / Pool Quota Card / Stacked Bars | GET /admin/v1/subscription-quotas/aggregate | `read` | `available` |
-| **UI-SRC-F52C6DD98101** | `ui_action` | — | Overview / Pool Quota Card / Themed Area Chart | Subscription Quota Pool History Time Series Query | `read` | `available` |
-| **UI-OV-04** | `network_request` | UI-SRC-F52C6DD98101 | Overview / Pool Quota Card / Themed Area Chart | GET /admin/v1/subscription-quotas/pool-history | `read` | `available` |
-| **UI-SRC-BAA6CE610FCA** | `ui_action` | — | Overview / OverviewPage / Data Layer | Principal Name Resolution Query | `read` | `available` |
-| **UI-OV-13** | `network_request` | UI-SRC-BAA6CE610FCA | Overview / OverviewPage / Data Layer | GET /admin/v1/principals | `read` | `available` |
-| **UI-SRC-1BEA80590008** | `ui_action` | — | Overview / OverviewPage / Data Layer | Upstream Name Resolution Query | `read` | `available` |
-| **UI-OV-14** | `network_request` | UI-SRC-1BEA80590008 | Overview / OverviewPage / Data Layer | GET /admin/v1/upstreams | `read` | `available` |
-| **UI-OV-07** | `ui_action` | — | Overview / Overview Header / Time Range Toggle Bar | Time Range Toggle Action | `read` | `available` |
-| **UI-OV-08** | `ui_action` | — | Overview / KPI Tiles / Sparkline | Synchronized KPI Sparkline Hover | `read` | `available` |
-| **UI-OV-09** | `ui_action` | — | Overview / TopPrincipalsCard / PrincipalCostMeter | Principal Cost Breakdown Popover | `read` | `available` |
-| **UI-OV-10** | `ui_action` | — | Overview / PoolQuotaCard / PoolQuotaStackedBar | Pool Quota Stacked Bar Breakdown Popover | `read` | `available` |
-| **UI-SRC-8C3BDB37C763** | `ui_action` | — | Overview / Recent Requests Table | Recent Requests Initial Page Query | `read` | `available` |
-| **UI-OV-05** | `network_request` | UI-SRC-8C3BDB37C763 | Overview / Recent Requests Table | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-2305B3BC43A4** | `ui_action` | — | Overview / Recent Requests Table / Infinite Scroll | Recent Requests Infinite Scroll Next Page | `read` | `available` |
-| **UI-OV-11** | `network_request` | UI-SRC-2305B3BC43A4 | Overview / Recent Requests Table / Infinite Scroll | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-40B1F1E07B91** | `ui_action` | — | Overview / Recent Requests / Live Event Stream | Live Tail SSE Connection | `read` | `available` |
-| **UI-OV-06** | `network_request` | UI-SRC-40B1F1E07B91 | Overview / Recent Requests / Live Event Stream | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-SRC-FDFB5195AB54** | `ui_action` | — | Overview / Recent Requests / Live Stream Reconnection | Live Stream Reconnect Hybrid Delta Backfill | `read` | `available` |
-| **UI-OV-15** | `network_request` | UI-SRC-FDFB5195AB54 | Overview / Recent Requests / Live Stream Reconnection | GET /admin/v1/events/delta | `read` | `available` |
-| **UI-OV-16** | `ui_action` | — | Overview / LiveTailFailureBanner | Live Tail Failure Banner Manual Retry | `read` | `available` |
-| **UI-SRC-CFF84088D66A** | `ui_action` | — | Overview / LiveTailFailureBanner | Live Tail Failure Banner Dismiss | `read` | `available` |
-| **UI-OV-17** | `ui_action` | — | Overview / Recent Requests / Section Header | Recent Requests 'See all' Navigation Link | `read` | `available` |
-| **UI-SRC-1667E85E2450** | `ui_action` | — | Overview / Recent Requests Table / RequestEventRow | Recent Request Row Selection | `read` | `available` |
-| **UI-SRC-7BBB835587EA** | `ui_action` | — | Overview / RequestEventDrawer / RequestDetail | Request Event Full Detail Query | `read` | `available` |
-| **UI-OV-12** | `network_request` | UI-SRC-7BBB835587EA | Overview / RequestEventDrawer / RequestDetail | GET /admin/v1/events/detail/{event_id} | `read_with_audit` | `available` |
-| **UI-SRC-FE19ED30AFDB** | `ui_action` | — | Overview / RequestEventDrawer / RequestDetail | Request Detail Copy Actions (ID, Session, JSON) | `read` | `available` |
-| **UI-SRC-25F058F5759A** | `ui_action` | — | Overview / RequestEventDrawer | Request Detail Drawer Close | `read` | `available` |
-| **UI-SRC-35CD806FA378** | `ui_action` | — | Logs / Logs Table Historical Events | Historical Events Page Query on Mount | `read` | `available` |
-| **UI-LOG-01** | `network_request` | UI-SRC-35CD806FA378 | Logs / Logs Table Historical Events | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-8290B2982481** | `ui_action` | — | Logs / Logs Live Event Stream (SSE) | SSE Live Event Stream Subscription | `read` | `available` |
-| **UI-LOG-02** | `network_request` | UI-SRC-8290B2982481 | Logs / Logs Live Event Stream (SSE) | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-SRC-694A5E8030DA** | `ui_action` | — | Logs / Events Histogram Strip | Events Histogram Query | `read` | `available` |
-| **UI-LOG-03** | `network_request` | UI-SRC-694A5E8030DA | Logs / Events Histogram Strip | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-04** | `ui_action` | — | Logs / Toggle Live Tail Button | Toggle Live Tail Button Click | `read` | `available` |
-| **UI-LOG-05** | `ui_action` | — | Logs / Principal Filter Dropdown | Select Principal Filter | `read` | `available` |
-| **UI-LOG-05A** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-05B** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-05C** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-06** | `ui_action` | — | Logs / Upstream Filter Dropdown | Select Upstream Filter | `read` | `available` |
-| **UI-LOG-06A** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-06B** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-06C** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-07** | `ui_action` | — | Logs / Session Filter Dropdown | Select Session Filter | `read` | `available` |
-| **UI-LOG-07A** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-07B** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-07C** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-08** | `ui_action` | — | Logs / Model Filter Input | Model Input Debounced Filter Change | `read` | `available` |
-| **UI-LOG-08A** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-08B** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-08C** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-09** | `ui_action` | — | Logs / Status Class Filter Dropdown | Select Status Class Filter | `read` | `available` |
-| **UI-LOG-09A** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-09B** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-09C** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-10** | `ui_action` | — | Logs / Source Kind Filter Dropdown | Select Source Kind Filter | `read` | `available` |
-| **UI-LOG-10A** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-10B** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-10C** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-11** | `ui_action` | — | Logs / Histogram Strip Canvas Interaction | Histogram View Pan/Zoom and Selection Drag | `read` | `available` |
-| **UI-LOG-11B** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-11A** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-12** | `ui_action` | — | Logs / TimeRangeBounds Input and Apply | Absolute Time Bounds Entry and Calendar Pick | `read` | `available` |
-| **UI-LOG-12A** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-12B** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-LOG-13** | `ui_action` | — | Logs / Clear Filters Button | Clear All Filters Button Click | `read` | `available` |
-| **UI-SRC-2874D8E9F106** | `ui_action` | — | Logs / Refresh Button | Manual Refresh Button Click | `read` | `available` |
-| **UI-LOG-14** | `network_request` | UI-SRC-2874D8E9F106 | Logs / Refresh Button | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-15** | `ui_action` | — | Logs / Export Logs Button | Export Visible Logs to JSON | `read` | `available` |
-| **UI-SRC-A6BE3F64E803** | `ui_action` | — | Logs / Logs Pagination Controls Next Button | Navigate to Next Historical Page | `read` | `available` |
-| **UI-LOG-16** | `network_request` | UI-SRC-A6BE3F64E803 | Logs / Logs Pagination Controls Next Button | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-888A1F4D1DD9** | `ui_action` | — | Logs / Logs Pagination Controls Prev Button | Navigate to Previous Historical Page | `read` | `available` |
-| **UI-LOG-17** | `ui_action` | — | Logs / Log Row Anchor Zoom Buttons | Row Anchor Range Buttons (±1m, ±5m, ±30m) | `read` | `available` |
-| **UI-LOG-17A** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-LOG-17B** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/histogram | `read` | `available` |
-| **UI-SRC-091345AD21A8** | `ui_action` | — | Logs / RequestEventsTable Row Click | Row Click Open Request Detail Drawer | `read` | `available` |
-| **UI-SRC-C59FB001EF22** | `ui_action` | — | Logs / Request Event Detail Query | Fetch Full Event Diagnostics Detail | `read` | `available` |
-| **UI-LOG-18** | `network_request` | UI-SRC-C59FB001EF22 | Logs / Request Event Detail Query | GET /admin/v1/events/detail/{event_id} | `read_with_audit` | `available` |
-| **UI-SRC-6793FF938733** | `ui_action` | — | Logs / Upstream Options Query | Fetch Upstreams for Options and Names | `read` | `available` |
-| **UI-LOG-19** | `network_request` | UI-SRC-6793FF938733 | Logs / Upstream Options Query | GET /admin/v1/upstreams | `read` | `available` |
-| **UI-SRC-476EE1297D09** | `ui_action` | — | Logs / Principal Options Query | Fetch Principals for Options and Names | `read` | `available` |
-| **UI-LOG-20** | `network_request` | UI-SRC-476EE1297D09 | Logs / Principal Options Query | GET /admin/v1/principals | `read` | `available` |
-| **UI-SRC-2B0EFC709378** | `ui_action` | — | Logs / Live Stream Reconnect Delta Backfill | SSE Reconnect Delta Catch-Up Query | `read` | `available` |
-| **UI-LOG-21** | `network_request` | UI-SRC-2B0EFC709378 | Logs / Live Stream Reconnect Delta Backfill | GET /admin/v1/events/delta | `read` | `available` |
-| **UI-LOG-22** | `ui_action` | — | Logs / Live Tail Failure Banner Retry | Force Reconnect Button Click on Terminal SSE Failure | `read` | `available` |
-| **REQ-SRC-B1BE83CDD51E** | `network_request` | UI-LOG-22 | Logs / Live Tail Failure Banner Retry | GET /admin/v1/events/stream | `read` | `available` |
-| **UI-LOG-25** | `ui_action` | — | Logs / Live Tail Failure Banner Dismiss | Dismiss Failure Banner | `read` | `available` |
-| **UI-LOG-23** | `ui_action` | — | Logs / Request Drawer Identity Copy Buttons | Copy Identity Fields to Clipboard | `read` | `available` |
-| **UI-LOG-28** | `ui_action` | — | Logs / Request Detail Drawer Close | Close Detail Drawer | `read` | `available` |
-| **UI-LOG-29** | `ui_action` | — | Logs / Latency Timeline Stage Breakdown | Latency Stage Hover Popover and Sticky Click | `read` | `available` |
-| **UI-LOG-30** | `ui_action` | — | Logs / Streaming Timeline Markers | Streaming Event Markers (TTFT / Message Start / Deltas / Stop) | `read` | `available` |
-| **UI-LOG-26** | `ui_action` | — | Logs / Legacy Preset URL Normalization | Rewrite Legacy ?time_range= Preset to Absolute Unix Bounds | `read` | `available` |
-| **UI-SRC-00BD57E4D253** | `ui_action` | — | Principals / PrincipalsPage | Load Principals List | `read` | `available` |
-| **UI-PR-01** | `network_request` | UI-SRC-00BD57E4D253 | Principals / PrincipalsPage | GET /admin/v1/principals | `read` | `available` |
-| **UI-SRC-241AEA7F7B55** | `ui_action` | — | Principals / PrincipalsPage | Desktop Auto-Select First Principal | `read` | `available` |
-| **UI-PR-02** | `ui_action` | — | Principals / PrincipalsPage | Select Principal from Sidebar | `read` | `available` |
-| **UI-SRC-B7B21779622C** | `ui_action` | — | Principals / PrincipalsPage | Action New URL Query Parameter Trigger | `read` | `available` |
-| **UI-SRC-783B9A8424A8** | `ui_action` | — | Principals / PrincipalsPage | Open Create Principal Modal via New Button | `read` | `available` |
-| **UI-SRC-E9A473CD5D19** | `ui_action` | — | Principals / CreatePrincipalModal | Create Principal Submit | `reversible_write` | `available` |
-| **UI-PR-23** | `network_request` | UI-SRC-E9A473CD5D19 | Principals / CreatePrincipalModal | POST /admin/v1/principals | `reversible_write` | `available` |
-| **UI-PR-03** | `ui_action` | — | Principals / PrincipalDetail | Toggle Principal Enabled State | `reversible_write` | `available` |
-| **REQ-SRC-C31B76D697EB** | `network_request` | UI-PR-03 | Principals / PrincipalDetail | POST /admin/v1/principals/{id}/enable | `reversible_write` | `available` |
-| **REQ-SRC-39C6706B40BF** | `network_request` | UI-PR-03 | Principals / PrincipalDetail | POST /admin/v1/principals/{id}/disable | `reversible_write` | `available` |
-| **UI-SRC-B1990946C344** | `ui_action` | — | Principals / PrincipalDetail | Delete Principal via Confirm Dialog | `destructive_write` | `available` |
-| **UI-PR-04** | `network_request` | UI-SRC-B1990946C344 | Principals / PrincipalDetail | DELETE /admin/v1/principals/{id} | `destructive_write` | `available` |
-| **UI-SRC-B0C8E4E556BC** | `ui_action` | — | Principals / PrincipalDetail | Mobile Back to Master List | `read` | `available` |
-| **UI-SRC-74652446E668** | `ui_action` | — | Principals / AllowedModelsCard | Update Allowed Models | `reversible_write` | `available` |
-| **UI-PR-05** | `network_request` | UI-SRC-74652446E668 | Principals / AllowedModelsCard | PUT /admin/v1/principals/{id}/allowed_models | `reversible_write` | `available` |
-| **UI-SRC-D74A22B571BC** | `ui_action` | — | Principals / DefaultLimitsCard | Update Principal Default Limits | `reversible_write` | `available` |
-| **UI-PR-06** | `network_request` | UI-SRC-D74A22B571BC | Principals / DefaultLimitsCard | PATCH /admin/v1/principals/{id} | `reversible_write` | `available` |
-| **UI-SRC-5EED9F4C1CB5** | `ui_action` | — | Principals / RecentRequestsCard | Recent Requests Principal Polling | `read` | `available` |
-| **UI-PR-24** | `network_request` | UI-SRC-5EED9F4C1CB5 | Principals / RecentRequestsCard | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-7FA58E7543A9** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Plugin Chain | `read` | `available` |
-| **UI-PR-13A** | `network_request` | UI-SRC-7FA58E7543A9 | Principals / RouterSlotEditor | GET /admin/v1/principals/{id}/plugin-chain | `read` | `available` |
-| **UI-SRC-F380C424AEC6** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Terminal Strategy | `read` | `available` |
-| **UI-PR-13B** | `network_request` | UI-SRC-F380C424AEC6 | Principals / RouterSlotEditor | GET /admin/v1/principals/{id}/router-terminal | `read` | `available` |
-| **UI-SRC-2C8DBDF42A9A** | `ui_action` | — | Principals / RouterSlotEditor | Router Editor Tab Switching | `read` | `available` |
-| **UI-SRC-72D80A37A7FC** | `ui_action` | — | Principals / RouterSlotEditor | Toggle Subscription Preference Plugin (Basic Tab) | `reversible_write` | `available` |
-| **UI-PR-15** | `network_request` | UI-SRC-72D80A37A7FC | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` | `available` |
-| **UI-PR-15B** | `network_request` | UI-SRC-72D80A37A7FC | Principals / RouterSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` | `available` |
-| **UI-SRC-12BD8F041AC6** | `ui_action` | — | Principals / RouterSlotEditor | Change Router Terminal Strategy | `reversible_write` | `available` |
-| **UI-PR-14** | `network_request` | UI-SRC-12BD8F041AC6 | Principals / RouterSlotEditor | PUT /admin/v1/principals/{id}/router-terminal | `reversible_write` | `available` |
-| **UI-SRC-D4D3CDAFC561** | `ui_action` | — | Principals / RouterSlotEditor | Add Router Filter from Popover (Advanced Tab) | `reversible_write` | `available` |
-| **UI-PR-16B** | `network_request` | UI-SRC-D4D3CDAFC561 | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` | `available` |
-| **UI-SRC-C4E25AD91ABF** | `ui_action` | — | Principals / RouterSlotEditor | Reorder Router Filters via Move Up/Down | `reversible_write` | `available` |
-| **UI-PR-16** | `network_request` | UI-SRC-C4E25AD91ABF | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain/reorder | `reversible_write` | `available` |
-| **UI-SRC-797468122201** | `ui_action` | — | Principals / RouterSlotEditor | Remove Router Filter Step | `destructive_write` | `available` |
-| **UI-PR-16C** | `network_request` | UI-SRC-797468122201 | Principals / RouterSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` | `available` |
-| **UI-SRC-9E71353DC28E** | `ui_action` | — | Principals / PluginDetailDrawer | View Plugin Details Drawer | `read` | `available` |
-| **UI-PR-18** | `ui_action` | — | Principals / ShapeSlotEditor | Select Shape Slot Plugin | `reversible_write` | `available` |
-| **UI-PR-18A** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` | `available` |
-| **UI-PR-18B** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` | `available` |
-| **UI-SRC-5DE97D4F1CFC** | `ui_action` | — | Principals / ApiKeysCard | Load Principal API Keys | `read` | `available` |
-| **UI-PR-20** | `network_request` | UI-SRC-5DE97D4F1CFC | Principals / ApiKeysCard | GET /admin/v1/principals/{id}/keys | `read_with_audit` | `available` |
-| **UI-SRC-911C0971EF03** | `ui_action` | — | Principals / ApiKeysCard | Issue New API Key | `reversible_write` | `available` |
-| **UI-PR-21** | `network_request` | UI-SRC-911C0971EF03 | Principals / ApiKeysCard | POST /admin/v1/principals/{id}/keys | `reversible_write` | `available` |
-| **UI-SRC-B4272A92476E** | `ui_action` | — | Principals / ApiKeysCard | Revoke API Key | `destructive_write` | `available` |
-| **UI-PR-22** | `network_request` | UI-SRC-B4272A92476E | Principals / ApiKeysCard | POST /admin/v1/principals/{id}/keys/{key_id}/revoke | `destructive_write` | `available` |
-| **UI-SRC-A3E7AE6357CE** | `ui_action` | — | Principals / CacheKeepaliveCard | Cache Keepalive Card Summary Polling (limit=0) | `read` | `available` |
-| **UI-PR-07** | `network_request` | UI-SRC-A3E7AE6357CE | Principals / CacheKeepaliveCard | GET /admin/v1/principals/{id}/cache-keepalive | `read` | `available` |
-| **UI-SRC-921EE69973B8** | `ui_action` | — | Principals / CacheKeepaliveCard | Toggle Principal Cache Keepalive Enabled | `reversible_write` | `available` |
-| **UI-PR-08** | `network_request` | UI-SRC-921EE69973B8 | Principals / CacheKeepaliveCard | PATCH /admin/v1/principals/{id} | `reversible_write` | `available` |
-| **UI-PR-09A** | `ui_action` | — | Principals / CacheKeepaliveSettingsDrawer | Save Cache Keepalive Advanced Settings | `reversible_write` | `available` |
-| **UI-PR-09** | `network_request` | UI-PR-09A | Principals / CacheKeepaliveSettingsDrawer | PATCH /admin/v1/principals/{id} | `reversible_write` | `available` |
-| **UI-PR-10** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Cache Keepalive Sessions List Query & Polling (limit omitted) | `read` | `available` |
-| **UI-PR-10A** | `network_request` | UI-PR-10 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` | `available` |
-| **UI-SRC-88A40F094821** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Horizon Toggle Selection & Cursor Invalidation | `read` | `available` |
-| **REQ-SRC-68354F29C6F2** | `network_request` | UI-SRC-88A40F094821 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` | `available` |
-| **UI-SRC-9E180B20857B** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Status Filter Selection (All / State / Error) | `read` | `available` |
-| **UI-PR-11** | `network_request` | UI-SRC-9E180B20857B | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` | `available` |
-| **UI-SRC-B75FF5FEE2B9** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Sessions Infinite Pagination via Cursor | `read` | `available` |
-| **UI-PR-11B** | `network_request` | UI-SRC-B75FF5FEE2B9 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` | `available` |
-| **UI-SRC-BACAC4FD9C6A** | `ui_action` | — | Principals / SessionDetailPane | Cache Keepalive Session Detail Polling | `read` | `available` |
-| **UI-PR-12** | `network_request` | UI-SRC-BACAC4FD9C6A | Principals / SessionDetailPane | GET /admin/v1/principals/{id}/cache-keepalive/{session_id} | `read` | `available` |
-| **UI-SRC-2DEF2F42BB04** | `ui_action` | — | Principals / SessionDetailPane | Session Detail Collapsible Sections | `read` | `available` |
-| **UI-SRC-D94B76752475** | `ui_action` | — | Plugins / PluginsPage | Plugins Page Mount & Registry Fetch | `read` | `available` |
-| **UI-PLUG-01** | `network_request` | UI-SRC-D94B76752475 | Plugins / PluginsPage | GET /admin/v1/plugins/registry | `read` | `available` |
-| **UI-PLUG-05** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Inspect Click | `read` | `available` |
-| **UI-PLUG-11** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Copy SHA256 | `read` | `available` |
-| **UI-PLUG-10** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Delete Button Click | `read` | `available` |
-| **UI-SRC-42AEDACD7B73** | `ui_action` | — | Plugins / PluginCatalog | Garbage Collection (Clean Orphaned Uploads) | `destructive_write` | `available` |
-| **UI-PLUG-04** | `network_request` | UI-SRC-42AEDACD7B73 | Plugins / PluginCatalog | POST /admin/v1/plugins/wasm/gc | `destructive_write` | `available` |
-| **UI-SRC-F8C17F59AB34** | `ui_action` | — | Plugins / PluginUploadCard | WASM Plugin File Upload (Browse or Drop) | `reversible_write` | `available` |
-| **UI-PLUG-02** | `network_request` | UI-SRC-F8C17F59AB34 | Plugins / PluginUploadCard | POST /admin/v1/plugins/wasm | `reversible_write` | `available` |
-| **UI-SRC-19B510951607** | `ui_action` | — | Plugins / PluginUploadCard | Confirm Plugin Replacement (409 Conflict Resolution) | `destructive_write` | `available` |
-| **UI-PLUG-03** | `network_request` | UI-SRC-19B510951607 | Plugins / PluginUploadCard | POST /admin/v1/plugins/wasm | `reversible_write` | `available` |
-| **UI-PLUG-20** | `ui_action` | — | Plugins / PluginUploadCard | Cancel Plugin Replacement | `read` | `available` |
-| **UI-PLUG-14** | `ui_action` | — | Plugins / PluginsPage | Upload Action Modal Lifecycle | `read` | `available` |
-| **UI-SRC-FBE359698524** | `ui_action` | — | Plugins / PluginDeleteDialog | Delete Dialog References Fetch | `read` | `available` |
-| **UI-PLUG-09** | `network_request` | UI-SRC-FBE359698524 | Plugins / PluginDeleteDialog | GET /admin/v1/plugins/registry/{id}/references | `read` | `available` |
-| **UI-SRC-9693EBA2D460** | `ui_action` | — | Plugins / PluginDeleteDialog | Plugin Deletion Confirm (Simple & Cascade) | `destructive_write` | `available` |
-| **UI-PLUG-08** | `network_request` | UI-SRC-9693EBA2D460 | Plugins / PluginDeleteDialog | DELETE /admin/v1/plugins/registry/{id} | `destructive_write` | `available` |
-| **UI-PLUG-19** | `ui_action` | — | Plugins / PluginDeleteDialog | Cancel Plugin Deletion | `read` | `available` |
-| **UI-PLUG-13** | `ui_action` | — | Plugins / PluginDetail | Back to Catalog Button Click | `read` | `available` |
-| **UI-PLUG-12** | `ui_action` | — | Plugins / PluginDetailIntegrity | Detail Card Copy SHA256 | `read` | `available` |
-| **UI-PLUG-16** | `ui_action` | — | Plugins / PluginDetailOperate | Inline Label Edit Form Toggle (Open & Cancel) | `read` | `available` |
-| **UI-SRC-824B79F88848** | `ui_action` | — | Plugins / PluginDetailOperate | Save Plugin Label Mutation | `reversible_write` | `available` |
-| **UI-PLUG-07** | `network_request` | UI-SRC-824B79F88848 | Plugins / PluginDetailOperate | PATCH /admin/v1/plugins/registry/{id} | `reversible_write` | `available` |
-| **UI-PLUG-18** | `ui_action` | — | Plugins / PluginDetailOperate | Detail View Delete Button Click | `read` | `available` |
-| **UI-PLUG-21** | `ui_action` | — | Plugins / PluginDetail | Used By Reference Link Click | `read` | `available` |
-| **UI-PLUG-22** | `ui_action` | — | Plugins / PluginDetailApply | Apply Plugin Target Navigation Links | `read` | `available` |
-| **UI-SRC-DF3F46767D73** | `ui_action` | — | Settings / Version Card | System Status & Version Telemetry | `read` | `available` |
-| **UI-SET-01** | `network_request` | UI-SRC-DF3F46767D73 | Settings / Version Card | GET /admin/v1/status | `read` | `available` |
-| **UI-SET-10** | `ui_action` | — | Settings / Localization Card | Change Locale Preference | `read` | `available` |
-| **UI-SET-11** | `ui_action` | — | Settings / Localization Card | Change Timezone Preference | `read` | `available` |
-| **UI-SRC-5A139160911F** | `ui_action` | — | Settings / Localization Card | Localization Live Preview Clock Tick | `read` | `available` |
-| **UI-SET-03** | `ui_action` | — | Settings / ConfigEditorSection | Load Configuration Editor & Draft Data | `read` | `partially_deployed` |
-| **UI-SET-17** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` | `not_deployed` |
-| **UI-SET-03B** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` | `available` |
-| **UI-SET-14** | `ui_action` | — | Settings / ConfigEditorSection | Edit Configuration Field Value | `read` | `available` |
-| **UI-SRC-67C497520AA2** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft | `reversible_write` | `available` |
-| **UI-SET-04** | `network_request` | UI-SRC-67C497520AA2 | Settings / ConfigEditorSection | PUT /admin/v1/config/draft | `reversible_write` | `available` |
-| **UI-SRC-BFD8C956C3C5** | `ui_action` | — | Settings / ConfigEditorSection | Validate Draft | `reversible_write` | `available` |
-| **UI-SET-05** | `network_request` | UI-SRC-BFD8C956C3C5 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/validate | `reversible_write` | `available` |
-| **UI-SET-12** | `ui_action` | — | Settings / ConfigEditorSection | Retry Configuration Editor Loading | `read` | `partially_deployed` |
-| **UI-SET-12A** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` | `not_deployed` |
-| **UI-SET-12B** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` | `available` |
-| **UI-SRC-C9DD3E291979** | `ui_action` | — | Settings / ConfigHistorySection | Load Configuration History | `read` | `available` |
-| **UI-SET-08** | `network_request` | UI-SRC-C9DD3E291979 | Settings / ConfigHistorySection | GET /admin/v1/config/history | `read_with_audit` | `available` |
-| **UI-SRC-49B5404AC804** | `ui_action` | — | Settings / Database Resources Snapshot Card | Download Database Resources Snapshot | `read` | `available` |
-| **UI-SET-02** | `network_request` | UI-SRC-49B5404AC804 | Settings / Database Resources Snapshot Card | GET /admin/v1/export | `read_with_audit` | `available` |
-| **UI-SRC-9A3432FEB525** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft to Config File | `reversible_write` | `not_deployed` |
-| **UI-SET-15** | `network_request` | UI-SRC-9A3432FEB525 | Settings / ConfigEditorSection | POST /admin/v1/config/save | `destructive_write` | `not_deployed` |
-| **UI-SRC-228C90EA6F13** | `ui_action` | — | Settings / ConfigEditorSection | Download Validated Draft as TOML | `read_with_audit` | `not_deployed` |
-| **UI-SET-16** | `network_request` | UI-SRC-228C90EA6F13 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/download | `read_with_audit` | `not_deployed` |
-| **UI-SRC-089FBD95699E** | `ui_action` | — | Settings / ConfigEditorSection | Select Configuration Category | `read` | `available` |
-| **UI-SRC-FA4533F02DD6** | `ui_action` | — | Settings / ConfigEditorSection | Search Settings Fields | `read` | `available` |
-| **UI-SRC-5F12838E8F4B** | `ui_action` | — | Settings / ConfigEditorSection | Toggle Advanced Settings Disclosure | `read` | `available` |
-| **UI-SRC-2DBACF6A00B0** | `ui_action` | — | Settings / ConfigEditorSection | Reveal Field from Validation Issue | `read` | `available` |
-| **UI-SRC-6C749C277F0A** | `ui_action` | — | Settings / ConfigEditorSection | Replace Opaque Storage URL | `read` | `available` |
-| **UI-SRC-6349C47F4250** | `ui_action` | — | Settings / ConfigEditorSection | Copy Draft JSON to Clipboard | `read` | `available` |
-| **UI-SRC-E5CC6F8E2B14** | `ui_action` | — | Settings / ConfigEditorSection | Deep-Link Field Focus via ?field= | `read` | `available` |
-| **UI-SRC-2FC5E3F9B148** | `ui_action` | — | Audit / AuditPage | Load Audit Trail & Supporting Entity Maps | `read` | `available` |
-| **UI-AUD-01** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-AUD-07** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/principals | `read` | `available` |
-| **UI-AUD-08** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/upstreams | `read` | `available` |
-| **UI-SRC-8A3FB89087F5** | `ui_action` | — | Audit / AuditPage | Refresh Audit Trail | `read` | `available` |
-| **UI-AUD-05** | `network_request` | UI-SRC-8A3FB89087F5 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-SRC-DD556FCB4A54** | `ui_action` | — | Audit / AuditPage Filter Bar | Filter by Principal ID | `read` | `available` |
-| **UI-AUD-02** | `network_request` | UI-SRC-DD556FCB4A54 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-SRC-00FD191B0EB1** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range Start (From) Field | `read` | `available` |
-| **UI-SRC-C7A6EA2F6025** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range End (To) Field | `read` | `available` |
-| **UI-SRC-FA47104074F4** | `ui_action` | — | Audit / CalendarPopover | Pick From Date in Calendar Popover | `read` | `available` |
-| **REQ-SRC-0829EA9261F6** | `network_request` | UI-SRC-FA47104074F4 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-SRC-38E343D2A4C1** | `ui_action` | — | Audit / CalendarPopover | Pick To Date in Calendar Popover | `read` | `available` |
-| **REQ-SRC-66D17D1EF13A** | `network_request` | UI-SRC-38E343D2A4C1 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-SRC-D309B057EC9E** | `ui_action` | — | Audit / TimeRangeBounds | Apply Time Range Bounds | `read` | `available` |
-| **UI-AUD-03** | `network_request` | UI-SRC-D309B057EC9E | Audit / TimeRangeBounds | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-AUD-04** | `ui_action` | — | Audit / AuditPage Filter Bar | Clear Filter Bar Filters | `read` | `available` |
-| **REQ-SRC-CAE9CDF1B8F6** | `network_request` | UI-AUD-04 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-AUD-09** | `ui_action` | — | Audit / AuditPage EmptyState | Clear Filters from Empty State Action | `read` | `available` |
-| **REQ-SRC-91FBA8F4830F** | `network_request` | UI-AUD-09 | Audit / AuditPage EmptyState | GET /admin/v1/audit | `read_with_audit` | `available` |
-| **UI-AUD-06** | `ui_action` | — | Audit / Audit Table Row | Open Audit Detail Modal | `read` | `available` |
-| **UI-AUD-10** | `ui_action` | — | Audit / Audit Detail Modal | Close Audit Detail Modal | `read` | `available` |
-| **UI-SRC-BDC81AB9B863** | `ui_action` | — | Upstreams / Upstreams Master List | Upstreams Master List Mount & Polling | `read` | `available` |
-| **UI-UP-01** | `network_request` | UI-SRC-BDC81AB9B863 | Upstreams / Upstreams Master List | GET /admin/v1/upstreams | `read` | `available` |
-| **UI-SRC-3FC895176F17** | `ui_action` | — | Upstreams / Upstream Quota Latest Snapshots | Subscription Quota Latest Polling | `read` | `available` |
-| **UI-UP-02** | `network_request` | UI-SRC-3FC895176F17 | Upstreams / Upstream Quota Latest Snapshots | GET /admin/v1/subscription-quotas/latest | `read` | `available` |
-| **UI-SRC-F25206CE1E1B** | `ui_action` | — | Upstreams / Upstream 7d Usage Bar | Upstream 7d Usage Summary Query | `read` | `available` |
-| **UI-UP-03** | `network_request` | UI-SRC-F25206CE1E1B | Upstreams / Upstream 7d Usage Bar | GET /admin/v1/dashboard/usage | `read` | `available` |
-| **UI-SRC-E4C913E07FEC** | `ui_action` | — | Upstreams / Runtime Apply Status | Runtime Status Query | `read` | `available` |
-| **UI-UP-04** | `network_request` | UI-SRC-E4C913E07FEC | Upstreams / Runtime Apply Status | GET /admin/v1/status | `read` | `available` |
-| **UI-UP-05** | `ui_action` | — | Upstreams / Upstream Item Click in Sidebar | Select Upstream in Sidebar | `read` | `available` |
-| **UI-SRC-CD87608DA5D5** | `ui_action` | — | Upstreams / Upstream Subscription Metadata | Upstream Subscription Metadata Query | `read` | `available` |
-| **UI-UP-06** | `network_request` | UI-SRC-CD87608DA5D5 | Upstreams / Upstream Subscription Metadata | GET /admin/v1/upstreams/{id}/subscription-metadata | `read` | `available` |
-| **UI-SRC-1EEBA1898F34** | `ui_action` | — | Upstreams / Refresh Metadata Button | Trigger Subscription Metadata Refresh | `reversible_write` | `available` |
-| **UI-UP-07** | `network_request` | UI-SRC-1EEBA1898F34 | Upstreams / Refresh Metadata Button | POST /admin/v1/upstreams/{id}/subscription-metadata/refresh | `external_action` | `available` |
-| **UI-SRC-224914630CC5** | `ui_action` | — | Upstreams / Quota Series Query | Subscription Quota Series Query | `read` | `available` |
-| **UI-UP-08A** | `network_request` | UI-SRC-224914630CC5 | Upstreams / Quota Series Query | GET /admin/v1/subscription-quotas/series | `read` | `available` |
-| **UI-UP-09** | `ui_action` | — | Upstreams / Quota History Range Toggle | Toggle Quota History Range | `read` | `available` |
-| **UI-UP-09A** | `network_request` | UI-UP-09 | Upstreams / Quota History Range Toggle | GET /admin/v1/subscription-quotas/series | `read` | `available` |
-| **UI-UP-10** | `ui_action` | — | Upstreams / Quota History Legend Window Isolation | Isolate Quota Window in Legend | `read` | `available` |
-| **UI-SRC-0D929B471D7A** | `ui_action` | — | Upstreams / Inline Name Editor | Rename Upstream | `reversible_write` | `available` |
-| **UI-UP-11** | `network_request` | UI-SRC-0D929B471D7A | Upstreams / Inline Name Editor | PUT /admin/v1/upstreams/{id} | `reversible_write` | `available` |
-| **UI-SRC-C72B3D4F216B** | `ui_action` | — | Upstreams / Toggle Upstream Enabled | Toggle Upstream Enabled Switch | `reversible_write` | `available` |
-| **UI-UP-12** | `network_request` | UI-SRC-C72B3D4F216B | Upstreams / Toggle Upstream Enabled | PATCH /admin/v1/upstreams/{id} | `reversible_write` | `available` |
-| **UI-SRC-9FD3FEC04C3D** | `ui_action` | — | Upstreams / SettingsCard (Base URL / API Key) | Update Non-OAuth Upstream Settings | `reversible_write` | `available` |
-| **UI-UP-13** | `network_request` | UI-SRC-9FD3FEC04C3D | Upstreams / SettingsCard (Base URL / API Key) | PUT /admin/v1/upstreams/{id} | `reversible_write` | `available` |
-| **UI-SRC-7F9359EA0052** | `ui_action` | — | Upstreams / ApiUsageCard Range Toggle | Toggle API Usage Range (24h / 7d) | `read` | `available` |
-| **UI-UP-14** | `network_request` | UI-SRC-7F9359EA0052 | Upstreams / ApiUsageCard Range Toggle | GET /admin/v1/dashboard/usage | `read` | `available` |
-| **UI-SRC-6D1976AC76E2** | `ui_action` | — | Upstreams / WarmupCardMinimal Toggle Enabled | Toggle Warmup Enabled | `reversible_write` | `available` |
-| **UI-UP-15** | `network_request` | UI-SRC-6D1976AC76E2 | Upstreams / WarmupCardMinimal Toggle Enabled | PATCH /admin/v1/upstreams/{id} | `reversible_write` | `available` |
-| **UI-SRC-1B467A3726A3** | `ui_action` | — | Upstreams / Warmup Dialect Plugin Dropdown | Select Warmup Shape Plugin | `reversible_write` | `available` |
-| **UI-UP-16** | `network_request` | UI-SRC-1B467A3726A3 | Upstreams / Warmup Dialect Plugin Dropdown | PATCH /admin/v1/upstreams/{id} | `reversible_write` | `available` |
-| **UI-SRC-329B12DA3BC3** | `ui_action` | — | Upstreams / Warmup Clear Dialect Plugin | Clear Warmup Shape Plugin | `reversible_write` | `available` |
-| **UI-UP-17** | `network_request` | UI-SRC-329B12DA3BC3 | Upstreams / Warmup Clear Dialect Plugin | DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin | `reversible_write` | `available` |
-| **UI-SRC-C41372BCA4B0** | `ui_action` | — | Upstreams / Warmup Fire Now Button | Fire Warmup Now | `external_action` | `available` |
-| **UI-UP-18** | `network_request` | UI-SRC-C41372BCA4B0 | Upstreams / Warmup Fire Now Button | POST /admin/v1/upstreams/{id}/warmup/fire-now | `external_action` | `available` |
-| **UI-SRC-4851B3D30282** | `ui_action` | — | Upstreams / Warmup History Drawer Open | Open Warmup History Drawer | `read` | `available` |
-| **UI-UP-19** | `network_request` | UI-SRC-4851B3D30282 | Upstreams / Warmup History Drawer Open | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` | `available` |
-| **UI-UP-20** | `ui_action` | — | Upstreams / Warmup History Attempt Click | Select Warmup Attempt in Drawer | `read` | `available` |
-| **UI-SRC-49171C2D2202** | `ui_action` | — | Upstreams / Re-authenticate OAuth Upstream | Start OAuth Authorization Flow | `external_action` | `available` |
-| **UI-UP-22** | `network_request` | UI-SRC-49171C2D2202 | Upstreams / Re-authenticate OAuth Upstream | POST /admin/v1/upstreams/{id}/oauth/start | `reversible_write` | `available` |
-| **UI-SRC-0D6108CB1DBC** | `ui_action` | — | Upstreams / Paste OAuth Callback Code | Complete OAuth Token Exchange | `external_action` | `available` |
-| **UI-UP-23** | `network_request` | UI-SRC-0D6108CB1DBC | Upstreams / Paste OAuth Callback Code | POST /admin/v1/upstreams/{id}/oauth/complete | `external_action` | `available` |
-| **UI-SRC-9D5B9DACBF9A** | `ui_action` | — | Upstreams / Delete Upstream Button | Delete Upstream | `reversible_write` | `available` |
-| **UI-UP-24** | `network_request` | UI-SRC-9D5B9DACBF9A | Upstreams / Delete Upstream Button | DELETE /admin/v1/upstreams/{id} | `destructive_write` | `available` |
-| **UI-UP-25** | `ui_action` | — | Upstreams / Create Upstream Modal Open | Open Create Upstream Modal | `read` | `available` |
-| **UI-SRC-5A9E89C6EEB0** | `ui_action` | — | Upstreams / Submit API Key Upstream Form | Create Non-OAuth Upstream | `reversible_write` | `available` |
-| **UI-UP-26** | `network_request` | UI-SRC-5A9E89C6EEB0 | Upstreams / Submit API Key Upstream Form | POST /admin/v1/upstreams | `reversible_write` | `available` |
-| **UI-SRC-427756CE86BB** | `ui_action` | — | Upstreams / Start OAuth Draft for New Upstream | Start OAuth Draft Flow | `external_action` | `available` |
-| **UI-UP-27** | `network_request` | UI-SRC-427756CE86BB | Upstreams / Start OAuth Draft for New Upstream | POST /admin/v1/oauth/draft/start | `reversible_write` | `available` |
-| **UI-SRC-CB056EC17B20** | `ui_action` | — | Upstreams / Submit OAuth Code for Draft | Verify OAuth Draft Code | `external_action` | `available` |
-| **UI-UP-28** | `network_request` | UI-SRC-CB056EC17B20 | Upstreams / Submit OAuth Code for Draft | POST /admin/v1/oauth/draft/complete | `external_action` | `available` |
-| **UI-SRC-2533F30C81A8** | `ui_action` | — | Upstreams / Create Upstream after OAuth Verified | Confirm and Create OAuth Upstream | `reversible_write` | `available` |
-| **UI-UP-29** | `network_request` | UI-SRC-2533F30C81A8 | Upstreams / Create Upstream after OAuth Verified | POST /admin/v1/upstreams/from-oauth-draft | `reversible_write` | `available` |
-| **UI-SRC-057C5139E406** | `ui_action` | — | Upstreams / Upstream OAuth Status | Upstream OAuth Status Query | `external_action` | `available` |
-| **UI-UP-30** | `network_request` | UI-SRC-057C5139E406 | Upstreams / Upstream OAuth Status | GET /admin/v1/upstreams/{id}/oauth/status | `read` | `available` |
-| **UI-SRC-83D0030A34AF** | `ui_action` | — | Upstreams / Warmup Summary | Warmup Summary Query | `read` | `available` |
-| **UI-UP-31** | `network_request` | UI-SRC-83D0030A34AF | Upstreams / Warmup Summary | GET /admin/v1/upstreams/{id}/warmup | `read` | `available` |
-| **UI-SRC-AB584B8FD224** | `ui_action` | — | Upstreams / Warmup Shape Plugin Registry | Shape Plugin Registry Query | `read` | `available` |
-| **UI-UP-32** | `network_request` | UI-SRC-AB584B8FD224 | Upstreams / Warmup Shape Plugin Registry | GET /admin/v1/plugins/registry | `read` | `available` |
-| **UI-SRC-C28C003E8881** | `ui_action` | — | Upstreams / Selected Upstream Recent Requests | Recent Requests for Upstream | `read` | `available` |
-| **UI-UP-33** | `network_request` | UI-SRC-C28C003E8881 | Upstreams / Selected Upstream Recent Requests | GET /admin/v1/events/recent | `read` | `available` |
-| **UI-SRC-9CDF9EE839AE** | `ui_action` | — | Upstreams / Warmup History Status Filter | Filter Warmup History by Status | `read` | `available` |
-| **UI-UP-34** | `network_request` | UI-SRC-9CDF9EE839AE | Upstreams / Warmup History Status Filter | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` | `available` |
-| **UI-SRC-35D5E99A460E** | `ui_action` | — | Upstreams / Warmup History Pagination | Load Older Warmup Attempts | `read` | `available` |
-| **UI-UP-35** | `network_request` | UI-SRC-35D5E99A460E | Upstreams / Warmup History Pagination | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` | `available` |
-| **UI-UP-36** | `ui_action` | — | Upstreams / Warmup History Horizon Filter | Toggle Warmup History Horizon (24h / 7d / All) | `read` | `available` |
-| **UI-UP-37** | `ui_action` | — | Upstreams / Warmup History Collapsible Sections | Toggle Plugin Snapshot and Raw Record Collapsibles | `read` | `available` |
-| **UI-UP-38** | `ui_action` | — | Upstreams / ApiUsageCard Metric Toggle | Toggle API Usage Metric (Tokens / Cost) | `read` | `available` |
-| **UI-UP-39** | `ui_action` | — | Upstreams / Metadata Strip Expansion | Expand/Collapse Metadata Strip | `read` | `available` |
-| **UI-UP-40** | `ui_action` | — | Upstreams / Mobile Back Button | Mobile Back Navigation | `read` | `available` |
-| **UI-SRC-517760F07481** | `ui_action` | — | Upstreams / Attempt Detail Close | Close Attempt Detail in Drawer | `read` | `available` |
-| **UI-SRC-668F412D6C0E** | `ui_action` | — | Upstreams / Warmup History Drawer Close | Close Warmup History Drawer | `read` | `available` |
-| **UI-SRC-D96DA7353940** | `ui_action` | — | Upstreams / WarmupConfigModal Copy JSON | Copy Warmup Plugin Config JSON | `read` | `available` |
-| **UI-SRC-D61F3782A082** | `ui_action` | — | Plugins / PluginDetail | Load Selected Plugin References | `read` | `available` |
-| **UI-PLUG-06** | `network_request` | UI-SRC-D61F3782A082 | Plugins / PluginDetail | GET /admin/v1/plugins/registry/{id}/references | `read` | `available` |
-| **UI-SRC-30AC7206755A** | `ui_action` | — | Principals / PrincipalDetail | Load Shape Plugin Chain | `read` | `available` |
-| **UI-PR-13C** | `network_request` | UI-SRC-30AC7206755A | Principals / PrincipalDetail | GET /admin/v1/principals/{id}/plugin-chain | `read` | `available` |
-| **UI-SRC-2092158E84C1** | `ui_action` | — | Principals / Router and Shape Editors | Load Plugin Registry for Principal Editors | `read` | `available` |
-| **UI-PR-13E** | `network_request` | UI-SRC-2092158E84C1 | Principals / Router and Shape Editors | GET /admin/v1/plugins/registry | `read` | `available` |
-| **UI-SRC-18907E842823** | `ui_action` | — | Global / Topbar | Render Authenticated Administrator Identity Badge | `read` | `not_deployed` |
-| **UI-SRC-453C347CE4F4** | `ui_action` | — | Audit / AuditPage | Render Audit Actor Metadata | `read` | `not_deployed` |
-| **UI-SRC-F0FA0033252E** | `ui_action` | — | Shared Request Tables / LatencyCell | Inspect Latency Responsibility Breakdown | `read` | `not_deployed` |
-| **PROD-UI-A5000384379C** | `ui_action` | — | Credentials / CredentialsPage | Load Credentials and OAuth Status | `read` | `available` |
-| **PROD-REQ-AE097B1BD13F** | `network_request` | PROD-UI-A5000384379C | Credentials / CredentialsPage | GET /admin/credentials | `read` | `available` |
-| **PROD-REQ-186B043F6662** | `network_request` | PROD-UI-A5000384379C | Credentials / CredentialsPage | GET /admin/oauth/status | `read` | `available` |
-| **PROD-REQ-8DB3CB46F307** | `network_request` | PROD-UI-A5000384379C | Credentials / CredentialsPage | GET /admin/v1/principals | `read` | `available` |
-| **PROD-UI-76168321F814** | `ui_action` | — | Credentials / CredentialsPage | Rotate Credential / Force Refresh OAuth Token | `reversible_write` | `available` |
-| **PROD-REQ-B33C09B92A03** | `network_request` | PROD-UI-76168321F814 | Credentials / CredentialsPage | POST /admin/credentials/{provider}/{cred_id}/rotate | `reversible_write` | `available` |
-| **PROD-UI-6011B5C8167A** | `ui_action` | — | Credentials / CredentialsPage | Revoke Credential | `destructive_write` | `available` |
-| **PROD-REQ-32A95A5C0307** | `network_request` | PROD-UI-6011B5C8167A | Credentials / CredentialsPage | POST /admin/credentials/{provider}/{cred_id}/revoke | `destructive_write` | `available` |
-| **PROD-UI-E68AB274C4E9** | `ui_action` | — | Status / StatusPage | Load System Status, Killswitch, and Observed Credentials | `read` | `available` |
-| **PROD-REQ-6B11261782D1** | `network_request` | PROD-UI-E68AB274C4E9 | Status / StatusPage | GET /admin/v1/status | `read` | `available` |
-| **PROD-REQ-0F9F7B032EC5** | `network_request` | PROD-UI-E68AB274C4E9 | Status / StatusPage | GET /admin/credentials | `read` | `available` |
-| **PROD-REQ-26ECB56C1696** | `network_request` | PROD-UI-E68AB274C4E9 | Status / StatusPage | GET /admin/oauth/status | `read` | `available` |
-| **PROD-REQ-AE0413AAFCDF** | `network_request` | PROD-UI-E68AB274C4E9 | Status / StatusPage | GET /admin/v1/principals | `read` | `available` |
-| **PROD-UI-168BF3B193F4** | `ui_action` | — | Status / StatusPage | Engage or Disengage Global Killswitch | `destructive_write` | `available` |
-| **PROD-REQ-817B78681D90** | `network_request` | PROD-UI-168BF3B193F4 | Status / StatusPage | POST /admin/killswitch | `destructive_write` | `available` |
-| **PROD-REQ-841024D77392** | `network_request` | PROD-UI-168BF3B193F4 | Status / StatusPage | DELETE /admin/killswitch | `destructive_write` | `available` |
-| **PROD-UI-3DF6CC4224CD** | `ui_action` | — | Global / Sidebar | Sidebar Navigation - Credentials | `read` | `available` |
-| **PROD-UI-F22C53DA973A** | `ui_action` | — | Global / Sidebar | Sidebar Navigation - Status | `read` | `available` |
-| **PROD-UI-7075CE908A3D** | `ui_action` | — | Global / CommandPalette | Command Palette - Go to Status | `read` | `available` |
-| **PROD-UI-3BA367988C76** | `ui_action` | — | Plugins / PluginDetailOperate | Plugin Detail Global Killswitch Indicator | `read` | `available` |
-| **PROD-REQ-341C216AF806** | `network_request` | PROD-UI-3BA367988C76 | Plugins / PluginDetailOperate | GET /admin/v1/status | `read` | `available` |
-| **PROD-UI-01A4AC001FED** | `ui_action` | — | Plugins / PluginDetailOperate | Plugin Detail Global Chain Usage Summary | `read` | `available` |
-| **PROD-REQ-448A5BA63A6D** | `network_request` | PROD-UI-01A4AC001FED | Plugins / PluginDetailOperate | GET /admin/v1/status | `read` | `available` |
-| **API-SRC-C767025D0EDC** | `backend_endpoint` | — | Backend-Only / serve_index | GET / | `read` | `available` |
-| **API-SRC-276F2E8B8B8D** | `backend_endpoint` | — | Backend-Only / serve_asset | GET /{*file} | `read` | `available` |
-| **API-SRC-7A787CD5C3CF** | `backend_endpoint` | — | Backend-Only / admin_server_state | GET /admin/health/state | `read` | `available` |
-| **API-SYS-02** | `backend_endpoint` | — | Backend-Only / handle_internal_partial_fetch | GET /internal/v1/partials/{event_id} | `read` | `available` |
-| **API-SYS-04** | `backend_endpoint` | — | Backend-Only / status | GET /admin/scheduler/status | `read` | `available` |
-| **API-SYS-03** | `backend_endpoint` | — | Backend-Only / failures | GET /admin/scheduler/failures | `read` | `available` |
-| **API-SRC-BD965DDC38E0** | `backend_endpoint` | — | Backend-Only / get_registry | GET /admin/v1/plugins/registry/{id} | `read` | `available` |
-| **API-SRC-8895068281DE** | `backend_endpoint` | — | Backend-Only / get_chain | GET /admin/v1/plugin-chain-entries/{id} | `read` | `available` |
-| **API-SRC-166291C6FB8A** | `backend_endpoint` | — | Backend-Only / get_principal | GET /admin/v1/principals/{id} | `read` | `available` |
-| **API-SRC-4B568BB20E22** | `backend_endpoint` | — | Backend-Only / get_allowed_models | GET /admin/v1/principals/{id}/allowed_models | `read` | `available` |
-| **API-SRC-7E55E35928A2** | `backend_endpoint` | — | Backend-Only / principal_limits | GET /admin/v1/principals/{id}/limits | `read` | `available` |
-| **API-SRC-92FD477750A5** | `backend_endpoint` | — | Backend-Only / get_api_key | GET /admin/principals/{id}/keys/{key_id} | `read` | `available` |
-| **API-SRC-7383936FE537** | `backend_endpoint` | — | Backend-Only / principal_key_usage | GET /admin/principals/{id}/keys/{key_id}/usage | `read` | `available` |
-| **API-SRC-7C0B903CAB5B** | `backend_endpoint` | — | Backend-Only / get_upstream | GET /admin/v1/upstreams/{id} | `read` | `available` |
-| **API-SRC-5E2D298E32DE** | `backend_endpoint` | — | Backend-Only / revoke_api_key | POST /admin/principals/{id}/keys/{key_id}/revoke | `destructive_write` | `available` |
-| **API-SRC-D05CE36481FC** | `backend_endpoint` | — | Backend-Only / disable_api_key | POST /admin/principals/{id}/keys/{key_id}/disable | `reversible_write` | `available` |
-| **API-SRC-EECEBC08D3B2** | `backend_endpoint` | — | Backend-Only / enable_api_key | POST /admin/principals/{id}/keys/{key_id}/enable | `reversible_write` | `available` |
-| **API-SYS-06** | `backend_endpoint` | — | Backend-Only / rebalance_chain | POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance | `reversible_write` | `available` |
-| **API-SRC-B624778A38FE** | `backend_endpoint` | — | Backend-Only / update_chain | PUT /admin/v1/plugin-chain-entries/{id} | `reversible_write` | `available` |
-| **API-SRC-B1B43DF36688** | `backend_endpoint` | — | Backend-Only / update_principal | PUT /admin/v1/principals/{id} | `reversible_write` | `available` |
-| **API-SYS-05** | `backend_endpoint` | — | Backend-Only / preview_route | POST /admin/v1/router/preview | `read` | `available` |
-| **API-SRC-FA895179691B** | `backend_endpoint` | — | Backend-Only / enable_upstream | POST /admin/v1/upstreams/{id}/enable | `reversible_write` | `available` |
-| **API-SRC-F00657C8F5E0** | `backend_endpoint` | — | Backend-Only / disable_upstream | POST /admin/v1/upstreams/{id}/disable | `reversible_write` | `available` |
-| **PROD-API-5234FA674D91** | `backend_endpoint` | — | Production Backend-Only / crate::v1::status::status | GET /admin/status | `read` | `available` |
-| **PROD-API-2B1E133DA8BF** | `backend_endpoint` | — | Production Backend-Only / get_killswitch | GET /admin/killswitch | `destructive_write` | `available` |
-| **PROD-API-DCBF12986EB5** | `backend_endpoint` | — | Production Backend-Only / get_killswitch | GET /admin/v1/killswitch | `destructive_write` | `available` |
-| **PROD-API-8AA0DB7F3093** | `backend_endpoint` | — | Production Backend-Only / set_killswitch | POST /admin/v1/killswitch | `destructive_write` | `available` |
-| **PROD-API-C482408C3112** | `backend_endpoint` | — | Production Backend-Only / clear_killswitch | DELETE /admin/v1/killswitch | `destructive_write` | `available` |
-| **PROD-API-6B655BAB2645** | `backend_endpoint` | — | Production Backend-Only / crate::credentials::list_credentials | GET /admin/v1/credentials | `read` | `available` |
-| **PROD-API-D8B657F6FCA4** | `backend_endpoint` | — | Production Backend-Only / crate::credentials::list_oauth_status | GET /admin/v1/oauth/status | `read` | `available` |
+| ID | Type | Parent | Page / Component | Action or HTTP | Risk |
+|---|---|---|---|---|---|
+| **UI-SRC-E63DB0A6963C** | `ui_action` | — | Global / AuthRequiredGate | Auto Session Verification on Mount/Storage Change | `read` |
+| **UI-ROOT-01** | `network_request` | UI-SRC-E63DB0A6963C | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` |
+| **UI-SRC-7EF8F6882B60** | `ui_action` | — | Global / AuthRequiredGate | Submit Static Admin Bearer Token | `read` |
+| **UI-ROOT-02** | `network_request` | UI-SRC-7EF8F6882B60 | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` |
+| **UI-SRC-15F5F1954403** | `ui_action` | — | Global / AuthRequiredGate | Admin Token Input Empty Validation | `read` |
+| **UI-SRC-9D6A6AA71D0F** | `ui_action` | — | Global / AuthRequiredGate | External Auth Required Retry Click | `read` |
+| **REQ-SRC-D9664AAE1B32** | `network_request` | UI-SRC-9D6A6AA71D0F | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` |
+| **UI-SRC-EB957D16B51D** | `ui_action` | — | Global / AuthRequiredGate | Auth Verification Error Retry Click | `read` |
+| **REQ-SRC-B038CDBE84D7** | `network_request` | UI-SRC-EB957D16B51D | Global / AuthRequiredGate | GET /admin/v1/auth/session | `read` |
+| **UI-SRC-F05A6A69408A** | `ui_action` | — | Global / AppShell / Topbar | Admin Server Health Poll | `read` |
+| **UI-ROOT-03** | `network_request` | UI-SRC-F05A6A69408A | Global / AppShell / Topbar | GET /admin/health | `read` |
+| **UI-TOP-01** | `ui_action` | — | Global / AppShell / Topbar | Desktop Sidebar Collapse Toggle Button | `read` |
+| **UI-TOP-03** | `ui_action` | — | Global / AppShell | Keyboard Shortcut Toggle Sidebar (Cmd+B / Ctrl+B) | `read` |
+| **UI-TOP-04** | `ui_action` | — | Global / AppShell / Topbar | Mobile Hamburger Navigation Drawer Trigger | `read` |
+| **UI-SRC-7963BABBB70A** | `ui_action` | — | Global / AppShell / Topbar | Command Palette Topbar Trigger Button | `read` |
+| **UI-TOP-05** | `ui_action` | — | Global / Sidebar / SidebarNav | Primary Navigation Links | `read` |
+| **UI-TOP-02** | `ui_action` | — | Global / ThemeToggle | Theme Mode Selection Dropdown | `read` |
+| **UI-CMD-01** | `ui_action` | — | Global / CommandPalette | Command Palette Keyboard Shortcut (Cmd+K / Ctrl+K) | `read` |
+| **UI-SRC-FD9DEB65904F** | `ui_action` | — | Global / CommandPalette | Command Palette Upstreams Background Query | `read` |
+| **UI-CMD-03** | `network_request` | UI-SRC-FD9DEB65904F | Global / CommandPalette | GET /admin/v1/upstreams | `read` |
+| **UI-SRC-036489E5DD6A** | `ui_action` | — | Global / CommandPalette | Command Palette Principals Background Query | `read` |
+| **UI-CMD-04** | `network_request` | UI-SRC-036489E5DD6A | Global / CommandPalette | GET /admin/v1/principals | `read` |
+| **UI-CMD-05** | `ui_action` | — | Global / CommandPalette | Command Palette Live Text Filter | `read` |
+| **UI-CMD-02** | `ui_action` | — | Global / CommandPalette | Command Palette Page or Action Navigation | `read` |
+| **UI-SRC-7B67C1B1E413** | `ui_action` | — | Global / CommandPalette | Command Palette Entity Deep Link Selection | `read` |
+| **UI-CMD-06** | `ui_action` | — | Global / CommandPalette | Command Palette Dismiss / Close | `read` |
+| **UI-SRC-014AD24226CE** | `ui_action` | — | Overview / KPI Tiles & Header | Overview Dashboard Summary & Sparkline Metrics Query | `read` |
+| **UI-OV-01** | `network_request` | UI-SRC-014AD24226CE | Overview / KPI Tiles & Header | GET /admin/v1/dashboard/summary | `read` |
+| **UI-SRC-6899B83C35F4** | `ui_action` | — | Overview / Top Principals Card | Overview Dashboard Principal Usage Query | `read` |
+| **UI-OV-02** | `network_request` | UI-SRC-6899B83C35F4 | Overview / Top Principals Card | GET /admin/v1/dashboard/usage | `read` |
+| **UI-SRC-6A947BA8B48A** | `ui_action` | — | Overview / Pool Quota Card / Stacked Bars | Subscription Quota Aggregate Snapshot Query | `read` |
+| **UI-OV-03** | `network_request` | UI-SRC-6A947BA8B48A | Overview / Pool Quota Card / Stacked Bars | GET /admin/v1/subscription-quotas/aggregate | `read` |
+| **UI-SRC-F52C6DD98101** | `ui_action` | — | Overview / Pool Quota Card / Themed Area Chart | Subscription Quota Pool History Time Series Query | `read` |
+| **UI-OV-04** | `network_request` | UI-SRC-F52C6DD98101 | Overview / Pool Quota Card / Themed Area Chart | GET /admin/v1/subscription-quotas/pool-history | `read` |
+| **UI-SRC-BAA6CE610FCA** | `ui_action` | — | Overview / OverviewPage / Data Layer | Principal Name Resolution Query | `read` |
+| **UI-OV-13** | `network_request` | UI-SRC-BAA6CE610FCA | Overview / OverviewPage / Data Layer | GET /admin/v1/principals | `read` |
+| **UI-SRC-1BEA80590008** | `ui_action` | — | Overview / OverviewPage / Data Layer | Upstream Name Resolution Query | `read` |
+| **UI-OV-14** | `network_request` | UI-SRC-1BEA80590008 | Overview / OverviewPage / Data Layer | GET /admin/v1/upstreams | `read` |
+| **UI-OV-07** | `ui_action` | — | Overview / Overview Header / Time Range Toggle Bar | Time Range Toggle Action | `read` |
+| **UI-OV-08** | `ui_action` | — | Overview / KPI Tiles / Sparkline | Synchronized KPI Sparkline Hover | `read` |
+| **UI-OV-09** | `ui_action` | — | Overview / TopPrincipalsCard / PrincipalCostMeter | Principal Cost Breakdown Popover | `read` |
+| **UI-OV-10** | `ui_action` | — | Overview / PoolQuotaCard / PoolQuotaStackedBar | Pool Quota Stacked Bar Breakdown Popover | `read` |
+| **UI-SRC-8C3BDB37C763** | `ui_action` | — | Overview / Recent Requests Table | Recent Requests Initial Page Query | `read` |
+| **UI-OV-05** | `network_request` | UI-SRC-8C3BDB37C763 | Overview / Recent Requests Table | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-2305B3BC43A4** | `ui_action` | — | Overview / Recent Requests Table / Infinite Scroll | Recent Requests Infinite Scroll Next Page | `read` |
+| **UI-OV-11** | `network_request` | UI-SRC-2305B3BC43A4 | Overview / Recent Requests Table / Infinite Scroll | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-40B1F1E07B91** | `ui_action` | — | Overview / Recent Requests / Live Event Stream | Live Tail SSE Connection | `read` |
+| **UI-OV-06** | `network_request` | UI-SRC-40B1F1E07B91 | Overview / Recent Requests / Live Event Stream | GET /admin/v1/events/stream | `read` |
+| **UI-SRC-FDFB5195AB54** | `ui_action` | — | Overview / Recent Requests / Live Stream Reconnection | Live Stream Reconnect Hybrid Delta Backfill | `read` |
+| **UI-OV-15** | `network_request` | UI-SRC-FDFB5195AB54 | Overview / Recent Requests / Live Stream Reconnection | GET /admin/v1/events/delta | `read` |
+| **UI-OV-16** | `ui_action` | — | Overview / LiveTailFailureBanner | Live Tail Failure Banner Manual Retry | `read` |
+| **UI-SRC-CFF84088D66A** | `ui_action` | — | Overview / LiveTailFailureBanner | Live Tail Failure Banner Dismiss | `read` |
+| **UI-OV-17** | `ui_action` | — | Overview / Recent Requests / Section Header | Recent Requests 'See all' Navigation Link | `read` |
+| **UI-SRC-1667E85E2450** | `ui_action` | — | Overview / Recent Requests Table / RequestEventRow | Recent Request Row Selection | `read` |
+| **UI-SRC-7BBB835587EA** | `ui_action` | — | Overview / RequestEventDrawer / RequestDetail | Request Event Full Detail Query | `read` |
+| **UI-OV-12** | `network_request` | UI-SRC-7BBB835587EA | Overview / RequestEventDrawer / RequestDetail | GET /admin/v1/events/detail/{event_id} | `read_with_audit` |
+| **UI-SRC-FE19ED30AFDB** | `ui_action` | — | Overview / RequestEventDrawer / RequestDetail | Request Detail Copy Actions (ID, Session, JSON) | `read` |
+| **UI-SRC-25F058F5759A** | `ui_action` | — | Overview / RequestEventDrawer | Request Detail Drawer Close | `read` |
+| **UI-SRC-35CD806FA378** | `ui_action` | — | Logs / Logs Table Historical Events | Historical Events Page Query on Mount | `read` |
+| **UI-LOG-01** | `network_request` | UI-SRC-35CD806FA378 | Logs / Logs Table Historical Events | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-8290B2982481** | `ui_action` | — | Logs / Logs Live Event Stream (SSE) | SSE Live Event Stream Subscription | `read` |
+| **UI-LOG-02** | `network_request` | UI-SRC-8290B2982481 | Logs / Logs Live Event Stream (SSE) | GET /admin/v1/events/stream | `read` |
+| **UI-SRC-694A5E8030DA** | `ui_action` | — | Logs / Events Histogram Strip | Events Histogram Query | `read` |
+| **UI-LOG-03** | `network_request` | UI-SRC-694A5E8030DA | Logs / Events Histogram Strip | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-04** | `ui_action` | — | Logs / Toggle Live Tail Button | Toggle Live Tail Button Click | `read` |
+| **UI-LOG-05** | `ui_action` | — | Logs / Principal Filter Dropdown | Select Principal Filter | `read` |
+| **UI-LOG-05A** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-05B** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-05C** | `network_request` | UI-LOG-05 | Logs / Principal Filter Dropdown | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-06** | `ui_action` | — | Logs / Upstream Filter Dropdown | Select Upstream Filter | `read` |
+| **UI-LOG-06A** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-06B** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-06C** | `network_request` | UI-LOG-06 | Logs / Upstream Filter Dropdown | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-07** | `ui_action` | — | Logs / Session Filter Dropdown | Select Session Filter | `read` |
+| **UI-LOG-07A** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-07B** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-07C** | `network_request` | UI-LOG-07 | Logs / Session Filter Dropdown | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-08** | `ui_action` | — | Logs / Model Filter Input | Model Input Debounced Filter Change | `read` |
+| **UI-LOG-08A** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-08B** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-08C** | `network_request` | UI-LOG-08 | Logs / Model Filter Input | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-09** | `ui_action` | — | Logs / Status Class Filter Dropdown | Select Status Class Filter | `read` |
+| **UI-LOG-09A** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-09B** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-09C** | `network_request` | UI-LOG-09 | Logs / Status Class Filter Dropdown | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-10** | `ui_action` | — | Logs / Source Kind Filter Dropdown | Select Source Kind Filter | `read` |
+| **UI-LOG-10A** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-10B** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-10C** | `network_request` | UI-LOG-10 | Logs / Source Kind Filter Dropdown | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-11** | `ui_action` | — | Logs / Histogram Strip Canvas Interaction | Histogram View Pan/Zoom and Selection Drag | `read` |
+| **UI-LOG-11B** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-11A** | `network_request` | UI-LOG-11 | Logs / Histogram Strip Canvas Interaction | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-12** | `ui_action` | — | Logs / TimeRangeBounds Input and Apply | Absolute Time Bounds Entry and Calendar Pick | `read` |
+| **UI-LOG-12A** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-12B** | `network_request` | UI-LOG-12 | Logs / TimeRangeBounds Input and Apply | GET /admin/v1/events/histogram | `read` |
+| **UI-LOG-13** | `ui_action` | — | Logs / Clear Filters Button | Clear All Filters Button Click | `read` |
+| **UI-SRC-2874D8E9F106** | `ui_action` | — | Logs / Refresh Button | Manual Refresh Button Click | `read` |
+| **UI-LOG-14** | `network_request` | UI-SRC-2874D8E9F106 | Logs / Refresh Button | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-15** | `ui_action` | — | Logs / Export Logs Button | Export Visible Logs to JSON | `read` |
+| **UI-SRC-A6BE3F64E803** | `ui_action` | — | Logs / Logs Pagination Controls Next Button | Navigate to Next Historical Page | `read` |
+| **UI-LOG-16** | `network_request` | UI-SRC-A6BE3F64E803 | Logs / Logs Pagination Controls Next Button | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-888A1F4D1DD9** | `ui_action` | — | Logs / Logs Pagination Controls Prev Button | Navigate to Previous Historical Page | `read` |
+| **UI-LOG-17** | `ui_action` | — | Logs / Log Row Anchor Zoom Buttons | Row Anchor Range Buttons (±1m, ±5m, ±30m) | `read` |
+| **UI-LOG-17A** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/recent | `read` |
+| **UI-LOG-17B** | `network_request` | UI-LOG-17 | Logs / Log Row Anchor Zoom Buttons | GET /admin/v1/events/histogram | `read` |
+| **UI-SRC-091345AD21A8** | `ui_action` | — | Logs / RequestEventsTable Row Click | Row Click Open Request Detail Drawer | `read` |
+| **UI-SRC-C59FB001EF22** | `ui_action` | — | Logs / Request Event Detail Query | Fetch Full Event Diagnostics Detail | `read` |
+| **UI-LOG-18** | `network_request` | UI-SRC-C59FB001EF22 | Logs / Request Event Detail Query | GET /admin/v1/events/detail/{event_id} | `read_with_audit` |
+| **UI-SRC-6793FF938733** | `ui_action` | — | Logs / Upstream Options Query | Fetch Upstreams for Options and Names | `read` |
+| **UI-LOG-19** | `network_request` | UI-SRC-6793FF938733 | Logs / Upstream Options Query | GET /admin/v1/upstreams | `read` |
+| **UI-SRC-476EE1297D09** | `ui_action` | — | Logs / Principal Options Query | Fetch Principals for Options and Names | `read` |
+| **UI-LOG-20** | `network_request` | UI-SRC-476EE1297D09 | Logs / Principal Options Query | GET /admin/v1/principals | `read` |
+| **UI-SRC-2B0EFC709378** | `ui_action` | — | Logs / Live Stream Reconnect Delta Backfill | SSE Reconnect Delta Catch-Up Query | `read` |
+| **UI-LOG-21** | `network_request` | UI-SRC-2B0EFC709378 | Logs / Live Stream Reconnect Delta Backfill | GET /admin/v1/events/delta | `read` |
+| **UI-LOG-22** | `ui_action` | — | Logs / Live Tail Failure Banner Retry | Force Reconnect Button Click on Terminal SSE Failure | `read` |
+| **REQ-SRC-B1BE83CDD51E** | `network_request` | UI-LOG-22 | Logs / Live Tail Failure Banner Retry | GET /admin/v1/events/stream | `read` |
+| **UI-LOG-25** | `ui_action` | — | Logs / Live Tail Failure Banner Dismiss | Dismiss Failure Banner | `read` |
+| **UI-LOG-23** | `ui_action` | — | Logs / Request Drawer Identity Copy Buttons | Copy Identity Fields to Clipboard | `read` |
+| **UI-LOG-28** | `ui_action` | — | Logs / Request Detail Drawer Close | Close Detail Drawer | `read` |
+| **UI-LOG-29** | `ui_action` | — | Logs / Latency Timeline Stage Breakdown | Latency Stage Hover Popover and Sticky Click | `read` |
+| **UI-LOG-30** | `ui_action` | — | Logs / Streaming Timeline Markers | Streaming Event Markers (TTFT / Message Start / Deltas / Stop) | `read` |
+| **UI-LOG-26** | `ui_action` | — | Logs / Legacy Preset URL Normalization | Rewrite Legacy ?time_range= Preset to Absolute Unix Bounds | `read` |
+| **UI-SRC-00BD57E4D253** | `ui_action` | — | Principals / PrincipalsPage | Load Principals List | `read` |
+| **UI-PR-01** | `network_request` | UI-SRC-00BD57E4D253 | Principals / PrincipalsPage | GET /admin/v1/principals | `read` |
+| **UI-SRC-241AEA7F7B55** | `ui_action` | — | Principals / PrincipalsPage | Desktop Auto-Select First Principal | `read` |
+| **UI-PR-02** | `ui_action` | — | Principals / PrincipalsPage | Select Principal from Sidebar | `read` |
+| **UI-SRC-B7B21779622C** | `ui_action` | — | Principals / PrincipalsPage | Action New URL Query Parameter Trigger | `read` |
+| **UI-SRC-783B9A8424A8** | `ui_action` | — | Principals / PrincipalsPage | Open Create Principal Modal via New Button | `read` |
+| **UI-SRC-E9A473CD5D19** | `ui_action` | — | Principals / CreatePrincipalModal | Create Principal Submit | `reversible_write` |
+| **UI-PR-23** | `network_request` | UI-SRC-E9A473CD5D19 | Principals / CreatePrincipalModal | POST /admin/v1/principals | `reversible_write` |
+| **UI-PR-03** | `ui_action` | — | Principals / PrincipalDetail | Toggle Principal Enabled State | `reversible_write` |
+| **REQ-SRC-C31B76D697EB** | `network_request` | UI-PR-03 | Principals / PrincipalDetail | POST /admin/v1/principals/{id}/enable | `reversible_write` |
+| **REQ-SRC-39C6706B40BF** | `network_request` | UI-PR-03 | Principals / PrincipalDetail | POST /admin/v1/principals/{id}/disable | `reversible_write` |
+| **UI-SRC-B1990946C344** | `ui_action` | — | Principals / PrincipalDetail | Delete Principal via Confirm Dialog | `destructive_write` |
+| **UI-PR-04** | `network_request` | UI-SRC-B1990946C344 | Principals / PrincipalDetail | DELETE /admin/v1/principals/{id} | `destructive_write` |
+| **UI-SRC-B0C8E4E556BC** | `ui_action` | — | Principals / PrincipalDetail | Mobile Back to Master List | `read` |
+| **UI-SRC-74652446E668** | `ui_action` | — | Principals / AllowedModelsCard | Update Allowed Models | `reversible_write` |
+| **UI-PR-05** | `network_request` | UI-SRC-74652446E668 | Principals / AllowedModelsCard | PUT /admin/v1/principals/{id}/allowed_models | `reversible_write` |
+| **UI-SRC-D74A22B571BC** | `ui_action` | — | Principals / DefaultLimitsCard | Update Principal Default Limits | `reversible_write` |
+| **UI-PR-06** | `network_request` | UI-SRC-D74A22B571BC | Principals / DefaultLimitsCard | PATCH /admin/v1/principals/{id} | `reversible_write` |
+| **UI-SRC-5EED9F4C1CB5** | `ui_action` | — | Principals / RecentRequestsCard | Recent Requests Principal Polling | `read` |
+| **UI-PR-24** | `network_request` | UI-SRC-5EED9F4C1CB5 | Principals / RecentRequestsCard | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-7FA58E7543A9** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Plugin Chain | `read` |
+| **UI-PR-13A** | `network_request` | UI-SRC-7FA58E7543A9 | Principals / RouterSlotEditor | GET /admin/v1/principals/{id}/plugin-chain | `read` |
+| **UI-SRC-F380C424AEC6** | `ui_action` | — | Principals / RouterSlotEditor | Load Router Terminal Strategy | `read` |
+| **UI-PR-13B** | `network_request` | UI-SRC-F380C424AEC6 | Principals / RouterSlotEditor | GET /admin/v1/principals/{id}/router-terminal | `read` |
+| **UI-SRC-2C8DBDF42A9A** | `ui_action` | — | Principals / RouterSlotEditor | Router Editor Tab Switching | `read` |
+| **UI-SRC-72D80A37A7FC** | `ui_action` | — | Principals / RouterSlotEditor | Toggle Subscription Preference Plugin (Basic Tab) | `reversible_write` |
+| **UI-PR-15** | `network_request` | UI-SRC-72D80A37A7FC | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` |
+| **UI-PR-15B** | `network_request` | UI-SRC-72D80A37A7FC | Principals / RouterSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` |
+| **UI-SRC-12BD8F041AC6** | `ui_action` | — | Principals / RouterSlotEditor | Change Router Terminal Strategy | `reversible_write` |
+| **UI-PR-14** | `network_request` | UI-SRC-12BD8F041AC6 | Principals / RouterSlotEditor | PUT /admin/v1/principals/{id}/router-terminal | `reversible_write` |
+| **UI-SRC-D4D3CDAFC561** | `ui_action` | — | Principals / RouterSlotEditor | Add Router Filter from Popover (Advanced Tab) | `reversible_write` |
+| **UI-PR-16B** | `network_request` | UI-SRC-D4D3CDAFC561 | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` |
+| **UI-SRC-C4E25AD91ABF** | `ui_action` | — | Principals / RouterSlotEditor | Reorder Router Filters via Move Up/Down | `reversible_write` |
+| **UI-PR-16** | `network_request` | UI-SRC-C4E25AD91ABF | Principals / RouterSlotEditor | POST /admin/v1/principals/{id}/plugin-chain/reorder | `reversible_write` |
+| **UI-SRC-797468122201** | `ui_action` | — | Principals / RouterSlotEditor | Remove Router Filter Step | `destructive_write` |
+| **UI-PR-16C** | `network_request` | UI-SRC-797468122201 | Principals / RouterSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` |
+| **UI-SRC-9E71353DC28E** | `ui_action` | — | Principals / PluginDetailDrawer | View Plugin Details Drawer | `read` |
+| **UI-PR-18** | `ui_action` | — | Principals / ShapeSlotEditor | Select Shape Slot Plugin | `reversible_write` |
+| **UI-PR-18A** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | DELETE /admin/v1/plugin-chain-entries/{id} | `destructive_write` |
+| **UI-PR-18B** | `network_request` | UI-PR-18 | Principals / ShapeSlotEditor | POST /admin/v1/principals/{id}/plugin-chain | `reversible_write` |
+| **UI-SRC-5DE97D4F1CFC** | `ui_action` | — | Principals / ApiKeysCard | Load Principal API Keys | `read` |
+| **UI-PR-20** | `network_request` | UI-SRC-5DE97D4F1CFC | Principals / ApiKeysCard | GET /admin/v1/principals/{id}/keys | `read_with_audit` |
+| **UI-SRC-911C0971EF03** | `ui_action` | — | Principals / ApiKeysCard | Issue New API Key | `reversible_write` |
+| **UI-PR-21** | `network_request` | UI-SRC-911C0971EF03 | Principals / ApiKeysCard | POST /admin/v1/principals/{id}/keys | `reversible_write` |
+| **UI-SRC-B4272A92476E** | `ui_action` | — | Principals / ApiKeysCard | Revoke API Key | `destructive_write` |
+| **UI-PR-22** | `network_request` | UI-SRC-B4272A92476E | Principals / ApiKeysCard | POST /admin/v1/principals/{id}/keys/{key_id}/revoke | `destructive_write` |
+| **UI-SRC-A3E7AE6357CE** | `ui_action` | — | Principals / CacheKeepaliveCard | Cache Keepalive Card Summary Polling (limit=0) | `read` |
+| **UI-PR-07** | `network_request` | UI-SRC-A3E7AE6357CE | Principals / CacheKeepaliveCard | GET /admin/v1/principals/{id}/cache-keepalive | `read` |
+| **UI-SRC-921EE69973B8** | `ui_action` | — | Principals / CacheKeepaliveCard | Toggle Principal Cache Keepalive Enabled | `reversible_write` |
+| **UI-PR-08** | `network_request` | UI-SRC-921EE69973B8 | Principals / CacheKeepaliveCard | PATCH /admin/v1/principals/{id} | `reversible_write` |
+| **UI-PR-09A** | `ui_action` | — | Principals / CacheKeepaliveSettingsDrawer | Save Cache Keepalive Advanced Settings | `reversible_write` |
+| **UI-PR-09** | `network_request` | UI-PR-09A | Principals / CacheKeepaliveSettingsDrawer | PATCH /admin/v1/principals/{id} | `reversible_write` |
+| **UI-PR-10** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Cache Keepalive Sessions List Query & Polling (limit omitted) | `read` |
+| **UI-PR-10A** | `network_request` | UI-PR-10 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` |
+| **UI-SRC-88A40F094821** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Horizon Toggle Selection & Cursor Invalidation | `read` |
+| **REQ-SRC-68354F29C6F2** | `network_request` | UI-SRC-88A40F094821 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` |
+| **UI-SRC-9E180B20857B** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Status Filter Selection (All / State / Error) | `read` |
+| **UI-PR-11** | `network_request` | UI-SRC-9E180B20857B | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` |
+| **UI-SRC-B75FF5FEE2B9** | `ui_action` | — | Principals / CacheKeepaliveSessionsDrawer | Sessions Infinite Pagination via Cursor | `read` |
+| **UI-PR-11B** | `network_request` | UI-SRC-B75FF5FEE2B9 | Principals / CacheKeepaliveSessionsDrawer | GET /admin/v1/principals/{id}/cache-keepalive | `read` |
+| **UI-SRC-BACAC4FD9C6A** | `ui_action` | — | Principals / SessionDetailPane | Cache Keepalive Session Detail Polling | `read` |
+| **UI-PR-12** | `network_request` | UI-SRC-BACAC4FD9C6A | Principals / SessionDetailPane | GET /admin/v1/principals/{id}/cache-keepalive/{session_id} | `read` |
+| **UI-SRC-2DEF2F42BB04** | `ui_action` | — | Principals / SessionDetailPane | Session Detail Collapsible Sections | `read` |
+| **UI-SRC-D94B76752475** | `ui_action` | — | Plugins / PluginsPage | Plugins Page Mount & Registry Fetch | `read` |
+| **UI-PLUG-01** | `network_request` | UI-SRC-D94B76752475 | Plugins / PluginsPage | GET /admin/v1/plugins/registry | `read` |
+| **UI-PLUG-05** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Inspect Click | `read` |
+| **UI-PLUG-11** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Copy SHA256 | `read` |
+| **UI-PLUG-10** | `ui_action` | — | Plugins / PluginCatalog | Catalog Row Delete Button Click | `read` |
+| **UI-SRC-42AEDACD7B73** | `ui_action` | — | Plugins / PluginCatalog | Garbage Collection (Clean Orphaned Uploads) | `destructive_write` |
+| **UI-PLUG-04** | `network_request` | UI-SRC-42AEDACD7B73 | Plugins / PluginCatalog | POST /admin/v1/plugins/wasm/gc | `destructive_write` |
+| **UI-SRC-F8C17F59AB34** | `ui_action` | — | Plugins / PluginUploadCard | WASM Plugin File Upload (Browse or Drop) | `reversible_write` |
+| **UI-PLUG-02** | `network_request` | UI-SRC-F8C17F59AB34 | Plugins / PluginUploadCard | POST /admin/v1/plugins/wasm | `reversible_write` |
+| **UI-SRC-19B510951607** | `ui_action` | — | Plugins / PluginUploadCard | Confirm Plugin Replacement (409 Conflict Resolution) | `destructive_write` |
+| **UI-PLUG-03** | `network_request` | UI-SRC-19B510951607 | Plugins / PluginUploadCard | POST /admin/v1/plugins/wasm | `reversible_write` |
+| **UI-PLUG-20** | `ui_action` | — | Plugins / PluginUploadCard | Cancel Plugin Replacement | `read` |
+| **UI-PLUG-14** | `ui_action` | — | Plugins / PluginsPage | Upload Action Modal Lifecycle | `read` |
+| **UI-SRC-FBE359698524** | `ui_action` | — | Plugins / PluginDeleteDialog | Delete Dialog References Fetch | `read` |
+| **UI-PLUG-09** | `network_request` | UI-SRC-FBE359698524 | Plugins / PluginDeleteDialog | GET /admin/v1/plugins/registry/{id}/references | `read` |
+| **UI-SRC-9693EBA2D460** | `ui_action` | — | Plugins / PluginDeleteDialog | Plugin Deletion Confirm (Simple & Cascade) | `destructive_write` |
+| **UI-PLUG-08** | `network_request` | UI-SRC-9693EBA2D460 | Plugins / PluginDeleteDialog | DELETE /admin/v1/plugins/registry/{id} | `destructive_write` |
+| **UI-PLUG-19** | `ui_action` | — | Plugins / PluginDeleteDialog | Cancel Plugin Deletion | `read` |
+| **UI-PLUG-13** | `ui_action` | — | Plugins / PluginDetail | Back to Catalog Button Click | `read` |
+| **UI-PLUG-12** | `ui_action` | — | Plugins / PluginDetailIntegrity | Detail Card Copy SHA256 | `read` |
+| **UI-PLUG-16** | `ui_action` | — | Plugins / PluginDetailOperate | Inline Label Edit Form Toggle (Open & Cancel) | `read` |
+| **UI-SRC-824B79F88848** | `ui_action` | — | Plugins / PluginDetailOperate | Save Plugin Label Mutation | `reversible_write` |
+| **UI-PLUG-07** | `network_request` | UI-SRC-824B79F88848 | Plugins / PluginDetailOperate | PATCH /admin/v1/plugins/registry/{id} | `reversible_write` |
+| **UI-PLUG-18** | `ui_action` | — | Plugins / PluginDetailOperate | Detail View Delete Button Click | `read` |
+| **UI-PLUG-21** | `ui_action` | — | Plugins / PluginDetail | Used By Reference Link Click | `read` |
+| **UI-PLUG-22** | `ui_action` | — | Plugins / PluginDetailApply | Apply Plugin Target Navigation Links | `read` |
+| **UI-SRC-DF3F46767D73** | `ui_action` | — | Settings / Version Card | System Status & Version Telemetry | `read` |
+| **UI-SET-01** | `network_request` | UI-SRC-DF3F46767D73 | Settings / Version Card | GET /admin/v1/status | `read` |
+| **UI-SET-10** | `ui_action` | — | Settings / Localization Card | Change Locale Preference | `read` |
+| **UI-SET-11** | `ui_action` | — | Settings / Localization Card | Change Timezone Preference | `read` |
+| **UI-SRC-5A139160911F** | `ui_action` | — | Settings / Localization Card | Localization Live Preview Clock Tick | `read` |
+| **UI-SET-03** | `ui_action` | — | Settings / ConfigEditorSection | Load Configuration Editor & Draft Data | `read` |
+| **UI-SET-17** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` |
+| **UI-SET-03B** | `network_request` | UI-SET-03 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` |
+| **UI-SET-14** | `ui_action` | — | Settings / ConfigEditorSection | Edit Configuration Field Value | `read` |
+| **UI-SRC-67C497520AA2** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft | `reversible_write` |
+| **UI-SET-04** | `network_request` | UI-SRC-67C497520AA2 | Settings / ConfigEditorSection | PUT /admin/v1/config/draft | `reversible_write` |
+| **UI-SRC-BFD8C956C3C5** | `ui_action` | — | Settings / ConfigEditorSection | Validate Draft | `reversible_write` |
+| **UI-SET-05** | `network_request` | UI-SRC-BFD8C956C3C5 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/validate | `reversible_write` |
+| **UI-SET-12** | `ui_action` | — | Settings / ConfigEditorSection | Retry Configuration Editor Loading | `read` |
+| **UI-SET-12A** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/editor | `read_with_audit` |
+| **UI-SET-12B** | `network_request` | UI-SET-12 | Settings / ConfigEditorSection | GET /admin/v1/config/draft | `read_with_audit` |
+| **UI-SRC-C9DD3E291979** | `ui_action` | — | Settings / ConfigHistorySection | Load Configuration History | `read` |
+| **UI-SET-08** | `network_request` | UI-SRC-C9DD3E291979 | Settings / ConfigHistorySection | GET /admin/v1/config/history | `read_with_audit` |
+| **UI-SRC-49B5404AC804** | `ui_action` | — | Settings / Database Resources Snapshot Card | Download Database Resources Snapshot | `read` |
+| **UI-SET-02** | `network_request` | UI-SRC-49B5404AC804 | Settings / Database Resources Snapshot Card | GET /admin/v1/export | `read_with_audit` |
+| **UI-SRC-9A3432FEB525** | `ui_action` | — | Settings / ConfigEditorSection | Save Draft to Config File | `reversible_write` |
+| **UI-SET-15** | `network_request` | UI-SRC-9A3432FEB525 | Settings / ConfigEditorSection | POST /admin/v1/config/save | `destructive_write` |
+| **UI-SRC-228C90EA6F13** | `ui_action` | — | Settings / ConfigEditorSection | Download Validated Draft as TOML | `read_with_audit` |
+| **UI-SET-16** | `network_request` | UI-SRC-228C90EA6F13 | Settings / ConfigEditorSection | POST /admin/v1/config/draft/download | `read_with_audit` |
+| **UI-SRC-089FBD95699E** | `ui_action` | — | Settings / ConfigEditorSection | Select Configuration Category | `read` |
+| **UI-SRC-FA4533F02DD6** | `ui_action` | — | Settings / ConfigEditorSection | Search Settings Fields | `read` |
+| **UI-SRC-5F12838E8F4B** | `ui_action` | — | Settings / ConfigEditorSection | Toggle Advanced Settings Disclosure | `read` |
+| **UI-SRC-2DBACF6A00B0** | `ui_action` | — | Settings / ConfigEditorSection | Reveal Field from Validation Issue | `read` |
+| **UI-SRC-6C749C277F0A** | `ui_action` | — | Settings / ConfigEditorSection | Replace Opaque Storage URL | `read` |
+| **UI-SRC-6349C47F4250** | `ui_action` | — | Settings / ConfigEditorSection | Copy Draft JSON to Clipboard | `read` |
+| **UI-SRC-E5CC6F8E2B14** | `ui_action` | — | Settings / ConfigEditorSection | Deep-Link Field Focus via ?field= | `read` |
+| **UI-SRC-2FC5E3F9B148** | `ui_action` | — | Audit / AuditPage | Load Audit Trail & Supporting Entity Maps | `read` |
+| **UI-AUD-01** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` |
+| **UI-AUD-07** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/principals | `read` |
+| **UI-AUD-08** | `network_request` | UI-SRC-2FC5E3F9B148 | Audit / AuditPage | GET /admin/v1/upstreams | `read` |
+| **UI-SRC-8A3FB89087F5** | `ui_action` | — | Audit / AuditPage | Refresh Audit Trail | `read` |
+| **UI-AUD-05** | `network_request` | UI-SRC-8A3FB89087F5 | Audit / AuditPage | GET /admin/v1/audit | `read_with_audit` |
+| **UI-SRC-DD556FCB4A54** | `ui_action` | — | Audit / AuditPage Filter Bar | Filter by Principal ID | `read` |
+| **UI-AUD-02** | `network_request` | UI-SRC-DD556FCB4A54 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` |
+| **UI-SRC-00FD191B0EB1** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range Start (From) Field | `read` |
+| **UI-SRC-C7A6EA2F6025** | `ui_action` | — | Audit / TimeRangeBounds | Edit Range End (To) Field | `read` |
+| **UI-SRC-FA47104074F4** | `ui_action` | — | Audit / CalendarPopover | Pick From Date in Calendar Popover | `read` |
+| **REQ-SRC-0829EA9261F6** | `network_request` | UI-SRC-FA47104074F4 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` |
+| **UI-SRC-38E343D2A4C1** | `ui_action` | — | Audit / CalendarPopover | Pick To Date in Calendar Popover | `read` |
+| **REQ-SRC-66D17D1EF13A** | `network_request` | UI-SRC-38E343D2A4C1 | Audit / CalendarPopover | GET /admin/v1/audit | `read_with_audit` |
+| **UI-SRC-D309B057EC9E** | `ui_action` | — | Audit / TimeRangeBounds | Apply Time Range Bounds | `read` |
+| **UI-AUD-03** | `network_request` | UI-SRC-D309B057EC9E | Audit / TimeRangeBounds | GET /admin/v1/audit | `read_with_audit` |
+| **UI-AUD-04** | `ui_action` | — | Audit / AuditPage Filter Bar | Clear Filter Bar Filters | `read` |
+| **REQ-SRC-CAE9CDF1B8F6** | `network_request` | UI-AUD-04 | Audit / AuditPage Filter Bar | GET /admin/v1/audit | `read_with_audit` |
+| **UI-AUD-09** | `ui_action` | — | Audit / AuditPage EmptyState | Clear Filters from Empty State Action | `read` |
+| **REQ-SRC-91FBA8F4830F** | `network_request` | UI-AUD-09 | Audit / AuditPage EmptyState | GET /admin/v1/audit | `read_with_audit` |
+| **UI-AUD-06** | `ui_action` | — | Audit / Audit Table Row | Open Audit Detail Modal | `read` |
+| **UI-AUD-10** | `ui_action` | — | Audit / Audit Detail Modal | Close Audit Detail Modal | `read` |
+| **UI-SRC-BDC81AB9B863** | `ui_action` | — | Upstreams / Upstreams Master List | Upstreams Master List Mount & Polling | `read` |
+| **UI-UP-01** | `network_request` | UI-SRC-BDC81AB9B863 | Upstreams / Upstreams Master List | GET /admin/v1/upstreams | `read` |
+| **UI-SRC-3FC895176F17** | `ui_action` | — | Upstreams / Upstream Quota Latest Snapshots | Subscription Quota Latest Polling | `read` |
+| **UI-UP-02** | `network_request` | UI-SRC-3FC895176F17 | Upstreams / Upstream Quota Latest Snapshots | GET /admin/v1/subscription-quotas/latest | `read` |
+| **UI-SRC-F25206CE1E1B** | `ui_action` | — | Upstreams / Upstream 7d Usage Bar | Upstream 7d Usage Summary Query | `read` |
+| **UI-UP-03** | `network_request` | UI-SRC-F25206CE1E1B | Upstreams / Upstream 7d Usage Bar | GET /admin/v1/dashboard/usage | `read` |
+| **UI-SRC-E4C913E07FEC** | `ui_action` | — | Upstreams / Runtime Apply Status | Runtime Status Query | `read` |
+| **UI-UP-04** | `network_request` | UI-SRC-E4C913E07FEC | Upstreams / Runtime Apply Status | GET /admin/v1/status | `read` |
+| **UI-UP-05** | `ui_action` | — | Upstreams / Upstream Item Click in Sidebar | Select Upstream in Sidebar | `read` |
+| **UI-SRC-CD87608DA5D5** | `ui_action` | — | Upstreams / Upstream Subscription Metadata | Upstream Subscription Metadata Query | `read` |
+| **UI-UP-06** | `network_request` | UI-SRC-CD87608DA5D5 | Upstreams / Upstream Subscription Metadata | GET /admin/v1/upstreams/{id}/subscription-metadata | `read` |
+| **UI-SRC-1EEBA1898F34** | `ui_action` | — | Upstreams / Refresh Metadata Button | Trigger Subscription Metadata Refresh | `reversible_write` |
+| **UI-UP-07** | `network_request` | UI-SRC-1EEBA1898F34 | Upstreams / Refresh Metadata Button | POST /admin/v1/upstreams/{id}/subscription-metadata/refresh | `external_action` |
+| **UI-SRC-224914630CC5** | `ui_action` | — | Upstreams / Quota Series Query | Subscription Quota Series Query | `read` |
+| **UI-UP-08A** | `network_request` | UI-SRC-224914630CC5 | Upstreams / Quota Series Query | GET /admin/v1/subscription-quotas/series | `read` |
+| **UI-UP-09** | `ui_action` | — | Upstreams / Quota History Range Toggle | Toggle Quota History Range | `read` |
+| **UI-UP-09A** | `network_request` | UI-UP-09 | Upstreams / Quota History Range Toggle | GET /admin/v1/subscription-quotas/series | `read` |
+| **UI-UP-10** | `ui_action` | — | Upstreams / Quota History Legend Window Isolation | Isolate Quota Window in Legend | `read` |
+| **UI-SRC-0D929B471D7A** | `ui_action` | — | Upstreams / Inline Name Editor | Rename Upstream | `reversible_write` |
+| **UI-UP-11** | `network_request` | UI-SRC-0D929B471D7A | Upstreams / Inline Name Editor | PUT /admin/v1/upstreams/{id} | `reversible_write` |
+| **UI-SRC-C72B3D4F216B** | `ui_action` | — | Upstreams / Toggle Upstream Enabled | Toggle Upstream Enabled Switch | `reversible_write` |
+| **UI-UP-12** | `network_request` | UI-SRC-C72B3D4F216B | Upstreams / Toggle Upstream Enabled | PATCH /admin/v1/upstreams/{id} | `reversible_write` |
+| **UI-SRC-9FD3FEC04C3D** | `ui_action` | — | Upstreams / SettingsCard (Base URL / API Key) | Update Non-OAuth Upstream Settings | `reversible_write` |
+| **UI-UP-13** | `network_request` | UI-SRC-9FD3FEC04C3D | Upstreams / SettingsCard (Base URL / API Key) | PUT /admin/v1/upstreams/{id} | `reversible_write` |
+| **UI-SRC-7F9359EA0052** | `ui_action` | — | Upstreams / ApiUsageCard Range Toggle | Toggle API Usage Range (24h / 7d) | `read` |
+| **UI-UP-14** | `network_request` | UI-SRC-7F9359EA0052 | Upstreams / ApiUsageCard Range Toggle | GET /admin/v1/dashboard/usage | `read` |
+| **UI-SRC-6D1976AC76E2** | `ui_action` | — | Upstreams / WarmupCardMinimal Toggle Enabled | Toggle Warmup Enabled | `reversible_write` |
+| **UI-UP-15** | `network_request` | UI-SRC-6D1976AC76E2 | Upstreams / WarmupCardMinimal Toggle Enabled | PATCH /admin/v1/upstreams/{id} | `reversible_write` |
+| **UI-SRC-1B467A3726A3** | `ui_action` | — | Upstreams / Warmup Dialect Plugin Dropdown | Select Warmup Shape Plugin | `reversible_write` |
+| **UI-UP-16** | `network_request` | UI-SRC-1B467A3726A3 | Upstreams / Warmup Dialect Plugin Dropdown | PATCH /admin/v1/upstreams/{id} | `reversible_write` |
+| **UI-SRC-329B12DA3BC3** | `ui_action` | — | Upstreams / Warmup Clear Dialect Plugin | Clear Warmup Shape Plugin | `reversible_write` |
+| **UI-UP-17** | `network_request` | UI-SRC-329B12DA3BC3 | Upstreams / Warmup Clear Dialect Plugin | DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin | `reversible_write` |
+| **UI-SRC-C41372BCA4B0** | `ui_action` | — | Upstreams / Warmup Fire Now Button | Fire Warmup Now | `external_action` |
+| **UI-UP-18** | `network_request` | UI-SRC-C41372BCA4B0 | Upstreams / Warmup Fire Now Button | POST /admin/v1/upstreams/{id}/warmup/fire-now | `external_action` |
+| **UI-SRC-4851B3D30282** | `ui_action` | — | Upstreams / Warmup History Drawer Open | Open Warmup History Drawer | `read` |
+| **UI-UP-19** | `network_request` | UI-SRC-4851B3D30282 | Upstreams / Warmup History Drawer Open | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` |
+| **UI-UP-20** | `ui_action` | — | Upstreams / Warmup History Attempt Click | Select Warmup Attempt in Drawer | `read` |
+| **UI-SRC-49171C2D2202** | `ui_action` | — | Upstreams / Re-authenticate OAuth Upstream | Start OAuth Authorization Flow | `external_action` |
+| **UI-UP-22** | `network_request` | UI-SRC-49171C2D2202 | Upstreams / Re-authenticate OAuth Upstream | POST /admin/v1/upstreams/{id}/oauth/start | `reversible_write` |
+| **UI-SRC-0D6108CB1DBC** | `ui_action` | — | Upstreams / Paste OAuth Callback Code | Complete OAuth Token Exchange | `external_action` |
+| **UI-UP-23** | `network_request` | UI-SRC-0D6108CB1DBC | Upstreams / Paste OAuth Callback Code | POST /admin/v1/upstreams/{id}/oauth/complete | `external_action` |
+| **UI-SRC-9D5B9DACBF9A** | `ui_action` | — | Upstreams / Delete Upstream Button | Delete Upstream | `reversible_write` |
+| **UI-UP-24** | `network_request` | UI-SRC-9D5B9DACBF9A | Upstreams / Delete Upstream Button | DELETE /admin/v1/upstreams/{id} | `destructive_write` |
+| **UI-UP-25** | `ui_action` | — | Upstreams / Create Upstream Modal Open | Open Create Upstream Modal | `read` |
+| **UI-SRC-5A9E89C6EEB0** | `ui_action` | — | Upstreams / Submit API Key Upstream Form | Create Non-OAuth Upstream | `reversible_write` |
+| **UI-UP-26** | `network_request` | UI-SRC-5A9E89C6EEB0 | Upstreams / Submit API Key Upstream Form | POST /admin/v1/upstreams | `reversible_write` |
+| **UI-SRC-427756CE86BB** | `ui_action` | — | Upstreams / Start OAuth Draft for New Upstream | Start OAuth Draft Flow | `external_action` |
+| **UI-UP-27** | `network_request` | UI-SRC-427756CE86BB | Upstreams / Start OAuth Draft for New Upstream | POST /admin/v1/oauth/draft/start | `reversible_write` |
+| **UI-SRC-CB056EC17B20** | `ui_action` | — | Upstreams / Submit OAuth Code for Draft | Verify OAuth Draft Code | `external_action` |
+| **UI-UP-28** | `network_request` | UI-SRC-CB056EC17B20 | Upstreams / Submit OAuth Code for Draft | POST /admin/v1/oauth/draft/complete | `external_action` |
+| **UI-SRC-2533F30C81A8** | `ui_action` | — | Upstreams / Create Upstream after OAuth Verified | Confirm and Create OAuth Upstream | `reversible_write` |
+| **UI-UP-29** | `network_request` | UI-SRC-2533F30C81A8 | Upstreams / Create Upstream after OAuth Verified | POST /admin/v1/upstreams/from-oauth-draft | `reversible_write` |
+| **UI-SRC-057C5139E406** | `ui_action` | — | Upstreams / Upstream OAuth Status | Upstream OAuth Status Query | `external_action` |
+| **UI-UP-30** | `network_request` | UI-SRC-057C5139E406 | Upstreams / Upstream OAuth Status | GET /admin/v1/upstreams/{id}/oauth/status | `read` |
+| **UI-SRC-83D0030A34AF** | `ui_action` | — | Upstreams / Warmup Summary | Warmup Summary Query | `read` |
+| **UI-UP-31** | `network_request` | UI-SRC-83D0030A34AF | Upstreams / Warmup Summary | GET /admin/v1/upstreams/{id}/warmup | `read` |
+| **UI-SRC-AB584B8FD224** | `ui_action` | — | Upstreams / Warmup Shape Plugin Registry | Shape Plugin Registry Query | `read` |
+| **UI-UP-32** | `network_request` | UI-SRC-AB584B8FD224 | Upstreams / Warmup Shape Plugin Registry | GET /admin/v1/plugins/registry | `read` |
+| **UI-SRC-C28C003E8881** | `ui_action` | — | Upstreams / Selected Upstream Recent Requests | Recent Requests for Upstream | `read` |
+| **UI-UP-33** | `network_request` | UI-SRC-C28C003E8881 | Upstreams / Selected Upstream Recent Requests | GET /admin/v1/events/recent | `read` |
+| **UI-SRC-9CDF9EE839AE** | `ui_action` | — | Upstreams / Warmup History Status Filter | Filter Warmup History by Status | `read` |
+| **UI-UP-34** | `network_request` | UI-SRC-9CDF9EE839AE | Upstreams / Warmup History Status Filter | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` |
+| **UI-SRC-35D5E99A460E** | `ui_action` | — | Upstreams / Warmup History Pagination | Load Older Warmup Attempts | `read` |
+| **UI-UP-35** | `network_request` | UI-SRC-35D5E99A460E | Upstreams / Warmup History Pagination | GET /admin/v1/upstreams/{id}/warmup/attempts | `read` |
+| **UI-UP-36** | `ui_action` | — | Upstreams / Warmup History Horizon Filter | Toggle Warmup History Horizon (24h / 7d / All) | `read` |
+| **UI-UP-37** | `ui_action` | — | Upstreams / Warmup History Collapsible Sections | Toggle Plugin Snapshot and Raw Record Collapsibles | `read` |
+| **UI-UP-38** | `ui_action` | — | Upstreams / ApiUsageCard Metric Toggle | Toggle API Usage Metric (Tokens / Cost) | `read` |
+| **UI-UP-39** | `ui_action` | — | Upstreams / Metadata Strip Expansion | Expand/Collapse Metadata Strip | `read` |
+| **UI-UP-40** | `ui_action` | — | Upstreams / Mobile Back Button | Mobile Back Navigation | `read` |
+| **UI-SRC-517760F07481** | `ui_action` | — | Upstreams / Attempt Detail Close | Close Attempt Detail in Drawer | `read` |
+| **UI-SRC-668F412D6C0E** | `ui_action` | — | Upstreams / Warmup History Drawer Close | Close Warmup History Drawer | `read` |
+| **UI-SRC-D96DA7353940** | `ui_action` | — | Upstreams / WarmupConfigModal Copy JSON | Copy Warmup Plugin Config JSON | `read` |
+| **UI-SRC-D61F3782A082** | `ui_action` | — | Plugins / PluginDetail | Load Selected Plugin References | `read` |
+| **UI-PLUG-06** | `network_request` | UI-SRC-D61F3782A082 | Plugins / PluginDetail | GET /admin/v1/plugins/registry/{id}/references | `read` |
+| **UI-SRC-30AC7206755A** | `ui_action` | — | Principals / PrincipalDetail | Load Shape Plugin Chain | `read` |
+| **UI-PR-13C** | `network_request` | UI-SRC-30AC7206755A | Principals / PrincipalDetail | GET /admin/v1/principals/{id}/plugin-chain | `read` |
+| **UI-SRC-2092158E84C1** | `ui_action` | — | Principals / Router and Shape Editors | Load Plugin Registry for Principal Editors | `read` |
+| **UI-PR-13E** | `network_request` | UI-SRC-2092158E84C1 | Principals / Router and Shape Editors | GET /admin/v1/plugins/registry | `read` |
+| **UI-SRC-18907E842823** | `ui_action` | — | Global / Topbar | Render Authenticated Administrator Identity Badge | `read` |
+| **UI-SRC-453C347CE4F4** | `ui_action` | — | Audit / AuditPage | Render Audit Actor Metadata | `read` |
+| **UI-SRC-F0FA0033252E** | `ui_action` | — | Shared Request Tables / LatencyCell | Inspect Latency Responsibility Breakdown | `read` |
+| **API-SRC-C767025D0EDC** | `backend_endpoint` | — | Backend-Only / serve_index | GET / | `read` |
+| **API-SRC-276F2E8B8B8D** | `backend_endpoint` | — | Backend-Only / serve_asset | GET /{*file} | `read` |
+| **API-SRC-7A787CD5C3CF** | `backend_endpoint` | — | Backend-Only / admin_server_state | GET /admin/health/state | `read` |
+| **API-SRC-6A3111721B04** | `backend_endpoint` | — | Backend-Only / handle_internal_partial_fetch | GET /internal/v1/partials/{event_id} | `read` |
+| **API-SRC-5115B16A96BD** | `backend_endpoint` | — | Backend-Only / status | GET /admin/scheduler/status | `read` |
+| **API-SRC-F4E21AA70D2C** | `backend_endpoint` | — | Backend-Only / failures | GET /admin/scheduler/failures | `read` |
+| **API-SRC-BD965DDC38E0** | `backend_endpoint` | — | Backend-Only / get_registry | GET /admin/v1/plugins/registry/{id} | `read` |
+| **API-SRC-8895068281DE** | `backend_endpoint` | — | Backend-Only / get_chain | GET /admin/v1/plugin-chain-entries/{id} | `read` |
+| **API-SRC-166291C6FB8A** | `backend_endpoint` | — | Backend-Only / get_principal | GET /admin/v1/principals/{id} | `read` |
+| **API-SRC-4B568BB20E22** | `backend_endpoint` | — | Backend-Only / get_allowed_models | GET /admin/v1/principals/{id}/allowed_models | `read` |
+| **API-SRC-7E55E35928A2** | `backend_endpoint` | — | Backend-Only / principal_limits | GET /admin/v1/principals/{id}/limits | `read` |
+| **API-SRC-7C0B903CAB5B** | `backend_endpoint` | — | Backend-Only / get_upstream | GET /admin/v1/upstreams/{id} | `read` |
+| **API-SRC-A96E630A4D8E** | `backend_endpoint` | — | Backend-Only / rebalance_chain | POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance | `reversible_write` |
+| **API-SRC-B624778A38FE** | `backend_endpoint` | — | Backend-Only / update_chain | PUT /admin/v1/plugin-chain-entries/{id} | `reversible_write` |
+| **API-SRC-B1B43DF36688** | `backend_endpoint` | — | Backend-Only / update_principal | PUT /admin/v1/principals/{id} | `reversible_write` |
+| **API-SRC-3566800F95C2** | `backend_endpoint` | — | Backend-Only / preview_route | POST /admin/v1/router/preview | `read` |
+| **API-SRC-FA895179691B** | `backend_endpoint` | — | Backend-Only / enable_upstream | POST /admin/v1/upstreams/{id}/enable | `reversible_write` |
+| **API-SRC-F00657C8F5E0** | `backend_endpoint` | — | Backend-Only / disable_upstream | POST /admin/v1/upstreams/{id}/disable | `reversible_write` |
 
 ## 4. Detailed Execution Specifications
 
@@ -448,7 +412,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Component mounts in __root.tsx → loadSession(true) is invoked → Checks getAdminToken() in localStorage['cc-lb-admin-token'] → Dispatches GET /admin/v1/auth/session
 - **Scope:** `once_and_event_driven` — Component mount & window storage/auth events
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **Expected UI:** Shows Spinner while loading. Transitions to children (authenticated view) on 200, or auth form/error screen on 401/error.
 - **Runtime result:** `PENDING`
 
@@ -461,7 +424,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Component mounts in __root.tsx → loadSession(true) is invoked → Checks getAdminToken() in localStorage['cc-lb-admin-token'] → Dispatches GET /admin/v1/auth/session
 - **Scope:** `once_and_event_driven` — Component mount & window storage/auth events
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/auth/session`
   - Query: None
   - Body: None
@@ -482,7 +444,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User inputs non-empty Bearer token into password input → User clicks 'Sign in' button or presses Enter → handleSubmit validates non-empty trimmed value → setAdminToken(trimmed) writes to localStorage['cc-lb-admin-token'] → Dispatches GET /admin/v1/auth/session via loadSession(false)
 - **Scope:** `on_user_action` — User form submission
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
 - **Expected UI:** Loading spinner on submit button; on success renders authenticated shell; on failure shows field error
 - **Runtime result:** `PENDING`
 
@@ -495,7 +456,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User inputs non-empty Bearer token into password input → User clicks 'Sign in' button or presses Enter → handleSubmit validates non-empty trimmed value → setAdminToken(trimmed) writes to localStorage['cc-lb-admin-token'] → Dispatches GET /admin/v1/auth/session via loadSession(false)
 - **Scope:** `on_user_action` — User form submission
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/auth/session`
   - Query: None
   - Body: None
@@ -516,7 +476,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User submits empty or whitespace-only token
 - **Scope:** `on_user_action` — User form submission
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders inline error: 'Token cannot be empty' below input
 - **Client-only reason:** Client-side form input validation guard prior to network dispatch
 - **Runtime result:** `PENDING`
@@ -530,7 +489,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Admin server configured with external auth (e.g. IdP/SSO) → Gate shows 'External authentication required' → User clicks 'Retry' button
 - **Scope:** `on_user_action` — User button click
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
 - **Expected UI:** Triggers loadSession(true) to re-verify session with admin server
 - **Runtime result:** `PENDING`
 
@@ -543,7 +501,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Admin server configured with external auth (e.g. IdP/SSO) → Gate shows 'External authentication required' → User clicks 'Retry' button
 - **Scope:** `on_user_action` — User button click
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/auth/session`
   - Query: None
   - Body: None
@@ -564,7 +521,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Network or admin server is unreachable → Gate displays 'Unable to verify admin session' → User clicks 'Retry' button
 - **Scope:** `on_user_action` — User button click
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
 - **Expected UI:** Renders loading spinner and re-dispatches loadSession(true)
 - **Runtime result:** `PENDING`
 
@@ -577,7 +533,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Network or admin server is unreachable → Gate displays 'Unable to verify admin session' → User clicks 'Retry' button
 - **Scope:** `on_user_action` — User button click
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/auth/session`
   - Query: None
   - Body: None
@@ -598,7 +553,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** AppShell mounts after authentication → useHealth query executes GET /admin/health → Polls periodically every 15,000ms
 - **Scope:** `continuous_poll` — Timer every 15s
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Status dot in topbar header updates tone and title tooltip
 - **Runtime result:** `PENDING`
 
@@ -611,7 +565,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** AppShell mounts after authentication → useHealth query executes GET /admin/health → Polls periodically every 15,000ms
 - **Scope:** `continuous_poll` — Timer every 15s
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/health`
   - Query: None
   - Body: None
@@ -632,7 +585,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks menu toggle button in Topbar (desktop viewport lg:inline-flex)
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Sidebar width transitions smoothly, localStorage['cclb.sidebar.collapsed'] updated ('1' or '0')
 - **Client-only reason:** Client-side layout collapse state management
 - **Runtime result:** `PENDING`
@@ -646,7 +598,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User presses Cmd+B (macOS) or Ctrl+B (Windows/Linux) anywhere in the application
 - **Scope:** `on_user_action` — Global keyboard event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Prevents default browser bookmark behavior, toggles collapsed state and updates localStorage
 - **Client-only reason:** Client-side keyboard shortcut handler
 - **Runtime result:** `PENDING`
@@ -660,7 +611,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks hamburger menu icon in Topbar on mobile viewport (< 1024px)
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens BaseDialog.Portal drawer from left with brand, full nav links, and footer
 - **Client-only reason:** Client-side modal dialog state
 - **Runtime result:** `PENDING`
@@ -674,7 +624,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks desktop 'Search... ⌘K' button or mobile Command icon button in Topbar
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Invokes onCommandPalette() callback, opening CommandPalette modal dialog
 - **Client-only reason:** Client-side modal trigger
 - **Runtime result:** `PENDING`
@@ -688,7 +637,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks any of the 7 primary navigation links in sidebar or mobile drawer
 - **Scope:** `on_user_action` — User navigation click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** TanStack Router transitions route; active link receives 'bg-overlay-6 text-text' styling; on mobile closes drawer
 - **Client-only reason:** Client-side SPA route navigation
 - **Runtime result:** `PENDING`
@@ -702,7 +650,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks ThemeToggle trigger in Topbar → BaseMenu popup opens displaying Light, Dark, System radio options → User clicks one of the theme options
 - **Scope:** `on_user_action` — User menu selection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Writes selection to localStorage['cclb.theme'], sets documentElement data-theme attribute, updates theme colors immediately and syncs across tabs
 - **Client-only reason:** Client-side theme attribute and local storage management
 - **Runtime result:** `PENDING`
@@ -716,7 +663,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User presses Cmd+K or Ctrl+K anywhere in the application
 - **Scope:** `on_user_action` — Global keyboard event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toggles CommandPalette open state
 - **Client-only reason:** Client-side keyboard shortcut handler
 - **Runtime result:** `PENDING`
@@ -730,7 +676,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** CommandPalette component mounts in root layout → useUpstreams hook executes GET /admin/v1/upstreams → Polls every 30,000ms
 - **Scope:** `continuous_poll` — Component mount & 30s timer
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates Upstreams command group in palette
 - **Runtime result:** `PENDING`
 
@@ -743,7 +688,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** CommandPalette component mounts in root layout → useUpstreams hook executes GET /admin/v1/upstreams → Polls every 30,000ms
 - **Scope:** `continuous_poll` — Component mount & 30s timer
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams`
   - Query: None
   - Body: None
@@ -764,7 +708,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** CommandPalette component mounts in root layout → usePrincipals hook executes GET /admin/v1/principals
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates Principals command group in palette
 - **Runtime result:** `PENDING`
 
@@ -777,7 +720,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** CommandPalette component mounts in root layout → usePrincipals hook executes GET /admin/v1/principals
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals`
   - Query: None
   - Body: None
@@ -798,7 +740,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User types text query into Command.Input
 - **Scope:** `on_user_action` — User keystrokes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** cmdk filters items in real time without network requests
 - **Client-only reason:** In-memory client filtering of cached items
 - **Runtime result:** `PENDING`
@@ -812,7 +753,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User selects an item in Pages or Actions group via Enter or Click
 - **Scope:** `on_user_action` — User item selection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes palette dialog, navigates to target path
 - **Client-only reason:** Client SPA router navigation
 - **Runtime result:** `PENDING`
@@ -826,7 +766,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User selects an upstream or principal entity from search results
 - **Scope:** `on_user_action` — User item selection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes palette dialog, navigates to entity detail view
 - **Client-only reason:** Client SPA router navigation with query parameters
 - **Runtime result:** `PENDING`
@@ -840,7 +779,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User presses ESC, clicks Close (X) button, or clicks modal backdrop
 - **Scope:** `on_user_action` — User interaction
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes CommandPalette dialog and restores focus
 - **Client-only reason:** Client modal dismiss action
 - **Runtime result:** `PENDING`
@@ -854,7 +792,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/v1/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates 5 KPI tiles (avg req/s, tokens, equiv $, avg latency, err rate) and their respective sparklines and subtotals
 - **Runtime result:** `PENDING`
 
@@ -867,7 +804,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes (1h, 6h, 24h, 7d) → useSummary hook executes GET /admin/v1/dashboard/summary?range={range} → Polls periodically every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/dashboard/summary`
   - Query: `range`
   - Body: None
@@ -888,7 +824,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders Top Principals Card with top 5 principals sorted by cost, showing req, tok, cache hit ratio, share %, and segmented cost meters
 - **Runtime result:** `PENDING`
 
@@ -901,7 +836,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes → useUsage executes GET /admin/v1/dashboard/usage?range={range}&step={step}&group_by=principal&projection=totals → Polls every 5,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 5s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `projection`
   - Body: None
@@ -922,7 +856,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useSubscriptionQuotaAggregate executes GET /admin/v1/subscription-quotas/aggregate?windows=5h%2C7d%2C7d_fable&source=merged → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount & 30s poll interval
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates Pool Quota Card Snapshot section with 3 stacked meters and plan-weighted upstream contribution percentages
 - **Runtime result:** `PENDING`
 
@@ -935,7 +868,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useSubscriptionQuotaAggregate executes GET /admin/v1/subscription-quotas/aggregate?windows=5h%2C7d%2C7d_fable&source=merged → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount & 30s poll interval
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/subscription-quotas/aggregate`
   - Query: `windows`, `source`
   - Body: None
@@ -956,7 +888,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes → useSubscriptionQuotaPoolHistory executes GET /admin/v1/subscription-quotas/pool-history with computed time bounds → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 30s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders Pool Quota Themed Chart with 5h, 7d (and optional 7d_fable) area series, reference lines (80% Warn, 95% Critical), and latest legend stats
 - **Runtime result:** `PENDING`
 
@@ -969,7 +900,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts or time range toggle changes → useSubscriptionQuotaPoolHistory executes GET /admin/v1/subscription-quotas/pool-history with computed time bounds → Polls every 30,000ms while window visible
 - **Scope:** `continuous_poll` — Mount, 30s poll interval, and range state changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/subscription-quotas/pool-history`
   - Query: `series_projection`, `windows`, `since_unix_secs`, `until_unix_secs`, `max_points_per_series`
   - Body: None
@@ -990,7 +920,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → usePrincipalNameMap hook executes usePrincipals() -> GET /admin/v1/principals
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Translates raw principal IDs into human-readable names across Top Principals card and Recent Requests table
 - **Runtime result:** `PENDING`
 
@@ -1003,7 +932,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → usePrincipalNameMap hook executes usePrincipals() -> GET /admin/v1/principals
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals`
   - Query: None
   - Body: None
@@ -1024,7 +952,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useUpstreamNameMap hook executes useUpstreams() -> GET /admin/v1/upstreams → Polls every 30,000ms
 - **Scope:** `continuous_poll` — Component mount & 30s timer
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Translates upstream IDs into display names across Recent Requests table and Pool Quota Popovers
 - **Runtime result:** `PENDING`
 
@@ -1037,7 +964,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useUpstreamNameMap hook executes useUpstreams() -> GET /admin/v1/upstreams → Polls every 30,000ms
 - **Scope:** `continuous_poll` — Component mount & 30s timer
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams`
   - Query: None
   - Body: None
@@ -1058,7 +984,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks one of the range toggles: '1h', '6h', '24h', or '7d'
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Resets activeKpiIndex to null, updates range state, triggers query param updates across summary, usage, and pool-history queries
 - **Client-only reason:** State update driving query re-evaluations (network triggered via dependent hooks UI-OV-07A/B/C)
 - **Runtime result:** `PENDING`
@@ -1072,7 +997,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User moves cursor horizontally over any of the 5 KPI sparkline charts
 - **Scope:** `on_user_action` — Mouse move / mouse leave
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Calculates normalized X ratio, sets shared activeKpiIndex, displaying synchronized tooltips (timestamp + value) on all 5 KPI cards simultaneously
 - **Client-only reason:** Pure client-side hover state coordination
 - **Runtime result:** `PENDING`
@@ -1086,7 +1010,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User hovers (delay 200ms) or focuses on a principal's segmented cost meter bar
 - **Scope:** `on_user_action` — Hover or focus event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens BasePopover showing BreakdownPopover with formatted dollar figures per category and total
 - **Client-only reason:** Client popover displaying already-aggregated series bucket data
 - **Runtime result:** `PENDING`
@@ -1100,7 +1023,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User hovers (desktop) or clicks/touches (mobile) on a 5h, 7d, or 7d_fable stacked meter bar
 - **Scope:** `on_user_action` — Hover, click, or touch event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens BasePopover showing PoolQuotaPopoverContent table: Upstream name, Util %, Weight (capacity_ratio x), and Impact (weighted contribution %)
 - **Client-only reason:** Client popover displaying already-fetched aggregate window data
 - **Runtime result:** `PENDING`
@@ -1114,7 +1036,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useRecentEventsInfinite initiates first page query
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders initial table rows (up to 200 items), status dots, timestamps, models, outcomes, latencies, tokens, costs
 - **Runtime result:** `PENDING`
 
@@ -1127,7 +1048,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useRecentEventsInfinite initiates first page query
 - **Scope:** `once` — Component mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`
   - Body: None
@@ -1148,7 +1068,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User scrolls down the Recent Requests table container → Sentinel row at the bottom of the table becomes visible (IntersectionObserver triggers) → events.fetchNextPage() is called
 - **Scope:** `on_user_action` — User scroll intersection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Sentinel displays 'Loading…' then appends next page of events seamlessly to recentRows
 - **Runtime result:** `PENDING`
 
@@ -1161,7 +1080,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User scrolls down the Recent Requests table container → Sentinel row at the bottom of the table becomes visible (IntersectionObserver triggers) → events.fetchNextPage() is called
 - **Scope:** `on_user_action` — User scroll intersection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `until_ts_ms`, `until_event_id`
   - Body: None
@@ -1182,7 +1100,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/v1/events/stream
 - **Scope:** `streaming` — Component mount & connection lifecycle
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** New events stream in real time and merge into table rows with green flash-in animation
 - **Runtime result:** `PENDING`
 
@@ -1195,7 +1112,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** OverviewPage mounts → useLiveEventStream opens EventSource to /admin/v1/events/stream
 - **Scope:** `streaming` — Component mount & connection lifecycle
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: None
   - Body: None
@@ -1216,7 +1132,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** SSE stream disconnects and attempts reconnection → lastCursorRef has a valid cursor string → connect(true) executes delta backfill request before reopening SSE
 - **Scope:** `on_reconnect` — Stream reconnection event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Seamlessly fills gaps in event stream without duplicate rows or missed events
 - **Runtime result:** `PENDING`
 
@@ -1229,7 +1144,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** SSE stream disconnects and attempts reconnection → lastCursorRef has a valid cursor string → connect(true) executes delta backfill request before reopening SSE
 - **Scope:** `on_reconnect` — Stream reconnection event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/delta`
   - Query: `since_cursor`, `limit`
   - Body: None
@@ -1250,7 +1164,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** SSE stream experiences permanent failure (>5 min unreachable) → LiveTailFailureBanner renders at top of Overview page → User clicks 'Retry now' button
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Calls live.forceReconnect(), resetting reconnect counters and immediately initiating stream connect()
 - **Client-only reason:** Client connection state trigger (leads to GET /admin/v1/events/stream)
 - **Runtime result:** `PENDING`
@@ -1264,7 +1177,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks Dismiss (X) button on failure banner
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Hides banner without affecting background reconnect attempts
 - **Client-only reason:** Client banner visibility state
 - **Runtime result:** `PENDING`
@@ -1278,7 +1190,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks 'See all' link in Recent Requests section header
 - **Scope:** `on_user_action` — User click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates browser to /logs page for full Logs Explorer view
 - **Client-only reason:** Client anchor/router navigation
 - **Runtime result:** `PENDING`
@@ -1292,7 +1203,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks any request row in the table, or focuses row and presses Enter or Space
 - **Scope:** `on_user_action` — User row interaction
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Sets selectedId in RequestEventsTable, opening RequestEventDrawer sliding in from right
 - **Client-only reason:** Client drawer state trigger (leads to detail query UI-OV-12-DETAIL)
 - **Runtime result:** `PENDING`
@@ -1306,7 +1216,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks a finalized request event row in RequestEventsTable → RequestEventDrawer opens with non-null detailId → useRequestEventDetail executes GET /admin/v1/events/detail/{eventId}
 - **Scope:** `on_user_action` — Row selection in table
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates full diagnostics in drawer: status badge, model, principal, upstream, session ID, latency timeline breakdown, token usage pie chart, cost pie chart, upstream failure message
 - **Runtime result:** `PENDING`
 
@@ -1319,7 +1228,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks a finalized request event row in RequestEventsTable → RequestEventDrawer opens with non-null detailId → useRequestEventDetail executes GET /admin/v1/events/detail/{eventId}
 - **Scope:** `on_user_action` — Row selection in table
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/detail/{event_id}`
   - Query: None
   - Body: None
@@ -1340,7 +1248,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks copy icon next to Request ID, Principal ID, Session ID, or bottom 'Copy raw JSON' button
 - **Scope:** `on_user_action` — User button click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Copies string to clipboard via navigator.clipboard.writeText, displays success toast via Sonner
 - **Client-only reason:** Client clipboard copy action
 - **Runtime result:** `PENDING`
@@ -1354,7 +1261,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** User clicks Close (X) button, presses ESC, or clicks drawer backdrop
 - **Scope:** `on_user_action` — User interaction
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Drawer slides out to right, resets selectedId to null
 - **Client-only reason:** Client dialog dismissal
 - **Runtime result:** `PENDING`
@@ -1368,7 +1274,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /logs with or without filter search params
 - **Scope:** `once` — Route mount / URL filter changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders loading skeleton rows in RequestEventsTable, then displays up to 50 rows matching historical filters
 - **Runtime result:** `PENDING`
 
@@ -1381,7 +1286,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /logs with or without filter search params
 - **Scope:** `once` — Route mount / URL filter changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `since_unix_secs`, `until_unix_secs`, `until_ts_ms`, `until_event_id`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -1402,7 +1306,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount /logs with until_unix_secs=undefined and userRequestedTailing=true
 - **Scope:** `once` — Effective tailing state active
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Status indicator displays 'Connecting…' then 'Live' with green pulsing dot; incoming events appear at top of table with flash animation
 - **Runtime result:** `PENDING`
 
@@ -1415,7 +1318,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount /logs with until_unix_secs=undefined and userRequestedTailing=true
 - **Scope:** `once` — Effective tailing state active
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -1436,7 +1338,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount /logs, wait for first page events to establish initial view domain, query histogram range
 - **Scope:** `once` — Histogram range establishment / view changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders canvas bar chart with total requests (accent cyan) and error lane (danger red)
 - **Runtime result:** `PENDING`
 
@@ -1449,7 +1350,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount /logs, wait for first page events to establish initial view domain, query histogram range
 - **Scope:** `once` — Histogram range establishment / view changes
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `since_unix_secs`, `until_unix_secs`, `bucket_ms`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -1470,7 +1370,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Live tail' / 'Stop tail' toggle button in page header
 - **Scope:** `once` — User toggle click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Button toggles pressed visual state; header subtitle switches between 'live tailing' and 'paged'; status dot turns off or reconnects
 - **Client-only reason:** Directly updates userRequestedTailing React state, which activates or tears down useLiveEventStream
 - **Runtime result:** `PENDING`
@@ -1484,7 +1383,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search params with principal_id; table resets to page 0, historical query refetches, SSE reconnects with principal_id filter, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1497,7 +1395,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `principal_id`, `limit`
   - Body: None
@@ -1518,7 +1415,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`
   - Body: None
@@ -1539,7 +1435,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Principal filter Select dropdown → Select a specific principal or 'All principals'
 - **Scope:** `each_filter_combination` — Available principals list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `principal_id`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1560,7 +1455,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search params with upstream_id; table resets to page 0, historical query refetches, SSE reconnects, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1573,7 +1467,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `upstream_id`, `limit`
   - Body: None
@@ -1594,7 +1487,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `upstream_id`
   - Body: None
@@ -1615,7 +1507,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Upstream filter Select dropdown → Select an upstream or 'All upstreams'
 - **Scope:** `each_filter_combination` — Available upstreams list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `upstream_id`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1636,7 +1527,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search params with session (mapped to thread_id on wire); table resets to page 0, historical query refetches with thread_id, SSE reconnects, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1649,7 +1539,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `thread_id`, `limit`
   - Body: None
@@ -1670,7 +1559,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `thread_id`
   - Body: None
@@ -1691,7 +1579,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Session filter Select dropdown → Select a session chip or 'All sessions'
 - **Scope:** `each_filter_combination` — Unique session IDs from loaded rows
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `thread_id`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1712,7 +1599,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type in Model input field → Wait 300ms for debounce timer to fire
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** After 300ms debounce, router search updates with model; table resets to page 0, historical query refetches, SSE reconnects with model prefix filter, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1725,7 +1611,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type in Model input field → Wait 300ms for debounce timer to fire
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `model`, `limit`
   - Body: None
@@ -1746,7 +1631,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type in Model input field → Wait 300ms for debounce timer to fire
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `model`
   - Body: None
@@ -1767,7 +1651,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type in Model input field → Wait 300ms for debounce timer to fire
 - **Scope:** `each_filter_combination` — Equivalence classes: [empty, exact model name, prefix string, special chars]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `model`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1788,7 +1671,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search params with status (mapped to status_class on wire); table resets to page 0, historical query refetches, SSE reconnects, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1801,7 +1683,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `status_class`, `limit`
   - Body: None
@@ -1822,7 +1703,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `status_class`
   - Body: None
@@ -1843,7 +1723,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Status filter Select dropdown → Select 2xx, 3xx, 4xx, 5xx or 'All statuses'
 - **Scope:** `each_filter_combination` — LOG_STATUS_CLASSES enum options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `status_class`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1864,7 +1743,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search params with source_kind; table resets to page 0, historical query refetches, SSE reconnects, histogram updates
 - **Runtime result:** `PENDING`
 
@@ -1877,7 +1755,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `source_kind`, `limit`
   - Body: None
@@ -1898,7 +1775,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `source_kind`
   - Body: None
@@ -1919,7 +1795,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open Kind filter Select dropdown → Select 'Exclude renewals' (default empty), 'All events', or 'Renewals only'
 - **Scope:** `each_filter_combination` — Source kind options
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `source_kind`, `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1940,7 +1815,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Drag bottom axis area to pan view → Mouse wheel on canvas to zoom domain in/out → Drag across canvas bars to brush-select time window [sel.a, sel.b] → Release mouse to commit selection
 - **Scope:** `once` — Canvas drag actions
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Canvas updates shaded highlight in real time; on mouse up, commits selection calling commitSelection in logs.tsx; navigates since_unix_secs and until_unix_secs; table and histogram refetch with new bounds
 - **Runtime result:** `PENDING`
 
@@ -1953,7 +1827,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Drag bottom axis area to pan view → Mouse wheel on canvas to zoom domain in/out → Drag across canvas bars to brush-select time window [sel.a, sel.b] → Release mouse to commit selection
 - **Scope:** `once` — Canvas drag actions
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
@@ -1974,7 +1847,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Drag bottom axis area to pan view → Mouse wheel on canvas to zoom domain in/out → Drag across canvas bars to brush-select time window [sel.a, sel.b] → Release mouse to commit selection
 - **Scope:** `once` — Canvas drag actions
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -1995,7 +1867,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type YYYY-MM-DD HH:mm into 'From' or 'To' inputs → Or click calendar icon to open CalendarPopover and pick date → Click 'Apply' button
 - **Scope:** `once` — Valid date combinations + error boundary cases
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates search parameters with since_unix_secs and until_unix_secs; triggers historical recent events and histogram queries; disables live tail if until is set
 - **Runtime result:** `PENDING`
 
@@ -2008,7 +1879,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type YYYY-MM-DD HH:mm into 'From' or 'To' inputs → Or click calendar icon to open CalendarPopover and pick date → Click 'Apply' button
 - **Scope:** `once` — Valid date combinations + error boundary cases
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
@@ -2029,7 +1899,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type YYYY-MM-DD HH:mm into 'From' or 'To' inputs → Or click calendar icon to open CalendarPopover and pick date → Click 'Apply' button
 - **Scope:** `once` — Valid date combinations + error boundary cases
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -2050,7 +1919,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Clear' button with X icon
 - **Scope:** `once` — Clear button presence
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates search to {}; all dropdowns reset to default; model input clears; time window resets to open now; SSE reconnects unfiltered
 - **Client-only reason:** Invokes router navigate({ search: {} }), which triggers subsequent query key resets
 - **Runtime result:** `PENDING`
@@ -2064,7 +1932,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Refresh' button with RefreshCw icon in page header
 - **Scope:** `once` — User action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Increments paginationRequestGenerationRef, calls recent.refetch(); table rows update with fresh server data
 - **Runtime result:** `PENDING`
 
@@ -2077,7 +1944,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Refresh' button with RefreshCw icon in page header
 - **Scope:** `once` — User action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `since_unix_secs`, `until_unix_secs`, `until_ts_ms`, `until_event_id`
   - Body: None
@@ -2098,7 +1964,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Export' button with Download icon in page header
 - **Scope:** `once` — User action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Generates a client-side Blob of visibleRows and triggers browser download of file cc-lb-events-YYYY-MM-DDTHH:mm.json
 - **Client-only reason:** Client-only Blob creation and anchor download trigger using already-loaded visibleRows
 - **Runtime result:** `PENDING`
@@ -2112,7 +1977,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Next' button in pagination toolbar at bottom of table
 - **Scope:** `once` — Pagination control
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Shows spinner on Next button, fetches next 50 rows using cursor from last row of current page, scrolls table container to top, updates page counter to 'Showing 51–100 of N+'
 - **Runtime result:** `PENDING`
 
@@ -2125,7 +1989,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Next' button in pagination toolbar at bottom of table
 - **Scope:** `once` — Pagination control
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `limit`, `until_ts_ms`, `until_event_id`, `since_unix_secs`, `until_unix_secs`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -2146,7 +2009,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Prev' button in pagination toolbar
 - **Scope:** `once` — Pagination control
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Decrements page index, displays cached page from loadedPages, scrolls table container to top
 - **Client-only reason:** Client-side state transition rendering cached loadedPages[page - 1]
 - **Runtime result:** `PENDING`
@@ -2160,7 +2022,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover over Timestamp cell of any request event row → Click one of the anchor radius buttons: '±1m', '±5m', or '±30m'
 - **Scope:** `each_row` — Row timestamp × ANCHOR_RADII_SECS
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Calls focusAround in logs.tsx; re-centers histogram strip view on timestamp ± radius*3; navigates search with since_unix_secs = ts - radius and until_unix_secs = ts + radius; refetches recent and histogram queries
 - **Runtime result:** `PENDING`
 
@@ -2173,7 +2034,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover over Timestamp cell of any request event row → Click one of the anchor radius buttons: '±1m', '±5m', or '±30m'
 - **Scope:** `each_row` — Row timestamp × ANCHOR_RADII_SECS
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `since_unix_secs`, `until_unix_secs`, `limit`
   - Body: None
@@ -2194,7 +2054,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover over Timestamp cell of any request event row → Click one of the anchor radius buttons: '±1m', '±5m', or '±30m'
 - **Scope:** `each_row` — Row timestamp × ANCHOR_RADII_SECS
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/histogram`
   - Query: `since_unix_secs`, `until_unix_secs`, `bucket_ms`
   - Body: None
@@ -2215,7 +2074,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click anywhere on request event table row → Or press Enter / Space while row is keyboard-focused
 - **Scope:** `each_row` — Loaded events list
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Sets selectedId; opens RequestEventDrawer slide-over from right; shows backdrop overlay
 - **Client-only reason:** Sets selectedId state in RequestEventsTable to mount RequestEventDrawer
 - **Runtime result:** `PENDING`
@@ -2229,7 +2087,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open RequestEventDrawer for a finalized event
 - **Scope:** `each_row` — Opened request event ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Fetches complete event from server; populates body bytes, detailed latency waterfall stages, upstream failure messages, and exact token/cost breakdown
 - **Runtime result:** `PENDING`
 
@@ -2242,7 +2099,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open RequestEventDrawer for a finalized event
 - **Scope:** `each_row` — Opened request event ID
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/detail/{event_id}`
   - Query: None
   - Body: None
@@ -2263,7 +2119,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Auto on mount of LogsPage
 - **Scope:** `once` — Route mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates Upstream dropdown filter options and upstream name column in logs table
 - **Runtime result:** `PENDING`
 
@@ -2276,7 +2131,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Auto on mount of LogsPage
 - **Scope:** `once` — Route mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams`
   - Query: None
   - Body: None
@@ -2297,7 +2151,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Auto on mount of LogsPage
 - **Scope:** `once` — Route mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates Principal dropdown filter options and principal name column in logs table
 - **Runtime result:** `PENDING`
 
@@ -2310,7 +2163,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Auto on mount of LogsPage
 - **Scope:** `once` — Route mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals`
   - Query: None
   - Body: None
@@ -2331,7 +2183,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** SSE connection drops and reconnects with lastCursorRef != null, or user returns to tab after pause
 - **Scope:** `once` — Stream disconnect/reconnect lifecycle
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Backfills missed events between lastCursor and current server cursor without full table reset
 - **Runtime result:** `PENDING`
 
@@ -2344,7 +2195,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** SSE connection drops and reconnects with lastCursorRef != null, or user returns to tab after pause
 - **Scope:** `once` — Stream disconnect/reconnect lifecycle
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/delta`
   - Query: `since_cursor`, `limit`, `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -2365,7 +2215,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Retry now' button in LiveTailFailureBanner when SSE fails permanently (>5m)
 - **Scope:** `once` — Failure banner action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Calls forceReconnect(); attempts fresh connection to /admin/v1/events/stream; resets failure counter on success
 - **Runtime result:** `PENDING`
 
@@ -2378,7 +2227,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Retry now' button in LiveTailFailureBanner when SSE fails permanently (>5m)
 - **Scope:** `once` — Failure banner action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/stream`
   - Query: `principal_id`, `upstream_id`, `thread_id`, `model`, `status_class`, `source_kind`
   - Body: None
@@ -2399,7 +2247,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click X (Dismiss) icon button on LiveTailFailureBanner
 - **Scope:** `once` — User action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Hides the banner from view until another permanent failure transition occurs
 - **Client-only reason:** Client-only state update: setDismissed(true)
 - **Runtime result:** `PENDING`
@@ -2413,7 +2260,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Copy button next to Request ID → Click Copy button next to Key ID → Click Copy button next to Session ID → Click Copy button next to Observed Session ID → Click Copy button next to Parent Session ID → Click Copy button next to Agent ID → Click Copy button next to Parent Agent ID
 - **Scope:** `each_row` — Identity fields present on event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Copies string to clipboard and displays toast confirmation via sonner
 - **Client-only reason:** Client-side navigator.clipboard.writeText action
 - **Runtime result:** `PENDING`
@@ -2427,7 +2273,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click X button in drawer header → Or click outside on backdrop → Or press Escape
 - **Scope:** `once` — User action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Drawer slides out to the right; backdrop fades out; selectedId reset to null
 - **Client-only reason:** Client-side Dialog state update calling onClose()
 - **Runtime result:** `PENDING`
@@ -2441,7 +2286,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover over any stage segment in the horizontal waterfall bar → Click a stage segment to lock sticky focus
 - **Scope:** `each_row` — Stages present in event timing
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Popover displays stage duration and detailed description; click toggles sticky highlight with dimmed sibling segments
 - **Client-only reason:** Client-only SVG/DOM interaction managing activeKey/stickyKey
 - **Runtime result:** `PENDING`
@@ -2455,7 +2299,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover or click marker pins along the latency timeline
 - **Scope:** `each_row` — Recorded streaming markers on event
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Displays Popover with exact marker description and offset relative to request start
 - **Client-only reason:** Client-only popover display
 - **Runtime result:** `PENDING`
@@ -2469,7 +2312,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /logs?time_range=1h (or 6h, 24h, 7d)
 - **Scope:** `once` — Legacy preset strings
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Immediately replaces URL with since_unix_secs = Math.floor(now/1000) - width and removes time_range param, keeping right edge open for live tail
 - **Client-only reason:** Client-side router replace navigation effect
 - **Runtime result:** `PENDING`
@@ -2483,7 +2325,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /principals → Route component mounts and executes usePrincipals()
 - **Scope:** `once` — All active principals
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Sidebar displays principal count header and list of principal cards with name, status dot, kind badge, allowed models/limits count, and revision
 - **Runtime result:** `PENDING`
 
@@ -2496,7 +2337,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /principals → Route component mounts and executes usePrincipals()
 - **Scope:** `once` — All active principals
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals`
   - Query: None
   - Body: None
@@ -2517,7 +2357,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Principals query finishes loading on desktop viewport (>=768px) → selectedId search param is absent
 - **Scope:** `once` — First item in principals query array
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** URL updates to /principals?selectedId=<first_id>, mounting PrincipalDetail in main pane
 - **Client-only reason:** Client-side routing navigation replacing search params without extra network call
 - **Runtime result:** `PENDING`
@@ -2531,7 +2370,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click principal item button in sidebar
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].id
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Selected row receives active highlight border-accent/40 bg-accent/5, right pane renders PrincipalDetail
 - **Client-only reason:** Updates TanStack router search params { selectedId: id }
 - **Runtime result:** `PENDING`
@@ -2545,7 +2383,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /principals?action=new
 - **Scope:** `once` — Route search schema
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** CreatePrincipalModal opens, action param cleared from URL via replace: true
 - **Client-only reason:** URL search param effect triggering modal state
 - **Runtime result:** `PENDING`
@@ -2559,7 +2396,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '#btn-new-principal' in sidebar header or 'New principal' in empty state
 - **Scope:** `once` — Sidebar UI
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** CreatePrincipalModal opens with empty name input, kind defaulting to 'machine', and empty default limits
 - **Client-only reason:** Sets local state createOpen to true
 - **Runtime result:** `PENDING`
@@ -2573,7 +2409,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Fill Name input → Select Kind → Optionally add default limits → Click 'Create' submit button
 - **Scope:** `once` — Operator input form
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Button shows 'Creating...' spinner, modal closes on success, toast 'Principal created', principals list refreshed
 - **Runtime result:** `PENDING`
 
@@ -2586,7 +2421,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Fill Name input → Select Kind → Optionally add default limits → Click 'Create' submit button
 - **Scope:** `once` — Operator input form
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals`
   - Query: None
   - Body: `name`, `kind`, `default_limits`
@@ -2607,7 +2441,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Header button shows spinner, status badge updates to Enabled/Disabled, toast confirms change
 - **Runtime result:** `PENDING`
 
@@ -2620,7 +2453,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/enable`
   - Query: None
   - Body: None
@@ -2642,7 +2474,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Enable' or 'Disable' button in detail header
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/disable`
   - Query: None
   - Body: None
@@ -2664,7 +2495,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Delete' button in detail header → Confirm in dialog
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** ConfirmDialog displays number of plugin chain entries to be removed; on success toasts 'Principal deleted' and unselects principal
 - **Runtime result:** `PENDING`
 
@@ -2677,7 +2507,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Delete' button in detail header → Confirm in dialog
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[]
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/principals/{id}`
   - Query: None
   - Body: None
@@ -2698,7 +2527,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '◀ Back' button in detail header on mobile viewport (<768px)
 - **Scope:** `each_principal` — Mobile UI state
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Clears selectedId search param, returning to full-width master list
 - **Client-only reason:** Calls onBack() which navigates to /principals with empty search
 - **Runtime result:** `PENDING`
@@ -2712,7 +2540,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' on Allowed Models card → Type or modify comma-separated model names in textarea → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].allowed_models
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Saves allowed_models array, toasts 'Allowed models updated', exits editing mode, renders badges for each model
 - **Runtime result:** `PENDING`
 
@@ -2725,7 +2552,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' on Allowed Models card → Type or modify comma-separated model names in textarea → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].allowed_models
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/principals/{id}/allowed_models`
   - Query: None
   - Body: `models`, `expected_revision`
@@ -2746,7 +2572,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' on Default Limits card → Add/modify/remove limits in LimitsEditor → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].default_limits
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Saves limits array, toasts 'Default limits updated', renders formatted table with kind, window, and cap
 - **Runtime result:** `PENDING`
 
@@ -2759,7 +2584,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' on Default Limits card → Add/modify/remove limits in LimitsEditor → Click 'Save'
 - **Scope:** `each_principal` — GET /admin/v1/principals -> data.principals[].default_limits
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/principals/{id}`
   - Query: None
   - Body: `default_limits`
@@ -2780,7 +2604,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane for selected principal → Polls every 10,000ms
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Displays RequestEventsTable with columns for status, method, model, cost, tokens, time, limited to 5 rows
 - **Runtime result:** `PENDING`
 
@@ -2793,7 +2616,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane for selected principal → Polls every 10,000ms
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `principal_id`, `limit`
   - Body: None
@@ -2814,7 +2636,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → RouterSlotEditor calls usePluginChain(principalId, 'router')
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates chain steps in Basic or Advanced tabs
 - **Runtime result:** `PENDING`
 
@@ -2827,7 +2648,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → RouterSlotEditor calls usePluginChain(principalId, 'router')
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/plugin-chain`
   - Query: `slot`
   - Body: None
@@ -2848,7 +2668,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → RouterSlotEditor calls useRouterTerminalStrategy(principalId)
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Selects active radio option in TerminalStrategyRadioGroup
 - **Runtime result:** `PENDING`
 
@@ -2861,7 +2680,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → RouterSlotEditor calls useRouterTerminalStrategy(principalId)
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/router-terminal`
   - Query: None
   - Body: None
@@ -2882,7 +2700,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Basic' or 'Advanced' tab
 - **Scope:** `each_principal` — Tab UI
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** If complex chain, shows temporary notice 'Basic requires a router chain containing only subscription-preference' and remains on Advanced; otherwise switches tab view
 - **Client-only reason:** Client state toggle activeTab
 - **Runtime result:** `PENDING`
@@ -2896,7 +2713,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Switch indicates progress ('Turning on...' / 'Turning off...'), updates state once mutation succeeds
 - **Runtime result:** `PENDING`
 
@@ -2909,7 +2725,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain`
   - Query: None
   - Body: `slot`, `wasm_registry_id`, `order`
@@ -2930,7 +2745,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In Basic tab, toggle 'Keep prompt cache warm by reusing upstreams' switch
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/plugin-chain-entries/{id}`
   - Query: None
   - Body: None
@@ -2951,7 +2765,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a radio card in TerminalStrategyRadioGroup ('first-pick', 'round-robin', 'least-latency', 'cheapest')
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Card shows active border and spinner during mutation, status message 'Updating strategy...', toast 'Terminal strategy updated'
 - **Runtime result:** `PENDING`
 
@@ -2964,7 +2777,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a radio card in TerminalStrategyRadioGroup ('first-pick', 'round-robin', 'least-latency', 'cheapest')
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/principals/{id}/router-terminal`
   - Query: None
   - Body: `strategy`
@@ -2985,7 +2797,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '+ Add filter' trigger → Select a plugin from the popover list
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Popover closes, popover trigger shows 'Adding...', new step appends before terminal step
 - **Runtime result:** `PENDING`
 
@@ -2998,7 +2809,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '+ Add filter' trigger → Select a plugin from the popover list
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain`
   - Query: None
   - Body: `slot`, `wasm_registry_id`, `order`
@@ -3019,7 +2829,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Move filter up' or 'Move filter down' arrow button on a filter step
 - **Scope:** `each_principal` — Router filter entries
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Steps visually swap positions using FLIP animation, status indicator 'Reordering steps...'
 - **Runtime result:** `PENDING`
 
@@ -3032,7 +2841,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Move filter up' or 'Move filter down' arrow button on a filter step
 - **Scope:** `each_principal` — Router filter entries
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain/reorder`
   - Query: None
   - Body: `entries`
@@ -3053,7 +2861,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Trash icon on a filter step
 - **Scope:** `each_principal` — Router filter entries
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** Filter row displays spinner, gets removed from list, connector lines adjust
 - **Runtime result:** `PENDING`
 
@@ -3066,7 +2873,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Trash icon on a filter step
 - **Scope:** `each_principal` — Router filter entries
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/plugin-chain-entries/{id}`
   - Query: None
   - Body: None
@@ -3087,7 +2893,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click filter name button in router chain
 - **Scope:** `once` — Router filter entry wasm_registry_id
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Slide-over drawer opens showing plugin title, slot badges, markdown/prose sections, sha256 hash, and wire version
 - **Client-only reason:** Renders detail view from already loaded plugin registry query data
 - **Runtime result:** `PENDING`
@@ -3101,7 +2906,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Card radio shows spinner, deletes previous entries sequentially, inserts new entry, toasts success
 - **Runtime result:** `PENDING`
 
@@ -3114,7 +2918,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/plugin-chain-entries/{id}`
   - Query: None
   - Body: None
@@ -3135,7 +2938,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a radio card in Shape slot editor ('None' or any compatible plugin)
 - **Scope:** `each_principal` — GET /admin/v1/plugins/registry filtered by pluginSupportsSlot(p, 'shape')
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/plugin-chain`
   - Query: None
   - Body: `slot`, `wasm_registry_id`, `order`
@@ -3156,7 +2958,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → ApiKeysCard calls usePrincipalKeys(principal.id)
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Displays table with columns: Label, Key ID, Last 4, Issued, Last Used, Status, and Revoke action button
 - **Runtime result:** `PENDING`
 
@@ -3169,7 +2970,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount PrincipalDetail pane → ApiKeysCard calls usePrincipalKeys(principal.id)
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/keys`
   - Query: None
   - Body: None
@@ -3190,7 +2990,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Issue Key' button → Optionally enter Label in modal → Click 'Issue' button
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Button shows 'Issuing...', modal transitions to display plaintext_key with Copy button; modal cannot be dismissed by backdrop or Escape until operator clicks Done
 - **Runtime result:** `PENDING`
 
@@ -3203,7 +3002,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Issue Key' button → Optionally enter Label in modal → Click 'Issue' button
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/keys`
   - Query: None
   - Body: `label`
@@ -3224,7 +3022,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Trash icon on an active API key row → Confirm in Revoke API key? dialog
 - **Scope:** `each_key` — GET /admin/v1/principals/${id}/keys -> data.keys[]
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** Dialog closes, toast 'Key revoked', row status badge changes to 'Revoked' tone=danger
 - **Runtime result:** `PENDING`
 
@@ -3237,7 +3034,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Trash icon on an active API key row → Confirm in Revoke API key? dialog
 - **Scope:** `each_key` — GET /admin/v1/principals/${id}/keys -> data.keys[]
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{id}/keys/{key_id}/revoke`
   - Query: None
   - Body: None
@@ -3258,7 +3054,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount CacheKeepaliveCard for selected principal → Initial load and continuous polling every 5,000ms
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Card displays 4 metric tiles: Renewing now, Sessions (last 5m), Renewals fired, and Cost saved. Values flash when updated.
 - **Runtime result:** `PENDING`
 
@@ -3271,7 +3066,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount CacheKeepaliveCard for selected principal → Initial load and continuous polling every 5,000ms
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive`
   - Query: `limit`
   - Body: None
@@ -3292,7 +3086,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click switch in CacheKeepaliveCard header
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Switch translates thumb (translate-x-4 vs translate-x-0.5) and turns green (var(--color-ok)), toast confirms enabled/disabled
 - **Runtime result:** `PENDING`
 
@@ -3305,7 +3098,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click switch in CacheKeepaliveCard header
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/principals/{id}`
   - Query: None
   - Body: `cache_keepalive`
@@ -3326,7 +3118,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Settings' on card → Modify lead times, max renewals, max duration, snapshot bytes, extra tools, or ambiguous flag → Click 'Save changes'
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Button shows 'Saving...', drawer closes on success with toast 'Cache keepalive settings updated'; on 412/409 shows refresh toast
 - **Runtime result:** `PENDING`
 
@@ -3339,7 +3130,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Settings' on card → Modify lead times, max renewals, max duration, snapshot bytes, extra tools, or ambiguous flag → Click 'Save changes'
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/principals/{id}`
   - Query: None
   - Body: `cache_keepalive`
@@ -3360,7 +3150,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Sessions' button on CacheKeepaliveCard → Drawer opens and initializes infinite query → Polls every 5,000ms when tab is visible
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Drawer displays horizon toggle, overview strip, status filter bar, and session list with FLIP animation
 - **Runtime result:** `PENDING`
 
@@ -3373,7 +3162,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Sessions' button on CacheKeepaliveCard → Drawer opens and initializes infinite query → Polls every 5,000ms when tab is visible
 - **Scope:** `each_principal` — Selected principal ID
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive`
   - Query: `horizon`, `status`, `error`, `cursor`
   - Body: None
@@ -3394,7 +3182,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '24h', '7d', or 'All' in HorizonToggle
 - **Scope:** `each_principal` — Horizon toggle buttons
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Button becomes active, overview strip text updates ('Last 24h:', 'Last 7d:', 'All time:'), query key changes, pagination cursor resets to page 1
 - **Runtime result:** `PENDING`
 
@@ -3407,7 +3194,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '24h', '7d', or 'All' in HorizonToggle
 - **Scope:** `each_principal` — Horizon toggle buttons
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive`
   - Query: `horizon`
   - Body: None
@@ -3428,7 +3214,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a status filter chip in the filter bar
 - **Scope:** `each_principal` — FILTERS array in CacheKeepaliveSessionsDrawer.tsx
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Filter chip receives active ring and opacity-100, session list updates to show matching sessions
 - **Runtime result:** `PENDING`
 
@@ -3441,7 +3226,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a status filter chip in the filter bar
 - **Scope:** `each_principal` — FILTERS array in CacheKeepaliveSessionsDrawer.tsx
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive`
   - Query: `status`, `error`
   - Body: None
@@ -3462,7 +3246,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Scroll to bottom of sessions list → Click 'Loading older sessions...' button
 - **Scope:** `each_principal` — Infinite query pages[].next_cursor
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Button displays spinner, appends older session rows to the bottom of the list without duplicates (mergeLiveSessions)
 - **Runtime result:** `PENDING`
 
@@ -3475,7 +3258,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Scroll to bottom of sessions list → Click 'Loading older sessions...' button
 - **Scope:** `each_principal` — Infinite query pages[].next_cursor
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive`
   - Query: `cursor`
   - Body: None
@@ -3496,7 +3278,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a session row in CacheKeepaliveSessionsDrawer → SessionDetailPane mounts and polls every 5,000ms
 - **Scope:** `each_session` — GET /admin/v1/principals/${id}/cache-keepalive -> rows[].id
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Displays Net P&L (+/-, avoided cache creation vs renewal spend), metadata list, turn-by-turn history with live/final turn tags and lock icons, collapsible schedule-time config snapshot, and raw JSON record
 - **Runtime result:** `PENDING`
 
@@ -3509,7 +3290,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a session row in CacheKeepaliveSessionsDrawer → SessionDetailPane mounts and polls every 5,000ms
 - **Scope:** `each_session` — GET /admin/v1/principals/${id}/cache-keepalive -> rows[].id
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/cache-keepalive/{session_id}`
   - Query: None
   - Body: None
@@ -3530,7 +3310,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Config in effect at schedule time' or 'Raw session record' chevron
 - **Scope:** `each_session` — Session detail view
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toggles visibility of snapshot definitions and formatted JSON payload
 - **Client-only reason:** Client-side state toggles showConfig and showRaw
 - **Runtime result:** `PENDING`
@@ -3544,7 +3323,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /plugins → Page mounts and triggers usePluginRegistry hook
 - **Scope:** `once` — Page navigation
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders plugin catalog or detail view depending on search param
 - **Runtime result:** `PENDING`
 
@@ -3557,7 +3335,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /plugins → Page mounts and triggers usePluginRegistry hook
 - **Scope:** `once` — Page navigation
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry`
   - Query: None
   - Body: None
@@ -3578,7 +3355,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Hover or navigate to plugin table row → Click 'Inspect' button in Actions column
 - **Scope:** `each_row` — Each catalog entry row
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Transitions view from catalog to PluginDetail for the selected plugin ID
 - **Client-only reason:** TanStack Router search param navigation: sets plugin ID in URL
 - **Runtime result:** `PENDING`
@@ -3592,7 +3368,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Locate File hash column on a table row → Click copy icon button beside the truncated SHA256 hex
 - **Scope:** `each_row` — Each catalog entry row
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toast 'Copied SHA256 to clipboard'
 - **Client-only reason:** Browser Clipboard API interaction via useCopyButton
 - **Runtime result:** `PENDING`
@@ -3606,7 +3381,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Locate non-built-in plugin row → Click trash icon button in Actions column
 - **Scope:** `each_row` — Each non-built-in plugin row
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens PluginDeleteDialog with pendingDelete state set
 - **Client-only reason:** Component local state: sets pendingDelete object
 - **Runtime result:** `PENDING`
@@ -3620,7 +3394,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Clean orphaned uploads' button in card header (enabled even when every registered plugin is in use)
 - **Scope:** `once` — Catalog header action
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** Header shows 'Cleaning orphaned uploads — waiting for the server.' status and 'Cleaning...' button; on completion toasts 'Removed {N} orphaned upload blob(s)' or 'No orphaned upload blobs found' and refreshes the registry
 - **Runtime result:** `PENDING`
 
@@ -3633,7 +3406,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Clean orphaned uploads' button in card header (enabled even when every registered plugin is in use)
 - **Scope:** `once` — Catalog header action
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/plugins/wasm/gc`
   - Query: None
   - Body: None
@@ -3654,7 +3426,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click dropzone button (or press Enter/Space while focused) to open file browser, OR drag & drop .wasm file onto dropzone → Select valid .wasm file (<= 32 MiB)
 - **Scope:** `each_plugin` — Each plugin upload action
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Dropzone displays 'Uploading…' with pulsing icon while pending; transitions to detail view on success
 - **Runtime result:** `PENDING`
 
@@ -3667,7 +3438,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click dropzone button (or press Enter/Space while focused) to open file browser, OR drag & drop .wasm file onto dropzone → Select valid .wasm file (<= 32 MiB)
 - **Scope:** `each_plugin` — Each plugin upload action
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/plugins/wasm`
   - Query: None
   - Body: `original_filename`, `bytes`
@@ -3688,7 +3458,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Trigger upload of a plugin whose name exists with lower/same semver → Observe 'Confirm Plugin Replacement' modal showing current vs incoming versions and hashes → Click 'Replace' button
 - **Scope:** `each_plugin` — Each duplicate replacement conflict
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** Toast 'Replaced {filename}' on success, closes modal, and navigates to replaced plugin detail view
 - **Runtime result:** `PENDING`
 
@@ -3701,7 +3470,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Trigger upload of a plugin whose name exists with lower/same semver → Observe 'Confirm Plugin Replacement' modal showing current vs incoming versions and hashes → Click 'Replace' button
 - **Scope:** `each_plugin` — Each duplicate replacement conflict
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/plugins/wasm`
   - Query: None
   - Body: `original_filename`, `bytes`, `confirm_replacement`, `replace_registry_id`, `expected_revision`
@@ -3722,7 +3490,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In 'Confirm Plugin Replacement' dialog, click 'Cancel' button or press Escape
 - **Scope:** `once` — Replacement dialog dismissal
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes dialog, retains current view
 - **Client-only reason:** Local state reset (setPendingReplacement(null))
 - **Runtime result:** `PENDING`
@@ -3736,7 +3503,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate with URL search param action=upload → Modal opens automatically with focus on dropzone → consumeUploadAction removes action=upload from URL while preserving plugin selection → Click close button or complete upload to dismiss
 - **Scope:** `once` — Deep-link or palette action
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens 'Upload plugin' modal, locks dismissal while uploading, closes on complete
 - **Client-only reason:** Modal open state and TanStack Router search param synchronization
 - **Runtime result:** `PENDING`
@@ -3750,7 +3516,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open delete dialog for a plugin that has refcount > 0
 - **Scope:** `each_plugin` — Each referenced plugin deletion attempt
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Lists affected reference locations before allowing deletion
 - **Runtime result:** `PENDING`
 
@@ -3763,7 +3528,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open delete dialog for a plugin that has refcount > 0
 - **Scope:** `each_plugin` — Each referenced plugin deletion attempt
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry/{id}/references`
   - Query: None
   - Body: None
@@ -3784,7 +3548,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In delete dialog, wait for fingerprint if referenced → Click 'Delete plugin' (if zero refs) or 'Delete and remove uses' (if referenced)
 - **Scope:** `each_plugin` — Each plugin deletion execution
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **Expected UI:** Toast 'Plugin deleted'; dialog closes (catalog) or detail view navigates back to catalog clearing ?plugin={id} (detail); registry refreshes and the deleted plugin's inactive plugin-references cache entry is removed
 - **Runtime result:** `PENDING`
 
@@ -3797,7 +3560,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In delete dialog, wait for fingerprint if referenced → Click 'Delete plugin' (if zero refs) or 'Delete and remove uses' (if referenced)
 - **Scope:** `each_plugin` — Each plugin deletion execution
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/plugins/registry/{id}`
   - Query: `cascade`
   - Body: None
@@ -3818,7 +3580,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In delete dialog, click 'Cancel' button or press Escape
 - **Scope:** `once` — Delete dialog dismissal
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes dialog and retains plugin row
 - **Client-only reason:** Local state reset (onClose callback)
 - **Runtime result:** `PENDING`
@@ -3832,7 +3593,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In plugin detail view, click 'Back to Catalog' ghost button
 - **Scope:** `each_plugin` — Each plugin detail view
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Transitions view from detail back to catalog table
 - **Client-only reason:** TanStack Router search param navigation: setSelectedPluginId(null)
 - **Runtime result:** `PENDING`
@@ -3846,7 +3606,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In 'File details' card, locate SHA256 row → Click copy icon button beside the truncated SHA256 hex
 - **Scope:** `each_plugin` — Each plugin detail view
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toast 'Copied SHA256 to clipboard'
 - **Client-only reason:** Browser Clipboard API interaction via useCopyButton
 - **Runtime result:** `PENDING`
@@ -3860,7 +3619,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' button beside current label in Manage this plugin card → Optionally edit text in input field → Click 'Cancel' button to discard changes
 - **Scope:** `each_plugin` — Each non-built-in plugin detail view
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toggles between label text display and inline edit form with focus
 - **Client-only reason:** Component local state: isEditingLabel and editLabelValue
 - **Runtime result:** `PENDING`
@@ -3874,7 +3632,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In inline label edit form, enter new label string (or clear for null) → Click 'Save' button
 - **Scope:** `each_plugin` — Each label update action
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Toast 'Label updated', closes edit form, updates label in header and catalog
 - **Runtime result:** `PENDING`
 
@@ -3887,7 +3644,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In inline label edit form, enter new label string (or clear for null) → Click 'Save' button
 - **Scope:** `each_plugin` — Each label update action
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/plugins/registry/{id}`
   - Query: None
   - Body: `label`
@@ -3908,7 +3664,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In 'Manage this plugin' card, click 'Delete Plugin' danger button
 - **Scope:** `each_plugin` — Each non-built-in plugin detail view
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens PluginDeleteDialog with current plugin details; on confirmed deletion the detail view calls onBack(), clearing ?plugin={id} and returning to the catalog
 - **Client-only reason:** Component local state: sets pendingDelete object in PluginDetail
 - **Runtime result:** `PENDING`
@@ -3922,7 +3677,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In 'Used by' section, locate reference list item → Click anchor link for principal (/principals?selectedId={id}) or upstream (/upstreams?selectedId={id})
 - **Scope:** `each_row` — Each reference list item
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates to the corresponding Principal or Upstream management page with selected entity
 - **Client-only reason:** Standard browser anchor navigation
 - **Runtime result:** `PENDING`
@@ -3936,7 +3690,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In 'Use this plugin' section, review available target action buttons → Click desired target button
 - **Scope:** `each_plugin` — Each applicable target slot
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates to /principals or /upstreams where the plugin can be attached
 - **Client-only reason:** Standard browser anchor navigation
 - **Runtime result:** `PENDING`
@@ -3950,7 +3703,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /settings or mount SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders build metadata, uptime, and generation
 - **Runtime result:** `PENDING`
 
@@ -3963,7 +3715,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /settings or mount SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/status`
   - Query: None
   - Body: None
@@ -3984,7 +3735,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select option in Locale dropdown
 - **Scope:** `once` — Equivalence classes: ['auto', 'en-US', 'ko-KR']
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates client localStorage['cclb.locale'] and triggers global re-formatting of numbers/dates
 - **Client-only reason:** Client-only preference stored in localStorage and reacted to via useSyncExternalStore
 - **Runtime result:** `PENDING`
@@ -3998,7 +3748,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select option in Timezone dropdown
 - **Scope:** `once` — Equivalence classes: ['auto', 'UTC', 'Asia/Seoul']
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates client localStorage['cclb.timezone'] and triggers global re-calculation of relative/absolute timestamps
 - **Client-only reason:** Client-only preference stored in localStorage and reacted to via useSyncExternalStore
 - **Runtime result:** `PENDING`
@@ -4012,7 +3761,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** 1000ms timer elapses
 - **Scope:** `once` — Continuous 1000ms interval
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates preview timestamp string 'Current preview: {formatAbsolute(now)}'
 - **Client-only reason:** Client-only setInterval updating local Date state
 - **Runtime result:** `PENDING`
@@ -4026,7 +3774,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount ConfigEditorSection inside SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `partially_deployed` — At least one atomic request branch is absent from the deployed API.
 - **Expected UI:** Populates revision/file-path metadata, running summary, category nav, and the structured field editor; restart drift banner appears when the latest saved revision post-dates process start.
 - **Runtime result:** `PENDING`
 
@@ -4039,7 +3786,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount ConfigEditorSection inside SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/config/editor`
   - Query: None
   - Body: None
@@ -4060,7 +3806,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount ConfigEditorSection inside SettingsPage
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/config/draft`
   - Query: None
   - Body: None
@@ -4081,7 +3826,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Change a field control (text/number input, enum select, ToggleSwitch, string-array row, tagged-union kind select, admin provider row, recurring job row) inside the structured editor → Click Reset/Unset/Set value on a field, or toggle a nullable object section
 - **Scope:** `once` — Per-field edit; equivalence classes per leaf kind (string/integer/number/boolean/enum/array/nullable object/tagged union)
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates editor state.value; marks leaf Modified; enables Save draft; locks Validate/Save to file/Download until re-saved
 - **Client-only reason:** Controlled React editor state; no request until Save draft
 - **Runtime result:** `PENDING`
@@ -4095,7 +3839,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Save draft" button
 - **Scope:** `once` — Single execution per draft edit
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Displays saving spinner; on success updates revision/saved metadata and toast; unsaved-changes notice clears
 - **Runtime result:** `PENDING`
 
@@ -4108,7 +3851,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Save draft" button
 - **Scope:** `once` — Single execution per draft edit
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/config/draft`
   - Query: None
   - Body: `draft`, `expected_revision`
@@ -4129,7 +3871,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Displays validating spinner; stores localValidation for the pinned revision; enables Save to config file and Download TOML when all sections pass
 - **Runtime result:** `PENDING`
 
@@ -4142,7 +3883,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Validate button
 - **Scope:** `once` — Single execution per saved revision
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/config/draft/validate`
   - Query: None
   - Body: `expected_revision`, `storage_url_replacement`
@@ -4163,7 +3903,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
 - **Risk:** `read`
-- **Production applicability:** `partially_deployed` — At least one atomic request branch is absent from the deployed API.
 - **Expected UI:** Notice action shows fetching spinner; triggers refetch of failed queries
 - **Runtime result:** `PENDING`
 
@@ -4176,7 +3915,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
 - **Risk:** `read_with_audit`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `GET /admin/v1/config/editor`
   - Query: None
   - Body: None
@@ -4197,7 +3935,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Retry button in error banner
 - **Scope:** `once` — Single execution upon error
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/config/draft`
   - Query: None
   - Body: None
@@ -4218,7 +3955,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount ConfigHistorySection → Click "Retry history" button in error state
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders table of up to 20 last saved revisions; error state offers retry
 - **Runtime result:** `PENDING`
 
@@ -4231,7 +3967,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount ConfigHistorySection → Click "Retry history" button in error state
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/config/history`
   - Query: `limit=20`
   - Body: None
@@ -4252,7 +3987,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Download database snapshot" button
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Initiates browser blob download of upstreams, principals, plugins, and chains stored in the database; shows feedback toast
 - **Runtime result:** `PENDING`
 
@@ -4265,7 +3999,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Download database snapshot" button
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/export`
   - Query: None
   - Body: None
@@ -4286,7 +4019,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Save to config file" button → Confirm in the overwrite/lockout ConfirmDialog (check "I confirmed another valid admin access path exists" when required)
 - **Scope:** `once` — Single execution per validated revision
 - **Risk:** `reversible_write`
-- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
 - **Expected UI:** Atomically replaces the TOML config file; saved draft stays server-side; restart required to apply
 - **Runtime result:** `PENDING`
 
@@ -4299,7 +4031,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Save to config file" button → Confirm in the overwrite/lockout ConfirmDialog (check "I confirmed another valid admin access path exists" when required)
 - **Scope:** `once` — Single execution per validated revision
 - **Risk:** `destructive_write`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `POST /admin/v1/config/save`
   - Query: None
   - Body: `expected_revision`, `expected_fingerprint`, `storage_url_replacement`, `confirm_self_lockout`
@@ -4320,7 +4051,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Download TOML" button → Click "Retry" in the download-failed Notice
 - **Scope:** `once` — Single execution per validated revision
 - **Risk:** `read_with_audit`
-- **Production applicability:** `not_deployed` — Every atomic request for this action is absent from the deployed API.
 - **Expected UI:** Initiates browser blob download of the validated draft rendered as TOML
 - **Runtime result:** `PENDING`
 
@@ -4333,7 +4063,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Download TOML" button → Click "Retry" in the download-failed Notice
 - **Scope:** `once` — Single execution per validated revision
 - **Risk:** `read_with_audit`
-- **Production applicability:** `not_deployed` — Endpoint added after deployed commit e56d029e
 - **HTTP:** `POST /admin/v1/config/draft/download`
   - Query: None
   - Body: `expected_revision`, `storage_url_replacement`
@@ -4354,7 +4083,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a category in the left nav (Network & requests, Storage & data, Scheduling, Routing & resilience, Identity & access, Pricing & quotas, Runtime & observability) → Open /settings?category={id} deep link
 - **Scope:** `once` — Per category selection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Switches the rendered category panel and syncs ?category= into the URL without scroll reset
 - **Client-only reason:** Client-side navigation state synced to URL search params via TanStack Router
 - **Runtime result:** `PENDING`
@@ -4368,7 +4096,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type in "Search settings" combobox → ArrowDown/ArrowUp to move active option; Enter or click to activate → Escape, clear button, or outside pointerdown closes the overlay
 - **Scope:** `once` — Per keystroke/activation; results capped at 24
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Filters config leaves client-side and deep-links the chosen field
 - **Client-only reason:** Client-side search over the in-memory editor model; URL ?q=/field= sync only
 - **Runtime result:** `PENDING`
@@ -4382,7 +4109,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Advanced (n)" summary inside a section card
 - **Scope:** `once` — Per section disclosure
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Expands or collapses the section's advanced field group
 - **Client-only reason:** Client UI disclosure state (details/summary)
 - **Runtime result:** `PENDING`
@@ -4396,7 +4122,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a validation issue row in ValidationSummary
 - **Scope:** `once` — Per issue click
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Navigates to and focuses the offending field control
 - **Client-only reason:** Client-side navigation and focus management
 - **Runtime result:** `PENDING`
@@ -4410,7 +4135,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Replace URL" on the storage.url field → Type the replacement URL → Click "Cancel replacement" or "Unset"
 - **Scope:** `once` — Per replacement edit
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Holds the real storage URL client-side so it is never rendered; forwarded only inside mutation request bodies
 - **Client-only reason:** Client-only state that leads to storage_url_replacement on later validate/save/download requests
 - **Runtime result:** `PENDING`
@@ -4424,7 +4148,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click "Copy draft JSON" inside the download-failed Notice
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Copies the current draft object as formatted JSON for manual recovery
 - **Client-only reason:** Client-only navigator.clipboard write
 - **Runtime result:** `PENDING`
@@ -4438,7 +4161,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Open /settings?field={path} (or activate a search result / issue that sets ?field=)
 - **Scope:** `once` — Per distinct ?field= value
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Focuses the requested field control after the editor model resolves
 - **Client-only reason:** Client-side URL search param handling and focus management
 - **Runtime result:** `PENDING`
@@ -4452,7 +4174,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /audit or change query parameters
 - **Scope:** `once` — Single execution on mount / search change
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders audit table with 9 columns (Timestamp, Principal, Actor, Route, Upstream, Action, Kind, Status, Detail)
 - **Runtime result:** `PENDING`
 
@@ -4465,7 +4186,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /audit or change query parameters
 - **Scope:** `once` — Single execution on mount / search change
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4486,7 +4206,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /audit or change query parameters
 - **Scope:** `once` — Single execution on mount / search change
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals`
   - Query: None
   - Body: None
@@ -4507,7 +4226,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /audit or change query parameters
 - **Scope:** `once` — Single execution on mount / search change
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams`
   - Query: None
   - Body: None
@@ -4528,7 +4246,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Refresh button
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Re-queries GET /admin/v1/audit with current search parameters
 - **Runtime result:** `PENDING`
 
@@ -4541,7 +4258,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Refresh button
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4562,7 +4278,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select principal from dropdown or select 'All principals'
 - **Scope:** `each_principal` — Principals list + empty option
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates URL search param principal_id and re-runs audit query with filter
 - **Runtime result:** `PENDING`
 
@@ -4575,7 +4290,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select principal from dropdown or select 'All principals'
 - **Scope:** `each_principal` — Principals list + empty option
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4596,7 +4310,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type or modify datetime in 'From' input
 - **Scope:** `once` — Equivalence classes: [valid '2026-06-18 10:00', empty '', invalid 'abc', invalid hour '2026-06-18 25:00', DST nonexistent]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates sinceStr input value; error text displayed on failed parse
 - **Client-only reason:** Local component state in TimeRangeBounds / DateTimeField
 - **Runtime result:** `PENDING`
@@ -4610,7 +4323,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Type or modify datetime in 'To' input
 - **Scope:** `once` — Equivalence classes: [valid '2026-06-18 12:00', empty '', invalid format, before start]
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates untilStr input value; error text displayed on failed parse
 - **Client-only reason:** Local component state in TimeRangeBounds / DateTimeField
 - **Runtime result:** `PENDING`
@@ -4624,7 +4336,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click calendar icon button on 'From' field → Select date in DayPicker
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Merges picked date with existing time (or 00:00) into sinceStr, closes popover, commits bounds
 - **Runtime result:** `PENDING`
 
@@ -4637,7 +4348,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click calendar icon button on 'From' field → Select date in DayPicker
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4658,7 +4368,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click calendar icon button on 'To' field → Select date in DayPicker
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Merges picked date with existing time (or 23:59) into untilStr, closes popover, commits bounds
 - **Runtime result:** `PENDING`
 
@@ -4671,7 +4380,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click calendar icon button on 'To' field → Select date in DayPicker
 - **Scope:** `once` — Date picker interaction
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4692,7 +4400,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Apply button beside datetime inputs
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates URL search params since and until and re-runs audit query
 - **Runtime result:** `PENDING`
 
@@ -4705,7 +4412,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Apply button beside datetime inputs
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`, `principal_id`, `since`, `until`
   - Body: None
@@ -4726,7 +4432,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Clear button when activeFilterCount > 0
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Resets all search parameters, returns to unfiltered state, re-runs query
 - **Runtime result:** `PENDING`
 
@@ -4739,7 +4444,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Clear button when activeFilterCount > 0
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`
   - Body: None
@@ -4760,7 +4464,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Clear filters' primary button in EmptyState
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Clears filters and reloads unfiltered audit entries
 - **Runtime result:** `PENDING`
 
@@ -4773,7 +4476,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Clear filters' primary button in EmptyState
 - **Scope:** `once` — Single execution
 - **Risk:** `read_with_audit`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/audit`
   - Query: `limit=200`, `admin_only=true`
   - Body: None
@@ -4794,7 +4496,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click any row in the audit table
 - **Scope:** `each_row` — Each rendered audit row
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens modal titled 'Audit entry {request_id}' showing Summary and Raw payload
 - **Client-only reason:** Client-only modal state setSelected(e)
 - **Runtime result:** `PENDING`
@@ -4808,7 +4509,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Close button, press Escape, or click backdrop
 - **Scope:** `each_row` — Each opened modal
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes modal dialog
 - **Client-only reason:** Client-only modal state setSelected(null)
 - **Runtime result:** `PENDING`
@@ -4822,7 +4522,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /upstreams → Hook useUpstreams executes on mount and polls every 15s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders upstream sidebar items with name, kind badge, status dot, and quota/usage summaries
 - **Runtime result:** `PENDING`
 
@@ -4835,7 +4534,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Navigate to /upstreams → Hook useUpstreams executes on mount and polls every 15s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams`
   - Query: None
   - Body: None
@@ -4856,7 +4554,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts with visible upstreams → useSubscriptionQuotaLatest queries merged snapshots for all upstreams every 5s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates sidebar mini-meters and detail card quota snapshot grid
 - **Runtime result:** `PENDING`
 
@@ -4869,7 +4566,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts with visible upstreams → useSubscriptionQuotaLatest queries merged snapshots for all upstreams every 5s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/subscription-quotas/latest`
   - Query: `upstream_ids`, `windows`, `source`
   - Body: None
@@ -4890,7 +4586,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts → useUsage queries 7d hourly usage grouped by upstream
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders aggregate cost and token count under non-OAuth upstreams in sidebar
 - **Runtime result:** `PENDING`
 
@@ -4903,7 +4598,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts → useUsage queries 7d hourly usage grouped by upstream
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `projection`
   - Body: None
@@ -4924,7 +4618,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts → useStatus queries runtime status for all upstreams every 15s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Color-coded dot next to upstream name representing runtime status
 - **Runtime result:** `PENDING`
 
@@ -4937,7 +4630,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** UpstreamsPage mounts → useStatus queries runtime status for all upstreams every 15s
 - **Scope:** `once` — Single page execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/status`
   - Query: None
   - Body: None
@@ -4958,7 +4650,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click on an upstream item row in the sidebar
 - **Scope:** `each_row` — Each visible upstream in sidebar
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates search parameters ?selectedId={id}, mounts DetailView for the selected upstream
 - **Client-only reason:** Client-side TanStack router navigation updating selectedId search param
 - **Runtime result:** `PENDING`
@@ -4972,7 +4663,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream → useUpstreamSubscriptionMetadata fetches metadata on mount and polls every 15s
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Displays metadata chips, tooltips, and subscription status banners
 - **Runtime result:** `PENDING`
 
@@ -4985,7 +4675,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream → useUpstreamSubscriptionMetadata fetches metadata on mount and polls every 15s
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/subscription-metadata`
   - Query: None
   - Body: None
@@ -5006,7 +4695,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the RefreshCw icon button in the metadata strip
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Triggers background sync with Anthropic API, updates cached metadata, displays success toast
 - **Runtime result:** `PENDING`
 
@@ -5019,7 +4707,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the RefreshCw icon button in the metadata strip
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/subscription-metadata/refresh`
   - Query: None
   - Body: None
@@ -5040,7 +4727,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream or change quota range
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders area curves for 5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, and overage
 - **Runtime result:** `PENDING`
 
@@ -5053,7 +4739,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream or change quota range
 - **Scope:** `each_upstream` — Each selected OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/subscription-quotas/series`
   - Query: `upstream_ids`, `windows`, `source`, `range_secs`, `bucket_secs`
   - Body: None
@@ -5074,7 +4759,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
 - **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Updates range state, recalculates bucketSecs and rangeSecs, and refetches series
 - **Runtime result:** `PENDING`
 
@@ -5087,7 +4771,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 1h, 6h, 24h, or 7d button in Quota History header
 - **Scope:** `each_upstream` — Each selected OAuth upstream × 4 ranges
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/subscription-quotas/series`
   - Query: `upstream_ids`, `windows`, `source`, `range_secs`, `bucket_secs`
   - Body: None
@@ -5108,7 +4791,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click a window badge (e.g. 5h, 7d) in the Quota History legend slot below chart
 - **Scope:** `each_row` — Each visible window in chart legend
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Dimmens non-selected legend items and hides non-isolated Area curves
 - **Client-only reason:** Client state setIsolatedWindow toggle
 - **Runtime result:** `PENDING`
@@ -5122,7 +4804,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click upstream name in DetailView header to enter editing mode (resets the save latch and seeds the input with the current name) → Type new unique name → Press Enter or blur the input to submit once (saveStartedRef latch makes Enter+blur a single mutation) → Or press Escape to cancel without a request
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Updates upstream name across sidebar and header; shows success toast 'Name updated'; on error (e.g. 409 stale revision or name conflict) the name reverts and editing exits
 - **Runtime result:** `PENDING`
 
@@ -5135,7 +4816,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click upstream name in DetailView header to enter editing mode (resets the save latch and seeds the input with the current name) → Type new unique name → Press Enter or blur the input to submit once (saveStartedRef latch makes Enter+blur a single mutation) → Or press Escape to cancel without a request
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/upstreams/{id}`
   - Query: None
   - Body: `name`
@@ -5156,7 +4836,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the Enabled/Disabled switch in DetailView header
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Toggles upstream status; shows success toast; triggers dynamic rebind in proxy engine
 - **Runtime result:** `PENDING`
 
@@ -5169,7 +4848,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the Enabled/Disabled switch in DetailView header
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/upstreams/{id}`
   - Query: None
   - Body: `enabled`, `warmup_enabled`
@@ -5190,7 +4868,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' in SettingsCard → Modify Base URL or toggle API Key mode (env var vs literal value) → Click 'Save'
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Exits edit mode and shows success toast; displays updated Base URL ('—' when base_url is null) and API Key source. In practice the API Key row always reads 'literal value (stored)': the 'env:{name}' branch is source-only/unreachable because UpstreamResponse omits api_key_env.
 - **Runtime result:** `PENDING`
 
@@ -5203,7 +4880,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Edit' in SettingsCard → Modify Base URL or toggle API Key mode (env var vs literal value) → Click 'Save'
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/upstreams/{id}`
   - Query: None
   - Body: `base_url`, `clear_base_url`, `api_key_value`, `api_key_env`
@@ -5224,7 +4900,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 24h or 7d toggle button in ApiUsageCard
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Triggers useUsage query for model breakdown and updates chart x-axis domain
 - **Runtime result:** `PENDING`
 
@@ -5237,7 +4912,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 24h or 7d toggle button in ApiUsageCard
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/dashboard/usage`
   - Query: `range`, `step`, `group_by`, `upstream_id`
   - Body: None
@@ -5258,7 +4932,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the Warmup switch in WarmupCardMinimal header, or click 'Enable warmup' button in disabled banner
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Updates warmup_enabled; displays success toast; schedules or deschedules background warmup loop
 - **Runtime result:** `PENDING`
 
@@ -5271,7 +4944,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click the Warmup switch in WarmupCardMinimal header, or click 'Enable warmup' button in disabled banner
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/upstreams/{id}`
   - Query: None
   - Body: `warmup_enabled`
@@ -5292,7 +4964,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a shape plugin from the Shape plugin dropdown
 - **Scope:** `each_upstream` — Each OAuth upstream × shape plugins
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Associates plugin wasm registry ID with upstream warmup; shows success toast
 - **Runtime result:** `PENDING`
 
@@ -5305,7 +4976,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a shape plugin from the Shape plugin dropdown
 - **Scope:** `each_upstream` — Each OAuth upstream × shape plugins
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PATCH /admin/v1/upstreams/{id}`
   - Query: None
   - Body: `warmup_dialect_plugin`
@@ -5326,7 +4996,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select 'None (default request shape)' in plugin dropdown → Confirm deletion in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream with attached plugin
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Removes warmup dialect plugin; dropdown resets to None; shows success toast
 - **Runtime result:** `PENDING`
 
@@ -5339,7 +5008,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select 'None (default request shape)' in plugin dropdown → Confirm deletion in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream with attached plugin
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/upstreams/{id}/warmup-dialect-plugin`
   - Query: None
   - Body: None
@@ -5360,7 +5028,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Fire now' button in WarmupCardMinimal → Click 'Fire now' in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Triggers immediate upstream priming, displays toast or warning/error panel
 - **Runtime result:** `PENDING`
 
@@ -5373,7 +5040,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Fire now' button in WarmupCardMinimal → Click 'Fire now' in ConfirmDialog
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/warmup/fire-now`
   - Query: None
   - Body: None
@@ -5394,7 +5060,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'History' button in WarmupCardMinimal, or click 'Last run' attempt outcome badge
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Slides open WarmupHistoryDrawer and triggers useWarmupAttempts infinite query
 - **Runtime result:** `PENDING`
 
@@ -5407,7 +5072,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'History' button in WarmupCardMinimal, or click 'Last run' attempt outcome badge
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/warmup/attempts`
   - Query: `status`, `limit`, `before`
   - Body: None
@@ -5428,7 +5092,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click an attempt row in the WarmupHistoryDrawer list
 - **Scope:** `each_row` — Each loaded warmup attempt
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens AttemptDetail pane showing narrative, freshness, timing, replica, cycle, HTTP status
 - **Client-only reason:** Client state setSelected(attempt) toggle
 - **Runtime result:** `PENDING`
@@ -5442,7 +5105,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Connect' or 'Reconnect' button in OAuth Status card
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Opens OAuth Authorization Modal with authorize URL and state token
 - **Runtime result:** `PENDING`
 
@@ -5455,7 +5117,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Connect' or 'Reconnect' button in OAuth Status card
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/oauth/start`
   - Query: None
   - Body: None
@@ -5476,7 +5137,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Open authorization URL' to authenticate with Anthropic → Paste authorization code into modal input → Click 'Complete'
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Exchanges code for access/refresh tokens with Anthropic; stores credentials; closes modal; shows success toast
 - **Runtime result:** `PENDING`
 
@@ -5489,7 +5149,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Open authorization URL' to authenticate with Anthropic → Paste authorization code into modal input → Click 'Complete'
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/oauth/complete`
   - Query: None
   - Body: `state_token`, `code`
@@ -5510,7 +5169,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Delete' button in DetailView header → Click 'Delete' in ConfirmDialog
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Soft-deletes upstream from database, closes dialog, shows success toast, and clears selectedId
 - **Runtime result:** `PENDING`
 
@@ -5523,7 +5181,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'Delete' button in DetailView header → Click 'Delete' in ConfirmDialog
 - **Scope:** `each_upstream` — Each upstream
 - **Risk:** `destructive_write`
-- **Production applicability:** `available`
 - **HTTP:** `DELETE /admin/v1/upstreams/{id}`
   - Query: None
   - Body: None
@@ -5544,7 +5201,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'New' button in sidebar header or 'New upstream' in empty state, or arrive via ?action=new
 - **Scope:** `once` — Single execution
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Opens CreateUpstreamModal on step 'type'
 - **Client-only reason:** Client state setCreateOpen(true)
 - **Runtime result:** `PENDING`
@@ -5558,7 +5214,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In CreateUpstreamModal, select Anthropic API Key and click Continue → Fill in Name, optional Base URL, and API key (literal or env var) → Click 'Create'
 - **Scope:** `once` — Single execution per creation
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Creates upstream in DB, closes modal, shows success toast, and refreshes upstream list
 - **Runtime result:** `PENDING`
 
@@ -5571,7 +5226,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In CreateUpstreamModal, select Anthropic API Key and click Continue → Fill in Name, optional Base URL, and API key (literal or env var) → Click 'Create'
 - **Scope:** `once` — Single execution per creation
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams`
   - Query: None
   - Body: `name`, `kind`, `base_url`, `api_key_value`, `api_key_env`
@@ -5592,7 +5246,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In CreateUpstreamModal, select Anthropic OAuth and click Continue → Click 'Authorize with Anthropic'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Fetches state token and authorize URL, opens browser window to Anthropic authorization page
 - **Runtime result:** `PENDING`
 
@@ -5605,7 +5258,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In CreateUpstreamModal, select Anthropic OAuth and click Continue → Click 'Authorize with Anthropic'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/oauth/draft/start`
   - Query: None
   - Body: None
@@ -5626,7 +5278,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Paste authorization code returned from Anthropic into textarea → Click 'Verify and fetch account'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Exchanges code with Anthropic, fetches account & subscription preview, and advances modal to confirm step
 - **Runtime result:** `PENDING`
 
@@ -5639,7 +5290,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Paste authorization code returned from Anthropic into textarea → Click 'Verify and fetch account'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/oauth/draft/complete`
   - Query: None
   - Body: `state_token`, `code`
@@ -5660,7 +5310,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Review Account Preview (Plan, Rate, Org, Role, etc.) → Edit or accept prefilled Upstream Name → Click 'Save'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **Expected UI:** Persists new OAuth upstream in DB, closes modal, shows success toast, and selects new upstream
 - **Runtime result:** `PENDING`
 
@@ -5673,7 +5322,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Review Account Preview (Plan, Rate, Org, Role, etc.) → Edit or accept prefilled Upstream Name → Click 'Save'
 - **Scope:** `once` — Single execution per OAuth creation
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/from-oauth-draft`
   - Query: None
   - Body: `state_token`, `name`
@@ -5694,7 +5342,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `external_action`
-- **Production applicability:** `available`
 - **Expected UI:** Displays token binding status, expiration relative countdown, refresh token presence, and granted scopes
 - **Runtime result:** `PENDING`
 
@@ -5707,7 +5354,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an OAuth upstream
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/oauth/status`
   - Query: None
   - Body: None
@@ -5728,7 +5374,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount WarmupCardMinimal on OAuth upstream selection
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders Next run countdown, Last run outcome badge, failure reason message, and incident status
 - **Runtime result:** `PENDING`
 
@@ -5741,7 +5386,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount WarmupCardMinimal on OAuth upstream selection
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/warmup`
   - Query: None
   - Body: None
@@ -5762,7 +5406,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount WarmupCardMinimal
 - **Scope:** `once` — Single execution per session/upstream mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Populates the Shape plugin dropdown with registered plugins supporting the shape slot
 - **Runtime result:** `PENDING`
 
@@ -5775,7 +5418,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Mount WarmupCardMinimal
 - **Scope:** `once` — Single execution per session/upstream mount
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry`
   - Query: None
   - Body: None
@@ -5796,7 +5438,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an upstream in DetailView
 - **Scope:** `each_upstream` — Each selected upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Renders RequestEventsTable filtered by upstream_id with method, status, duration, cost, and tokens
 - **Runtime result:** `PENDING`
 
@@ -5809,7 +5450,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select an upstream in DetailView
 - **Scope:** `each_upstream` — Each selected upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/events/recent`
   - Query: `upstream_id`, `limit`
   - Body: None
@@ -5830,7 +5470,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click filter chip: All, Success, Retrying, Failed, or Skipped
 - **Scope:** `each_filter_combination` — Each selected upstream × 5 status filters
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Triggers useWarmupAttempts query with status filter and resets attempt list
 - **Runtime result:** `PENDING`
 
@@ -5843,7 +5482,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click filter chip: All, Success, Retrying, Failed, or Skipped
 - **Scope:** `each_filter_combination` — Each selected upstream × 5 status filters
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/warmup/attempts`
   - Query: `status`, `limit`
   - Body: None
@@ -5864,7 +5502,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Scroll to bottom of attempts list in WarmupHistoryDrawer → Click 'Load older' button
 - **Scope:** `each_upstream` — Each upstream with next_cursor
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Appends next 50 attempts to list
 - **Runtime result:** `PENDING`
 
@@ -5877,7 +5514,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Scroll to bottom of attempts list in WarmupHistoryDrawer → Click 'Load older' button
 - **Scope:** `each_upstream` — Each upstream with next_cursor
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}/warmup/attempts`
   - Query: `status`, `limit`, `before`
   - Body: None
@@ -5898,7 +5534,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 24h, 7d, or All button in drawer header
 - **Scope:** `each_filter_combination` — Each upstream × 3 horizons
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Recalculates OverviewStrip attempt count, success/failed/skipped breakdown, and dominant failure reason client-side
 - **Client-only reason:** Client-side date filtering over already-fetched attempt array
 - **Runtime result:** `PENDING`
@@ -5912,7 +5547,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In AttemptDetail, click 'Shape plugin snapshot at attempt time' or 'Raw attempt record'
 - **Scope:** `each_row` — Each inspected attempt
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Expands or collapses preformatted JSON viewers
 - **Client-only reason:** Client state setPluginOpen / setRawOpen toggles
 - **Runtime result:** `PENDING`
@@ -5926,7 +5560,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click Tokens or Cost toggle button in ApiUsageCard
 - **Scope:** `each_upstream` — Each non-OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Reformats chart Y-axis and area values between token sums and USD costs without network request
 - **Client-only reason:** Client state onMetricChange reformatting pre-fetched usage bucket data
 - **Runtime result:** `PENDING`
@@ -5940,7 +5573,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click '+N more' or 'Less' button in metadata strip
 - **Scope:** `each_upstream` — Each upstream with overflow metadata
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Toggles visibility of secondary metadata fields (Org, Role, Seat, Subscribed, Billing)
 - **Client-only reason:** Client state setShowMoreMeta toggle
 - **Runtime result:** `PENDING`
@@ -5954,7 +5586,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** On viewport < 768px with upstream selected, click '< Back' button
 - **Scope:** `once` — Each mobile detail inspection
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Clears selectedId in search params, hides DetailView, and reveals sidebar list
 - **Client-only reason:** Client-side TanStack router navigation
 - **Runtime result:** `PENDING`
@@ -5968,7 +5599,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In AttemptDetail pane, click 'Close ▶' button
 - **Scope:** `each_row` — Each inspected attempt
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Clears selected attempt; expands attempt list to full drawer width
 - **Client-only reason:** Client state setSelected(null)
 - **Runtime result:** `PENDING`
@@ -5982,7 +5612,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Click 'X' button, click drawer backdrop, or press Escape
 - **Scope:** `each_upstream` — Each OAuth upstream
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Closes drawer with slide-out animation, resets selected attempt to null
 - **Client-only reason:** Client state setDrawerOpen(false)
 - **Runtime result:** `PENDING`
@@ -5996,7 +5625,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** In WarmupConfigModal, click 'Copy JSON' button
 - **Scope:** `each_upstream` — Each attached plugin
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Copies formatted plugin config JSON to system clipboard; button temporarily reads 'Copied'
 - **Client-only reason:** Clipboard API write (navigator.clipboard.writeText) via useCopyButton
 - **Runtime result:** `PENDING`
@@ -6010,7 +5638,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a plugin from the catalog → PluginDetail mounts → usePluginReferences(plugin.id) executes
 - **Scope:** `each_plugin` — GET /admin/v1/plugins/registry response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Used by card renders every returned principal-chain and upstream-warmup reference.
 - **Runtime result:** `PENDING`
 
@@ -6023,7 +5650,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a plugin from the catalog → PluginDetail mounts → usePluginReferences(plugin.id) executes
 - **Scope:** `each_plugin` — GET /admin/v1/plugins/registry response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry/{id}/references`
   - Query: None
   - Body: None
@@ -6044,7 +5670,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a principal → PrincipalDetail mounts usePluginChain(principal.id, 'shape')
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** The shape editor and delete-impact count reflect the returned chain entries.
 - **Runtime result:** `PENDING`
 
@@ -6057,7 +5682,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a principal → PrincipalDetail mounts usePluginChain(principal.id, 'shape')
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/plugin-chain`
   - Query: `slot`
   - Body: None
@@ -6078,7 +5702,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a principal → Router and Shape editors mount usePluginRegistry
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **Expected UI:** Plugin pickers expose only registry entries compatible with each slot.
 - **Runtime result:** `PENDING`
 
@@ -6091,7 +5714,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Select a principal → Router and Shape editors mount usePluginRegistry
 - **Scope:** `each_principal` — GET /admin/v1/principals response entries
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry`
   - Query: None
   - Body: None
@@ -6112,7 +5734,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Protected AppShell renders → Topbar reads AuthSessionContext → Identity label and kind are displayed
 - **Scope:** `once` — Current authenticated admin session
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **Expected UI:** Topbar displays the current administrator identity and actor kind without an additional request.
 - **Client-only reason:** Client rendering from the already-loaded AuthSessionContext.
 - **Runtime result:** `PENDING`
@@ -6126,7 +5747,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Audit rows render actor in the table → Open a row → Inspect authority, subject, kind, and email in the detail modal
 - **Scope:** `each_row` — Every row returned by GET /admin/v1/audit
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **Expected UI:** Actor identity columns and detail fields reflect the source row, using an em dash for absent legacy values.
 - **Client-only reason:** Client rendering from the existing audit query result.
 - **Runtime result:** `PENDING`
@@ -6140,415 +5760,8 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Focus or hover the latency cell button → Inspect responsibility sparkline and popover sections
 - **Scope:** `each_row` — Every visible request-event row with a LatencyCell
 - **Risk:** `read`
-- **Production applicability:** `not_deployed` — Added after deployed commit e56d029e
 - **Expected UI:** Popover separates downstream, cc-lb, upstream network, upstream wait, renewal, and unattributed time without a new request.
 - **Client-only reason:** Client computation and popover rendering from the existing request event.
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-A5000384379C] Credentials — Load Credentials and OAuth Status
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-AE097B1BD13F`, `PROD-REQ-186B043F6662`, `PROD-REQ-8DB3CB46F307`
-- **Source:** `crates/cc-lb-admin/web/src/routes/credentials.tsx:92#CredentialsPage`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /credentials
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Renders API keys table, OAuth cards grid, and summary tiles (Total, Expiring Soon, Expired, Active)
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-AE097B1BD13F] Credentials — Load Credentials and OAuth Status — useCredentials
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-A5000384379C`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:767#useCredentials`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /credentials
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/credentials`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_credentials`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** Read-only credential overview
-- **Expected UI:** Renders API keys table, OAuth cards grid, and summary tiles (Total, Expiring Soon, Expired, Active)
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-186B043F6662] Credentials — Load Credentials and OAuth Status — useOAuthStatus
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-A5000384379C`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:773#useOAuthStatus`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /credentials
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/oauth/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_oauth_status`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** Read-only OAuth token overview
-- **Expected UI:** Renders API keys table, OAuth cards grid, and summary tiles (Total, Expiring Soon, Expired, Active)
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-8DB3CB46F307] Credentials — Load Credentials and OAuth Status — usePrincipalNameMap
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-A5000384379C`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:744#usePrincipalNameMap`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /credentials
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/principals`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `list_principals`
-- **Storage operations:** `sqlite:PrincipalStore::list:SqliteStorage::list`, `postgres:PrincipalStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Executes PrincipalStore::list twice: first with offset=0 and limit=1000 to derive the capped X-Total-Count, then with the requested offset/limit for the page; no COUNT SQL is executed.
-- **Side effects:** Look up principal names for OAuth tokens
-- **Expected UI:** Renders API keys table, OAuth cards grid, and summary tiles (Total, Expiring Soon, Expired, Active)
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-76168321F814] Credentials — Rotate Credential / Force Refresh OAuth Token
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-B33C09B92A03`
-- **Source:** `crates/cc-lb-admin/web/src/routes/credentials.tsx:102#CredentialsPage`
-- **Preconditions:** Visible credential row or OAuth card
-- **Steps:** Click 'Rotate' or 'Force refresh' button on credential row/card → Confirm in modal
-- **Scope:** `item` — Credential row or OAuth card
-- **Risk:** `reversible_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Modal confirmation dialog, then toast notification
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-B33C09B92A03] Credentials — Rotate Credential / Force Refresh OAuth Token — postJson
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-76168321F814`
-- **Source:** `crates/cc-lb-admin/web/src/routes/credentials.tsx:108#CredentialsPage`
-- **Preconditions:** Visible credential row or OAuth card
-- **Steps:** Click 'Rotate' or 'Force refresh' button on credential row/card → Confirm in modal
-- **Scope:** `item` — Credential row or OAuth card
-- **Risk:** `reversible_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `POST /admin/credentials/{provider}/{cred_id}/rotate`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::rotate_credential`
-- **Storage operations:** None
-- **Cache / no-query path:** None (returns 501 rotate_unsupported)
-- **Side effects:** Attempts rotation (returns 501 for OAuth in v0.4.9)
-- **Expected UI:** Modal confirmation dialog, then toast notification
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-6011B5C8167A] Credentials — Revoke Credential
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-32A95A5C0307`
-- **Source:** `crates/cc-lb-admin/web/src/routes/credentials.tsx:102#CredentialsPage`
-- **Preconditions:** Active credential or OAuth token
-- **Steps:** Click 'Revoke' button on credential row/card → Confirm in destructive modal
-- **Scope:** `item` — Credential row or OAuth card
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Destructive confirm dialog, invalidates credentials query
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-32A95A5C0307] Credentials — Revoke Credential — postJson
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-6011B5C8167A`
-- **Source:** `crates/cc-lb-admin/web/src/routes/credentials.tsx:108#CredentialsPage`
-- **Preconditions:** Active credential or OAuth token
-- **Steps:** Click 'Revoke' button on credential row/card → Confirm in destructive modal
-- **Scope:** `item` — Credential row or OAuth card
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `POST /admin/credentials/{provider}/{cred_id}/revoke`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::revoke_credential`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.delete_oauth); SQLite (storage.delete_oauth)
-- **Side effects:** Deletes OAuth credentials from storage
-- **Expected UI:** Destructive confirm dialog, invalidates credentials query
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-E68AB274C4E9] Status — Load System Status, Killswitch, and Observed Credentials
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-6B11261782D1`, `PROD-REQ-0F9F7B032EC5`, `PROD-REQ-26ECB56C1696`, `PROD-REQ-AE0413AAFCDF`
-- **Source:** `crates/cc-lb-admin/web/src/routes/status.tsx:78#StatusPage`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /status
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-6B11261782D1] Status — Load System Status, Killswitch, and Observed Credentials — useStatus
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-E68AB274C4E9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:395#useStatus`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /status
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `status`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** DB query for upstream names/IDs combined with in-memory DynamicViewHolder.replica_identity and build metadata
-- **Side effects:** Polled every 15s
-- **Expected UI:** Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-0F9F7B032EC5] Status — Load System Status, Killswitch, and Observed Credentials — useCredentials
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-E68AB274C4E9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:767#useCredentials`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /status
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/credentials`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_credentials`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** Read-only
-- **Expected UI:** Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-26ECB56C1696] Status — Load System Status, Killswitch, and Observed Credentials — useOAuthStatus
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-E68AB274C4E9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:773#useOAuthStatus`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /status
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/oauth/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_oauth_status`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** Read-only
-- **Expected UI:** Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-AE0413AAFCDF] Status — Load System Status, Killswitch, and Observed Credentials — usePrincipalNameMap
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-E68AB274C4E9`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:744#usePrincipalNameMap`
-- **Preconditions:** Authenticated session
-- **Steps:** Navigate to /status
-- **Scope:** `once` — Single page mount
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/principals`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `list_principals`
-- **Storage operations:** `sqlite:PrincipalStore::list:SqliteStorage::list`, `postgres:PrincipalStore::list:PostgresStorage::list`
-- **Cache / no-query path:** Executes PrincipalStore::list twice: first with offset=0 and limit=1000 to derive the capped X-Total-Count, then with the requested offset/limit for the page; no COUNT SQL is executed.
-- **Side effects:** Read-only
-- **Expected UI:** Displays Restart-Required Changes list, System grid (Storage Backend, Plugin Chain Summary, Killswitch control), Credentials table, and OAuth Tokens grid
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-168BF3B193F4] Status — Engage or Disengage Global Killswitch
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-817B78681D90`, `PROD-REQ-841024D77392`
-- **Source:** `crates/cc-lb-admin/web/src/routes/status.tsx:217#StatusPage`
-- **Preconditions:** Authenticated session, StatusPage mounted
-- **Steps:** Click 'Engage killswitch' button -> Confirm in dialog, OR Click 'Disengage'
-- **Scope:** `once` — Button click
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Changes badge from OFF to ACTIVE (or vice versa), disables/enables traffic, shows toast
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-817B78681D90] Status — Engage or Disengage Global Killswitch — useKillswitch
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-168BF3B193F4`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1630#useKillswitch`
-- **Preconditions:** Authenticated session, StatusPage mounted
-- **Steps:** Click 'Engage killswitch' button -> Confirm in dialog, OR Click 'Disengage'
-- **Scope:** `once` — Button click
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `POST /admin/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `set_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.set_killswitch_enabled(true)); SQLite (storage.set_killswitch_enabled(true))
-- **Side effects:** Engages emergency killswitch, stopping all proxy traffic
-- **Expected UI:** Changes badge from OFF to ACTIVE (or vice versa), disables/enables traffic, shows toast
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-841024D77392] Status — Engage or Disengage Global Killswitch — useKillswitch
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-168BF3B193F4`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:1630#useKillswitch`
-- **Preconditions:** Authenticated session, StatusPage mounted
-- **Steps:** Click 'Engage killswitch' button -> Confirm in dialog, OR Click 'Disengage'
-- **Scope:** `once` — Button click
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `DELETE /admin/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `clear_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.set_killswitch_enabled(false)); SQLite (storage.set_killswitch_enabled(false))
-- **Side effects:** Disengages emergency killswitch, resuming traffic
-- **Expected UI:** Changes badge from OFF to ACTIVE (or vice versa), disables/enables traffic, shows toast
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-3DF6CC4224CD] Global — Sidebar Navigation - Credentials
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx:22#NAV`
-- **Preconditions:** Sidebar visible
-- **Steps:** Click 'Credentials' link in sidebar
-- **Scope:** `once` — Navigation click
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Navigates to /credentials route
-- **Client-only reason:** Router navigation link
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-F22C53DA973A] Global — Sidebar Navigation - Status
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/components/layout/Sidebar.tsx:23#NAV`
-- **Preconditions:** Sidebar visible
-- **Steps:** Click 'Status' link in sidebar
-- **Scope:** `once` — Navigation click
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Navigates to /status route
-- **Client-only reason:** Router navigation link
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-7075CE908A3D] Global — Command Palette - Go to Status
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** None
-- **Source:** `crates/cc-lb-admin/web/src/components/CommandPalette.tsx:105#CommandPalette`
-- **Preconditions:** Command palette open
-- **Steps:** Open command palette (Cmd+K) → Select 'Go to Status'
-- **Scope:** `once` — Command selection
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Navigates to /status and closes command palette
-- **Client-only reason:** Router navigation
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-3BA367988C76] Plugins — Plugin Detail Global Killswitch Indicator
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-341C216AF806`
-- **Source:** `crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx:140#PluginDetailOperate`
-- **Preconditions:** Plugin selected
-- **Steps:** Select plugin to view detail in Operate tab
-- **Scope:** `item` — Selected plugin
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Shows 'Global Killswitch' status row with Active/Inactive badge
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-341C216AF806] Plugins — Plugin Detail Global Killswitch Indicator — useStatus
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-3BA367988C76`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:395#useStatus`
-- **Preconditions:** Plugin selected
-- **Steps:** Select plugin to view detail in Operate tab
-- **Scope:** `item` — Selected plugin
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `status`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** DB query for upstream names/IDs combined with in-memory DynamicViewHolder.replica_identity and build metadata
-- **Side effects:** Read-only
-- **Expected UI:** Shows 'Global Killswitch' status row with Active/Inactive badge
-- **Runtime result:** `PENDING`
-
-### [PROD-UI-01A4AC001FED] Plugins — Plugin Detail Global Chain Usage Summary
-
-- **Entry type:** `ui_action`
-- **Atomic requests:** `PROD-REQ-448A5BA63A6D`
-- **Source:** `crates/cc-lb-admin/web/src/components/plugins/PluginDetailOperate.tsx:154#PluginDetailOperate`
-- **Preconditions:** Plugin selected
-- **Steps:** Select plugin to view detail in Operate tab
-- **Scope:** `item` — Selected plugin
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **Expected UI:** Displays total chain entries and number of principals with configured chain
-- **Runtime result:** `PENDING`
-
-### [PROD-REQ-448A5BA63A6D] Plugins — Plugin Detail Global Chain Usage Summary — useStatus
-
-- **Entry type:** `network_request`
-- **Parent action:** `PROD-UI-01A4AC001FED`
-- **Source:** `crates/cc-lb-admin/web/src/lib/queries.ts:395#useStatus`
-- **Preconditions:** Plugin selected
-- **Steps:** Select plugin to view detail in Operate tab
-- **Scope:** `item` — Selected plugin
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `status`
-- **Storage operations:** `sqlite:UpstreamStore::list:SqliteStorage::list`, `postgres:UpstreamStore::list:PostgresStorage::list`
-- **Cache / no-query path:** DB query for upstream names/IDs combined with in-memory DynamicViewHolder.replica_identity and build metadata
-- **Side effects:** Read-only
-- **Expected UI:** Displays total chain entries and number of principals with configured chain
 - **Runtime result:** `PENDING`
 
 ### [API-SRC-C767025D0EDC] Backend-Only — GET /
@@ -6559,7 +5772,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /`
   - Query: None
   - Body: None
@@ -6579,7 +5791,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /{*file}`
   - Query: None
   - Body: None
@@ -6599,7 +5810,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/health/state`
   - Query: None
   - Body: None
@@ -6611,7 +5821,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SYS-02] Backend-Only — GET /internal/v1/partials/{event_id}
+### [API-SRC-6A3111721B04] Backend-Only — GET /internal/v1/partials/{event_id}
 
 - **Entry type:** `backend_endpoint`
 - **Source:** `crates/cc-lb-admin/src/internal_partials.rs:20`
@@ -6619,7 +5829,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /internal/v1/partials/{event_id}`
   - Query: None
   - Body: None
@@ -6631,7 +5840,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SYS-04] Backend-Only — GET /admin/scheduler/status
+### [API-SRC-5115B16A96BD] Backend-Only — GET /admin/scheduler/status
 
 - **Entry type:** `backend_endpoint`
 - **Source:** `crates/cc-lb-admin/src/scheduler.rs:23`
@@ -6639,7 +5848,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/scheduler/status`
   - Query: None
   - Body: None
@@ -6651,7 +5859,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SYS-03] Backend-Only — GET /admin/scheduler/failures
+### [API-SRC-F4E21AA70D2C] Backend-Only — GET /admin/scheduler/failures
 
 - **Entry type:** `backend_endpoint`
 - **Source:** `crates/cc-lb-admin/src/scheduler.rs:24`
@@ -6659,7 +5867,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/scheduler/failures`
   - Query: `limit`, `offset`, `job_type`
   - Body: None
@@ -6679,7 +5886,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugins/registry/{id}`
   - Query: None
   - Body: None
@@ -6699,7 +5905,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/plugin-chain-entries/{id}`
   - Query: None
   - Body: None
@@ -6719,7 +5924,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}`
   - Query: None
   - Body: None
@@ -6739,7 +5943,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/allowed_models`
   - Query: None
   - Body: None
@@ -6759,7 +5962,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/principals/{id}/limits`
   - Query: `identity`
   - Body: None
@@ -6767,46 +5969,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Handler:** `principal_limits`
 - **Storage operations:** None
 - **Cache / no-query path:** In-memory dynamic_view + LimitEngine snapshot
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-92FD477750A5] Backend-Only — GET /admin/principals/{id}/keys/{key_id}
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:30`
-- **Preconditions:** require_admin_auth + authorize(AdminAction::SensitiveRead)
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/principals/{id}/keys/{key_id}`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_api_key`
-- **Storage operations:** `sqlite:ManagedKeyStore::get:SqliteStorage::get`, `postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get`
-- **Cache / no-query path:** Direct single-key lookup in ManagedKeyStore
-- **Side effects:** None
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-7383936FE537] Backend-Only — GET /admin/principals/{id}/keys/{key_id}/usage
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:43`
-- **Preconditions:** require_admin_auth middleware
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available`
-- **HTTP:** `GET /admin/principals/{id}/keys/{key_id}/usage`
-  - Query: `range`, `step`
-  - Body: None
-  - Headers: None
-- **Handler:** `principal_key_usage`
-- **Storage operations:** `sqlite:ManagedKeyStore::get:SqliteStorage::get`, `postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get`, `sqlite:RequestEventStore::request_event_key_usage:SqliteStorage::request_event_key_usage`, `postgres:RequestEventStore::request_event_key_usage:PostgresStorage::request_event_key_usage`
-- **Cache / no-query path:** Validates the principal in in-memory dynamic_view.principal_view before storage (404/no-query on miss), then verifies the managed key, enforces the 7-day range maximum, and reads key-usage time buckets.
 - **Side effects:** None
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
@@ -6819,7 +5981,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `GET /admin/v1/upstreams/{id}`
   - Query: None
   - Body: None
@@ -6831,67 +5992,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SRC-5E2D298E32DE] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/revoke
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:31`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/principals/{id}/keys/{key_id}/revoke`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `revoke_api_key`
-- **Storage operations:** `sqlite:ManagedKeyStore::revoke_zero_secrets:SqliteStorage::revoke_zero_secrets`, `postgres:ManagedKeyStore::revoke_zero_secrets:PostgresManagedKeyStore::revoke_zero_secrets`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Invalidates in-memory KeyStore cache; deletes index from fast-lookup map
-- **Side effects:** Audit event `principal_key_revoke`; sets status to Revoked and zeroes secret salts/hashes in DB; permanently revokes key QA restore: Re-issue key or restore database snapshot (revocation zeroes secrets permanently).
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-D05CE36481FC] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/disable
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:35`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/principals/{id}/keys/{key_id}/disable`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `disable_api_key`
-- **Storage operations:** `sqlite:ManagedKeyStore::update:SqliteStorage::update`, `postgres:ManagedKeyStore::update:PostgresManagedKeyStore::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Updates KeyStore cached status to Disabled
-- **Side effects:** Audit event `principal_key_disable`; prevents incoming proxy requests from authenticating with this key QA restore: Call POST /admin/principals/{id}/keys/{key_id}/enable.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SRC-EECEBC08D3B2] Backend-Only — POST /admin/principals/{id}/keys/{key_id}/enable
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:39`
-- **Preconditions:** require_admin_auth; non-GET method is authorized as AdminAction::Write
-- **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `reversible_write`
-- **Production applicability:** `available`
-- **HTTP:** `POST /admin/principals/{id}/keys/{key_id}/enable`
-  - Query: None
-  - Body: None
-  - Headers: `authorization`
-- **Handler:** `enable_api_key`
-- **Storage operations:** `sqlite:ManagedKeyStore::get:SqliteStorage::get`, `postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get`, `sqlite:ManagedKeyStore::update:SqliteStorage::update`, `postgres:ManagedKeyStore::update:PostgresManagedKeyStore::update`, `sqlite:AuditStore::append_audit:SqliteStorage::append_audit`, `postgres:AuditStore::append_audit:PostgresStorage::append_audit`
-- **Cache / no-query path:** Updates KeyStore cached status to Active
-- **Side effects:** Audit event `principal_key_enable`; permits incoming proxy requests authenticating with this key QA restore: Call POST /admin/principals/{id}/keys/{key_id}/disable.
-- **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
-- **Runtime result:** `PENDING`
-
-### [API-SYS-06] Backend-Only — POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance
+### [API-SRC-A96E630A4D8E] Backend-Only — POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance
 
 - **Entry type:** `backend_endpoint`
 - **Source:** `crates/cc-lb-admin/src/v1/plugins.rs:54`
@@ -6899,7 +6000,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance`
   - Query: `slot`
   - Body: None
@@ -6919,7 +6019,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/plugin-chain-entries/{id}`
   - Query: None
   - Body: `config`
@@ -6939,7 +6038,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `PUT /admin/v1/principals/{id}`
   - Query: None
   - Body: `name`, `allowed_models`, `allowed_upstreams`, `default_limits`, `cache_keepalive`
@@ -6951,7 +6049,7 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [API-SYS-05] Backend-Only — POST /admin/v1/router/preview
+### [API-SRC-3566800F95C2] Backend-Only — POST /admin/v1/router/preview
 
 - **Entry type:** `backend_endpoint`
 - **Source:** `crates/cc-lb-admin/src/v1/router.rs:22`
@@ -6959,7 +6057,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `read`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/router/preview`
   - Query: None
   - Body: `principal_id`, `request_id`, `headers`, `body`
@@ -6979,7 +6076,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/enable`
   - Query: None
   - Body: None
@@ -6999,7 +6095,6 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Steps:** Direct API, operator, scheduler, health probe, or internal service caller
 - **Scope:** `backend_only` — not_applicable
 - **Risk:** `reversible_write`
-- **Production applicability:** `available`
 - **HTTP:** `POST /admin/v1/upstreams/{id}/disable`
   - Query: None
   - Body: None
@@ -7011,152 +6106,9 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **Expected UI:** No Admin Web caller. Validate through the authorized backend-only QA path.
 - **Runtime result:** `PENDING`
 
-### [PROD-API-5234FA674D91] Production Backend-Only — GET /admin/status
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:110 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::v1::status::status`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (via StatusResponse building); SQLite (via StatusResponse building)
-- **Side effects:** Legacy status endpoint aliasing v1 status handler
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-2B1E133DA8BF] Production Backend-Only — GET /admin/killswitch
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:111 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.killswitch_enabled); SQLite (storage.killswitch_enabled)
-- **Side effects:** Query whether global emergency killswitch is currently engaged
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-DCBF12986EB5] Production Backend-Only — GET /admin/v1/killswitch
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:116 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `get_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.killswitch_enabled); SQLite (storage.killswitch_enabled)
-- **Side effects:** v1 alias: Query whether global emergency killswitch is currently engaged
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-8AA0DB7F3093] Production Backend-Only — POST /admin/v1/killswitch
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:117 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `POST /admin/v1/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `set_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.set_killswitch_enabled(true)); SQLite (storage.set_killswitch_enabled(true))
-- **Side effects:** v1 alias: Engage global emergency killswitch
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-C482408C3112] Production Backend-Only — DELETE /admin/v1/killswitch
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:118 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `destructive_write`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `DELETE /admin/v1/killswitch`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `clear_killswitch`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (storage.set_killswitch_enabled(false)); SQLite (storage.set_killswitch_enabled(false))
-- **Side effects:** v1 alias: Disengage global emergency killswitch
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-6B655BAB2645] Production Backend-Only — GET /admin/v1/credentials
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:163 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/credentials`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_credentials`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** v1 alias: Lists observed credentials across principals
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
-### [PROD-API-D8B657F6FCA4] Production Backend-Only — GET /admin/v1/oauth/status
-
-- **Entry type:** `backend_endpoint`
-- **Source:** `crates/cc-lb-admin/src/routes.rs:167 (e56d029e)`
-- **Preconditions:** AdminAuth (legacy token)
-- **Steps:** Direct deployed API or operator caller
-- **Scope:** `backend_only` — not_applicable
-- **Risk:** `read`
-- **Production applicability:** `available` — Present only in the deployed production commit.
-- **HTTP:** `GET /admin/v1/oauth/status`
-  - Query: None
-  - Body: None
-  - Headers: None
-- **Handler:** `crate::credentials::list_oauth_status`
-- **Storage operations:** None
-- **Cache / no-query path:** PostgreSQL (PrincipalStore::list, get_oauth_ciphertext); SQLite (PrincipalStore::list, get_oauth_ciphertext)
-- **Side effects:** v1 alias: Lists active OAuth flow status and tokens
-- **Expected UI:** No deployed Admin Web caller was reconciled for this endpoint.
-- **Runtime result:** `PENDING`
-
 ## 5. Explicit Gaps
 
-- **GAP-GLOBAL-01** (medium): The legacy inventory documented localStorage['cclb.auth.token'], whereas the actual codebase uses AUTH_TOKEN_KEY = 'cc-lb-admin-token' in src/lib/auth.ts:1.
-- **GAP-GLOBAL-02** (low): The legacy inventory documented localStorage['theme'] with .dark class toggling. The actual codebase uses STORAGE_KEY = 'cclb.theme' in src/lib/theme.ts:10 and sets data-theme attribute on document.documentElement.
 - **GAP-GLOBAL-03** (medium): CommandPalette.tsx lists Overview, Upstreams, Principals, Plugins, Logs, and Settings in the Pages group, but omits the /audit route, even though it exists in Sidebar.tsx.
-- **GAP-OV-02** (high): The legacy inventory documented a single GET /admin/dashboard/pool-history endpoint for UI-OV-03, UI-OV-04, and UI-OV-07C. The actual codebase splits this into two distinct endpoints: GET /admin/v1/subscription-quotas/aggregate (snapshot stacked bars) and GET /admin/v1/subscription-quotas/pool-history (multi-series Recharts area chart).
 - **GAP-OV-03** (medium): UI-OV-12 was documented purely as a UI row click action, but selecting any finalized request row triggers an asynchronous network fetch to GET /admin/v1/events/detail/{eventId} via useRequestEventDetail.
 - **GAP-LOGS-1** (low): SSE reconnect delta query (/admin/v1/events/delta) is only called when lastCursor is known and resumeNeedsBackfill is true. If connection drops on initial load before any event arrives, it reconnects directly without backfill.
 - **GAP-LOGS-2** (low): Model filter is debounced by 300ms in client. Fast typing will not issue network requests per keystroke, but typing rapidly across the 300ms boundary produces sequential queries.
@@ -7168,248 +6120,13 @@ Candidate server Admin responses expose `x-request-id`; `admin_response_head_rea
 - **GAP-PLUG-DOWNLOAD** (design_gap): WASM binary download feature is completely missing from both backend and frontend. The prompt asks for 'download' tracking, but neither GET /admin/v1/plugins/wasm/{id} nor any export button in PluginDetailIntegrity / PluginCatalog exists.
 - **GAP-PLUG-BACKEND-ONLY-ENDPOINTS** (unreachable_surface): Four REST endpoints implemented in crates/cc-lb-admin/src/v1/plugins.rs are never called by the admin web UI: (1) GET /admin/v1/plugins/registry/{id} (UI fetches whole registry and finds by ID in memory), (2) POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance (re-spacing order integers), (3) GET /admin/v1/plugin-chain-entries/{id} (single chain entry fetch), and (4) PUT /admin/v1/plugin-chain-entries/{id} (single chain entry update).
 - **GAP-PLUG-HEALTH-METRICS** (display_only): PluginDetailOperate displays static text indicating 'Health metrics for individual plugins are not yet available in the dashboard' and points to raw Prometheus metric names (cc_lb_plugin_call_duration_seconds, cc_lb_plugin_trap_total). There is no live telemetry or chart in the UI.
-- **GAP-SET-01** (documented): The legacy inventory documented GET /admin/config/diff?from={revA}&to={revB} with no UI caller. In the merged candidate the diff route and the qk.configDiff query key are deleted entirely; revision comparison is superseded by the save-file ConfirmDialog change review (config-review-list).
 - **GAP-SET-02** (documented): Neither the backend axum routes (routes.rs) nor the frontend (ConfigEditor.tsx) implements a draft discard/delete endpoint or button; a saved draft can only be overwritten by a new PUT or by saving to the config file.
 - **GAP-AUD-01** (documented): AuditPage requests useAudit with limit='200'. The UI table displays at most 200 admin rows and a static 'No more entries' footer. There are no next/previous page buttons, cursor tokens, or infinite scrolling.
 - **GAP-AUD-02** (documented): GET /admin/v1/audit returns all audit_log_v1 rows matching query bounds, but the UI client explicitly filters for entries where admin_action != null || kind != null. Regular proxy request logs returned by the endpoint are silently omitted from the table view.
 - **GAP-UPSTREAMS-1** (documented): WarmupConfigModal is conditionally rendered when pluginSnapshot exists with open={configOpen}, but configOpen is initialized to false and no button or interaction anywhere in WarmupCardMinimal or the UI ever calls setConfigOpen(true). It is an unreachable dead modal in production.
 - **GAP-UPSTREAMS-3** (documented): Triggering Fire Now sends an actual /messages payload directly upstream to Anthropic, burning real account tokens and potentially incurring billable usage or rate limit depletion.
 - **GAP-STATIC-RUNTIME** (runtime_pending): Static source reconciliation does not prove browser behavior, production entity coverage, latency, or deployed availability.
-- **GAP-DEPLOYED-DELTA** (production_applicability_pending): No deployed-delta.json has been supplied yet; latest-source items stay out of an asserted production-complete matrix until applicability is reconciled.
 - **GAP-NONEXISTENT-CONFIG-DISCARD** (nonexistent): No Admin Web action or backend route discards a config draft.
-- **GAP-BACKEND-ONLY-CONFIG-DIFF** (backend_only): GET /admin/config/diff exists but has no Admin Web caller.
 - **GAP-NONEXISTENT-CONFIG-DOWNLOAD** (nonexistent): The UI downloads a database export from GET /admin/v1/export; it has no standalone config download action.
 - **GAP-NONEXISTENT-WASM-DOWNLOAD** (nonexistent): Neither frontend nor backend exposes uploaded WASM bytecode download.
 - **GAP-UPSTREAMS-4** (documented): The env:{api_key_env} display branch is source-only/unreachable because UpstreamResponse omits api_key_env. That write-only credential contract is unchanged. The separately approved Base URL clear contract is now implemented via explicit clear_base_url: true (omitted or null base_url preserves the override); the form captures the edit-time baseline so a mid-edit refetch cannot fabricate a clear, and an unconfirmed clear keeps the editor open with an error toast. Historical null-as-clear evidence remains a baseline limitation.
-- **GAP-SET-03** (documented): The static-token admin guidance card (previously settings.tsx#SettingsPage:admin_token_view, item UI-SRC-0744A60F49D3) is absent from the merged route. Admin provider guidance now lives in the config editor Identity & access category (admin.auth.providers) and the self-lockout confirmation on save.
-- **GAP-SET-04** (documented): Apply Draft (UI-SRC-EDE5449D42BD / UI-SET-06 POST /admin/config/apply) and Trigger Daemon Reload (UI-SRC-EA3DE5874C4D / UI-SET-07 POST /admin/config/reload) are removed: master makes configuration startup-fixed. Replacement: Save to config file (UI-SET-15 POST /admin/v1/config/save) plus restart, with restart_required and the restart-drift banner communicating pending state.
-- **GAP-SET-05** (documented): The collapsible schema coverage checklist (UI-SET-13, settings.tsx#ConfigDraftSection:toggle_checklist) was removed with the raw-JSON textarea editor. The structured editor replaces it with per-section Advanced disclosures and category modified/overrides/error counts.
-- **GAP-SET-06** (documented): The static RestartRequiredMatrix table (UI-SRC-625C96B0933F) listing 15 restart-required keys is removed. Restart semantics are now data-driven: ConfigEditorResponse.restart_required plus the "Saved ... not applied yet — restart cc-lb" banner driven by saved_at vs process uptime.
-- **GAP-SET-07** (documented): The free-text JSON textarea draft editor was replaced by schema-driven structured field controls (components/settings-config/ConfigEditor.tsx + lib/configEditorModel.ts). UI-SET-14 is retained as the semantic draft-editing action (edit_field); malformed-JSON input classes no longer exist — invalid values surface via server validation issues instead.
-
-## 6. Legacy ID Mapping
-
-| Legacy ID | Status | Canonical Target / Endpoint | Reason |
-|---|---|---|---|
-| **UI-ROOT-01** | `preserved` | UI-ROOT-01 | Same method/path and source-backed request occurrence. |
-| **UI-ROOT-02** | `preserved` | UI-ROOT-02 | Same method/path and source-backed request occurrence. |
-| **UI-ROOT-03** | `preserved` | UI-ROOT-03 | Same method/path and source-backed request occurrence. |
-| **UI-CMD-01** | `preserved` | UI-CMD-01 | Same source-backed UI action. |
-| **UI-CMD-02** | `preserved` | UI-CMD-02 | Same source-backed UI action. |
-| **UI-TOP-01** | `preserved` | UI-TOP-01 | Same source-backed UI action. |
-| **UI-TOP-02** | `preserved` | UI-TOP-02 | Same source-backed UI action. |
-| **UI-OV-01** | `preserved` | UI-OV-01 | Same method/path and source-backed request occurrence. |
-| **UI-OV-02** | `preserved` | UI-OV-02 | Same method/path and source-backed request occurrence. |
-| **UI-OV-03** | `preserved` | UI-OV-03 | Same method/path and source-backed request occurrence. |
-| **UI-OV-04** | `preserved` | UI-OV-04 | Same method/path and source-backed request occurrence. |
-| **UI-OV-05** | `preserved` | UI-OV-05 | Same method/path and source-backed request occurrence. |
-| **UI-OV-06** | `preserved` | UI-OV-06 | Same method/path and source-backed request occurrence. |
-| **UI-OV-07** | `preserved` | UI-OV-07 | Same source-backed UI action. |
-| **UI-OV-08** | `preserved` | UI-OV-08 | Same source-backed UI action. |
-| **UI-OV-09** | `preserved` | UI-OV-09 | Same source-backed UI action. |
-| **UI-OV-10** | `preserved` | UI-OV-10 | Same source-backed UI action. |
-| **UI-OV-11** | `preserved` | UI-OV-11 | Same method/path and source-backed request occurrence. |
-| **UI-OV-12** | `preserved` | UI-OV-12 | Same method/path and source-backed request occurrence. |
-| **UI-UP-01** | `preserved` | UI-UP-01 | Same method/path and source-backed request occurrence. |
-| **UI-UP-02** | `preserved` | UI-UP-02 | Same method/path and source-backed request occurrence. |
-| **UI-UP-03** | `preserved` | UI-UP-03 | Same method/path and source-backed request occurrence. |
-| **UI-UP-04** | `preserved` | UI-UP-04 | Same method/path and source-backed request occurrence. |
-| **UI-UP-05** | `preserved` | UI-UP-05 | Same source-backed UI action. |
-| **UI-UP-06** | `preserved` | UI-UP-06 | Same method/path and source-backed request occurrence. |
-| **UI-UP-07** | `preserved` | UI-UP-07 | Same method/path and source-backed request occurrence. |
-| **UI-UP-08** | `retired` | — | Legacy compound quota coordinator was replaced by distinct source-backed series and analysis actions. |
-| **UI-UP-09** | `preserved` | UI-UP-09 | Same source-backed UI action. |
-| **UI-UP-10** | `preserved` | UI-UP-10 | Same source-backed UI action. |
-| **UI-UP-11** | `preserved` | UI-UP-11 | Same method/path and source-backed request occurrence. |
-| **UI-UP-12** | `preserved` | UI-UP-12 | Same source-backed request occurrence with a corrected stale historical method/path. |
-| **UI-UP-13** | `preserved` | UI-UP-13 | Same method/path and source-backed request occurrence. |
-| **UI-UP-14** | `preserved` | UI-UP-14 | Same method/path and source-backed request occurrence. |
-| **UI-UP-15** | `preserved` | UI-UP-15 | Same source-backed request occurrence with a corrected stale historical method/path. |
-| **UI-UP-16** | `preserved` | UI-UP-16 | Same source-backed request occurrence with a corrected stale historical method/path. |
-| **UI-UP-17** | `preserved` | UI-UP-17 | Same method/path and source-backed request occurrence. |
-| **UI-UP-18** | `preserved` | UI-UP-18 | Same method/path and source-backed request occurrence. |
-| **UI-UP-19** | `preserved` | UI-UP-19 | Same method/path and source-backed request occurrence. |
-| **UI-UP-20** | `preserved` | UI-UP-20 | Same source-backed UI action. |
-| **UI-UP-22** | `preserved` | UI-UP-22 | Same method/path and source-backed request occurrence. |
-| **UI-UP-23** | `preserved` | UI-UP-23 | Same method/path and source-backed request occurrence. |
-| **UI-UP-24** | `preserved` | UI-UP-24 | Same method/path and source-backed request occurrence. |
-| **UI-UP-25** | `preserved` | UI-UP-25 | Same source-backed UI action. |
-| **UI-UP-26** | `preserved` | UI-UP-26 | Same method/path and source-backed request occurrence. |
-| **UI-UP-27** | `preserved` | UI-UP-27 | Same method/path and source-backed request occurrence. |
-| **UI-UP-28** | `preserved` | UI-UP-28 | Same method/path and source-backed request occurrence. |
-| **UI-UP-29** | `preserved` | UI-UP-29 | Same method/path and source-backed request occurrence. |
-| **UI-PR-01** | `preserved` | UI-PR-01 | Same method/path and source-backed request occurrence. |
-| **UI-PR-02** | `preserved` | UI-PR-02 | Same source-backed UI action. |
-| **UI-PR-03** | `preserved` | UI-PR-03 | The historical combined write row is retained as the parent toggle action; enable and disable are separate atomic child requests. |
-| **UI-PR-04** | `preserved` | UI-PR-04 | Same method/path and source-backed request occurrence. |
-| **UI-PR-05** | `preserved` | UI-PR-05 | Same method/path and source-backed request occurrence. |
-| **UI-PR-06** | `preserved` | UI-PR-06 | Same method/path and source-backed request occurrence. |
-| **UI-PR-07** | `preserved` | UI-PR-07 | Same method/path and source-backed request occurrence. |
-| **UI-PR-08** | `preserved` | UI-PR-08 | Same method/path and source-backed request occurrence. |
-| **UI-PR-09** | `preserved` | UI-PR-09 | Same method/path and source-backed request occurrence. |
-| **UI-PR-10** | `preserved` | UI-PR-10 | Same source-backed UI action. |
-| **UI-PR-11** | `preserved` | UI-PR-11 | Same method/path and source-backed request occurrence. |
-| **UI-PR-12** | `preserved` | UI-PR-12 | Same method/path and source-backed request occurrence. |
-| **UI-PR-13** | `retired` | — | Legacy compound principal-detail coordinator was replaced by separately sourced chain and registry requests. |
-| **UI-PR-14** | `preserved` | UI-PR-14 | Same method/path and source-backed request occurrence. |
-| **UI-PR-15** | `preserved` | UI-PR-15 | Same method/path and source-backed request occurrence. |
-| **UI-PR-16** | `preserved` | UI-PR-16 | Same method/path and source-backed request occurrence. |
-| **UI-PR-18** | `preserved` | UI-PR-18 | Same source-backed UI action. |
-| **UI-PR-20** | `preserved` | UI-PR-20 | Same method/path and source-backed request occurrence. |
-| **UI-PR-21** | `preserved` | UI-PR-21 | Same method/path and source-backed request occurrence. |
-| **UI-PR-22** | `preserved` | UI-PR-22 | Same method/path and source-backed request occurrence. |
-| **UI-PR-23** | `preserved` | UI-PR-23 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-01** | `preserved` | UI-LOG-01 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-02** | `preserved` | UI-LOG-02 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-03** | `preserved` | UI-LOG-03 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-04** | `preserved` | UI-LOG-04 | Same source-backed UI action. |
-| **UI-LOG-05** | `preserved` | UI-LOG-05 | Same source-backed UI action. |
-| **UI-LOG-06** | `preserved` | UI-LOG-06 | Same source-backed UI action. |
-| **UI-LOG-07** | `preserved` | UI-LOG-07 | Same source-backed UI action. |
-| **UI-LOG-08** | `preserved` | UI-LOG-08 | Same source-backed UI action. |
-| **UI-LOG-09** | `preserved` | UI-LOG-09 | Same source-backed UI action. |
-| **UI-LOG-10** | `preserved` | UI-LOG-10 | Same source-backed UI action. |
-| **UI-LOG-11** | `preserved` | UI-LOG-11 | Same source-backed UI action. |
-| **UI-LOG-12** | `preserved` | UI-LOG-12 | Same source-backed UI action. |
-| **UI-LOG-13** | `preserved` | UI-LOG-13 | Same source-backed UI action. |
-| **UI-LOG-14** | `preserved` | UI-LOG-14 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-15** | `preserved` | UI-LOG-15 | Same source-backed UI action. |
-| **UI-LOG-16** | `preserved` | UI-LOG-16 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-17** | `preserved` | UI-LOG-17 | Same source-backed UI action. |
-| **UI-LOG-18** | `preserved` | UI-LOG-18 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-01** | `preserved` | UI-PLUG-01 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-02** | `preserved` | UI-PLUG-02 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-03** | `preserved` | UI-PLUG-03 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-04** | `preserved` | UI-PLUG-04 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-05** | `preserved` | UI-PLUG-05 | Same source-backed UI action. |
-| **UI-PLUG-06** | `preserved` | UI-PLUG-06 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-07** | `preserved` | UI-PLUG-07 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-08** | `preserved` | UI-PLUG-08 | Same method/path and source-backed request occurrence. |
-| **UI-SET-01** | `preserved` | UI-SET-01 | Same method/path and source-backed request occurrence. |
-| **UI-SET-02** | `preserved` | UI-SET-02 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-03** | `preserved` | UI-SET-03 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-04** | `preserved` | UI-SET-04 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-05** | `preserved` | UI-SET-05 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-06** | `retired` | — | POST /admin/config/apply was removed; master replaces runtime apply with save-to-file plus restart (UI-SET-15 POST /admin/v1/config/save). |
-| **UI-SET-07** | `retired` | — | POST /admin/config/reload was removed; master makes saved config startup-fixed, surfaced via the restart-drift banner and restart_required flag. |
-| **UI-SET-08** | `preserved` | UI-SET-08 | Same method/path and source-backed request occurrence. |
-| **UI-SET-10** | `preserved` | UI-SET-10 | Same source-backed UI action. |
-| **UI-SET-11** | `preserved` | UI-SET-11 | Same source-backed UI action. |
-| **UI-AUD-01** | `preserved` | UI-AUD-01 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-02** | `preserved` | UI-AUD-02 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-03** | `preserved` | UI-AUD-03 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-04** | `preserved` | UI-AUD-04 | Same source-backed UI action. |
-| **UI-AUD-05** | `preserved` | UI-AUD-05 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-06** | `preserved` | UI-AUD-06 | Same source-backed UI action. |
-| **API-SYS-01** | `retired` | — | GET /admin/health/state is not registered in current source; GET /admin/health is a distinct operation. |
-| **API-SYS-02** | `moved_to_api_catalog` | GET /internal/v1/partials/{event_id} | The same backend-only operation is now sourced from the API catalog. |
-| **API-SYS-03** | `moved_to_api_catalog` | GET /admin/scheduler/failures | The same backend-only operation is now sourced from the API catalog. |
-| **API-SYS-04** | `moved_to_api_catalog` | GET /admin/scheduler/status | The same backend-only operation is now sourced from the API catalog. |
-| **API-SYS-05** | `moved_to_api_catalog` | POST /admin/v1/router/preview | The same backend-only operation is now sourced from the API catalog. |
-| **API-SYS-06** | `moved_to_api_catalog` | POST /admin/v1/principals/{id}/plugin-chain/rebalance | The same backend-only operation is now sourced from the API catalog. |
-| **UI-CMD-03** | `preserved` | UI-CMD-03 | Same method/path and source-backed request occurrence. |
-| **UI-CMD-04** | `preserved` | UI-CMD-04 | Same method/path and source-backed request occurrence. |
-| **UI-CMD-05** | `preserved` | UI-CMD-05 | Same source-backed UI action. |
-| **UI-CMD-06** | `preserved` | UI-CMD-06 | Same source-backed UI action. |
-| **UI-TOP-03** | `preserved` | UI-TOP-03 | Same source-backed UI action. |
-| **UI-TOP-04** | `preserved` | UI-TOP-04 | Same source-backed UI action. |
-| **UI-TOP-05** | `preserved` | UI-TOP-05 | Same source-backed UI action. |
-| **UI-CMD-07** | `preserved_alias` | UI-CMD-02 | Same source-backed UI action. |
-| **UI-OV-07A** | `preserved_alias` | UI-OV-01 | Same method/path and source-backed request occurrence. |
-| **UI-OV-07B** | `preserved_alias` | UI-OV-02 | Same method/path and source-backed request occurrence. |
-| **UI-OV-07C** | `preserved_alias` | UI-OV-04 | Same method/path and source-backed request occurrence. |
-| **UI-OV-13** | `preserved` | UI-OV-13 | Same method/path and source-backed request occurrence. |
-| **UI-OV-14** | `preserved` | UI-OV-14 | Same method/path and source-backed request occurrence. |
-| **UI-OV-15** | `preserved` | UI-OV-15 | Same method/path and source-backed request occurrence. |
-| **UI-OV-16** | `preserved` | UI-OV-16 | Same source-backed UI action. |
-| **UI-OV-17** | `preserved` | UI-OV-17 | Same source-backed UI action. |
-| **UI-UP-08A** | `preserved` | UI-UP-08A | Same method/path and source-backed request occurrence. |
-| **UI-UP-08B** | `retired` | — | Subscription quota analysis endpoint was removed; no UI action requests it. |
-| **UI-UP-09A** | `preserved` | UI-UP-09A | Same method/path and source-backed request occurrence. |
-| **UI-UP-09B** | `retired` | — | Subscription quota analysis endpoint was removed; no UI action requests it. |
-| **UI-UP-30** | `preserved` | UI-UP-30 | Same method/path and source-backed request occurrence. |
-| **UI-UP-31** | `preserved` | UI-UP-31 | Same method/path and source-backed request occurrence. |
-| **UI-UP-32** | `preserved` | UI-UP-32 | Same method/path and source-backed request occurrence. |
-| **UI-UP-33** | `preserved` | UI-UP-33 | Same method/path and source-backed request occurrence. |
-| **UI-UP-34** | `preserved` | UI-UP-34 | Same method/path and source-backed request occurrence. |
-| **UI-UP-35** | `preserved` | UI-UP-35 | Same method/path and source-backed request occurrence. |
-| **UI-UP-36** | `preserved` | UI-UP-36 | Same source-backed UI action. |
-| **UI-UP-37** | `preserved` | UI-UP-37 | Same source-backed UI action. |
-| **UI-UP-38** | `preserved` | UI-UP-38 | Same source-backed UI action. |
-| **UI-UP-39** | `preserved` | UI-UP-39 | Same source-backed UI action. |
-| **UI-UP-40** | `preserved` | UI-UP-40 | Same source-backed UI action. |
-| **UI-PR-07A** | `preserved_alias` | UI-PR-07 | Same method/path and source-backed request occurrence. |
-| **UI-PR-09A** | `preserved` | UI-PR-09A | Same source-backed UI action. |
-| **UI-PR-10A** | `preserved` | UI-PR-10A | Same method/path and source-backed request occurrence. |
-| **UI-PR-11A** | `preserved_alias` | UI-PR-10A | Same method/path and source-backed request occurrence. |
-| **UI-PR-11B** | `preserved` | UI-PR-11B | Same method/path and source-backed request occurrence. |
-| **UI-PR-12A** | `preserved_alias` | UI-PR-12 | Same method/path and source-backed request occurrence. |
-| **UI-PR-12B** | `preserved_alias` | UI-PR-10 | Same source-backed UI action. |
-| **UI-PR-12C** | `preserved_alias` | UI-PR-10 | Same source-backed UI action. |
-| **UI-PR-13A** | `preserved` | UI-PR-13A | Same method/path and source-backed request occurrence. |
-| **UI-PR-13B** | `preserved` | UI-PR-13B | Same method/path and source-backed request occurrence. |
-| **UI-PR-13C** | `preserved` | UI-PR-13C | Same method/path and source-backed request occurrence. |
-| **UI-PR-13E** | `preserved` | UI-PR-13E | Same method/path and source-backed request occurrence. |
-| **UI-PR-15B** | `preserved` | UI-PR-15B | Same method/path and source-backed request occurrence. |
-| **UI-PR-16B** | `preserved` | UI-PR-16B | Same method/path and source-backed request occurrence. |
-| **UI-PR-16C** | `preserved` | UI-PR-16C | Same method/path and source-backed request occurrence. |
-| **UI-PR-18A** | `preserved` | UI-PR-18A | Same method/path and source-backed request occurrence. |
-| **UI-PR-18B** | `preserved` | UI-PR-18B | Same method/path and source-backed request occurrence. |
-| **UI-PR-24** | `preserved` | UI-PR-24 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-05A** | `preserved` | UI-LOG-05A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-05B** | `preserved` | UI-LOG-05B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-05C** | `preserved` | UI-LOG-05C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-06A** | `preserved` | UI-LOG-06A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-06B** | `preserved` | UI-LOG-06B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-06C** | `preserved` | UI-LOG-06C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-07A** | `preserved` | UI-LOG-07A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-07B** | `preserved` | UI-LOG-07B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-07C** | `preserved` | UI-LOG-07C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-08A** | `preserved` | UI-LOG-08A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-08B** | `preserved` | UI-LOG-08B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-08C** | `preserved` | UI-LOG-08C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-09A** | `preserved` | UI-LOG-09A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-09B** | `preserved` | UI-LOG-09B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-09C** | `preserved` | UI-LOG-09C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-10A** | `preserved` | UI-LOG-10A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-10B** | `preserved` | UI-LOG-10B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-10C** | `preserved` | UI-LOG-10C | Same method/path and source-backed request occurrence. |
-| **UI-LOG-11A** | `preserved` | UI-LOG-11A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-11B** | `preserved` | UI-LOG-11B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-12A** | `preserved` | UI-LOG-12A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-12B** | `preserved` | UI-LOG-12B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-17A** | `preserved` | UI-LOG-17A | Same method/path and source-backed request occurrence. |
-| **UI-LOG-17B** | `preserved` | UI-LOG-17B | Same method/path and source-backed request occurrence. |
-| **UI-LOG-19** | `preserved` | UI-LOG-19 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-20** | `preserved` | UI-LOG-20 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-21** | `preserved` | UI-LOG-21 | Same method/path and source-backed request occurrence. |
-| **UI-LOG-22** | `preserved` | UI-LOG-22 | Same source-backed UI action. |
-| **UI-LOG-23** | `preserved` | UI-LOG-23 | Same source-backed UI action. |
-| **UI-PLUG-08B** | `preserved_alias` | UI-PLUG-08 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-09** | `preserved` | UI-PLUG-09 | Same method/path and source-backed request occurrence. |
-| **UI-PLUG-10** | `preserved` | UI-PLUG-10 | Same source-backed UI action. |
-| **UI-PLUG-11** | `preserved` | UI-PLUG-11 | Same source-backed UI action. |
-| **UI-PLUG-12** | `preserved` | UI-PLUG-12 | Same source-backed UI action. |
-| **UI-PLUG-13** | `preserved` | UI-PLUG-13 | Same source-backed UI action. |
-| **UI-PLUG-14** | `preserved` | UI-PLUG-14 | Same source-backed UI action. |
-| **UI-PLUG-15** | `preserved_alias` | UI-PLUG-14 | Same source-backed UI action. |
-| **UI-PLUG-16** | `preserved` | UI-PLUG-16 | Same source-backed UI action. |
-| **UI-PLUG-17** | `preserved_alias` | UI-PLUG-16 | Same source-backed UI action. |
-| **UI-PLUG-18** | `preserved` | UI-PLUG-18 | Same source-backed UI action. |
-| **UI-PLUG-19** | `preserved` | UI-PLUG-19 | Same source-backed UI action. |
-| **UI-PLUG-20** | `preserved` | UI-PLUG-20 | Same source-backed UI action. |
-| **UI-PLUG-21** | `preserved` | UI-PLUG-21 | Same source-backed UI action. |
-| **UI-PLUG-22** | `preserved` | UI-PLUG-22 | Same source-backed UI action. |
-| **UI-SET-03A** | `retired` | — | GET /admin/config/current was removed; the baseline file/effective config now arrives inside GET /admin/v1/config/editor (UI-SET-17). |
-| **UI-SET-03B** | `preserved` | UI-SET-03B | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-03C** | `retired` | — | GET /admin/config/schema was removed; the config schema now arrives inside GET /admin/v1/config/editor (UI-SET-17). |
-| **UI-SET-12** | `preserved` | UI-SET-12 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-12A** | `preserved` | UI-SET-12A | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-12B** | `preserved` | UI-SET-12B | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **UI-SET-13** | `retired` | — | The schema coverage checklist was removed with the textarea editor; per-section Advanced disclosures (UI-SRC-5F12838E8F4B) replace it. |
-| **UI-SET-14** | `preserved` | UI-SET-14 | Same source-backed UI action; re-anchored to the merged ConfigEditor/settings source. |
-| **API-BACKEND-CONFIG-DIFF** | `retired` | — | Master removed both config/diff routes and raw configuration history; there is no current API replacement. |
-| **UI-AUD-07** | `preserved` | UI-AUD-07 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-08** | `preserved` | UI-AUD-08 | Same method/path and source-backed request occurrence. |
-| **UI-AUD-09** | `preserved` | UI-AUD-09 | Same source-backed UI action. |
-| **UI-AUD-10** | `preserved` | UI-AUD-10 | Same source-backed UI action. |

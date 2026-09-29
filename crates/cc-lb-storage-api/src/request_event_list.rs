@@ -138,25 +138,6 @@ pub struct RequestEventKeyLastUsed {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestEventKeyUsageQuery {
-    pub principal_id: String,
-    pub key_id: String,
-    pub range_start_ms: u64,
-    pub range_end_ms: u64,
-    pub step_ms: u64,
-    pub bucket_count: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RequestEventKeyUsageBucket {
-    pub bucket_start_unix_secs: u64,
-    pub request_count: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd_micros: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestEventPrincipalCostQuery {
     pub since_unix_secs: u64,
     pub until_unix_secs: u64,

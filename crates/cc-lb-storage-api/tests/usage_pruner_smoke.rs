@@ -1,6 +1,7 @@
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, MetaStore, RequestEvent, RequestEventStore,
+    AuditEntry, AuditQueryScope, AuditStore, MetaStore, RequestEvent, RequestEventStore,
+    RequestEventStreamFilters,
     usage_pruner::{PruneResult, UsagePruner},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -20,7 +21,7 @@ async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
     let result = pruner.prune_once().await;
 
     assert!(result.request_events_removed >= 5);
-    let remaining = storage.query_request_events(0, u64::MAX, 100).await?;
+    let remaining = stored_request_events(storage.as_ref()).await?;
     assert_eq!(remaining.len(), 0);
     Ok(())
 }
@@ -36,7 +37,7 @@ async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
     let result = pruner.prune_once().await;
 
     assert_eq!(result, PruneResult::default());
-    let remaining = storage.query_request_events(0, u64::MAX, 100).await?;
+    let remaining = stored_request_events(storage.as_ref()).await?;
     assert_eq!(remaining.len(), 5);
     Ok(())
 }
@@ -51,7 +52,7 @@ async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
     let result = pruner.prune_once().await;
 
     assert_eq!(result.request_events_removed, 0);
-    let remaining = storage.query_request_events(0, u64::MAX, 100).await?;
+    let remaining = stored_request_events(storage.as_ref()).await?;
     assert_eq!(remaining.len(), 5);
     Ok(())
 }
@@ -67,7 +68,9 @@ async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
     let result = pruner.prune_once().await;
 
     assert!(result.audit_log_removed >= 5);
-    let remaining = storage.query_audit(None, 0, u64::MAX, 100).await?;
+    let remaining = storage
+        .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 100, false)
+        .await?;
     assert_eq!(remaining.len(), 0);
     Ok(())
 }
@@ -145,4 +148,16 @@ fn now_unix_ms(clock: &dyn Clock) -> u64 {
 
 fn now_unix_secs(clock: &dyn Clock) -> u64 {
     unix_secs(clock.now())
+}
+
+async fn stored_request_events(
+    storage: &SqliteStorage,
+) -> Result<Vec<RequestEvent>, Box<dyn std::error::Error>> {
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(0, cursor, 500, &RequestEventStreamFilters::default())
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
 }

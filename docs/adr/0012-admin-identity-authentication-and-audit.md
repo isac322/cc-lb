@@ -136,7 +136,7 @@ The audit UI continues to use `actor` as its concise display value and exposes t
 - `cargo test -p cc-lb-config`.
 - `cargo test -p cc-lb-admin --test integration`.
 - `cargo test -p cc-lb-storage-sqlite audit`.
-- `cargo test -p cc-lb-storage-postgres audit --features postgres` when `CI_POSTGRES_URL` is available.
+- `cargo test -p cc-lb-storage-postgres audit` when `CI_POSTGRES_URL` is available.
 - `grep -rn "admin_token" crates/` and `grep -rn 'actor: Some("admin"' crates/` both return no matches.
 - A local static-token server returns a `BreakGlass` identity from `/admin/v1/auth/session`, records the actor for a kill-switch mutation and audit-log read, and records a credential-free request as `auth_rejected`.
 - In `crates/cc-lb-admin/web`, `bun run test`, `bun run typecheck`, and `bun run build` pass; browser verification covers static-token entry, external identity display, and structured audit actor details.

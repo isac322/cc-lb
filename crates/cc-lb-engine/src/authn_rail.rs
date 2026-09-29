@@ -134,7 +134,6 @@ pub fn reject_unauthenticated(
 fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
     match source {
         BuiltinAuthError::Expired => "Expired",
-        BuiltinAuthError::KeyDisabled => "Disabled",
         BuiltinAuthError::KeyRevoked => "Revoked",
         BuiltinAuthError::PrincipalDisabled => "PrincipalDisabled",
         BuiltinAuthError::Unavailable => "Unavailable",
@@ -150,12 +149,12 @@ fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
 mod tests {
     use super::*;
 
-    /// A disabled key is a 403, and `Unavailable` degrades to 503 with a
+    /// A disabled principal is a 403, and `Unavailable` degrades to 503 with a
     /// Retry-After rather than looking like a bad credential.
     #[test]
     fn rejection_maps_status_per_error_kind() {
         assert_eq!(
-            reject_unauthenticated(&BuiltinAuthError::KeyDisabled, None).status(),
+            reject_unauthenticated(&BuiltinAuthError::PrincipalDisabled, None).status(),
             StatusCode::FORBIDDEN
         );
         let unavailable = reject_unauthenticated(&BuiltinAuthError::Unavailable, None);

@@ -50,11 +50,9 @@ async fn test_auth_required() {
     let app = router(test_state());
 
     let endpoints = vec![
-        ("/admin/principals/alice/keys/key-1", "GET"),
-        ("/admin/principals/alice/keys/key-1/revoke", "POST"),
-        ("/admin/principals/alice/keys/key-1/disable", "POST"),
-        ("/admin/principals/alice/keys/key-1/enable", "POST"),
-        ("/admin/principals/alice/keys/key-1/usage", "GET"),
+        ("/admin/v1/principals/alice/keys", "GET"),
+        ("/admin/v1/principals/alice/keys", "POST"),
+        ("/admin/v1/principals/alice/keys/key-1/revoke", "POST"),
         ("/admin/v1/audit", "GET"),
         ("/admin/v1/config/editor", "GET"),
         ("/admin/v1/config/draft", "GET"),

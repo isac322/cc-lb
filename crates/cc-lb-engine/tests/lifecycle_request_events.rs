@@ -6,7 +6,7 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_control::RequestEventBus;
 use cc_lb_engine::{BreakerRegistry, DispatchError, LifecycleConfig, UpstreamDispatch};
-use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::{Response, StatusCode};
@@ -69,7 +69,7 @@ async fn hermes_root_identity_crosses_proxy_and_persists_without_body_rewrite()
             .as_slice(),
         &[original_body]
     );
-    let events = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let events = crate::common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(events.len(), 1);
     let event = &events[0];
     assert_eq!(event.thread_id.as_deref(), Some("hermes-root-session"));

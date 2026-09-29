@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
-    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, WasmBlob,
-    WasmRegistryEntryInput,
+    AuditQueryScope, AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
+    WasmBlob, WasmRegistryEntryInput,
 };
 use serde_json::{Value, json};
 
@@ -182,7 +182,7 @@ async fn update_endpoints_audit_distinct_concrete_routes() {
 
     let entries = server
         .storage
-        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .query_recent_audit(AuditQueryScope::Principal(&id), 0, u64::MAX, 20, false)
         .await
         .unwrap();
     assert!(entries.iter().any(|entry| {
@@ -343,7 +343,7 @@ async fn enable_disable_persists_and_audits() {
 
     let entries = server
         .storage
-        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .query_recent_audit(AuditQueryScope::Principal(&id), 0, u64::MAX, 20, false)
         .await
         .unwrap();
     assert!(
@@ -418,7 +418,7 @@ async fn delete_principal_cascades_owned_plugin_chains() {
 
     let entries = server
         .storage
-        .query_audit(Some(&id), 0, u64::MAX, 20)
+        .query_recent_audit(AuditQueryScope::Principal(&id), 0, u64::MAX, 20, false)
         .await
         .unwrap();
     assert!(entries.iter().any(|entry| {

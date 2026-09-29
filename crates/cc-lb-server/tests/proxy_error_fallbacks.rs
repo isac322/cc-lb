@@ -152,8 +152,7 @@ async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
     // request_events rows. Give the async writer a window to (incorrectly)
     // persist before asserting the table stayed empty.
     sleep(Duration::from_millis(500)).await;
-    let rows =
-        RequestEventStore::query_request_events(storage_arc.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = stored_request_events(storage_arc.as_ref()).await?;
     assert!(
         rows.is_empty(),
         "pre-auth 404/405 fallbacks must not persist request events, found {} row(s)",
@@ -161,6 +160,24 @@ async fn proxy_fallbacks_return_anthropic_json_errors() -> TestResult<()> {
     );
 
     Ok(())
+}
+
+/// Reads every persisted request event in append order through the cursor API.
+async fn stored_request_events(
+    storage: &SqliteStorage,
+) -> StorageResult<Vec<cc_lb_storage_api::RequestEvent>> {
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
 }
 
 /// ManagedKeyStore wrapper whose credential lookup always fails — used to
@@ -269,8 +286,7 @@ async fn key_store_unavailable_persists_typed_authn_reason() -> TestResult<()> {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let row = loop {
-        let rows =
-            RequestEventStore::query_request_events(storage_arc.as_ref(), 0, u64::MAX, 10).await?;
+        let rows = stored_request_events(storage_arc.as_ref()).await?;
         if let Some(row) = rows.into_iter().next() {
             break row;
         }

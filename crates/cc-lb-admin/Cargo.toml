@@ -48,7 +48,6 @@ http.workspace = true
 http-body-util.workspace = true
 figment.workspace = true
 hex.workspace = true
-humantime = "2.3"
 metrics.workspace = true
 bytes.workspace = true
 base64.workspace = true
@@ -63,6 +62,7 @@ tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 sonic-rs.workspace = true
+subtle = "2.6.1"
 url.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 mime_guess = "2.0.5"

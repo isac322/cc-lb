@@ -18,8 +18,8 @@ use cc_lb_storage_conformance::{
         anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads, managed_keys,
         organization_metadata_store, plan_tier_store, plugin_registry_store,
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
-        request_event_key_usage, request_event_list, request_event_principal_costs,
-        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        request_event_list, request_event_principal_costs, storage_roundtrips,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store, warmup_attempts_store,
     },
@@ -117,10 +117,34 @@ fn config_draft_optimistic_revision_sqlite() {
 }
 
 #[test]
+fn config_history_cap_50_sqlite() {
+    run_sqlite_scenario(
+        "config_history_cap_50",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_history_cap_50,
+    );
+}
+
+#[test]
+fn config_last_validated_revision_sqlite() {
+    run_sqlite_scenario(
+        "config_last_validated_revision",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::config_last_validated_revision,
+    );
+}
+
+#[test]
 fn meta_compare_and_put_sqlite() {
     run_sqlite_scenario(
         "meta_compare_and_put",
         cc_lb_storage_conformance::scenarios::revisioning_meta::meta_compare_and_put,
+    );
+}
+
+#[test]
+fn meta_backend_kind_stamp_sqlite() {
+    run_sqlite_scenario(
+        "meta_backend_kind_stamp",
+        cc_lb_storage_conformance::scenarios::revisioning_meta::meta_backend_kind_stamp,
     );
 }
 
@@ -185,14 +209,6 @@ fn request_event_principal_cost_components_sqlite() {
     run_sqlite_scenario(
         "request_event_principal_cost_components",
         request_event_principal_costs::principal_cost_components_aggregate_without_fabrication,
-    );
-}
-
-#[test]
-fn request_event_key_usage_materialized_columns_sqlite() {
-    run_sqlite_scenario(
-        "request_event_key_usage_materialized_columns",
-        request_event_key_usage::materialized_key_usage_preserves_bucket_contract,
     );
 }
 
@@ -325,28 +341,12 @@ upstream_subscription_quota_sqlite_test!(
     latest_is_monotonic_in_millis
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_series_returns_buckets_with_correct_bounds_sqlite,
-    series_returns_buckets_with_correct_bounds
-);
-upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_series_source_merge_merged_collapses_both_sources_sqlite,
-    series_source_merge_merged_collapses_both_sources
-);
-upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_series_source_merge_header_filters_api_sqlite,
-    series_source_merge_header_filters_api
-);
-upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_series_max_points_per_series_downsamples_sqlite,
-    series_max_points_per_series_downsamples
-);
-upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_empty_upstream_ids_returns_empty_sqlite,
     empty_upstream_ids_returns_empty
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_series_filters_observed_at_window_sqlite,
-    series_filters_observed_at_window
+    upstream_subscription_quota_slim_checkpoints_filter_observed_at_window_sqlite,
+    slim_checkpoints_filter_observed_at_window
 );
 upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_checkpoint_writer_latest_freshness_sqlite,
@@ -357,8 +357,8 @@ upstream_subscription_quota_sqlite_test!(
     checkpoint_writer_decrease
 );
 upstream_subscription_quota_sqlite_test!(
-    upstream_subscription_quota_checkpoint_series_anchor_merge_sqlite,
-    checkpoint_series_anchor_merge
+    upstream_subscription_quota_slim_checkpoints_select_per_source_left_anchors_sqlite,
+    slim_checkpoints_select_per_source_left_anchors
 );
 upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_checkpoint_history_sqlite,

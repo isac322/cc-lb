@@ -168,18 +168,6 @@ mod tests {
             Ok(())
         }
 
-        async fn query_audit(
-            &self,
-            _principal_id: Option<&str>,
-            _since: u64,
-            _until: u64,
-            _limit: usize,
-        ) -> StorageResult<Vec<StoredAuditEntry>> {
-            Err(StorageError::Fatal {
-                message: "query_audit is not used by subscriber tests".to_owned(),
-            })
-        }
-
         async fn query_recent_audit(
             &self,
             _scope: AuditQueryScope<'_>,

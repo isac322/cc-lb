@@ -2,11 +2,10 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventKeyUsageBucket, RequestEventKeyUsageQuery,
-    RequestEventKind, RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_pattern,
-    model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
+    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
+    RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
+    model_filter_like_pattern, model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
@@ -67,68 +66,6 @@ impl RequestEventStore for PostgresStorage {
         insert_keepalive_decision_in_tx(&mut tx, &projections.decision).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         i64_to_u64(seq, "request event cursor")
-    }
-
-    async fn query_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-        let Some(since) = unix_secs_to_datetime_lower(since, "request event since")? else {
-            return Ok(Vec::new());
-        };
-        let until = unix_secs_to_datetime_upper(until, "request event until")?;
-
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq ASC LIMIT $3",
-        )
-        .bind(since)
-        .bind(until)
-        .bind(u64_to_i64(limit as u64, "request event limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter()
-            .map(|(source_kind, source_ref_id, event_kind, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
-            })
-            .collect()
-    }
-
-    async fn query_recent_request_events(
-        &self,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-        let Some(since) = unix_secs_to_datetime_lower(since, "request event since")? else {
-            return Ok(Vec::new());
-        };
-        let until = unix_secs_to_datetime_upper(until, "request event until")?;
-
-        let rows = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Vec<u8>)>(
-            "SELECT source_kind, source_ref_id, event_kind, payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
-        )
-        .bind(since)
-        .bind(until)
-        .bind(u64_to_i64(limit as u64, "request event limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter()
-            .map(|(source_kind, source_ref_id, event_kind, payload)| {
-                request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)
-            })
-            .collect()
     }
 
     async fn prune_request_events_before(
@@ -243,13 +180,6 @@ impl RequestEventStore for PostgresStorage {
         request_event_key_last_used(self, query).await
     }
 
-    async fn request_event_key_usage(
-        &self,
-        query: &RequestEventKeyUsageQuery,
-    ) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
-        request_event_key_usage(self, query).await
-    }
-
     async fn request_event_principal_costs(
         &self,
         query: &RequestEventPrincipalCostQuery,
@@ -312,80 +242,6 @@ async fn request_event_key_last_used(
             })
         })
         .collect()
-}
-
-async fn request_event_key_usage(
-    storage: &PostgresStorage,
-    query: &RequestEventKeyUsageQuery,
-) -> StorageResult<Vec<RequestEventKeyUsageBucket>> {
-    if query.bucket_count == 0 || query.step_ms == 0 || query.range_end_ms < query.range_start_ms {
-        return Ok(Vec::new());
-    }
-
-    let bucket_count = usize::try_from(query.bucket_count).map_err(|_| StorageError::Fatal {
-        message: "request event key usage bucket_count cannot be represented as usize".to_owned(),
-    })?;
-    let mut buckets = vec![RequestEventKeyUsageBucket::default(); bucket_count];
-    for (index, bucket) in buckets.iter_mut().enumerate() {
-        let bucket_start_ms = query
-            .range_start_ms
-            .saturating_add((index as u64).saturating_mul(query.step_ms));
-        bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
-    }
-
-    let rows = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
-        "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, \
-                COUNT(*)::bigint AS request_count, \
-                COALESCE(SUM(COALESCE(input_tokens, 0) \
-                    + COALESCE(cache_creation_input_tokens, 0) \
-                    + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, \
-                COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, \
-                COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros \
-         FROM request_events_v1 \
-         WHERE principal_id = $4 \
-           AND key_id = $5 \
-           AND list_ts_ms BETWEEN $6 AND $7 \
-         GROUP BY bucket_index",
-    )
-    .bind(u64_to_i64(
-        query.range_start_ms,
-        "request event key usage range start",
-    )?)
-    .bind(u64_to_i64(query.step_ms, "request event key usage step")?)
-    .bind(u64_to_i64(
-        query.bucket_count.saturating_sub(1),
-        "request event key usage last bucket",
-    )?)
-    .bind(query.principal_id.as_str())
-    .bind(query.key_id.as_str())
-    .bind(u64_to_i64(
-        query.range_start_ms,
-        "request event key usage lower bound",
-    )?)
-    .bind(u64_to_i64(
-        query.range_end_ms,
-        "request event key usage upper bound",
-    )?)
-    .fetch_all(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    for (bucket_index, request_count, input_tokens, output_tokens, cost_usd_micros) in rows {
-        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
-            message: "request event key usage bucket index is negative".to_owned(),
-        })?;
-        let Some(bucket) = buckets.get_mut(bucket_index) else {
-            return Err(StorageError::Corrupted {
-                message: "request event key usage bucket index is out of range".to_owned(),
-            });
-        };
-        bucket.request_count = i64_to_u64(request_count, "request event key usage request count")?;
-        bucket.input_tokens = i64_to_u64(input_tokens, "request event key usage input tokens")?;
-        bucket.output_tokens = i64_to_u64(output_tokens, "request event key usage output tokens")?;
-        bucket.cost_usd_micros = cost_usd_micros;
-    }
-
-    Ok(buckets)
 }
 
 fn is_canonical_uuid_principal(value: &str) -> bool {

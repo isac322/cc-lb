@@ -71,12 +71,6 @@ pub trait ManagedKeyControl: Send + Sync {
         params: CreateParams,
     ) -> Result<(StoredApiKeyRecord, RedactedSecret), KeyStoreError>;
 
-    async fn get_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> Result<Option<StoredApiKeyRecord>, KeyStoreError>;
-
     async fn list_keys_by_principal(
         &self,
         principal_id: &str,
@@ -85,10 +79,6 @@ pub trait ManagedKeyControl: Send + Sync {
     async fn list_all_keys(
         &self,
     ) -> Result<Vec<(String, String, StoredApiKeyRecord)>, KeyStoreError>;
-
-    async fn disable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
-
-    async fn enable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
 
     async fn revoke_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError>;
 
@@ -144,14 +134,6 @@ impl ManagedKeyControl for KeyStore {
         self.create(principal_id, params).await
     }
 
-    async fn get_key(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> Result<Option<StoredApiKeyRecord>, KeyStoreError> {
-        self.get(principal_id, key_id).await
-    }
-
     async fn list_keys_by_principal(
         &self,
         principal_id: &str,
@@ -163,14 +145,6 @@ impl ManagedKeyControl for KeyStore {
         &self,
     ) -> Result<Vec<(String, String, StoredApiKeyRecord)>, KeyStoreError> {
         self.list_all().await
-    }
-
-    async fn disable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {
-        self.disable(principal_id, key_id).await
-    }
-
-    async fn enable_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {
-        self.enable(principal_id, key_id).await
     }
 
     async fn revoke_key(&self, principal_id: &str, key_id: &str) -> Result<(), KeyStoreError> {

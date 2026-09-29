@@ -6546,12 +6546,6 @@ fn limit_rejection_response(
             "api key expired".to_owned(),
             None,
         ),
-        RejectReason::KeyDisabled => (
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "api key disabled".to_owned(),
-            None,
-        ),
         RejectReason::KeyRevoked => (
             StatusCode::UNAUTHORIZED,
             "authentication_error",
@@ -6660,7 +6654,6 @@ fn limit_violation_name(reason: &RejectReason) -> Option<&'static str> {
         RejectReason::ConcurrentRateLimit => Some("Concurrent"),
         RejectReason::PrincipalMissing
         | RejectReason::PrincipalDisabled
-        | RejectReason::KeyDisabled
         | RejectReason::KeyRevoked
         | RejectReason::Expired
         | RejectReason::ModelNotAllowed

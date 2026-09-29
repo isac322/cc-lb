@@ -660,55 +660,6 @@ fn all_query(limit: u32) -> CacheKeepaliveSessionListQuery {
     }
 }
 
-fn prefixed_ids(page: &cc_lb_storage_api::CacheKeepaliveSessionPage) -> Vec<String> {
-    page.rows
-        .iter()
-        .map(|row| row.source.cursor_entry_id(&row.id))
-        .collect()
-}
-
-async fn legacy_ids_after_cursor(
-    storage: &cc_lb_storage_sqlite::SqliteStorage,
-    last_message_at_ms: i64,
-    entry_id: &str,
-) -> Vec<String> {
-    sqlx::query(
-        "WITH entries AS (
-            SELECT
-                'session:' || session_key_hash AS entry_id,
-                last_message_at_ms
-            FROM cache_keepalive_sessions
-            WHERE principal_id = ?
-            UNION ALL
-            SELECT
-                'decision:' || source_ref_id AS entry_id,
-                last_message_at_ms
-            FROM cache_keepalive_decisions
-            WHERE principal_id = ?
-              AND NOT EXISTS (
-                  SELECT 1 FROM cache_keepalive_turns turn_row
-                  WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
-              )
-        )
-        SELECT entry_id
-        FROM entries
-        WHERE last_message_at_ms < ?
-           OR (last_message_at_ms = ? AND entry_id > ?)
-        ORDER BY last_message_at_ms DESC, entry_id ASC",
-    )
-    .bind(PRINCIPAL_ID)
-    .bind(PRINCIPAL_ID)
-    .bind(last_message_at_ms)
-    .bind(last_message_at_ms)
-    .bind(entry_id)
-    .fetch_all(storage.pool())
-    .await
-    .expect("run legacy cursor query")
-    .into_iter()
-    .map(|row| row.get("entry_id"))
-    .collect()
-}
-
 #[tokio::test]
 async fn direct_lookup_returns_exact_session() {
     let (_temp_dir, storage) = storage().await;
@@ -1145,38 +1096,6 @@ async fn selected_corruption_is_not_silently_dropped() {
             .expect_err("summary reports corruption"),
     ] {
         assert!(matches!(error, StorageError::Corrupted { .. }));
-    }
-}
-
-#[tokio::test]
-async fn cursor_entry_id_preserves_legacy_sql_comparison() {
-    let (_temp_dir, storage) = storage().await;
-    for id in ["a", "é", "Ω", "session::x"] {
-        storage
-            .replace_from_real_request(&request(id, 12_000, "agent-in-turn"))
-            .await
-            .expect("insert collation session");
-    }
-    for id in ["b", "é-decision", "Ω-decision"] {
-        insert_decision(&storage, PRINCIPAL_ID, id, 12_000).await;
-    }
-
-    for entry_id in ["x", "session::x", "decision:é", "Ω"] {
-        let candidate = storage
-            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
-                cursor: Some(CacheKeepaliveSessionCursor {
-                    principal_id: PRINCIPAL_ID.to_owned(),
-                    horizon_start_ms: None,
-                    filter: CacheKeepaliveSessionFilter::All,
-                    last_message_at_ms: 12_000_000,
-                    entry_id: entry_id.to_owned(),
-                }),
-                ..all_query(100)
-            })
-            .await
-            .expect("candidate cursor comparison");
-        let legacy = legacy_ids_after_cursor(&storage, 12_000_000, entry_id).await;
-        assert_eq!(prefixed_ids(&candidate), legacy, "cursor {entry_id}");
     }
 }
 

@@ -26,8 +26,8 @@ use cc_lb_lifecycle::{LifecycleEvent, TerminationReason, UsageSource};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
-    PromptCacheObservationRecord, PromptCacheObservationStore, RequestEventStore,
-    Storage as StorageTrait, StorageResult,
+    PromptCacheObservationRecord, PromptCacheObservationStore, Storage as StorageTrait,
+    StorageResult,
 };
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ShapedRequest, ShapedRequestBuilder,
@@ -75,7 +75,7 @@ async fn unpolled_stream_body_drop_persists_one_client_closed_final()
 
     assert_error_terminal(&mut lifecycle_rx, 499, "client_closed_request").await;
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, 499);
     assert_eq!(rows[0].error_code.as_deref(), Some("client_closed_request"));
@@ -743,7 +743,7 @@ async fn terminal_body_error_case(
     assert_error_terminal(&mut lifecycle_rx, 200, "upstream_stream_error").await;
     assert_one_final(&mut update_rx).await;
 
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].error_code.as_deref(),
@@ -843,7 +843,7 @@ async fn upstream_frame_error_preserves_http_error_classification()
     )
     .await;
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].error_code.as_deref(), Some("upstream_4xx"));
     assert_eq!(
@@ -895,7 +895,7 @@ async fn streaming_refusal_persists_distinguishable_row() -> Result<(), Box<dyn 
     assert_eq!(text.matches("event: message_stop").count(), 1);
 
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, 200);
     assert_eq!(rows[0].error_code.as_deref(), Some("upstream_refusal"));
@@ -948,7 +948,7 @@ async fn provider_error_before_body_failure_preserves_provider_error()
     assert_eq!(text.matches("event: error\n").count(), 1);
 
     assert_one_final(&mut update_rx).await;
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let rows = common::stored_request_events(storage.as_ref()).await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].upstream_error_type.as_deref(),

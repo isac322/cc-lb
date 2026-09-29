@@ -1632,15 +1632,6 @@ mod tests {
             self.rows.lock().unwrap().push(event.clone());
             Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
         }
-
-        async fn query_request_events(
-            &self,
-            _since: u64,
-            _until: u64,
-            _limit: usize,
-        ) -> StorageResult<Vec<RequestEvent>> {
-            Ok(Vec::new())
-        }
     }
 
     #[derive(Clone, Default)]

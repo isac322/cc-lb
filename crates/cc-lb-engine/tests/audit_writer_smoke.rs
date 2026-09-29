@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_control::{AuditEntry, spawn_audit_writer};
-use cc_lb_storage_api::{AuditStore, MetaStore};
+use cc_lb_storage_api::{AuditQueryScope, AuditStore, MetaStore};
 use cc_lb_storage_sqlite::SqliteStorage;
 
 #[tokio::test(flavor = "current_thread")]
@@ -82,7 +82,10 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
 }
 
 async fn audit_count(storage: &SqliteStorage) -> Result<usize, Box<dyn std::error::Error>> {
-    Ok(storage.query_audit(None, 0, u64::MAX, 1_000).await?.len())
+    Ok(storage
+        .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 1_000, false)
+        .await?
+        .len())
 }
 
 fn audit_entry(index: usize) -> AuditEntry {

@@ -363,7 +363,7 @@ async fn wait_for_events(
 ) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        let events = common::stored_request_events(storage).await?;
         if events.len() >= expected {
             return Ok(events);
         }

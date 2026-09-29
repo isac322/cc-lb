@@ -27,12 +27,16 @@ macro_rules! define_request_event_quota_postgres_tests {
                     storage.append_request_event(&event).await?;
 
                     // Then payload reads and the stored payload JSON both retain the selected values.
-                    let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(read_back.len(), 1);
-                    request_event_quota_support::assert_populated_event(&read_back[0]);
-                    let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(recent.len(), 1);
-                    request_event_quota_support::assert_populated_event(&recent[0]);
+                    let row_count =
+                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_events_v1")
+                            .fetch_one(&fixture.pool)
+                            .await?;
+                    assert_eq!(row_count, 1);
+                    let read_back = storage
+                        .get_request_event(request_event_quota_support::SELECTED_EVENT_ID)
+                        .await?
+                        .expect("persisted request event");
+                    request_event_quota_support::assert_populated_event(&read_back);
 
                     let row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                         .bind(request_event_quota_support::SELECTED_EVENT_ID)

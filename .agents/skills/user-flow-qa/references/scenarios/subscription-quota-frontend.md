@@ -96,9 +96,6 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
     - `overage` card unchanged: renders when non-missing AND (`extra_usage_enabled` or `extra_usage_monthly_limit` set).
     - Card order follows `QUOTA_WINDOW_ORDER` (5h, 7d, 7d_sonnet, 7d_opus, 7d_fable, overage).
 
-### TC-3 — Retired: detail quota deficit + analysis caveats
-- The deficit card, caveats list, and `/subscription-quotas/analysis` endpoint were removed (2026-09-28). Nothing to execute; the number is kept so later TC references stay stable.
-
 ### TC-4 — Detail empty / loading states
 - Steps: (a) select an OAuth upstream with no quota rows; (b) observe during initial load.
 - Expected: (a) "No data in range" empty state in Quota History and/or
@@ -177,7 +174,6 @@ Legend: **Initial** = state before action · **Steps** = exact actions · **Expe
 |----|---------|--------|----------|
 | 1  | Detail Quota History range | **PASS** (gating) | post_{1h,6h,24h,7d}.png: x-spans 03:04–04:04 / 22:04–04:04 / 7/8–7/9 / 7/2–7/9 → 1h/6h/24h/7d, all distinct, no 16-day/6-23 stretch |
 | 2  | Detail snapshot cards | **PASS** | post_7d.png: 5H 59.0% / 7D 71.0% with meter + "live · Header · 16초 전" ("16 seconds ago"), no NaN/broken cards |
-| 3  | Detail deficit/analysis | Retired | surface and `/analysis` endpoint removed 2026-09-28 |
 | 4  | Detail empty/loading | N/A | code unchanged by fix; empty/skeleton paths not force-reproduced |
 | 5  | Overview pool quota | **PASS** (regression guard) | ov_post_{1h,7d}.png: 1h flat vs 7d dynamic, distinct spans, clean render; Overview code untouched |
 | 6  | Sidebar mini meters | **PASS** | /upstreams snapshot: per-window meters render (bh322yoo-max 5h 59% / 7d 72%, etc.) |
