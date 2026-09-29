@@ -742,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-admin"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "apalis-postgres",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-aead"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -823,7 +823,7 @@ version = "0.1.0"
 
 [[package]]
 name = "cc-lb-config"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "clap",
  "figment",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-control"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -882,7 +882,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-domain"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-engine"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-lifecycle"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "cc-lb-domain",
  "cc-lb-request-log",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-loadgen"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-oauth-protocol"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-observability"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "cc-lb-domain",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-pricing"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-property-tests"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "cc-lb-control",
@@ -1104,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-quota"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "cc-lb-domain",
  "cc-lb-storage-api",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-request-log"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "cc-lb-domain",
  "serde",
@@ -1125,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-routing"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "cc-lb-domain",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-scheduler"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "apalis",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-server"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "apalis-postgres",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-signer-anthropic-key"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-signer-anthropic-oauth"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1340,7 +1340,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-storage-api"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-storage-conformance"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-storage-postgres"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-storage-sqlite"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "cc-lb-aead",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-stress-suite"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "bytes",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-tls-tests"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "cc-lb-clock",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-upstream"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "fake-anthropic"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -3695,7 +3695,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-oauth-server"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -6095,7 +6095,7 @@ dependencies = [
 
 [[package]]
 name = "tests-integration"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "cc-lb-aead",
  "cc-lb-clock",
@@ -6118,14 +6118,14 @@ dependencies = [
 
 [[package]]
 name = "tests-loom"
-version = "0.8.1"
+version = "1.0.0"
 dependencies = [
  "loom",
 ]
 
 [[package]]
 name = "tests-multi-replica"
-version = "0.8.1"
+version = "1.0.0"
 
 [[package]]
 name = "thiserror"
