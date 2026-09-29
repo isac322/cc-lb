@@ -4,7 +4,7 @@
  "source_state": {
   "kind": "merged_master",
   "base_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
-  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree."
+  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits."
  },
  "response_observability": {
   "scope": "server_admin_listener",
@@ -582,40 +582,6 @@
   },
   {
    "method": "GET",
-   "path": "/admin/audit",
-   "source": "crates/cc-lb-admin/src/routes.rs:47",
-   "handler": "query_audit",
-   "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-   "ui_clients": [
-    "crates/cc-lb-admin/web/src/lib/queries.ts:730"
-   ],
-   "cache_or_no_query": "Single storage dispatch: actor_authority+actor_subject selects AuditQueryScope::Actor, principal_id selects AuditQueryScope::Principal, otherwise AuditQueryScope::All; all scopes call AuditStore::query_recent_audit(scope, since, until, limit, admin_only), which applies the scope filter and since/until bounds before LIMIT. admin_only (default false) adds the literal predicate (admin_action IS NOT NULL OR kind IS NOT NULL) before ORDER BY/LIMIT; the Admin Web audit page always sends admin_only=true. since is inclusive; after is an exclusive lower bound converted to since = max(since, after+1). Results are newest-first: ORDER BY ts DESC with id DESC (SQLite) / seq DESC (Postgres) tie-break. limit defaults to 100, capped at 1000; limit=0 or until<since returns empty without SQL.",
-   "side_effects": "Audit log write: record_admin_audit(\"audit_query\", \"/admin/v1/audit\")",
-   "storage_operation_ids": [
-    "sqlite:AuditStore::query_recent_audit:SqliteStorage::query_recent_audit",
-    "postgres:AuditStore::query_recent_audit:PostgresStorage::query_recent_audit",
-    "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-    "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "principal_id",
-     "since",
-     "after",
-     "until",
-     "limit",
-     "actor_authority",
-     "actor_subject",
-     "admin_only"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read_with_audit"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/audit",
    "source": "crates/cc-lb-admin/src/routes.rs:48",
    "handler": "query_audit",
@@ -655,37 +621,6 @@
    "handler": "crate::dashboard_routes::handle_dashboard_summary",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/dashboard/summary."
-   ],
-   "cache_or_no_query": "Reads usage-rollup checkpoint for weak ETag/304, then usage rollups and overview-excluded error buckets when a body is required.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint",
-    "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint",
-    "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range",
-    "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range",
-    "sqlite:UsageRollupStore::query_overview_excluded_error_buckets_in_range:SqliteStorage::query_overview_excluded_error_buckets_in_range",
-    "postgres:UsageRollupStore::query_overview_excluded_error_buckets_in_range:PostgresStorage::query_overview_excluded_error_buckets_in_range"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "range"
-    ],
-    "header": [
-     "if-none-match"
-    ],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/dashboard/summary",
-   "source": "crates/cc-lb-admin/src/dashboard_routes.rs:28",
-   "handler": "handle_dashboard_summary",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/queries.ts:376"
    ],
    "cache_or_no_query": "Reads usage-rollup checkpoint for weak ETag/304, then usage rollups and overview-excluded error buckets when a body is required.",
@@ -715,76 +650,6 @@
    "path": "/admin/v1/dashboard/usage",
    "source": "crates/cc-lb-admin/src/routes.rs:68",
    "handler": "crate::dashboard_routes::handle_dashboard_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/usage."
-   ],
-   "cache_or_no_query": "Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint",
-    "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint",
-    "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range",
-    "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range",
-    "sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs",
-    "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "range",
-     "group_by",
-     "step",
-     "upstream_id",
-     "projection"
-    ],
-    "header": [
-     "if-none-match"
-    ],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/dashboard/usage",
-   "source": "crates/cc-lb-admin/src/dashboard_routes.rs:29",
-   "handler": "handle_dashboard_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/usage."
-   ],
-   "cache_or_no_query": "Principal totals projection uses a short-TTL single-flight cache; other branches use checkpoint-based weak ETag/304. Body construction reads usage rollups and conditionally principal costs for group_by=principal.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UsageRollupStore::usage_rollup_checkpoint:SqliteStorage::usage_rollup_checkpoint",
-    "postgres:UsageRollupStore::usage_rollup_checkpoint:PostgresStorage::usage_rollup_checkpoint",
-    "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range",
-    "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range",
-    "sqlite:RequestEventStore::request_event_principal_costs:SqliteStorage::request_event_principal_costs",
-    "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "range",
-     "group_by",
-     "step",
-     "upstream_id",
-     "projection"
-    ],
-    "header": [
-     "if-none-match"
-    ],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/usage",
-   "source": "crates/cc-lb-admin/src/dashboard_routes.rs:30",
-   "handler": "handle_dashboard_usage",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/queries.ts:401"
@@ -822,46 +687,10 @@
    "handler": "crate::events_routes::handle_recent_events",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/events/recent."
-   ],
-   "cache_or_no_query": "Dynamic query builder branching based on filters: principal_id, thread_id, model, upstream, status_class, source_kind. Keysets: until_ts_ms, until_event_id",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:RequestEventStore::list_request_events:SqliteStorage::list_request_events",
-    "postgres:RequestEventStore::list_request_events:PostgresStorage::list_request_events"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "since_unix_secs",
-     "until_unix_secs",
-     "until_ts_ms",
-     "until_event_id",
-     "limit",
-     "principal_id",
-     "thread_id",
-     "model",
-     "upstream",
-     "upstream_id",
-     "status_class",
-     "source_kind"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/events/recent",
-   "source": "crates/cc-lb-admin/src/events_routes.rs:51",
-   "handler": "handle_recent_events",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/queries.ts:484",
     "crates/cc-lb-admin/web/src/lib/queries.ts:595"
    ],
-   "cache_or_no_query": "Dynamic filter queries",
+   "cache_or_no_query": "Dynamic query builder branching based on filters: principal_id, thread_id, model, upstream, status_class, source_kind. Keysets: until_ts_ms, until_event_id",
    "side_effects": "None",
    "storage_operation_ids": [
     "sqlite:RequestEventStore::list_request_events:SqliteStorage::list_request_events",
@@ -896,40 +725,6 @@
    "auth": "require_admin_auth middleware",
    "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/api.ts:712"
-   ],
-   "cache_or_no_query": "Computes time buckets and rejects requests exceeding MAX_HISTOGRAM_BUCKETS=240.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:RequestEventStore::request_event_histogram:SqliteStorage::request_event_histogram",
-    "postgres:RequestEventStore::request_event_histogram:PostgresStorage::request_event_histogram"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "since_unix_secs",
-     "until_unix_secs",
-     "bucket_ms",
-     "principal_id",
-     "thread_id",
-     "model",
-     "upstream",
-     "upstream_id",
-     "status_class",
-     "source_kind"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/events/histogram",
-   "source": "crates/cc-lb-admin/src/routes.rs:80",
-   "handler": "crate::events_routes::handle_events_histogram",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/events/histogram."
    ],
    "cache_or_no_query": "Computes time buckets and rejects requests exceeding MAX_HISTOGRAM_BUCKETS=240.",
    "side_effects": "None",
@@ -993,79 +788,9 @@
   },
   {
    "method": "GET",
-   "path": "/admin/events/delta",
-   "source": "crates/cc-lb-admin/src/events_routes.rs:52",
-   "handler": "handle_events_delta",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/events/delta."
-   ],
-   "cache_or_no_query": "Reads a storage cursor and cursor-bounded page. build_delta_events_payload in the admin layer then applies residual filters in memory (including excluding renewal source_kind by default); exhausted is computed from the pre-filter row count.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor",
-    "postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor",
-    "sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors",
-    "postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "since_cursor",
-     "limit",
-     "principal_id",
-     "thread_id",
-     "model",
-     "upstream",
-     "upstream_id",
-     "status_class",
-     "source_kind"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/events/stream",
    "source": "crates/cc-lb-admin/src/routes.rs:88",
    "handler": "crate::events_routes::handle_events_stream",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/events/stream."
-   ],
-   "cache_or_no_query": "SSE: reads the current cursor and performs one reconnect backfill bounded by BACKFILL_MAX_EVENTS=500; reaching the cap emits a backfill-cap reset, otherwise delivery continues from in-memory event-bus/storage-tail broadcasts with heartbeats.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:RequestEventStore::current_request_event_cursor:SqliteStorage::current_request_event_cursor",
-    "postgres:RequestEventStore::current_request_event_cursor:PostgresStorage::current_request_event_cursor",
-    "sqlite:RequestEventStore::query_request_events_between_cursors:SqliteStorage::query_request_events_between_cursors",
-    "postgres:RequestEventStore::query_request_events_between_cursors:PostgresStorage::query_request_events_between_cursors"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "principal_id",
-     "thread_id",
-     "model",
-     "upstream",
-     "upstream_id",
-     "status_class",
-     "source_kind"
-    ],
-    "header": [
-     "last-event-id"
-    ],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/events/stream",
-   "source": "crates/cc-lb-admin/src/events_routes.rs:53",
-   "handler": "handle_events_stream",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/api.ts:528",
@@ -1154,73 +879,12 @@
   },
   {
    "method": "GET",
-   "path": "/admin/subscription-quotas/latest",
-   "source": "crates/cc-lb-admin/src/subscription_quotas.rs:50",
-   "handler": "handle_latest",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/latest."
-   ],
-   "cache_or_no_query": "Reads upstream records for names/filtering; quota snapshots come from the in-memory dynamic subscription-quota cache.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UpstreamStore::list:SqliteStorage::list",
-    "postgres:UpstreamStore::list:PostgresStorage::list"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "upstream_ids",
-     "windows",
-     "source",
-     "max_staleness_secs"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/subscription-quotas/series",
    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:51",
    "handler": "handle_series",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/queries.ts:869"
-   ],
-   "cache_or_no_query": "Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UpstreamStore::list:SqliteStorage::list",
-    "postgres:UpstreamStore::list:PostgresStorage::list",
-    "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:SqliteStorage::list_subscription_quota_slim_checkpoints",
-    "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints:PostgresStorage::list_subscription_quota_slim_checkpoints"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "upstream_ids",
-     "windows",
-     "source",
-     "since_unix_secs",
-     "until_unix_secs",
-     "bucket_secs",
-     "max_points_per_series"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/subscription-quotas/series",
-   "source": "crates/cc-lb-admin/src/subscription_quotas.rs:52",
-   "handler": "handle_series",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/series."
    ],
    "cache_or_no_query": "Reads upstream records and slim subscription-quota checkpoints through UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_slim_checkpoints; the admin-local series helper builds buckets in memory. Empty upstream/window/source sets short-circuit without checkpoint SQL.",
    "side_effects": "None",
@@ -1284,81 +948,12 @@
   },
   {
    "method": "GET",
-   "path": "/admin/subscription-quotas/aggregate",
-   "source": "crates/cc-lb-admin/src/subscription_quotas.rs:57",
-   "handler": "handle_aggregate",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/aggregate."
-   ],
-   "cache_or_no_query": "Reads upstreams, subscription/organization metadata, provider-lot checkpoint history, and usage-rollup token sums for generated intervals; current quota candidates also come from the in-memory dynamic cache.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UpstreamStore::list:SqliteStorage::list",
-    "postgres:UpstreamStore::list:PostgresStorage::list",
-    "sqlite:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:SqliteStorage::list_upstream_subscription_metadata",
-    "postgres:UpstreamSubscriptionMetadataStore::list_upstream_subscription_metadata:PostgresStorage::list_upstream_subscription_metadata",
-    "sqlite:OrganizationMetadataStore::list_organization_metadata:SqliteStorage::list_organization_metadata",
-    "postgres:OrganizationMetadataStore::list_organization_metadata:PostgresStorage::list_organization_metadata",
-    "sqlite:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:SqliteStorage::list_subscription_quota_provider_lots",
-    "postgres:UpstreamSubscriptionQuotaAggregateStore::list_subscription_quota_provider_lots:PostgresStorage::list_subscription_quota_provider_lots",
-    "sqlite:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:SqliteStorage::sum_usage_tokens_for_intervals",
-    "postgres:UsageTokenIntervalStore::sum_usage_tokens_for_intervals:PostgresStorage::sum_usage_tokens_for_intervals"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "upstream_ids",
-     "windows",
-     "source",
-     "max_staleness_secs"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/subscription-quotas/pool-history",
    "source": "crates/cc-lb-admin/src/subscription_quotas.rs:61",
    "handler": "handle_pool_history",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
     "crates/cc-lb-admin/web/src/lib/queries.ts:981"
-   ],
-   "cache_or_no_query": "Always reads latest pooled summaries; series_projection=full reads raw summary rows, while chart reads raw or bucketed chart projections.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:SqliteStorage::list_latest_pool_quota_snapshot_summaries",
-    "postgres:PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries:PostgresStorage::list_latest_pool_quota_snapshot_summaries",
-    "sqlite:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:SqliteStorage::list_pool_quota_snapshot_summaries_in_range",
-    "postgres:PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range:PostgresStorage::list_pool_quota_snapshot_summaries_in_range",
-    "sqlite:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:SqliteStorage::list_pool_quota_chart_points_in_range",
-    "postgres:PoolQuotaHistoryStore::list_pool_quota_chart_points_in_range:PostgresStorage::list_pool_quota_chart_points_in_range"
-   ],
-   "parameters": {
-    "path": [],
-    "query": [
-     "windows",
-     "since_unix_secs",
-     "until_unix_secs",
-     "series_projection",
-     "max_points_per_series"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/subscription-quotas/pool-history",
-   "source": "crates/cc-lb-admin/src/subscription_quotas.rs:65",
-   "handler": "handle_pool_history",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: compatibility alias; built-in admin web calls /admin/v1/subscription-quotas/pool-history."
    ],
    "cache_or_no_query": "Always reads latest pooled summaries; series_projection=full reads raw summary rows, while chart reads raw or bucketed chart projections.",
    "side_effects": "None",
@@ -1700,94 +1295,12 @@
   },
   {
    "method": "GET",
-   "path": "/admin/principals/{id}/usage",
-   "source": "crates/cc-lb-admin/src/routes.rs:26",
-   "handler": "principal_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: principal-specific usage endpoint; no built-in admin web caller."
-   ],
-   "cache_or_no_query": "Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range",
-    "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-   ],
-   "parameters": {
-    "path": [
-     "id"
-    ],
-    "query": [
-     "range",
-     "step",
-     "group_by"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/v1/principals/{id}/usage",
-   "source": "crates/cc-lb-admin/src/routes.rs:28",
-   "handler": "principal_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: versioned principal-usage alias; no built-in admin web caller."
-   ],
-   "cache_or_no_query": "Validates the principal in the in-memory dynamic_view.principal_view before storage (404/no-query on miss), then reads usage rollups and filters the principal in memory.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:UsageRollupStore::query_usage_rollups_in_range:SqliteStorage::query_usage_rollups_in_range",
-    "postgres:UsageRollupStore::query_usage_rollups_in_range:PostgresStorage::query_usage_rollups_in_range"
-   ],
-   "parameters": {
-    "path": [
-     "id"
-    ],
-    "query": [
-     "range",
-     "step",
-     "group_by"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/principals/{id}/limits",
-   "source": "crates/cc-lb-admin/src/routes.rs:27",
-   "handler": "principal_limits",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: unversioned limits alias; built-in UI calls /admin/v1/principals/{id}/limits."
-   ],
-   "cache_or_no_query": "PURE IN-MEMORY PATH: reads dynamic_view.principal_view and takes an in-memory snapshot via state.limit_engine.snapshot_for_principal",
-   "side_effects": "None",
-   "storage_operation_ids": [],
-   "parameters": {
-    "path": [
-     "id"
-    ],
-    "query": [
-     "identity"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
    "path": "/admin/v1/principals/{id}/limits",
    "source": "crates/cc-lb-admin/src/routes.rs:29",
    "handler": "principal_limits",
    "auth": "require_admin_auth middleware",
    "ui_clients": [
-    "crates/cc-lb-admin/web/src/lib/queries.ts:437"
+    "backend-only: principal limits read endpoint; no built-in admin web caller."
    ],
    "cache_or_no_query": "In-memory dynamic_view + LimitEngine snapshot",
    "side_effects": "None",
@@ -1798,63 +1311,6 @@
     ],
     "query": [
      "identity"
-    ],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/principals/{id}/keys/{key_id}",
-   "source": "crates/cc-lb-admin/src/routes.rs:30",
-   "handler": "get_api_key",
-   "auth": "require_admin_auth + authorize(AdminAction::SensitiveRead)",
-   "ui_clients": [
-    "backend-only: individual managed-key detail endpoint; built-in UI reads the principal key collection."
-   ],
-   "cache_or_no_query": "Direct single-key lookup in ManagedKeyStore",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-    "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get"
-   ],
-   "parameters": {
-    "path": [
-     "id",
-     "key_id"
-    ],
-    "query": [],
-    "header": [],
-    "body": []
-   },
-   "risk_tier": "read"
-  },
-  {
-   "method": "GET",
-   "path": "/admin/principals/{id}/keys/{key_id}/usage",
-   "source": "crates/cc-lb-admin/src/routes.rs:43",
-   "handler": "principal_key_usage",
-   "auth": "require_admin_auth middleware",
-   "ui_clients": [
-    "backend-only: key-specific usage endpoint; no built-in admin web caller."
-   ],
-   "cache_or_no_query": "Validates the principal in in-memory dynamic_view.principal_view before storage (404/no-query on miss), then verifies the managed key, enforces the 7-day range maximum, and reads key-usage time buckets.",
-   "side_effects": "None",
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-    "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-    "sqlite:RequestEventStore::request_event_key_usage:SqliteStorage::request_event_key_usage",
-    "postgres:RequestEventStore::request_event_key_usage:PostgresStorage::request_event_key_usage"
-   ],
-   "parameters": {
-    "path": [
-     "id",
-     "key_id"
-    ],
-    "query": [
-     "range",
-     "step"
     ],
     "header": [],
     "body": []
@@ -2153,37 +1609,6 @@
       "76: .bind(entry.actor_email.as_deref())",
       "77: .bind(entry.kind.as_deref())",
       "78: .bind(payload)"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "postgres:AuditStore::query_audit:PostgresStorage::query_audit",
-   "engine": "postgres",
-   "trait_method": "AuditStore::query_audit",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-    "symbol": "PostgresStorage::query_audit",
-    "line_start": 134,
-    "line_end": 161,
-    "sha256": "cddddbbc69ae9e1ead02d545742e9d81d95ebe6afc7d2af88453d441b77c0e13"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/audit.rs",
-      "symbol": "query_audit",
-      "line_start": 150,
-      "line_end": 150
-     },
-     "branches": [],
-     "bind_parameters": [
-      "152: .bind(since)",
-      "153: .bind(until)",
-      "154: .bind(principal_id)",
-      "155: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
      ]
     }
    ]
@@ -3047,32 +2472,6 @@
      "bind_parameters": [
       "148: .bind(u64_to_i64(limit as u64, \"history limit\")?)"
      ]
-    }
-   ]
-  },
-  {
-   "id": "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-   "engine": "postgres",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-    "symbol": "PostgresManagedKeyStore::get",
-    "line_start": 93,
-    "line_end": 112,
-    "sha256": "724f8c19ed51b5c9ca3691d660388b9d5134bf52f125555f7c73c1e2a8c7d376"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 280,
-      "line_end": 282
-     },
-     "branches": [],
-     "bind_parameters": []
     }
    ]
   },
@@ -3949,40 +3348,6 @@
    ]
   },
   {
-   "id": "postgres:RequestEventStore::request_event_key_usage:PostgresStorage::request_event_key_usage",
-   "engine": "postgres",
-   "trait_method": "RequestEventStore::request_event_key_usage",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/request_events.rs",
-    "symbol": "PostgresStorage::request_event_key_usage",
-    "line_start": 242,
-    "line_end": 247,
-    "sha256": "bd106712a3cc0f8a24e665d2979e318634df25400d0d7a814ae1a6da7309d17b"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT LEAST(((list_ts_ms - $1) / $2), $3)::bigint AS bucket_index, COUNT(*)::bigint AS request_count, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)), 0)::bigint AS input_tokens, COALESCE(SUM(COALESCE(output_tokens, 0)), 0)::bigint AS output_tokens, COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0)::bigint AS cost_usd_micros FROM request_events_v1 WHERE principal_id = $4 AND key_id = $5 AND list_ts_ms BETWEEN $6 AND $7 GROUP BY bucket_index",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/request_events.rs",
-      "symbol": "request_event_key_usage",
-      "line_start": 333,
-      "line_end": 344
-     },
-     "branches": [],
-     "bind_parameters": [
-      "346: .bind(u64_to_i64(",
-      "350: .bind(u64_to_i64(query.step_ms, \"request event key usage step\")?)",
-      "351: .bind(u64_to_i64(",
-      "355: .bind(query.principal_id.as_str())",
-      "356: .bind(query.key_id.as_str())",
-      "357: .bind(u64_to_i64(",
-      "361: .bind(u64_to_i64("
-     ]
-    }
-   ]
-  },
-  {
    "id": "postgres:RequestEventStore::request_event_principal_costs:PostgresStorage::request_event_principal_costs",
    "engine": "postgres",
    "trait_method": "RequestEventStore::request_event_principal_costs",
@@ -4778,38 +4143,6 @@
       "233: .bind(entry.actor_email.as_deref())",
       "234: .bind(entry.kind.as_deref())",
       "235: .bind(payload.as_deref())"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "sqlite:AuditStore::query_audit:SqliteStorage::query_audit",
-   "engine": "sqlite",
-   "trait_method": "AuditStore::query_audit",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-    "symbol": "SqliteStorage::query_audit",
-    "line_start": 29,
-    "line_end": 59,
-    "sha256": "2ff40f7c2aaf5545e2a23a164ce4861bea96b12014623a865a1e8e5af83d1131"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, actor_email, kind, payload FROM audit_log_v1 WHERE ts >= ? AND ts <= ? AND (? IS NULL OR principal_id = ?) ORDER BY id ASC LIMIT ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/audit.rs",
-      "symbol": "query_audit",
-      "line_start": 41,
-      "line_end": 47
-     },
-     "branches": [],
-     "bind_parameters": [
-      "49: .bind(u64_to_i64(since, \"audit since\")?)",
-      "50: .bind(u64_to_i64_upper(until))",
-      "51: .bind(principal_id)",
-      "52: .bind(principal_id)",
-      "53: .bind(u64_to_i64(limit as u64, \"audit limit\")?)"
      ]
     }
    ]
@@ -5661,32 +4994,6 @@
    ]
   },
   {
-   "id": "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-   "engine": "sqlite",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "symbol": "SqliteStorage::get",
-    "line_start": 48,
-    "line_end": 64,
-    "sha256": "81d0988c73bb03a72a43d0fafb2e641502c8a0e1c518398044c411aa601785ad"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, description, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 140,
-      "line_end": 142
-     },
-     "branches": [],
-     "bind_parameters": []
-    }
-   ]
-  },
-  {
    "id": "sqlite:ManagedKeyStore::list_all:SqliteStorage::list_all",
    "engine": "sqlite",
    "trait_method": "ManagedKeyStore::list_all",
@@ -6244,40 +5551,6 @@
       "241: .bind(query.principal_id.as_str())",
       "242: .bind(u64_to_i64(",
       "246: .bind(u64_to_i64_upper(query.until_unix_secs))"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "sqlite:RequestEventStore::request_event_key_usage:SqliteStorage::request_event_key_usage",
-   "engine": "sqlite",
-   "trait_method": "RequestEventStore::request_event_key_usage",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/request_events.rs",
-    "symbol": "SqliteStorage::request_event_key_usage",
-    "line_start": 185,
-    "line_end": 194,
-    "sha256": "5eb8bf3976632c029491303b2ff41142e1727cea3df022d540b8bfca6c83358e"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT MIN(((list_ts_ms - ?) / ?), ?) AS bucket_index, COUNT(*) AS request_count, COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_creation_input_tokens, 0) + COALESCE(cache_read_input_tokens, 0)), 0) AS input_tokens, COALESCE(SUM(COALESCE(output_tokens, 0)), 0) AS output_tokens, COALESCE(SUM(COALESCE(list_cost_usd_micros, 0)), 0) AS cost_usd_micros FROM request_events_v1 WHERE principal_id = ? AND key_id = ? AND list_ts_ms >= ? AND list_ts_ms <= ? GROUP BY bucket_index",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/request_events.rs",
-      "symbol": "request_event_key_usage",
-      "line_start": 284,
-      "line_end": 296
-     },
-     "branches": [],
-     "bind_parameters": [
-      "298: .bind(u64_to_i64(",
-      "302: .bind(u64_to_i64(query.step_ms, \"request event key usage step\")?)",
-      "303: .bind(u64_to_i64(",
-      "307: .bind(query.principal_id.as_str())",
-      "308: .bind(query.key_id.as_str())",
-      "309: .bind(u64_to_i64(",
-      "313: .bind(u64_to_i64_upper(query.range_end_ms))"
      ]
     }
    ]

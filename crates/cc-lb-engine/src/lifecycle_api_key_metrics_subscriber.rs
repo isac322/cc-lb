@@ -335,7 +335,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,
@@ -348,7 +347,7 @@ mod tests {
     }
 
     fn bus() -> Arc<dyn RequestEventBus> {
-        Arc::new(crate::event_bus::InMemoryBus::new())
+        Arc::new(cc_lb_control::event_bus::InMemoryBus::new())
     }
 
     #[tokio::test(flavor = "current_thread")]

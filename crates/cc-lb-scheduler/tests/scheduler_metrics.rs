@@ -15,7 +15,6 @@ use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJob;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
-use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJob;
 use cc_lb_scheduler::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
@@ -97,6 +96,12 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
         pool.clone(),
         Arc::new(SystemClock),
     ));
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        stop.cancel();
+    });
     build_adaptive_worker(
         &backend,
         SchedulerCtx::new(
@@ -106,7 +111,7 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
             Arc::new(SystemClock),
         ),
     )?
-    .run_for(Duration::from_secs(5))
+    .run_until_cancelled(cancel)
     .await?;
     Ok(())
 }
@@ -198,11 +203,10 @@ fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     ]
 }
 
-fn singleton_jobs() -> [CronJob; 8] {
+fn singleton_jobs() -> [CronJob; 7] {
     [
         CronJob::UsageRollup(UsageRollupTask::default()),
         CronJob::UsagePrune(UsagePruneJob::default()),
-        CronJob::QuotaGc(SubscriptionQuotaGcJob::default()),
         CronJob::PromptCachePurge(PromptCacheObservationPurgeJob::default()),
         CronJob::UpstreamAffinityPurge(UpstreamAffinityPurgeJob::default()),
         CronJob::PriceCatalogRefresh(PriceCatalogRefreshJob::default()),

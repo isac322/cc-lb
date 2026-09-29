@@ -4,13 +4,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;
 use url::Url;
@@ -157,7 +156,6 @@ fn build_lifecycle_from(
     });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(NoopRouter))
         .principal_view(principal_view)
         .upstream_records(upstream_records)
         .build();
@@ -166,7 +164,7 @@ fn build_lifecycle_from(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -282,20 +280,5 @@ impl FilterPlugin for IndexKeepingFilter {
 
     fn plugin_name(&self) -> &str {
         self.name
-    }
-}
-
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "test router should not be called by preview_route".to_owned(),
-        })
     }
 }

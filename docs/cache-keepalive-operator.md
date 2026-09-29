@@ -117,35 +117,19 @@ Prometheus surface:
   `"stale"`, `"noop"`, or `"decrypt_failed"`.
 - `cc_lb_cache_keepalive_cancelled_total{principal_id, reason}` — a
   session was torn down. `reason` values:
-  - `new_request` — a fresh real request superseded the pending
-    keep-alive.
-  - `no_cache_control` — the tracked request no longer carries a
-    `cache_control` breakpoint.
-  - `max_refreshes` — hit `max_refreshes_per_session`.
-  - `max_duration` — hit `max_total_duration_secs`.
   - `user_turn_detected` — the classifier decided the user is now up.
   - `snapshot_too_large` — shaped body exceeded `snapshot_max_bytes`.
-  - `upstream_gone` — dispatch returned an error, unreachable upstream,
-    or a provider-gated upstream kind.
-  - `shutdown` — the server drained on `SIGTERM`.
-  - `process_cap_exceeded` — the process-wide active-session hard cap
-    (10 000 sessions) was hit; new sessions are refused until existing
-    ones drain.
 - `cc_lb_cache_keepalive_classifier_decisions_total{decision, source}` —
   every classifier verdict. `decision` is `"user_turn"`, `"agent_in_turn"`,
-  or `"ambiguous"`. `source` is currently `"heuristic"`; `"llm"` is reserved
-  for the future judge implementation. Not labelled by `principal_id` —
-  aggregate over the whole process.
-- `cc_lb_cache_keepalive_llm_latency_seconds` — reserved histogram for the
-  future LLM judge. It has zero samples in this release because non-null
-  `classifier.llm_judge` is rejected by the admin API.
+  or `"ambiguous"`. `source` is always `"heuristic"`. Not labelled by
+  `principal_id` — aggregate over the whole process.
 - `cc_lb_cache_keepalive_active_sessions{principal_id}` — gauge of
   currently-scheduled sessions.
 
 Interpretation shortcuts:
 
 - Steady growth in `active_sessions` without matching
-  `cancelled_total{reason=new_request}` = the classifier is over-firing.
+  `cancelled_total{reason=user_turn_detected}` = the classifier is over-firing.
   Add tool names to `extra_wait_for_user_tools` or lower
   `max_refreshes_per_session`.
 - `fired_total{result=miss}` spiking = requests are being evicted between

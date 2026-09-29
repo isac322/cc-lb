@@ -43,7 +43,6 @@ async fn fake_anthropic_accepts_signed_request() {
     let principal = Principal {
         id: "alice".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let shaped = shape_request(
         &E2EDialect,

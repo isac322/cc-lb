@@ -9,11 +9,11 @@ use std::thread::JoinHandle as ThreadJoinHandle;
 
 use cc_lb_aead::AeadService;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
-    UpstreamStore, principal::Limit,
+    MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    principal::Limit,
 };
 
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -310,22 +310,8 @@ async fn spawn_test_server_attempt(
     })
 }
 
-pub fn free_addr() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
-    listener.local_addr().expect("free local addr")
-}
-
 fn reserve_addr() -> StdTcpListener {
     StdTcpListener::bind("127.0.0.1:0").expect("reserve free port")
-}
-
-fn write_config(
-    path: &Path,
-    proxy_addr: SocketAddr,
-    admin_addr: SocketAddr,
-    metrics_addr: SocketAddr,
-) {
-    write_config_with_extra(path, proxy_addr, admin_addr, metrics_addr, "", 256)
 }
 
 fn write_config_with_extra(
@@ -404,15 +390,12 @@ async fn seed_storage(
 ) -> ManagedTestKey {
     let database_url = format!("sqlite://{}", storage_path.display());
     let storage = std::sync::Arc::new(
-        open_sqlite(
-            &database_url,
-            std::sync::Arc::new(cc_lb_engine::SystemClock),
-        )
-        .await
-        .expect("test storage opens"),
+        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("test storage opens"),
     );
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("test storage initializes");
     // The spawned server reads CC_LB_MASTER_KEY (64 zero hex chars) in
@@ -471,7 +454,7 @@ async fn seed_storage(
         .await
         .expect("seed managed key");
     let (key_id, _) =
-        cc_lb_engine::api_keys::secret::parse(plaintext.expose()).expect("generated key parses");
+        cc_lb_control::api_keys::secret::parse(plaintext.expose()).expect("generated key parses");
     ManagedTestKey {
         key_id,
         plaintext: plaintext.expose().to_owned(),
@@ -484,19 +467,6 @@ fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
         .and_then(|raw| raw.parse::<u64>().ok())
         .map(std::time::Duration::from_secs)
         .unwrap_or(default)
-}
-
-async fn wait_for_proxy_ready(addr: SocketAddr, managed_key: &ManagedTestKey) {
-    wait_for_status_with_request(
-        addr,
-        "/v1/models",
-        200,
-        &format!(
-            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {}\r\nConnection: close\r\n\r\n",
-            managed_key.plaintext
-        ),
-    )
-    .await;
 }
 
 async fn wait_for_proxy_ready_or_exit(
@@ -577,33 +547,6 @@ fn startup_failure_for_exit(exit_status: ExitStatus, stderr: String) -> StartupF
             "cc-lb child exited before becoming ready: {exit_status}\nstderr:\n{stderr}"
         ),
         address_in_use,
-    }
-}
-
-async fn wait_for_status_with_request(addr: SocketAddr, path: &str, status: u16, request: &str) {
-    let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
-    loop {
-        let last = match raw_http(addr, request).await {
-            Ok(response) => {
-                let last = format!("status={} body={}", response.status, response.body);
-                if response.status == status {
-                    return;
-                }
-                last
-            }
-            Err(error) => format!("error={error}"),
-        };
-        if std::time::Instant::now() >= deadline {
-            eprintln!(
-                "server did not become ready at http://{addr}{path}; expected status {status}; last {}",
-                last
-            );
-            panic!(
-                "server did not become ready at http://{addr}{path}; expected status {status}; last {}",
-                last
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -697,9 +640,4 @@ fn split_response(text: &str) -> (String, String) {
         Some((headers, body)) => (headers.to_owned(), body.to_owned()),
         _ => (text.to_owned(), String::new()),
     }
-}
-
-#[allow(dead_code)]
-pub fn config_path(dir: &TempDir) -> PathBuf {
-    dir.path().join("cc-lb.toml")
 }

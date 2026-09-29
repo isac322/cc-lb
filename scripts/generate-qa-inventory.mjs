@@ -18,7 +18,6 @@ const contractPaths = {
   ui: path.join(contractsDir, 'ui.json'),
   read: path.join(contractsDir, 'api-read.json'),
   write: path.join(contractsDir, 'api-write.json'),
-  deployedDelta: path.join(contractsDir, 'deployed-delta.json'),
 };
 const checkOnly = process.argv.includes('--check');
 const RISK_TIERS = new Set([
@@ -403,7 +402,6 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
       'source_files',
       'route_denominator',
       'coverage_dimensions',
-      'legacy_id_mapping',
       'items',
       'gaps',
     ],
@@ -416,7 +414,6 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
     [
       'source_reconciled',
       'runtime_status',
-      'production_applicability',
       'static_catalog_limitations',
     ],
     'ui.metadata',
@@ -474,7 +471,6 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
   const ids = new Map();
   const sourceIds = new Set();
   const requestKeys = [];
-  const legacyClaims = new Map();
   for (const [index, item] of (ui.items ?? []).entries()) {
     const context = `ui.items[${index}]`;
     requiredFields(
@@ -482,7 +478,6 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
       [
         'id',
         'source_id',
-        'legacy_ids',
         'page',
         'component',
         'source',
@@ -520,27 +515,15 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
       item.atomic_request_ids,
       `${context}.atomic_request_ids`,
     );
-    requireStringArray(item.legacy_ids, `${context}.legacy_ids`);
-    for (const legacyId of item.legacy_ids ?? []) {
-      if (legacyClaims.has(legacyId))
-        fail(
-          `legacy ID ${legacyId} is claimed by both ${legacyClaims.get(legacyId)} and ${item.source_id}`,
-        );
-      legacyClaims.set(legacyId, item.source_id);
-    }
     if (!RISK_TIERS.has(item.risk_tier))
       fail(`${context}.risk_tier is invalid: ${item.risk_tier}`);
     requiredFields(
       item.applicability,
-      ['latest_source', 'production'],
+      ['latest_source'],
       `${context}.applicability`,
     );
     if (item.applicability?.latest_source !== true)
       fail(`${context}.applicability.latest_source must be true`);
-    if (item.applicability?.production !== 'pending_deployed_delta')
-      fail(
-        `${context}.applicability.production must remain pending_deployed_delta in the source catalog`,
-      );
     validateSourceReference(item.source, `${context}.source`, sourceManifest);
     if (!Array.isArray(item.requests))
       fail(`${context}.requests must be an array`);
@@ -601,15 +584,11 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
         fail(`${requestContext}.risk_tier is invalid: ${request.risk_tier}`);
       requiredFields(
         request.applicability,
-        ['latest_source', 'production'],
+        ['latest_source'],
         `${requestContext}.applicability`,
       );
       if (request.applicability?.latest_source !== true)
         fail(`${requestContext}.applicability.latest_source must be true`);
-      if (request.applicability?.production !== 'pending_deployed_delta')
-        fail(
-          `${requestContext}.applicability.production must remain pending_deployed_delta in the source catalog`,
-        );
       validateSourceReference(
         request.source,
         `${requestContext}.source`,
@@ -634,60 +613,6 @@ function validateUi(ui, discoveredSources, discoveredRoutes) {
         `${context} has requests but is marked client-only without documenting the request transition`,
       );
     }
-  }
-  const legacyIds = new Set();
-  for (const [index, mapping] of (ui.legacy_id_mapping ?? []).entries()) {
-    requiredFields(
-      mapping,
-      ['legacy_id', 'status'],
-      `ui.legacy_id_mapping[${index}]`,
-    );
-    if (legacyIds.has(mapping.legacy_id))
-      fail(`duplicate legacy ID mapping: ${mapping.legacy_id}`);
-    legacyIds.add(mapping.legacy_id);
-    if (
-      ![
-        'preserved',
-        'preserved_alias',
-        'moved_to_api_catalog',
-        'retired',
-      ].includes(mapping.status)
-    ) {
-      fail(
-        `invalid legacy mapping status for ${mapping.legacy_id}: ${mapping.status}`,
-      );
-    }
-    if (mapping.status === 'retired' && !mapping.retired_reason)
-      fail(`retired legacy ID lacks retired_reason: ${mapping.legacy_id}`);
-    if (['preserved', 'preserved_alias'].includes(mapping.status)) {
-      if (!mapping.canonical_id || !ids.has(mapping.canonical_id))
-        fail(
-          `legacy mapping ${mapping.legacy_id} references an unknown canonical_id`,
-        );
-      if (!mapping.source_id || !sourceIds.has(mapping.source_id))
-        fail(
-          `legacy mapping ${mapping.legacy_id} references an unknown source_id`,
-        );
-    }
-    if (mapping.status === 'moved_to_api_catalog')
-      requiredFields(
-        mapping.endpoint,
-        ['method', 'path'],
-        `ui.legacy_id_mapping[${index}].endpoint`,
-      );
-  }
-  for (const [legacyId, sourceId] of legacyClaims) {
-    const mapping = (ui.legacy_id_mapping ?? []).find(
-      (entry) => entry.legacy_id === legacyId,
-    );
-    if (!mapping)
-      fail(
-        `item ${sourceId} claims legacy ID ${legacyId} without a legacy_id_mapping entry`,
-      );
-    else if (mapping.source_id !== sourceId)
-      fail(
-        `item ${sourceId} claims legacy ID ${legacyId}, but mapping assigns it to ${mapping.source_id}`,
-      );
   }
   const dimensionIds = new Set();
   const gapIds = new Set();
@@ -1037,175 +962,6 @@ function validateBackendDenominator(discovered, endpoints) {
   return { missingFromCatalog, missingFromRegistration };
 }
 
-function parseDeployedDelta(delta, ui) {
-  if (!delta) {
-    const pending = () => ({
-      status: 'pending_deployed_delta',
-      reason: 'deployed-delta.json not supplied',
-    });
-    return {
-      delta: null,
-      statusFor: pending,
-      latestOnlyUi: [],
-      latestOnlyApi: [],
-      unknownLatestOnlySourceIds: [],
-      unknownLatestOnlyEndpoints: [],
-      deployedOnlyItems: [],
-      deployedOnlyEndpoints: [],
-      classificationNotes: [],
-    };
-  }
-  requiredFields(
-    delta,
-    [
-      'deployed_commit',
-      'source_commit',
-      'added_since_deploy',
-      'removed_since_deploy',
-      'changed_contracts',
-      'deployed_only_items',
-      'deployed_only_endpoints',
-      'source_files',
-      'unread_files',
-      'gaps',
-    ],
-    'deployed_delta',
-  );
-  requireString(delta.deployed_commit, 'deployed_delta.deployed_commit');
-  requireString(delta.source_commit, 'deployed_delta.source_commit');
-  if (!delta.source_commit.startsWith(ui.source_commit))
-    fail(
-      `deployed_delta.source_commit ${delta.source_commit} does not match UI source commit ${ui.source_commit}`,
-    );
-  for (const field of [
-    'added_since_deploy',
-    'removed_since_deploy',
-    'changed_contracts',
-    'deployed_only_items',
-    'deployed_only_endpoints',
-    'source_files',
-    'unread_files',
-    'gaps',
-  ]) {
-    if (!Array.isArray(delta[field]))
-      fail(`deployed_delta.${field} must be an array`);
-  }
-  if ((delta.unread_files ?? []).length > 0)
-    fail(
-      `deployed delta has unread source files: ${delta.unread_files.join(', ')}`,
-    );
-  if ((delta.gaps ?? []).length > 0)
-    fail('deployed delta contains unresolved gaps');
-  const deltaSourceFiles = new Set(delta.source_files ?? []);
-  for (const [index, entry] of (delta.added_since_deploy ?? []).entries()) {
-    const sources = [
-      ...(entry.source && typeof entry.source === 'object'
-        ? [entry.source]
-        : []),
-      ...(entry.sources ?? []),
-    ];
-    for (const [sourceIndex, source] of sources.entries()) {
-      const context = `deployed_delta.added_since_deploy[${index}].sources[${sourceIndex}]`;
-      if (source && Object.hasOwn(source, 'line'))
-        validateSourceReference(source, context, deltaSourceFiles);
-      else validateApiSourceObject(source, context, deltaSourceFiles, true);
-    }
-  }
-  const aliases = new Map(
-    (ui.normalization?.deployed_delta_source_aliases ?? []).map((entry) => [
-      entry.delta_source_id,
-      entry.canonical_source_id,
-    ]),
-  );
-  const latestOnlyUi = (delta.added_since_deploy ?? []).filter(
-    (entry) => entry.type === 'ui',
-  );
-  const latestOnlyApi = (delta.added_since_deploy ?? []).filter(
-    (entry) => entry.type === 'api',
-  );
-  const unavailableSourceIds = new Set(
-    latestOnlyUi.map(
-      (entry) => aliases.get(entry.source_id) ?? entry.source_id,
-    ),
-  );
-  const unavailableRouteKeys = new Set(
-    latestOnlyApi.map((entry) => routeKey(entry.method, entry.path)),
-  );
-  const overrides = new Map();
-  for (const entry of delta.items ?? []) {
-    if (entry.source_id)
-      overrides.set(
-        `source:${aliases.get(entry.source_id) ?? entry.source_id}`,
-        entry,
-      );
-    if (entry.method && entry.path)
-      overrides.set(`route:${routeKey(entry.method, entry.path)}`, entry);
-  }
-  const statusFor = (item, request) => {
-    const sourceOverride = overrides.get(`source:${item.source_id}`);
-    const routeOverride = request
-      ? overrides.get(
-          `route:${routeKey(request.method, request.path ?? request.endpoint)}`,
-        )
-      : null;
-    const override = sourceOverride ?? routeOverride;
-    if (override)
-      return {
-        status:
-          override.status ??
-          (override.applicable === false ||
-          override.production_applicability === false
-            ? 'not_deployed'
-            : 'available'),
-        reason: override.reason ?? null,
-      };
-    if (unavailableSourceIds.has(item.source_id))
-      return {
-        status: 'not_deployed',
-        reason: `Added after deployed commit ${delta.deployed_commit.slice(0, 8)}`,
-      };
-    if (
-      request &&
-      unavailableRouteKeys.has(
-        routeKey(request.method, request.path ?? request.endpoint),
-      )
-    )
-      return {
-        status: 'not_deployed',
-        reason: `Endpoint added after deployed commit ${delta.deployed_commit.slice(0, 8)}`,
-      };
-    return { status: 'available', reason: null };
-  };
-  const currentSourceIds = new Set(ui.items.map((item) => item.source_id));
-  const currentEndpointKeys = new Set();
-  const unknownLatestOnlySourceIds = [...unavailableSourceIds].filter(
-    (sourceId) => !currentSourceIds.has(sourceId),
-  );
-  const unknownLatestOnlyEndpoints = [];
-  return {
-    delta,
-    statusFor,
-    latestOnlyUi,
-    latestOnlyApi,
-    unknownLatestOnlySourceIds,
-    unknownLatestOnlyEndpoints,
-    deployedOnlyItems: delta.deployed_only_items ?? [],
-    deployedOnlyEndpoints: delta.deployed_only_endpoints ?? [],
-    classificationNotes: [
-      ...(delta.changed_contracts ?? []).map((entry) => ({
-        classification: 'changed_since_deploy',
-        ...entry,
-      })),
-      ...(delta.removed_since_deploy ?? []).map((entry) => ({
-        classification: 'removed_since_deploy',
-        ...entry,
-      })),
-    ],
-    aliases,
-    currentEndpointKeys,
-  };
-}
-
 function isBlockingApiGap(gap) {
   return (
     gap.blocking === true ||
@@ -1214,18 +970,11 @@ function isBlockingApiGap(gap) {
   );
 }
 
-function normalizeRiskTier(value) {
-  if (value === 'write') return 'reversible_write';
-  if (value === 'destructive') return 'destructive_write';
-  return RISK_TIERS.has(value) ? value : 'read';
-}
-
 function buildInventory(
   ui,
   apiEndpoints,
   apiOperations,
   apiGaps,
-  deployment,
   sourceStatus,
   responseObservability,
 ) {
@@ -1245,57 +994,10 @@ function buildInventory(
       [],
     ]),
   );
-  const deployedEndpointByKey = new Map(
-    deployment.deployedOnlyEndpoints.map((endpoint) => [
-      routeKey(endpoint.method, endpoint.path),
-      endpoint,
-    ]),
-  );
-  const deployedEndpointClients = new Map(
-    deployment.deployedOnlyEndpoints.map((endpoint) => [
-      routeKey(endpoint.method, endpoint.path),
-      [],
-    ]),
-  );
-  const aliasesByCanonical = new Map();
-  for (const mapping of ui.legacy_id_mapping) {
-    if (mapping.status !== 'preserved_alias' || !mapping.canonical_id) continue;
-    const aliases = aliasesByCanonical.get(mapping.canonical_id) ?? [];
-    aliases.push(mapping.legacy_id);
-    aliasesByCanonical.set(mapping.canonical_id, aliases);
-  }
   const interactions = [];
   for (const item of ui.items) {
-    const requestDeployments = item.requests.map((request) =>
-      deployment.statusFor(item, request),
-    );
-    let actionDeployment = deployment.statusFor(item, null);
-    if (
-      deployment.delta &&
-      actionDeployment.status === 'available' &&
-      requestDeployments.length > 0
-    ) {
-      if (
-        requestDeployments.every((status) => status.status === 'not_deployed')
-      ) {
-        actionDeployment = {
-          status: 'not_deployed',
-          reason:
-            'Every atomic request for this action is absent from the deployed API.',
-        };
-      } else if (
-        requestDeployments.some((status) => status.status === 'not_deployed')
-      ) {
-        actionDeployment = {
-          status: 'partially_deployed',
-          reason:
-            'At least one atomic request branch is absent from the deployed API.',
-        };
-      }
-    }
     interactions.push({
       id: item.id,
-      aliases: aliasesByCanonical.get(item.id) ?? [],
       entry_type: 'ui_action',
       source_id: item.source_id,
       category: item.contract_area,
@@ -1316,16 +1018,13 @@ function buildInventory(
       source: item.source,
       source_reconciled: true,
       runtime_status: 'runtime_pending',
-      production_applicability: actionDeployment,
     });
-    for (const [requestIndex, request] of item.requests.entries()) {
+    for (const request of item.requests) {
       const key = routeKey(request.method, request.path);
       const endpoint = endpointByKey.get(key);
       if (endpoint) endpointClients.get(key).push(item.source_id);
-      const requestDeployment = requestDeployments[requestIndex];
       interactions.push({
         id: request.id,
-        aliases: aliasesByCanonical.get(request.id) ?? [],
         entry_type: 'network_request',
         parent_action_id: item.id,
         source_id: item.source_id,
@@ -1362,148 +1061,15 @@ function buildInventory(
         side_effects: endpoint?.side_effects ?? request.side_effect_notes,
         source_reconciled: Boolean(endpoint),
         runtime_status: 'runtime_pending',
-        production_applicability: requestDeployment,
       });
     }
   }
-  for (const item of deployment.deployedOnlyItems) {
-    const actionId = stableId('PROD-UI', item.source_id);
-    const requestIds = (item.requests ?? []).map((request, index) =>
-      stableId(
-        'PROD-REQ',
-        `${item.source_id}|${index}|${request.method}|${request.endpoint}`,
-      ),
-    );
-    interactions.push({
-      id: actionId,
-      aliases: [],
-      entry_type: 'ui_action',
-      source_catalog: 'deployed_only',
-      source_commit: deployment.delta.deployed_commit,
-      source_id: item.source_id,
-      category: 'production_only',
-      page: item.page,
-      component: item.component,
-      name: item.name,
-      trigger_steps: item.trigger_steps ?? [],
-      preconditions: item.preconditions ?? [],
-      variants: item.variants ?? [],
-      scope: item.scope,
-      iteration_source: item.iteration_source,
-      atomic_request_ids: requestIds,
-      risk_tier: normalizeRiskTier(item.risk_tier),
-      expected_ui: item.expected_ui,
-      polling: item.polling ?? 'not_applicable',
-      client_only_reason: item.client_only_reason ?? null,
-      source: item.source,
-      source_reconciled: true,
-      runtime_status: 'runtime_pending',
-      production_applicability: {
-        status: 'available',
-        reason: 'Present only in the deployed production commit.',
-      },
-    });
-    for (const [index, request] of (item.requests ?? []).entries()) {
-      const requestPath = normalizeWirePath(request.endpoint);
-      const key = routeKey(request.method, requestPath);
-      const deployedEndpoint = deployedEndpointByKey.get(key);
-      const currentEndpoint = endpointByKey.get(key);
-      if (deployedEndpoint)
-        deployedEndpointClients.get(key).push(item.source_id);
-      interactions.push({
-        id: requestIds[index],
-        aliases: [],
-        entry_type: 'network_request',
-        source_catalog: 'deployed_only',
-        source_commit: deployment.delta.deployed_commit,
-        parent_action_id: actionId,
-        source_id: item.source_id,
-        category: 'production_only',
-        page: item.page,
-        component: item.component,
-        name: `${item.name} — ${request.client_symbol}`,
-        trigger_steps: item.trigger_steps ?? [],
-        preconditions: item.preconditions ?? [],
-        variants: item.variants ?? [],
-        scope: item.scope,
-        iteration_source: item.iteration_source,
-        risk_tier: normalizeRiskTier(item.risk_tier),
-        expected_ui: item.expected_ui,
-        polling: item.polling ?? 'not_applicable',
-        source: request.source,
-        http: {
-          method: request.method,
-          path: requestPath,
-          path_bindings: [...requestPath.matchAll(/\{([^}]+)\}/g)].map(
-            (match) => ({
-              name: match[1],
-              source: `deployed_runtime.${match[1]}`,
-              format: 'source_identifier',
-            }),
-          ),
-          query_fields: request.query_fields ?? [],
-          body_fields: request.body_fields ?? [],
-          header_fields: currentEndpoint
-            ? parameterNames(
-                currentEndpoint.parameters.header,
-                `deployed join ${request.method} ${requestPath} headers`,
-              )
-            : [],
-          condition: null,
-        },
-        client_symbol: request.client_symbol,
-        api_handler:
-          deployedEndpoint?.handler ?? currentEndpoint?.handler ?? null,
-        auth: deployedEndpoint?.auth ?? currentEndpoint?.auth ?? null,
-        storage_operation_ids: currentEndpoint?.storage_operation_ids ?? [],
-        cache_or_no_query:
-          deployedEndpoint?.storage?.join?.('; ') ??
-          currentEndpoint?.cache_or_no_query ??
-          null,
-        side_effects:
-          request.side_effect_notes ??
-          deployedEndpoint?.description ??
-          currentEndpoint?.side_effects ??
-          null,
-        source_reconciled: Boolean(deployedEndpoint || currentEndpoint),
-        runtime_status: 'runtime_pending',
-        production_applicability: {
-          status: 'available',
-          reason: 'Present only in the deployed production commit.',
-        },
-      });
-    }
-  }
-  const occupiedIds = new Set(
-    interactions.map((interaction) => interaction.id),
-  );
-  const movedLegacy = new Map(
-    ui.legacy_id_mapping
-      .filter(
-        (mapping) =>
-          mapping.status === 'moved_to_api_catalog' && mapping.endpoint,
-      )
-      .map((mapping) => [
-        routeKey(mapping.endpoint.method, mapping.endpoint.path),
-        mapping.legacy_id,
-      ]),
-  );
   for (const endpoint of apiEndpoints) {
     const key = routeKey(endpoint.method, endpoint.path);
     if ((endpointClients.get(key) ?? []).length > 0) continue;
-    const preferred = movedLegacy.get(key);
-    const id =
-      preferred && !occupiedIds.has(preferred)
-        ? preferred
-        : stableId('API-SRC', `${endpoint.method} ${endpoint.path}`);
-    occupiedIds.add(id);
-    const endpointDeployment = deployment.statusFor(
-      { source_id: null },
-      endpoint,
-    );
+    const id = stableId('API-SRC', `${endpoint.method} ${endpoint.path}`);
     interactions.push({
       id,
-      aliases: aliasesByCanonical.get(id) ?? [],
       entry_type: 'backend_endpoint',
       category: 'backend_only',
       page: 'Backend-Only',
@@ -1532,61 +1098,8 @@ function buildInventory(
       side_effects: endpoint.side_effects,
       source_reconciled: true,
       runtime_status: 'runtime_pending',
-      production_applicability: endpointDeployment,
     });
   }
-  for (const endpoint of deployment.deployedOnlyEndpoints) {
-    const key = routeKey(endpoint.method, endpoint.path);
-    if ((deployedEndpointClients.get(key) ?? []).length > 0) continue;
-    const id = stableId('PROD-API', `${endpoint.method} ${endpoint.path}`);
-    occupiedIds.add(id);
-    const destructive = /killswitch|revoke/i.test(
-      `${endpoint.path} ${endpoint.description}`,
-    );
-    interactions.push({
-      id,
-      aliases: [],
-      entry_type: 'backend_endpoint',
-      source_catalog: 'deployed_only',
-      source_commit: deployment.delta.deployed_commit,
-      category: 'production_only',
-      page: 'Production Backend-Only',
-      component: endpoint.handler,
-      name: `${endpoint.method} ${endpoint.path}`,
-      http: {
-        method: endpoint.method,
-        path: normalizeWirePath(endpoint.path),
-        parameters: null,
-      },
-      trigger_steps: ['Direct deployed API or operator caller'],
-      preconditions: [endpoint.auth],
-      variants: [],
-      scope: 'backend_only',
-      iteration_source: 'not_applicable',
-      risk_tier: destructive ? 'destructive_write' : 'read',
-      expected_ui:
-        'No deployed Admin Web caller was reconciled for this endpoint.',
-      source: endpoint.reference,
-      api_handler: endpoint.handler,
-      auth: endpoint.auth,
-      storage_operation_ids: [],
-      cache_or_no_query:
-        endpoint.storage?.join?.('; ') ?? String(endpoint.storage ?? ''),
-      side_effects: endpoint.description,
-      source_reconciled: true,
-      runtime_status: 'runtime_pending',
-      production_applicability: {
-        status: 'available',
-        reason: 'Present only in the deployed production commit.',
-      },
-    });
-  }
-  const productionMatrix = deployment.delta
-    ? interactions.filter(
-        (interaction) =>
-          interaction.production_applicability.status !== 'not_deployed',
-      )
-    : [];
   const counts = interactions.reduce(
     (result, interaction) => {
       result.total += 1;
@@ -1605,9 +1118,6 @@ function buildInventory(
       response_observability: responseObservability,
       source_reconciled: sourceStatus === 'source_reconciled',
       runtime_status: 'runtime_pending',
-      production_applicability: deployment.delta
-        ? 'reconciled_from_deployed_delta'
-        : 'pending_deployed_delta',
       count_basis:
         'Rows are rendered from source contracts and independently checked source/route denominators; counts alone are not completion evidence.',
       static_catalog_limitations: ui.metadata.static_catalog_limitations,
@@ -1615,14 +1125,8 @@ function buildInventory(
     },
     coverage_dimensions: ui.coverage_dimensions,
     interactions,
-    production_matrix_ids: productionMatrix.map(
-      (interaction) => interaction.id,
-    ),
     storage_operations: apiOperations,
-    classification_notes: [
-      ...apiClassificationNotes,
-      ...deployment.classificationNotes,
-    ],
+    classification_notes: apiClassificationNotes,
     gaps: [...ui.gaps, ...blockingApiGaps],
   };
 }
@@ -1634,7 +1138,6 @@ function buildReconciliation(
   apiGaps,
   discoveredBackendRoutes,
   backendDenominator,
-  deployment,
 ) {
   const blockingApiGaps = apiGaps.filter(isBlockingApiGap);
   const apiClassificationNotes = apiGaps.filter(
@@ -1658,48 +1161,6 @@ function buildReconciliation(
     fail(
       `UI request is not registered in the API catalogs: ${request.method} ${request.path} (${request.source_id})`,
     );
-  const movedLegacyMissing = ui.legacy_id_mapping
-    .filter((mapping) => mapping.status === 'moved_to_api_catalog')
-    .filter(
-      (mapping) =>
-        !endpointByKey.has(
-          routeKey(mapping.endpoint.method, mapping.endpoint.path),
-        ),
-    )
-    .map((mapping) => ({ legacy_id: mapping.legacy_id, ...mapping.endpoint }));
-  for (const mapping of movedLegacyMissing) {
-    fail(
-      `legacy ID ${mapping.legacy_id} moved to an API endpoint absent from the catalogs: ${mapping.method} ${mapping.path}`,
-    );
-  }
-  const unknownLatestOnlySourceIds = deployment.unknownLatestOnlySourceIds;
-  const unknownLatestOnlyEndpoints = deployment.latestOnlyApi
-    .filter((entry) => !endpointByKey.has(routeKey(entry.method, entry.path)))
-    .map((entry) => ({ method: entry.method, path: entry.path }));
-  for (const sourceId of unknownLatestOnlySourceIds)
-    fail(
-      `deployed delta latest-only UI source_id does not resolve to the canonical UI catalog: ${sourceId}`,
-    );
-  for (const endpoint of unknownLatestOnlyEndpoints)
-    fail(
-      `deployed delta latest-only endpoint does not resolve to the API catalogs: ${endpoint.method} ${endpoint.path}`,
-    );
-  const applicabilityGaps = [
-    ...unknownLatestOnlySourceIds.map((source_id) => ({
-      gap_id: stableId('GAP-DELTA-UI', source_id),
-      classification: 'production_applicability',
-      source_id,
-      description:
-        'Latest-only UI source_id could not be mapped to the canonical catalog.',
-    })),
-    ...unknownLatestOnlyEndpoints.map((endpoint) => ({
-      gap_id: stableId('GAP-DELTA-API', `${endpoint.method} ${endpoint.path}`),
-      classification: 'production_applicability',
-      ...endpoint,
-      description:
-        'Latest-only API endpoint could not be mapped to the canonical catalog.',
-    })),
-  ];
   const uiClientsByEndpoint = new Map(
     apiEndpoints.map((endpoint) => [
       routeKey(endpoint.method, endpoint.path),
@@ -1726,37 +1187,13 @@ function buildReconciliation(
           ? 'No Admin Web caller in current source.'
           : `API catalog declares non-UI clients: ${endpoint.ui_clients.join(', ')}`,
     }));
-  const notDeployed = [];
-  for (const item of ui.items) {
-    const actionStatus = deployment.statusFor(item, null);
-    if (actionStatus.status === 'not_deployed')
-      notDeployed.push({
-        source_id: item.source_id,
-        reason: actionStatus.reason,
-      });
-    for (const request of item.requests) {
-      const status = deployment.statusFor(item, request);
-      if (status.status === 'not_deployed')
-        notDeployed.push({
-          source_id: item.source_id,
-          request_id: request.id,
-          method: request.method,
-          path: request.path,
-          reason: status.reason,
-        });
-    }
-  }
   return {
     schema_version: 1,
     source_commit: ui.source_commit,
     source_state: ui.source_state,
-    deployed_commit: deployment.delta?.deployed_commit ?? null,
     source_reconciliation: {
       status:
         unknownUiRequests.length === 0 &&
-        movedLegacyMissing.length === 0 &&
-        unknownLatestOnlySourceIds.length === 0 &&
-        unknownLatestOnlyEndpoints.length === 0 &&
         backendDenominator.missingFromCatalog.length === 0 &&
         backendDenominator.missingFromRegistration.length === 0 &&
         blockingApiGaps.length === 0
@@ -1769,19 +1206,13 @@ function buildReconciliation(
       production_ui_source_files: ui.source_files.length,
       ui_routes: ui.route_denominator.length,
       unknown_ui_requests: unknownUiRequests,
-      moved_legacy_ids_missing_from_api_catalog: movedLegacyMissing,
-      unknown_latest_only_source_ids: unknownLatestOnlySourceIds,
-      unknown_latest_only_endpoints: unknownLatestOnlyEndpoints,
       registered_routes_missing_from_catalog:
         backendDenominator.missingFromCatalog,
       catalog_routes_missing_from_registration:
         backendDenominator.missingFromRegistration,
       backend_only_endpoints: backendOnly,
       api_contract_gaps: blockingApiGaps,
-      classification_notes: [
-        ...apiClassificationNotes,
-        ...deployment.classificationNotes,
-      ],
+      classification_notes: apiClassificationNotes,
     },
     runtime_reconciliation: {
       status: 'runtime_pending',
@@ -1790,29 +1221,9 @@ function buildReconciliation(
       pagination_termination: 'not_observed',
       polling_and_stream_cycles: 'not_observed',
     },
-    production_applicability: {
-      status:
-        deployment.delta && applicabilityGaps.length === 0
-          ? 'reconciled'
-          : deployment.delta
-            ? 'incomplete'
-            : 'pending_deployed_delta',
-      not_deployed: notDeployed,
-      deployed_only_items: deployment.deployedOnlyItems.map(
-        (item) => item.source_id,
-      ),
-      deployed_only_endpoints: deployment.deployedOnlyEndpoints.map(
-        (endpoint) => ({ method: endpoint.method, path: endpoint.path }),
-      ),
-      rule: 'Latest-only rows are excluded; deployed-only rows are explicit production catalog entries and remain in production_matrix_ids.',
-    },
     normalization: ui.normalization,
-    legacy_id_mapping: ui.legacy_id_mapping,
-    classification_notes: [
-      ...apiClassificationNotes,
-      ...deployment.classificationNotes,
-    ],
-    gaps: [...ui.gaps, ...blockingApiGaps, ...applicabilityGaps],
+    classification_notes: apiClassificationNotes,
+    gaps: [...ui.gaps, ...blockingApiGaps],
   };
 }
 
@@ -1877,7 +1288,6 @@ function renderMarkdown(inventory, reconciliation) {
   markdown += `> **Source state:** \`${inventory.metadata.source_state.kind}\` — ${inventory.metadata.source_state.note}  \n`;
   markdown += `> **Source reconciliation:** \`${reconciliation.source_reconciliation.status}\`  \n`;
   markdown += `> **Runtime status:** \`${inventory.metadata.runtime_status}\`  \n`;
-  markdown += `> **Production applicability:** \`${inventory.metadata.production_applicability}\`  \n`;
   markdown += `> **Count basis:** ${inventory.metadata.count_basis}\n\n`;
   markdown +=
     'Static reconciliation is not browser proof. Runtime entities, cursor termination, poll cycles, SSE behavior, production availability, and latency remain pending until the execution harness records them.\n\n';
@@ -1905,14 +1315,14 @@ function renderMarkdown(inventory, reconciliation) {
     '- `external_action`: calls an external system, reloads a service, performs OAuth exchange, or can consume billable upstream resources.\n\n';
   markdown += '## 3. Master Interaction Index\n\n';
   markdown +=
-    '| ID | Type | Parent | Page / Component | Action or HTTP | Risk | Production |\n';
-  markdown += '|---|---|---|---|---|---|---|\n';
+    '| ID | Type | Parent | Page / Component | Action or HTTP | Risk |\n';
+  markdown += '|---|---|---|---|---|---|\n';
   for (const item of inventory.interactions) {
     const action =
       item.entry_type === 'ui_action'
         ? item.name
         : `${item.http.method} ${item.http.path}`;
-    markdown += `| **${escapeCell(item.id)}** | \`${item.entry_type}\` | ${escapeCell(item.parent_action_id ?? '—')} | ${escapeCell(`${item.page} / ${item.component}`)} | ${escapeCell(action)} | \`${item.risk_tier}\` | \`${item.production_applicability.status}\` |\n`;
+    markdown += `| **${escapeCell(item.id)}** | \`${item.entry_type}\` | ${escapeCell(item.parent_action_id ?? '—')} | ${escapeCell(`${item.page} / ${item.component}`)} | ${escapeCell(action)} | \`${item.risk_tier}\` |\n`;
   }
   markdown += '\n## 4. Detailed Execution Specifications\n\n';
   for (const item of inventory.interactions) {
@@ -1927,7 +1337,6 @@ function renderMarkdown(inventory, reconciliation) {
     markdown += `- **Steps:** ${item.trigger_steps?.join(' → ') ?? 'Direct backend invocation'}\n`;
     markdown += `- **Scope:** \`${item.scope}\` — ${item.iteration_source}\n`;
     markdown += `- **Risk:** \`${item.risk_tier}\`\n`;
-    markdown += `- **Production applicability:** \`${item.production_applicability.status}\`${item.production_applicability.reason ? ` — ${item.production_applicability.reason}` : ''}\n`;
     if (item.http) {
       markdown += `- **HTTP:** \`${item.http.method} ${item.http.path}\`\n`;
       const query = item.http.query_fields ?? item.http.parameters?.query ?? [];
@@ -1958,18 +1367,6 @@ function renderMarkdown(inventory, reconciliation) {
   for (const gap of inventory.gaps) {
     markdown += `- **${gap.gap_id ?? gap.id ?? 'unnamed-gap'}** (${gap.classification ?? gap.severity ?? gap.risk ?? 'documented'}): ${gap.description ?? gap.title ?? JSON.stringify(gap)}\n`;
   }
-  markdown += '\n## 6. Legacy ID Mapping\n\n';
-  markdown += '| Legacy ID | Status | Canonical Target / Endpoint | Reason |\n';
-  markdown += '|---|---|---|---|\n';
-  for (const mapping of reconciliation.legacy_id_mapping) {
-    const target =
-      mapping.canonical_id ??
-      (mapping.endpoint
-        ? `${mapping.endpoint.method} ${mapping.endpoint.path}`
-        : '—');
-    const reason = mapping.reason ?? mapping.retired_reason ?? '—';
-    markdown += `| **${escapeCell(mapping.legacy_id)}** | \`${mapping.status}\` | ${escapeCell(target)} | ${escapeCell(reason)} |\n`;
-  }
   return markdown;
 }
 
@@ -1986,13 +1383,9 @@ function compareOutput(file, expected, label) {
 const ui = readJson(contractPaths.ui, 'UI source contract');
 const apiRead = readJson(contractPaths.read, 'API read source contract');
 const apiWrite = readJson(contractPaths.write, 'API write source contract');
-const deployedDelta = fs.existsSync(contractPaths.deployedDelta)
-  ? readJson(contractPaths.deployedDelta, 'deployed delta')
-  : null;
 validateSourceState(ui, 'ui', null);
 validateSourceState(apiRead, 'api_read', ui?.source_state);
 validateSourceState(apiWrite, 'api_write', ui?.source_state);
-validateSourceState(deployedDelta, 'deployed_delta', ui?.source_state);
 const responseObservability = apiRead?.response_observability;
 const observabilityFields = [
   'scope',
@@ -2073,10 +1466,6 @@ const backendDenominator = validateBackendDenominator(
   discoveredBackendRoutes,
   apiEndpoints,
 );
-const deployment = parseDeployedDelta(
-  deployedDelta,
-  ui ?? { source_commit: null },
-);
 const reconciliation =
   ui && uiValidation
     ? buildReconciliation(
@@ -2086,7 +1475,6 @@ const reconciliation =
         apiGaps,
         discoveredBackendRoutes,
         backendDenominator,
-        deployment,
       )
     : null;
 const inventory =
@@ -2096,7 +1484,6 @@ const inventory =
         apiEndpoints,
         apiOperations,
         apiGaps,
-        deployment,
         reconciliation.source_reconciliation.status,
         responseObservability,
       )

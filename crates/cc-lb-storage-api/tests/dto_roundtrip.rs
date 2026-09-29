@@ -6,17 +6,15 @@ use cc_lb_domain::{
 };
 use cc_lb_request_log::{CostBreakdown, RequestCacheLookbackPrefix, RequestEventUpdate};
 use cc_lb_storage_api::principal::{Limit, LimitKind};
-use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
-    ApiKeyRecord, AuditEntry, BackendKind, BucketKind, CacheKeepaliveConfig,
-    CacheKeepaliveConfigSnapshot, CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStatus, CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig,
-    ConfigDraftState, HistoryEntry, IssuedKey, JudgeResponseFormat, KeyStatus, LlmJudgeConfig,
-    OAuthCredentials, PrincipalCreate, PrincipalKind, PrincipalKindLite,
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestCacheBreakpoint,
-    RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventKind,
-    RequestEventUpstream, StorageError, StoredApiKeyRecord, UsageRollup, UsageRollupKey,
-    UsageRollupResolution, UsageRollupRun,
+    AuditEntry, BackendKind, CacheKeepaliveConfig, CacheKeepaliveConfigSnapshot,
+    CacheKeepaliveEnqueueState, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
+    CacheKeepaliveTerminalReason, CacheTtl, ClassifierConfig, ConfigDraftState, HistoryEntry,
+    JudgeResponseFormat, KeyStatus, LlmJudgeConfig, OAuthCredentials, PrincipalCreate,
+    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
+    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
+    RequestEvent, RequestEventKind, StorageError, UsageRollup, UsageRollupResolution,
+    UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -53,19 +51,11 @@ fn retryable_classification_matches_storage_error_intent() {
         StorageError::Conflict {
             message: "revision changed".to_owned(),
         },
-        StorageError::SchemaMismatch {
-            found: 0,
-            expected: 1,
-        },
         StorageError::Corrupted {
             message: "checksum mismatch".to_owned(),
         },
         StorageError::Fatal {
             message: "invariant failed".to_owned(),
-        },
-        StorageError::BackendKindMismatch {
-            stored: BackendKind::Sqlite,
-            configured: BackendKind::Postgres,
         },
         StorageError::Serialization(serialization_error),
         StorageError::Aead("authentication failed".to_owned()),
@@ -117,7 +107,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         actor_subject: Some("user-123".to_owned()),
         actor_kind: Some("human".to_owned()),
         actor_email: Some("admin@example.test".to_owned()),
-        kind: Some("request_completed".to_owned()),
         payload: Some(json!({
             "nested": { "cache": true },
             "tags": ["t6", "dto"]
@@ -130,7 +119,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         request_id: "req_002".to_owned(),
         principal_id: Some("principal_a".to_owned()),
         principal_kind: Some("account".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(Uuid::from_u128(0x11111111111111111111111111111111)),
         upstream_name: Some("anthropic_direct".to_owned()),
         model: Some("claude-3-haiku".to_owned()),
@@ -223,14 +211,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         }),
     );
 
-    assert_json_roundtrip(UsageRollupKey {
-        resolution: UsageRollupResolution::Hour,
-        bucket_start: 1_716_000_000,
-        principal: "principal_a".to_owned(),
-        upstream_id: Uuid::from_u128(0x22222222222222222222222222222222),
-        upstream_name: "anthropic_direct".to_owned(),
-        model: "claude-3-haiku".to_owned(),
-    });
     assert_json_roundtrip(UsageRollup {
         resolution: UsageRollupResolution::Minute,
         bucket_start: 1_716_000_060,
@@ -273,37 +253,6 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["openid".to_owned(), "profile".to_owned()],
     });
-    assert_json_roundtrip(IssuedKey {
-        key_id: "key_123".to_owned(),
-        plaintext: "plain_credential".to_owned(),
-        issued_at_unix_secs: 1_716_000_010,
-    });
-    assert_json_roundtrip(ApiKeyRecord {
-        key_id: "key_123".to_owned(),
-        label: Some("default".to_owned()),
-        issued_at_unix_secs: 1_716_000_010,
-        revoked_at_unix_secs: Some(1_716_000_020),
-    });
-    assert_json_roundtrip(StoredApiKeyRecord {
-        label: "default".to_owned(),
-        issued_at_unix_secs: 1_716_000_010,
-        revoked_at_unix_secs: Some(1_716_000_020),
-        key_hash_b64: "YWJjMTIz".to_owned(),
-        verify_hash: [1; 32],
-        secret_salt: [2; 16],
-        limit_overrides: vec![TypesLimit {
-            kind: TypesLimitKind::Requests,
-            window_secs: 60,
-            cap_micros: 100,
-        }],
-        status: KeyStatus::Active,
-        expires_at_unix_secs: Some(1_800_000_000),
-        last_4: "c123".to_owned(),
-        description: Some("default key".to_owned()),
-        index_hash: [3; 32],
-    });
-
-    assert_json_roundtrip(BucketKind::OutputTokens);
 
     assert_json_roundtrip(PrincipalCreate {
         name: "test-principal".to_owned(),
@@ -376,28 +325,9 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
 }
 
 #[test]
-fn config_draft_state_accepts_legacy_rows_without_validation_details() {
-    let state = serde_json::from_value::<ConfigDraftState>(json!({
-        "draft": { "timeouts": { "upstream_total_secs": 30 } },
-        "revision": 7,
-        "last_validated_revision": 6,
-        "saved_at_unix_secs": 1_716_000_004
-    }))
-    .unwrap();
-
-    assert_eq!(state.last_validation, None);
-    assert_eq!(state.last_validated_revision, Some(6));
-}
-
-#[test]
 fn batch_b_wire_snapshots_are_stable() {
     assert_wire(PrincipalKindLite::Machine, json!("machine"));
     assert_wire(PrincipalKindLite::Human, json!("human"));
-
-    assert_wire(
-        RequestEventUpstream::AnthropicDirect,
-        json!("anthropic_direct"),
-    );
 
     assert_wire(RequestCacheState::Hit, json!("hit"));
     assert_wire(RequestCacheState::Write, json!("write"));
@@ -450,7 +380,6 @@ fn batch_b_wire_snapshots_are_stable() {
         principal_id: Some("principal_batch_b".to_owned()),
         key_id: Some("key_batch_b".to_owned()),
         principal_kind: Some("machine".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(Uuid::from_u128(0x11111111111111111111111111111111)),
         upstream_name: Some("anthropic-primary".to_owned()),
         model: Some("claude-3-5-sonnet".to_owned()),
@@ -506,10 +435,6 @@ fn batch_b_wire_snapshots_are_stable() {
         quota_urgency_7d: None,
         quota_urgency_combined: None,
         quota_warning_multiplier: None,
-        lineage_would_have_predicted_read_tokens: Some(1024),
-        lineage_would_have_picked_upstream_id: Some(Uuid::from_u128(
-            0x66666666666666666666666666666666,
-        )),
         cost_usd_micros: Some(987_654),
         cost_input_micros: Some(111_000),
         cost_output_micros: Some(222_000),
@@ -531,7 +456,6 @@ fn batch_b_wire_snapshots_are_stable() {
         dns_ms: Some(9),
         connect_ms: Some(10),
         connection_reused: Some(true),
-        limit_reconcile_ms: Some(11),
         duration_ms: 1234,
         request_body_read_ms: Some(2),
         request_body_first_chunk_ms: Some(0.0),
@@ -605,7 +529,6 @@ fn batch_b_wire_snapshots_are_stable() {
         "principal_id": "principal_batch_b",
         "key_id": "key_batch_b",
         "principal_kind": "machine",
-        "upstream": "anthropic_direct",
         "upstream_id": "11111111-1111-1111-1111-111111111111",
         "upstream_name": "anthropic-primary",
         "model": "claude-3-5-sonnet",
@@ -657,8 +580,6 @@ fn batch_b_wire_snapshots_are_stable() {
         "cache_value_micros": 777_000,
         "formula_winner_upstream_id": "44444444-4444-4444-4444-444444444444",
         "kept_upstream_id": "55555555-5555-5555-5555-555555555555",
-        "lineage_would_have_predicted_read_tokens": 1024,
-        "lineage_would_have_picked_upstream_id": "66666666-6666-6666-6666-666666666666",
         "cost_usd_micros": 987_654,
         "cost_input_micros": 111_000,
         "cost_output_micros": 222_000,
@@ -680,7 +601,6 @@ fn batch_b_wire_snapshots_are_stable() {
         "dns_ms": 9,
         "connect_ms": 10,
         "connection_reused": true,
-        "limit_reconcile_ms": 11,
         "duration_ms": 1234,
         "request_body_read_ms": 2,
         "request_body_first_chunk_ms": 0.0,
@@ -775,7 +695,6 @@ fn batch_b_wire_snapshots_are_stable() {
             actor_subject: Some("user-123".to_owned()),
             actor_kind: Some("human".to_owned()),
             actor_email: Some("admin@example.test".to_owned()),
-            kind: Some("admin_action".to_owned()),
             payload: Some(json!({ "key_id": "key_audit", "enabled": false })),
         },
         json!({
@@ -799,16 +718,15 @@ fn batch_b_wire_snapshots_are_stable() {
             "actor_subject": "user-123",
             "actor_kind": "human",
             "actor_email": "admin@example.test",
-            "kind": "admin_action",
             "payload": { "key_id": "key_audit", "enabled": false }
         }),
     );
 
-    assert_wire(TypesLimitKind::CostUsd, json!("cost_usd"));
+    assert_wire(LimitKind::CostUsd, json!("cost_usd"));
     assert_wire(PrincipalLimitKind::Requests, json!("requests"));
     assert_wire(
-        TypesLimit {
-            kind: TypesLimitKind::CostUsd,
+        Limit {
+            kind: LimitKind::CostUsd,
             window_secs: 3600,
             cap_micros: 12_345,
         },
@@ -832,7 +750,6 @@ fn batch_b_wire_snapshots_are_stable() {
     );
 
     assert_wire(KeyStatus::Active, json!("active"));
-    assert_wire(KeyStatus::Disabled, json!("disabled"));
     assert_wire(KeyStatus::Revoked, json!("revoked"));
 
     assert_wire(

@@ -3,7 +3,7 @@ use crate::admin_test_common;
 use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
-use cc_lb_storage_api::AuditStore;
+use cc_lb_storage_api::{AuditQueryScope, AuditStore};
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn put_router_terminal_strategy_persists_and_audits() {
     while Instant::now() < deadline {
         let entries = server
             .storage
-            .query_audit(Some(&id), 0, u64::MAX, 20)
+            .query_recent_audit(AuditQueryScope::Principal(&id), 0, u64::MAX, 20, false)
             .await
             .unwrap();
         saw_audit = entries.iter().any(|entry| {

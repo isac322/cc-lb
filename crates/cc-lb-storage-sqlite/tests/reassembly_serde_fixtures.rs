@@ -4,9 +4,7 @@ use cc_lb_domain::{
     InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, StageDecision,
     SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision, TerminalStrategy,
 };
-use cc_lb_storage_api::{
-    BackendKind, KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore,
-};
+use cc_lb_storage_api::{KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -95,7 +93,7 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         .expect("read key status fixture");
     let key_statuses: Vec<KeyStatus> =
         serde_json::from_slice(&key_status_bytes).expect("deserialize key status fixture");
-    assert_eq!(key_statuses.len(), 3);
+    assert_eq!(key_statuses.len(), 2);
     assert_eq!(
         serde_json::to_vec(&key_statuses).expect("re-serialize key status fixture"),
         key_status_bytes
@@ -104,7 +102,6 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
         let serialized = serde_json::to_string(&status).expect("serialize key status");
         match status {
             KeyStatus::Active => assert_eq!(serialized, "\"active\""),
-            KeyStatus::Disabled => assert_eq!(serialized, "\"disabled\""),
             KeyStatus::Revoked => assert_eq!(serialized, "\"revoked\""),
         }
     }
@@ -114,6 +111,7 @@ async fn generate_fixtures(output_dir: &Path) {
     let upstream_id = Uuid::from_u128(0x018f_2a3b_4c5d_7e6f_8123_4567_89ab_cdef);
     let request = RequestEvent {
         ts: 1_720_000_000,
+        ts_ms: Some(1_720_000_000_000),
         request_id: "req-reassembly-golden".to_owned(),
         event_id: Some("018f2a3b-4c5d-7e6f-8123-456789abcdef".to_owned()),
         principal_id: Some("principal-reassembly".to_owned()),
@@ -133,18 +131,12 @@ async fn generate_fixtures(output_dir: &Path) {
                 subscription_preference: Some(SubscriptionPreferenceTrace {
                     chosen_tier: SubscriptionTier::KnownBase,
                     candidates: Vec::new(),
-                    previous_tier: Some(SubscriptionTier::PartialBase),
                     formula_version: None,
                     cache_cost_basis_version: Some("v1".to_owned()),
                     formula_winner_upstream_id: Some(upstream_id),
                     kept_upstream_id: Some(upstream_id),
-                    incumbent_upstream_id: None,
-                    estimated_switch_cache_loss_micros: Some(900),
-                    cache_loss_status: Some("estimated".to_owned()),
                     switch_gate_reason: Some("incumbent_is_formula_winner".to_owned()),
                     bucket_v3_cache_key: Some("v3:golden".to_owned()),
-                    lineage_would_have_predicted_read_tokens: Some(768),
-                    lineage_would_have_picked_upstream_id: Some(upstream_id),
                 }),
             }],
             terminal_decision: Some(TerminalDecision {
@@ -173,7 +165,7 @@ async fn generate_fixtures(output_dir: &Path) {
     .expect("write plugin slot fixture");
     fs::write(
         output_dir.join("key_statuses.json"),
-        serde_json::to_vec(&[KeyStatus::Active, KeyStatus::Disabled, KeyStatus::Revoked])
+        serde_json::to_vec(&[KeyStatus::Active, KeyStatus::Revoked])
             .expect("serialize key status fixture"),
     )
     .expect("write key status fixture");
@@ -188,7 +180,7 @@ async fn generate_fixtures(output_dir: &Path) {
             .await
             .expect("open fixture sqlite database");
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("initialize fixture sqlite database");
     storage

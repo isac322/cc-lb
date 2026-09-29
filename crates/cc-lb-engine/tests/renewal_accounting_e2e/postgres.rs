@@ -1,9 +1,9 @@
 use std::{str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveReplaceRequest, CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl,
-    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStore, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -13,9 +13,9 @@ use uuid::Uuid;
 async fn postgres_renewal_storage_paths_require_live_dsn() {
     // Given
     let fixture = PostgresFixture::create(&required_postgres_url()).await;
-    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_engine::SystemClock));
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage
-        .initialize(BackendKind::Postgres)
+        .initialize()
         .await
         .expect("initialize isolated postgres schema");
     let session = storage
@@ -104,6 +104,7 @@ async fn claim_after_barrier(
 fn renewal_event() -> RequestEvent {
     RequestEvent {
         ts: 1_003,
+        ts_ms: Some(1_003_000),
         request_id: "renewal:postgres-renewal-session:1".to_owned(),
         event_id: Some("renewal:postgres-renewal-session:1".to_owned()),
         source_kind: Some("renewal".to_owned()),

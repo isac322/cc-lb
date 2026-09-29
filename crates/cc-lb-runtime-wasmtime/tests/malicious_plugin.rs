@@ -48,7 +48,7 @@ fn build_malicious_wat(wat_body: &str, initial_pages: u32) -> Vec<u8> {
     let mut wasm = wat::parse_str(&wat).expect("valid wat");
 
     // Append metadata section
-    let metadata = r#"{"name":"malicious-plugin","version":"0.1.0","description":"Malicious test plugin","usage":"Testing only","hooks":{"filter":{"wire_version":1,"description":"filter hook","usage":"call filter"}}}"#;
+    let metadata = r#"{"name":"malicious-plugin","version":"0.1.0","description":"Malicious test plugin","usage":"Testing only","hooks":{"filter":{"wire_version":1,"description":"filter hook","usage":"call filter","mode":"active"}}}"#;
     append_custom_section(&mut wasm, "cc_lb.plugin.v1", metadata.as_bytes());
 
     // Append schema section
@@ -272,7 +272,7 @@ fn test_memory_grow_before_return_behavior() {
         )
         .expect("register filter");
     let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
-    let result = dispatch.call_filter(&[]);
+    let result = dispatch.call_filter_scoped(&[], <[u8]>::to_vec);
 
     // Then: It must succeed and return the valid FilterResponse bytes
     assert!(result.is_ok());
@@ -330,7 +330,7 @@ fn test_misaligned_valid_rkyv() {
         )
         .expect("register filter");
     let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
-    let result = dispatch.call_filter(&[]);
+    let result = dispatch.call_filter_scoped(&[], <[u8]>::to_vec);
 
     // Then: It must succeed via fallback copy and return the valid FilterResponse bytes
     assert!(result.is_ok());
@@ -393,7 +393,7 @@ fn test_corrupt_rkyv() {
         )
         .expect("register filter");
     let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
-    let result = dispatch.call_filter(&[]);
+    let result = dispatch.call_filter_scoped(&[], <[u8]>::to_vec);
 
     // Then: It must succeed at the dispatch level (since dispatch doesn't validate rkyv),
     // but the returned bytes will fail validation when accessed.

@@ -341,7 +341,6 @@ test('audit preserves duplicate request-id events across filter result transitio
       status: 200,
       actor: 'admin',
       admin_action,
-      kind: 'admin',
       payload:
         request_id === duplicateRequestIds[1]
           ? { revision: index - 1 }
@@ -357,7 +356,6 @@ test('audit preserves duplicate request-id events across filter result transitio
     status: 200,
     actor: 'admin',
     admin_action: `other.action.${index}`,
-    kind: 'admin',
   }));
   const unfilteredRows = [...otherRows, ...principalRows];
   const timeRows = principalRows.slice(0, 2);

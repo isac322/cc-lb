@@ -9,7 +9,6 @@ use tokio::sync::Notify;
 pub enum ServerState {
     Starting,
     Ready,
-    ShuttingDown,
 }
 
 pub struct ServerStateHandle {

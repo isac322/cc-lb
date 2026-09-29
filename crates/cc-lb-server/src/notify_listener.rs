@@ -4,10 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::DynamicViewHolder;
-use cc_lb_engine::clock::ClockHandle;
-use cc_lb_engine::lifecycle::{PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike};
+use cc_lb_clock::ClockHandle;
+use cc_lb_control::DynamicViewHolder;
+use cc_lb_control::PromptCacheObservationSinkLike;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;
@@ -16,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::dynamic_view_builder::{self, Stores};
-use crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct NotifyListener {
@@ -24,15 +22,13 @@ pub struct NotifyListener {
     cancel: CancellationToken,
     holder: Arc<DynamicViewHolder>,
     stores: Arc<Stores>,
-    oauth_cfg: Arc<AnthropicOAuthConfig>,
     runtime: Arc<WasmtimeRuntime>,
     aead: Arc<AeadService>,
     data_dir: PathBuf,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
     prompt_cache_grace_margin_secs: u64,
-    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     subscription_quota_routing_max_staleness_secs: u64,
     clock: ClockHandle,
 }
@@ -42,15 +38,13 @@ pub struct NotifyListenerParams {
     pub cancel: CancellationToken,
     pub holder: Arc<DynamicViewHolder>,
     pub stores: Arc<Stores>,
-    pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub runtime: Arc<WasmtimeRuntime>,
     pub aead: Arc<AeadService>,
     pub data_dir: PathBuf,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    pub prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
     pub prompt_cache_grace_margin_secs: u64,
-    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
 }
@@ -62,13 +56,11 @@ impl NotifyListener {
             cancel: params.cancel,
             holder: params.holder,
             stores: params.stores,
-            oauth_cfg: params.oauth_cfg,
             runtime: params.runtime,
             aead: params.aead,
             data_dir: params.data_dir,
             lazy_refresher: params.lazy_refresher,
             subscription_quota_cache: params.subscription_quota_cache,
-            prompt_cache_thread_usage: params.prompt_cache_thread_usage,
             prompt_cache_grace_margin_secs: params.prompt_cache_grace_margin_secs,
             prompt_cache_observation_sink: params.prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs: params
@@ -141,7 +133,6 @@ impl NotifyListener {
         let started = Instant::now();
         match dynamic_view_builder::build_dynamic_view(
             &self.stores,
-            &self.oauth_cfg,
             self.aead.clone(),
             self.lazy_refresher.clone(),
             current_generation,
@@ -149,9 +140,6 @@ impl NotifyListener {
             &self.data_dir,
             self.subscription_quota_cache.clone(),
             self.prompt_cache_grace_margin_secs,
-            self.prompt_cache_thread_usage
-                .clone()
-                .map(|tracker| tracker as Arc<dyn PromptCacheThreadUsageTrackerLike>),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),

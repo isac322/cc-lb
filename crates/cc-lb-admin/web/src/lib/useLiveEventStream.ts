@@ -266,7 +266,7 @@ export function useLiveEventStream(
       return;
     }
 
-    const url = `/admin/events/stream?${params.toString()}`;
+    const url = `/admin/v1/events/stream?${params.toString()}`;
 
     clientRef.current = createEventSource({
       url,

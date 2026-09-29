@@ -1,15 +1,11 @@
 use crate::{common, router_lifecycle_support};
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use http::StatusCode;
 use uuid::Uuid;
 
 use common::{collect_body, messages_request};
-use router_lifecycle_support::{
-    RouterLifecycleState, SelectingRouter, api_key_record, lifecycle_with_records, plugin_upstream,
-};
+use router_lifecycle_support::{RouterLifecycleState, api_key_record, lifecycle_with_records};
 
 #[tokio::test]
 async fn terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
@@ -21,11 +17,6 @@ async fn terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
             api_key_record(first, "first", "http://first.local/"),
             api_key_record(second, "second", "http://second.local/"),
         ],
-        Arc::new(SelectingRouter {
-            selected_id: Some(second),
-            state: state.clone(),
-            plugin_upstream: plugin_upstream("http://plugin.local/"),
-        }),
         state.clone(),
     );
 
@@ -43,13 +34,6 @@ async fn terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        state
-            .router_candidates
-            .lock()
-            .expect("router candidates lock")
-            .is_empty()
-    );
     assert_eq!(
         state
             .router_choice_names

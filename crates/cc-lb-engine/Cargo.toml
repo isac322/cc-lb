@@ -24,7 +24,6 @@ cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
 cc-lb-routing.workspace = true
 cc-lb-upstream.workspace = true
-globset.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [target.'cfg(not(loom))'.dependencies]
@@ -42,7 +41,6 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 brotli.workspace = true
 dashmap.workspace = true
-eventsource-stream.workspace = true
 flate2.workspace = true
 futures-core = "0.3"
 h2.workspace = true

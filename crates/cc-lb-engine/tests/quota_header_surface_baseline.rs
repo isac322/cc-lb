@@ -5,7 +5,8 @@ use crate::common::{
     messages_request,
 };
 use bytes::Bytes;
-use cc_lb_engine::{build_subscription_quota_samples, parse_anthropic_unified_headers};
+use cc_lb_quota::build_subscription_quota_samples;
+use cc_lb_quota::rate_limit_headers::parse_anthropic_unified_headers;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use uuid::Uuid;

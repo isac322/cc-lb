@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-07-08
 - Ships with: pending
-- Supersedes: ADR 0006's transitional exact-prefix/thread-memory merge, ADR 0005's thread-keyed cache-positive WRH keying, and every v1/v2 prompt-cache routing assumption.
+- Supersedes: ADR 0006's transitional exact-prefix/thread-memory merge, the retired thread-keyed cache-positive WRH keying, and every v1/v2 prompt-cache routing assumption.
 - Research source: `.omo/ulw-research/20260708-v3-cache-research/`.
 - Source: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>.
 - Retrieved: 2026-07-27.

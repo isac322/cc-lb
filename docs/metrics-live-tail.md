@@ -10,7 +10,6 @@ This is the canonical metric inventory for the dashboard live-tail redesign. Lab
 | `sse_backfill_pages_total` | Counter | none | SSE backfill pages queried during initial connect or reconnect. | Increases with dashboard reconnects. |
 | `sse_backfill_rows_total` | Counter | none | Historical rows emitted through SSE backfill. | Usually low; spikes mean clients are reconnecting after gaps. |
 | `sse_reset_events_sent_total` | Counter | `reason=backfill_cap|bus_lagged|storage_error` | Server reset frames sent to force client resynchronization. | Zero or near zero; any sustained increase needs investigation. |
-| `sse_lagged_resync_total` | Counter | none | Legacy companion counter for broadcast lag resets. | Zero in normal operation. |
 | `sse_reconnects_total` | Counter | none | Admin SSE stream connection attempts. | Tracks active dashboard reconnect cadence. |
 | `sse_malformed_frames_total` | Counter | none | Server-side SSE message frames that could not be serialized. | Always zero. |
 | `sse_storage_tail_polls_total` | Counter | none | Storage tail poll attempts by multi-instance pollers. | Increases every poll interval on the postgres backend, where pg_notify fanout is always on. Absent on sqlite. |

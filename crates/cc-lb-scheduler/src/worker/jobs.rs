@@ -10,7 +10,6 @@ use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
-use crate::jobs::quota_gc::SubscriptionQuotaGcJob;
 use crate::jobs::upstream_affinity_purge::UpstreamAffinityPurgeJob;
 use crate::jobs::usage_prune::UsagePruneJob;
 use crate::jobs::usage_rollup::UsageRollupTask;
@@ -23,7 +22,7 @@ use crate::retry::RetryPayload;
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum AdaptiveJob {
     Warmup(UpstreamWarmupJob),
-    #[serde(rename = "oauth_refresh", alias = "o_auth_refresh")]
+    #[serde(rename = "oauth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
     MetadataRefresh(MetadataRefreshJob),
     CacheKeepalive(CacheKeepaliveJob),
@@ -34,16 +33,14 @@ pub enum AdaptiveJob {
 pub enum CronJob {
     UsageRollup(UsageRollupTask),
     UsagePrune(UsagePruneJob),
-    // Retired: subscription-quota retention removed (ADR 0005). Never scheduled; dispatch is a no-op. Kept as a deserialization tombstone so queued CRON_QUEUE rows still deserialize.
-    QuotaGc(SubscriptionQuotaGcJob),
     PromptCachePurge(PromptCacheObservationPurgeJob),
     UpstreamAffinityPurge(UpstreamAffinityPurgeJob),
     PriceCatalogRefresh(PriceCatalogRefreshJob),
     ApalisHousekeeping(ApalisHousekeepingJob),
     WarmupWatchdog(WarmupWatchdogJob),
-    #[serde(rename = "oauth_refresh_watchdog", alias = "o_auth_refresh_watchdog")]
+    #[serde(rename = "oauth_refresh_watchdog")]
     OAuthRefreshWatchdog(OAuthRefreshWatchdogJob),
-    #[serde(rename = "oauth_usage_poll", alias = "o_auth_usage_poll")]
+    #[serde(rename = "oauth_usage_poll")]
     OAuthUsagePoll(OAuthUsagePollCronJob),
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
     PoolQuotaSnapshot(PoolQuotaSnapshotCronJob),
@@ -54,7 +51,6 @@ impl CronJob {
         match self {
             Self::UsageRollup(_) => "usage_rollup",
             Self::UsagePrune(_) => "usage_prune",
-            Self::QuotaGc(_) => "quota_gc",
             Self::PromptCachePurge(_) => "prompt_cache_purge",
             Self::UpstreamAffinityPurge(_) => "upstream_affinity_purge",
             Self::PriceCatalogRefresh(_) => "price_catalog_refresh",
@@ -120,7 +116,6 @@ impl TraceparentCarrier for CronJob {
         match self {
             Self::UsageRollup(job) => job.traceparent.as_deref(),
             Self::UsagePrune(job) => job.traceparent.as_deref(),
-            Self::QuotaGc(job) => job.traceparent(),
             Self::PromptCachePurge(job) => job.traceparent(),
             Self::UpstreamAffinityPurge(job) => job.traceparent(),
             Self::PriceCatalogRefresh(job) => job.traceparent(),
@@ -137,7 +132,6 @@ impl TraceparentCarrier for CronJob {
         match self {
             Self::UsageRollup(job) => job.traceparent = traceparent,
             Self::UsagePrune(job) => job.traceparent = traceparent,
-            Self::QuotaGc(job) => job.set_traceparent(traceparent),
             Self::PromptCachePurge(job) => job.set_traceparent(traceparent),
             Self::UpstreamAffinityPurge(job) => job.set_traceparent(traceparent),
             Self::PriceCatalogRefresh(job) => job.set_traceparent(traceparent),
@@ -172,48 +166,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quota_gc_tombstone_preserves_serialized_shape() {
-        let serialized =
-            serde_json::to_string(&CronJob::QuotaGc(SubscriptionQuotaGcJob::default()))
-                .expect("serialize quota_gc tombstone");
-        assert_eq!(serialized, r#"{"type":"quota_gc","payload":{}}"#);
-
-        let deserialized: CronJob = serde_json::from_str(&serialized)
-            .expect("deserialize quota_gc tombstone from cron queue payload");
-        assert!(matches!(deserialized, CronJob::QuotaGc(_)));
-    }
-
-    #[test]
-    fn anthropic_compat_refresh_all_keys_payload_round_trips() {
+    fn anthropic_compat_refresh_payload_round_trips() {
         let serialized = serde_json::to_string(&CronJob::AnthropicCompatRefresh(
-            AnthropicCompatRefreshJob::all(),
+            AnthropicCompatRefreshJob::default(),
         ))
-        .expect("serialize all-keys compat refresh");
+        .expect("serialize compat refresh");
         assert_eq!(
             serialized,
-            r#"{"type":"anthropic_compat_refresh","payload":{"key":null,"traceparent":null}}"#
+            r#"{"type":"anthropic_compat_refresh","payload":{"traceparent":null}}"#
         );
         let deserialized: CronJob =
-            serde_json::from_str(&serialized).expect("deserialize all-keys compat refresh");
+            serde_json::from_str(&serialized).expect("deserialize compat refresh");
         assert!(matches!(
             deserialized,
-            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob { key: None, .. })
-        ));
-    }
-
-    #[test]
-    fn anthropic_compat_refresh_keyed_payload_from_older_binary_decodes() {
-        // Jobs enqueued before `key` became optional carry a plain string.
-        let deserialized: CronJob = serde_json::from_str(
-            r#"{"type":"anthropic_compat_refresh","payload":{"key":"claude_code_stable_version","traceparent":null}}"#,
-        )
-        .expect("deserialize legacy keyed compat refresh");
-        assert!(matches!(
-            &deserialized,
-            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob {
-                key: Some(key),
-                ..
-            }) if key == "claude_code_stable_version"
+            CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob { traceparent: None })
         ));
     }
 

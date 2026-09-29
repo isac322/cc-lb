@@ -3,22 +3,20 @@ use crate::common;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
-use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::{
+use cc_lb_control::RequestEventBus;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
-use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, ProxyError,
-    UpstreamDispatch,
-};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_storage_api::principal::PrincipalRecord;
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
@@ -36,7 +34,7 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
-use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body, messages_request};
+use common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
 
 #[tokio::test]
 async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
@@ -315,19 +313,19 @@ async fn sqlite_storage(
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
 async fn wait_for_events(
     storage: &dyn RequestEventStore,
     expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        let events = common::stored_request_events(storage).await?;
         if events.len() >= expected {
             return Ok(events);
         }
@@ -561,10 +559,7 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
         HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
     );
     let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -628,10 +623,7 @@ async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry(
         HeaderValue::from_str(&malformed.len().to_string()).expect("content length header"),
     );
     let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -795,10 +787,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip.sqlite").await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         Some(transform.clone()),
@@ -1018,7 +1007,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -1722,8 +1711,6 @@ fn lifecycle_with_transforms_and_config(
         allowed_upstreams: vec![default_upstream_id()],
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -1737,9 +1724,6 @@ fn lifecycle_with_transforms_and_config(
     );
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .build();
@@ -1748,7 +1732,7 @@ fn lifecycle_with_transforms_and_config(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -2293,6 +2277,5 @@ fn _principal_for_doc() -> Principal {
     Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     }
 }

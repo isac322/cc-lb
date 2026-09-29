@@ -26,7 +26,7 @@ The earlier work delivered the Keepalive improvement code, local verification, a
 | GAP-06 | Per-request all-layer correlated measurement | The final local API records have null SQL/pool fields on both DBs, 389 rows each; a separate plan exists | Browser/server/SQL/pool evidence linkage; real instrumentation or explicit approval/blocking for items not provided |
 | GAP-07 | Controlled cold/warm comparison | First vs. subsequent requests were distinguished, but OS/DB cold cache was not controlled | Verifiable cache states in an isolated environment, repeated comparisons under identical conditions |
 
-The analysis/proposal `docs/keepalive-performance-proposal.md` keeps the user's uncommitted-preservation instruction. That instruction is not extended to exclude the skill/QA artifacts. The past 57 local QA and 92 browser PASSes do not substitute for exhaustive production execution.
+The user's uncommitted-preservation instruction still applies. That instruction is not extended to exclude the skill/QA artifacts. The past 57 local QA and 92 browser PASSes do not substitute for exhaustive production execution.
 
 ## 2. Authority and safety boundaries
 

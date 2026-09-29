@@ -12,12 +12,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::{Bytes, BytesMut};
-use cc_lb_control::{BusReceiver, LifecycleBusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_request_log::RequestEventUpdate;
-use cc_lb_storage_api::types::RequestEvent;
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::SignedRequest;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE};
@@ -28,9 +28,8 @@ use tracing::Subscriber;
 use tracing::span::{Attributes, Id};
 use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
 use tracing_subscriber::{Layer, Registry};
-use url::Url;
 
-use common::{TestAuthn, TestLifecycleBus, TestRouter, TestState, messages_request};
+use common::{TestAuthn, TestLifecycleBus, TestState, messages_request};
 
 const BOUNDED_WAIT: Duration = Duration::from_secs(2);
 const SPAN_CHILD_ENV: &str = "CC_LB_RESPONSE_SPAN_REGRESSION_CHILD";
@@ -134,13 +133,8 @@ async fn finite_gzip_eos_case(
     let dir = tempfile::tempdir().expect("temporary directory");
     let storage = Arc::new(sqlite_storage(&dir, "gzip-eos.sqlite").await);
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
-    let BusReceiver::InMemory(mut update_rx) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory request-event receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let mut update_rx = test_bus.bus.subscribe();
     let expected_plaintext = Bytes::from_static(
         b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
     );
@@ -198,7 +192,7 @@ async fn finite_gzip_eos_case(
     let final_event = final_event.expect("assembler publishes final request event");
     assert_eq!(final_event.status, StatusCode::OK.as_u16());
     assert_eq!(final_event.error_code, None);
-    let persisted = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10)
+    let persisted = common::stored_request_events(storage.as_ref())
         .await
         .expect("query persisted request event");
     assert_eq!(persisted.len(), 1);
@@ -213,10 +207,7 @@ async fn delivered_body_drop_case(
     seen_spans: &Mutex<Vec<String>>,
 ) {
     let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let expected_body = gzip_bytes(&Bytes::from_static(
         b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":7,\"output_tokens\":11}}\n\n",
     ));
@@ -277,9 +268,6 @@ async fn delivered_body_drop_case(
 fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
     common::lifecycle_with_parts(
         TestAuthn::new(TestState::default()),
-        Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         dispatcher,
         LifecycleConfig::default(),
     )
@@ -498,11 +486,11 @@ async fn receive_final(
 async fn sqlite_storage(dir: &tempfile::TempDir, file_name: &str) -> SqliteStorage {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite storage");
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("initialize sqlite storage");
     storage

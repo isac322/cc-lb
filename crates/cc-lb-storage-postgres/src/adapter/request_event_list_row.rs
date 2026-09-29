@@ -1,4 +1,4 @@
-use cc_lb_storage_api::{RequestEventListItem, RequestEventUpstream, StorageError, StorageResult};
+use cc_lb_storage_api::{RequestEventListItem, StorageError, StorageResult};
 use serde::Deserialize;
 
 use crate::adapter::i64_to_u64;
@@ -36,7 +36,6 @@ struct ListPayload {
     dns_ms: Option<i64>,
     connect_ms: Option<i64>,
     connection_reused: Option<bool>,
-    limit_reconcile_ms: Option<i64>,
     finalize_ms: Option<i64>,
     proxy_setup_ms: Option<i64>,
     shape_ms: Option<i64>,
@@ -77,7 +76,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .map(parse_event_kind)
             .transpose()?,
         principal_id: row.principal_id,
-        upstream: row.upstream.as_deref().map(parse_upstream).transpose()?,
         upstream_id: row.upstream_id,
         upstream_name: row.upstream_name,
         thread_id: row.thread_id,
@@ -170,10 +168,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .map(|value| i64_to_u64(value, "request event list connect_ms"))
             .transpose()?,
         connection_reused: payload.connection_reused,
-        limit_reconcile_ms: payload
-            .limit_reconcile_ms
-            .map(|value| i64_to_u64(value, "request event list limit_reconcile_ms"))
-            .transpose()?,
         finalize_ms: payload
             .finalize_ms
             .map(|value| i64_to_u64(value, "request event list finalize_ms"))
@@ -241,13 +235,4 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         cost_cache_creation_1h_micros: payload.cost_cache_creation_1h_micros,
         cost_cache_read_micros: payload.cost_cache_read_micros,
     })
-}
-
-fn parse_upstream(value: &str) -> StorageResult<RequestEventUpstream> {
-    match value {
-        "anthropic_direct" => Ok(RequestEventUpstream::AnthropicDirect),
-        other => Err(StorageError::Corrupted {
-            message: format!("request event list unknown upstream value: {other}"),
-        }),
-    }
 }

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey,
-    UpstreamAffinityKind, UpstreamAffinityStore, UpstreamCreate, UpstreamStore,
-    upstream::UpstreamKind,
+    MetaStore, StorageError, UpstreamAffinityBinding, UpstreamAffinityKey, UpstreamAffinityKind,
+    UpstreamAffinityStore, UpstreamCreate, UpstreamStore, upstream::UpstreamKind,
 };
 use sha2::{Digest, Sha256};
 
@@ -21,10 +20,7 @@ async fn upstream_affinity_bind_is_idempotent_conflict_atomic_and_expiry_aware()
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
 
     let first_upstream = create_upstream(&storage, "affinity-first").await;
     let second_upstream = create_upstream(&storage, "affinity-second").await;
@@ -465,10 +461,7 @@ async fn open_storage(file_name: &str) -> (tempfile::TempDir, cc_lb_storage_sqli
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     (temp_dir, storage)
 }
 

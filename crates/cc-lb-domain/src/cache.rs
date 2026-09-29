@@ -11,16 +11,6 @@ pub enum TtlClass {
     Ephemeral1h,
 }
 
-/// Origin of a cache breakpoint: whether explicitly requested or auto-inferred.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BreakpointOrigin {
-    /// Explicit cache breakpoint requested by the user or application.
-    Explicit,
-    /// Auto-inferred cache breakpoint from proxy analysis.
-    AutoCacheInferred,
-}
-
 /// Source of a cache breakpoint within the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -61,8 +51,6 @@ pub struct CacheBreakpoint {
     pub prefix_token_count: u64,
     /// Requested TTL class for this breakpoint.
     pub requested_ttl: TtlClass,
-    /// Origin of this breakpoint.
-    pub origin: BreakpointOrigin,
     /// V3 lookback candidates in N through N-19 order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lookback_prefixes: Vec<CacheLookbackPrefix>,

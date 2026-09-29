@@ -1,12 +1,10 @@
-use cc_lb_engine::clock::unix_secs;
+use cc_lb_clock::unix_secs;
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::apalis_housekeeping::{
     ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
 };
-use cc_lb_scheduler::jobs::compat::{
-    AnthropicCompatRefreshJob, handle_anthropic_compat_refresh_job_with_core_fetcher,
-};
+use cc_lb_scheduler::jobs::compat::handle_anthropic_compat_refresh_job_with_core_fetcher;
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     NETWORK_FAILURE_STATUS, OAuthUsagePollCronJob, OAuthUsagePollObservation,
 };
@@ -53,12 +51,6 @@ impl SchedulerDispatch {
                 .map_err(storage_scheduler_error)?;
                 usage_prune_outcome(result)
             }
-            CronJob::QuotaGc(_job) => {
-                tracing::debug!(
-                    "quota_gc retired; subscription-quota retention removed (ADR 0005)"
-                );
-                Ok(JobOutcome::Done)
-            }
             CronJob::PromptCachePurge(job) => prompt_cache_purge_outcome(
                 PromptCacheObservationPurgeJobHandler::new(StorageHandle::new(
                     self.storage.clone(),
@@ -102,7 +94,7 @@ impl SchedulerDispatch {
             CronJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
             CronJob::OAuthRefreshWatchdog(job) => self.handle_oauth_refresh_watchdog(job).await,
             CronJob::OAuthUsagePoll(job) => self.handle_oauth_usage_poll(job).await,
-            CronJob::AnthropicCompatRefresh(job) => self.dispatch_anthropic_compat(job).await,
+            CronJob::AnthropicCompatRefresh(_) => self.dispatch_anthropic_compat().await,
             CronJob::PoolQuotaSnapshot(job) => self.handle_pool_quota_snapshot(job).await,
         }
     }
@@ -283,15 +275,11 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn dispatch_anthropic_compat(
-        &self,
-        job: AnthropicCompatRefreshJob,
-    ) -> SchedulerResult<JobOutcome> {
+    async fn dispatch_anthropic_compat(&self) -> SchedulerResult<JobOutcome> {
         match &self.backend {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
-                    job,
                     &AnthropicCompatEtagsStore::new(sqlite.pool().clone()),
                     self.storage.as_ref(),
                     &self.cancel,
@@ -302,7 +290,6 @@ impl SchedulerDispatch {
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 handle_anthropic_compat_refresh_job_with_core_fetcher(
-                    job,
                     &AnthropicCompatEtagsStore::new(postgres.pool().clone()),
                     self.storage.as_ref(),
                     &self.cancel,

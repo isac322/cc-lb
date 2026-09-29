@@ -33,7 +33,6 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
     "@playwright/test": "^1.63.0",
-    "@tailwindcss/container-queries": "^0.1.1",
     "@tailwindcss/vite": "4.3.3",
     "@tanstack/router-plugin": "1.168.40",
     "@testing-library/dom": "^10.4.2",

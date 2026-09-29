@@ -14,7 +14,7 @@ use cc_lb_upstream::SignedRequest;
 use http::StatusCode;
 
 use common::{
-    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
     lifecycle_with_parts, messages_request,
 };
 
@@ -85,9 +85,6 @@ async fn unauthorized_refresh_retries_once_then_stops() {
     };
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state.clone()),
-        Arc::new(TestRouter {
-            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(TimedDispatch {
             inner: dispatcher,
             attempts: Arc::new(Mutex::new(VecDeque::from([
@@ -197,9 +194,6 @@ async fn unauthorized_refresh_second_attempt_dispatch_error_clears_stale_stage_t
     };
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state.clone()),
-        Arc::new(TestRouter {
-            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(failing_dispatch),
         LifecycleConfig::default(),
     )

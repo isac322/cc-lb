@@ -106,7 +106,7 @@ struct ExportRegistryEntry {
 struct ExportPrincipalChains {
     #[serde(rename = "Router")]
     router: Vec<ExportChainEntry>,
-    #[serde(rename = "Shape", skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(rename = "Shape", skip_serializing_if = "Vec::is_empty")]
     shape: Vec<ExportChainEntry>,
 }
 

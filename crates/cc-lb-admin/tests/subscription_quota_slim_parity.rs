@@ -28,14 +28,14 @@ async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusi
     let cc_start = NOW_UNIX_SECS - NOW_UNIX_SECS % (5 * 3_600);
     server
         .storage
-        .put_subscription_quota_checkpoint(&quota_checkpoint(
+        .put_subscription_quota_checkpoints(&[quota_checkpoint(
             upstream_id,
             SubscriptionQuotaWindow::FiveHour,
             NOW_UNIX_SECS - 1_200,
             1,
             0.5,
             provider_sample_end,
-        ))
+        )])
         .await
         .unwrap();
     let buckets = [
@@ -188,14 +188,14 @@ async fn subscription_quota_aggregate_is_identical_after_independent_storage_and
     let upstream_id = create_oauth_upstream(&server, "quota-restart").await;
     server
         .storage
-        .put_subscription_quota_checkpoint(&quota_checkpoint(
+        .put_subscription_quota_checkpoints(&[quota_checkpoint(
             upstream_id,
             SubscriptionQuotaWindow::FiveHour,
             NOW_UNIX_SECS - 1_200,
             1,
             0.5,
             NOW_UNIX_SECS + 3_600,
-        ))
+        )])
         .await
         .unwrap();
     server

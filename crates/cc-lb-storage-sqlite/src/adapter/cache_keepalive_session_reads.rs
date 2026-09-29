@@ -49,7 +49,7 @@ SELECT
     session_key_hash,
     principal_id,
     upstream_id,
-    COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms,
+    last_message_at_ms,
     ttl,
     generation,
     NULL AS refresh_count,
@@ -203,7 +203,7 @@ impl CacheKeepaliveSessionReadStore for SqliteStorage {
             "SELECT COUNT(*)
              FROM cache_keepalive_decisions
              WHERE principal_id = ?
-               AND COALESCE(last_message_at_ms, ts * 1000) >= ?
+               AND last_message_at_ms >= ?
                AND NOT EXISTS (
                    SELECT 1 FROM cache_keepalive_turns turn_row
                    WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
@@ -424,7 +424,7 @@ fn push_decision_branch(
         );
     if let Some(horizon_start_ms) = horizon_start_ms {
         builder
-            .push(" AND COALESCE(last_message_at_ms, ts * 1000) >= ")
+            .push(" AND last_message_at_ms >= ")
             .push_bind(horizon_start_ms);
     }
     match query.filter {
@@ -444,11 +444,11 @@ fn push_decision_branch(
         (query.cursor.as_ref(), cursor_last_message_at_ms)
     {
         builder
-            .push(" AND COALESCE(last_message_at_ms, ts * 1000) <= ")
+            .push(" AND last_message_at_ms <= ")
             .push_bind(cursor_last_message_at_ms)
-            .push(" AND (COALESCE(last_message_at_ms, ts * 1000) < ")
+            .push(" AND (last_message_at_ms < ")
             .push_bind(cursor_last_message_at_ms)
-            .push(" OR (COALESCE(last_message_at_ms, ts * 1000) = ")
+            .push(" OR (last_message_at_ms = ")
             .push_bind(cursor_last_message_at_ms)
             .push(" AND 'decision:' || source_ref_id > ")
             .push_bind(cursor.entry_id.as_str())

@@ -10,11 +10,13 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_clock::{Clock, ClockHandle, TestClock};
 use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_control::DynamicViewHolder;
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_domain::Upstream;
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_engine::{Clock, ClockHandle, DynamicViewHolder, Lifecycle, LifecycleConfig, TestClock};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
     refresh_token_form_body, refreshed_token_parts,
@@ -38,8 +40,8 @@ use cc_lb_signer_anthropic_oauth::{
     LazyRefreshHandle,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, types::KeyStatus,
+    KeyStatus, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
+    UpstreamStore,
 };
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ShapedRequest, ShapedRequestBuilder, SignerError,
@@ -122,7 +124,7 @@ impl Fixture {
                 .await
                 .expect("storage"),
         );
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        storage.initialize().await.unwrap();
         let scheduler_path = dir.path().join("scheduler.sqlite");
         let scheduler_backend = sqlite_scheduler_backend(&scheduler_path, clock.clone()).await;
         let stores = Arc::new(Stores {
@@ -309,7 +311,6 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
-        fixture.oauth_cfg.as_ref(),
         fixture.aead.clone(),
         Some(lazy),
         0,
@@ -317,8 +318,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         fixture.clock.clone(),
     )
@@ -514,7 +514,6 @@ async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         fixture.stores.as_ref(),
-        fixture.oauth_cfg.as_ref(),
         fixture.aead.clone(),
         Some(lazy_handle),
         0,
@@ -522,8 +521,7 @@ async fn long_lived_oauth_upstream_unauthorized_response_is_terminal() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
         fixture.clock.clone(),
     )
@@ -1053,7 +1051,6 @@ fn shaped_request() -> ShapedRequest {
     let principal = cc_lb_domain::Principal {
         id: "principal".to_owned(),
         kind: cc_lb_domain::PrincipalKind::OAuthSubject,
-        claims: serde_json::Map::new(),
     };
     shape_request(
         &DirectDialect,

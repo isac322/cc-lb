@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::time::Duration;
 
-use apalis_core::task::{Task, builder::TaskBuilder};
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -38,18 +37,6 @@ impl OAuthRefreshJob {
             "adaptive:oauth_refresh:{}:{}",
             self.upstream_id, expires_at_unix_secs
         )
-    }
-
-    pub fn into_apalis_task<Ctx, IdType>(self, expires_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
-    where
-        Ctx: Default,
-    {
-        let run_at_unix_secs = Self::run_at_for_expires_at(expires_at_unix_secs);
-        let idempotency_key = self.idempotency_key(expires_at_unix_secs);
-        TaskBuilder::<Self, Ctx, IdType>::new(self)
-            .run_at_timestamp(run_at_unix_secs)
-            .with_idempotency_key(idempotency_key)
-            .build()
     }
 
     pub const fn run_at_for_expires_at(expires_at_unix_secs: u64) -> u64 {

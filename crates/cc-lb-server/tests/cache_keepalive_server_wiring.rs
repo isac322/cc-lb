@@ -8,7 +8,7 @@ use cc_lb_server::app::build_app_for_testing;
 #[tokio::test]
 async fn cache_keepalive_disabled_principal_builds_without_scheduler_dependency_cycle()
 -> Result<(), Box<dyn std::error::Error>> {
-    let app = build_app_for_testing(Config::default(), Arc::new(cc_lb_engine::SystemClock)).await?;
+    let app = build_app_for_testing(Config::default(), Arc::new(cc_lb_clock::SystemClock)).await?;
 
     assert_eq!(
         app.proxy_addr.port(),

@@ -3,8 +3,8 @@
 use std::{str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_conformance::scenarios::managed_keys::{
     ManagedKeyBackend, managed_keys_concurrent_issue_no_index_collision,
     managed_keys_empty_label_roundtrip, managed_keys_equivalent_records, managed_keys_happy_path,
@@ -53,7 +53,7 @@ impl ManagedKeyBackend for PostgresManagedKeyBackend {
             )
             .await?;
         PostgresStorage::new(pool.clone(), system_clock())
-            .initialize(BackendKind::Postgres)
+            .initialize()
             .await?;
 
         Ok(PostgresFixture {

@@ -1,15 +1,8 @@
 //! Cache-affinity router authored against the wasmtime PDK.
 //!
-//! Phase 1 W7 — first plugin to exercise the
-//! `cc-lb-pdk-wasmtime` (`#[plugin]` + `#[handler]`) + rkyv wire path
-//! end-to-end. Algorithm: rank candidates by
-//! `predicted_cache_read_tokens` desc, keep the top `keep_k`
-//! (default 1).
-//!
-//! `keep_k` lifts from a `keep_k` claim on the principal because the
-//! W4 PDK ships no `cc_lb_init` config wiring yet — Phase 2 will route
-//! `PluginManifest::config` through the optional `cc_lb_init` export
-//! and replace this lookup.
+//! Algorithm: rank candidates by `predicted_cache_read_tokens` desc,
+//! keep the top `keep_k` (default 1). `keep_k` is read from a `keep_k`
+//! claim on the principal.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
 extern crate alloc;

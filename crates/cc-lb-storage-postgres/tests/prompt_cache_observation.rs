@@ -16,7 +16,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -234,7 +234,7 @@ impl Fixture {
         // `v3_prefix_key`. `initialize` is the same entry point the sibling fixtures in this
         // directory use, so it cannot fall behind the migrations directory.
         PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
-            .initialize(BackendKind::Postgres)
+            .initialize()
             .await?;
 
         Ok(Some(Self { url, schema, pool }))

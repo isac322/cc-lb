@@ -277,7 +277,7 @@ CC_LB_LOAD_PROFILE=$PROFILE "$ROOT_DIR/target/release/cc-lb-loadgen" \
   --max-in-flight "$MAX_IN_FLIGHT" \
   --sse-subscribers "$SSE_SUBSCRIBERS" \
   --reconnect-churn-secs "$RECONNECT_CHURN_SECS" \
-  --sse-stream-url "http://127.0.0.1:$admin_port/admin/events/stream" \
+  --sse-stream-url "http://127.0.0.1:$admin_port/admin/v1/events/stream" \
   --admin-token "$ADMIN_TOKEN" \
   --metrics-scrape-url "http://127.0.0.1:$metrics_port/metrics" \
   --metrics-scrape-interval-secs "$METRICS_SCRAPE_SECS" \

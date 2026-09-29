@@ -1,19 +1,6 @@
 @import "tailwindcss";
-@plugin "@tailwindcss/container-queries";
 
 @theme {
-  --color-amber-400: #fbbf24;
-  --color-amber-500: #f59e0b;
-  --color-amber-600: #d97706;
-
-  --color-red-400: #f87171;
-  --color-red-500: #ef4444;
-  --color-red-600: #dc2626;
-
-  --color-green-400: #4ade80;
-  --color-green-500: #22c55e;
-  --color-green-600: #16a34a;
-
   /* Hanken Grotesk for everything; Geist Mono only for IDs, hashes, error
      codes and model IDs — never for times, dates or prose. */
   --font-sans: "Hanken Grotesk Variable", "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -33,10 +20,6 @@
      are the only light (300) weight. */
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;
-  --text-display-hero: 3.5rem;
-  --text-display-hero--line-height: 3.75rem;
-  --text-display-hero--font-weight: 300;
-  --text-display-hero--letter-spacing: -0.03em;
   --text-display: 2rem;
   --text-display--line-height: 2.25rem;
   --text-display--font-weight: 300;
@@ -120,10 +103,6 @@
   --color-progress-track: var(--color-progress-track);
   --color-modal-backdrop: var(--color-modal-backdrop);
   --color-drawer-backdrop: var(--color-drawer-backdrop);
-  /* Aliases for class names already in use that never had a token. Owning
-     slices should migrate to the canonical name (right-hand side). */
-  --color-surface-raised: var(--color-overlay-4);
-  --color-overlay-10: var(--color-overlay-6);
   --color-input-bg: var(--color-input-bg);
   --color-series-5h: var(--color-series-5h);
   --color-series-7d: var(--color-series-7d);
@@ -423,12 +402,6 @@
   }
   a[href] {
     cursor: pointer;
-  }
-  .drag-handle {
-    cursor: grab;
-  }
-  .drag-handle:active {
-    cursor: grabbing;
   }
 }
 

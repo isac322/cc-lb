@@ -31,7 +31,7 @@ awk '
 function set(p, n) { thr[p] = n; order[++np] = p }
 BEGIN {
   # PACKAGE -> minimum line coverage %. Mirrors the previous per-package gates.
-  set("cc-lb-engine", 60);                 set("cc-lb-dialect-anthropic", 80)
+  set("cc-lb-engine", 60)
   set("cc-lb-admin", 60);                  set("cc-lb-config", 60)
   set("cc-lb-observability", 60);          set("cc-lb-signer-anthropic-key", 60)
   set("cc-lb-signer-anthropic-oauth", 60); set("cc-lb-server", 60)

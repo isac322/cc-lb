@@ -1,6 +1,5 @@
 mod common;
 mod router_lifecycle_support;
-mod sse_relay_support;
 
 #[path = "assembler_partial_property.rs"]
 mod assembler_partial_property;
@@ -12,8 +11,6 @@ mod audit_writer_smoke;
 mod authn_rail_trybuild;
 #[path = "bulkhead_drops_release_permit.rs"]
 mod bulkhead_drops_release_permit;
-#[path = "byte_equivalent_passthrough.rs"]
-mod byte_equivalent_passthrough;
 #[path = "cache_hit_metric.rs"]
 mod cache_hit_metric;
 #[path = "cache_keepalive_proxy_path.rs"]
@@ -24,8 +21,6 @@ mod cache_ttl_floor_respected;
 mod case_insensitive;
 #[path = "circuit_breaker_isolation.rs"]
 mod circuit_breaker_isolation;
-#[path = "client_disconnect_cancels_upstream.rs"]
-mod client_disconnect_cancels_upstream;
 #[path = "closed_to_open_on_failures.rs"]
 mod closed_to_open_on_failures;
 #[path = "concurrent_guard_smoke.rs"]
@@ -58,8 +53,6 @@ mod lifecycle_event_policy;
 mod lifecycle_filter_pipeline;
 #[path = "lifecycle_happy.rs"]
 mod lifecycle_happy;
-#[path = "lifecycle_legacy_plugin_first_candidate.rs"]
-mod lifecycle_legacy_plugin_first_candidate;
 #[path = "lifecycle_model_gate.rs"]
 mod lifecycle_model_gate;
 #[path = "lifecycle_no_candidates.rs"]
@@ -72,8 +65,6 @@ mod lifecycle_observation_retry_path;
 mod lifecycle_observation_upstream_keyed;
 #[path = "lifecycle_oversized_body.rs"]
 mod lifecycle_oversized_body;
-#[path = "lifecycle_persists_rate_limit_headers.rs"]
-mod lifecycle_persists_rate_limit_headers;
 #[path = "lifecycle_preview_route.rs"]
 mod lifecycle_preview_route;
 #[path = "lifecycle_request_events.rs"]
@@ -86,8 +77,6 @@ mod lifecycle_router_drives_credentials;
 mod lifecycle_routing_failure;
 #[path = "lifecycle_terminal.rs"]
 mod lifecycle_terminal;
-#[path = "lifecycle_unknown_upstream_id.rs"]
-mod lifecycle_unknown_upstream_id;
 #[path = "limit_engine_smoke.rs"]
 mod limit_engine_smoke;
 #[path = "load_once_bind_dispatch.rs"]
@@ -100,8 +89,6 @@ mod no_modification_of_success_body;
 mod open_rejects_immediately;
 #[path = "open_to_half_open_after_timeout.rs"]
 mod open_to_half_open_after_timeout;
-#[path = "passthrough_anthropic_error.rs"]
-mod passthrough_anthropic_error;
 #[path = "per_upstream_isolation.rs"]
 mod per_upstream_isolation;
 #[path = "pg_listener_recovery.rs"]
@@ -142,8 +129,6 @@ mod rfc_0002_fix_live_qa;
 mod semaphore_bounds_concurrency;
 #[path = "snapshot_error_responses.rs"]
 mod snapshot_error_responses;
-#[path = "sse_usage_anthropic.rs"]
-mod sse_usage_anthropic;
 #[path = "storage_tail_poller.rs"]
 mod storage_tail_poller;
 #[path = "strip_connection_listed.rs"]
@@ -162,13 +147,7 @@ mod subscription_quota_checkpoint_writer;
 mod task_23_no_hop_by_hop;
 #[path = "tower_layer_round_trip.rs"]
 mod tower_layer_round_trip;
-#[path = "unknown_event_preserved.rs"]
-mod unknown_event_preserved;
 #[path = "upstream_affinity.rs"]
 mod upstream_affinity;
-#[path = "upstream_mid_stream_error_emits_error_frame.rs"]
-mod upstream_mid_stream_error_emits_error_frame;
 #[path = "upstream_rate_limit_cache.rs"]
 mod upstream_rate_limit_cache;
-#[path = "utf8_boundary_handling.rs"]
-mod utf8_boundary_handling;

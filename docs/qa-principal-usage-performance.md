@@ -14,7 +14,7 @@ zero-filled dense series materialization is removed.
 ## Invariant contract
 
 - Per-principal total cost and component breakdown values are identical to the existing full-series collapse.
-- Preserve UUID and legacy/non-UUID principal normalization and merge results.
+- Aggregate canonical UUID principals per id and NULL principals as `unknown`; blank or other non-UUID principal ids are not aggregated (the writer stores only UUIDs or NULL).
 - The presence or absence of an upstream filter does not change the result row set or cost totals.
 - Preserve negative/NULL cost handling and the `component_costs_recorded` determination.
 - SQLite and PostgreSQL return identical results.
@@ -27,8 +27,8 @@ zero-filled dense series materialization is removed.
 - [x] The PostgreSQL filtered query uses a separate static SQL shape.
 - [x] SQLite also selects a static SQL shape based on the presence of an upstream filter.
 - [x] When the UUID selection set is empty, the UUID branch is not executed.
-- [x] The normalization branch runs exactly once per request over the entire selection key set, handling padded UUID, legacy, and unknown together.
-- [x] Mixed UUID/non-UUID input merges the two results under the existing rules.
+- [x] The NULL-principal branch runs only when `unknown` is selected and matches `principal_id IS NULL` exactly.
+- [x] Mixed UUID/`unknown` input merges the two results under the existing rules.
 - [x] The PostgreSQL prepared generic no-upstream plan is a covering index-only shape and can achieve heap fetch 0.
 - [x] The PostgreSQL filtered plan uses index-level cost columns without reading payload/TOAST.
 - [x] Totals for NULL, negative, and partially recorded component values are identical to the existing SQL.

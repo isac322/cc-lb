@@ -6,7 +6,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, StorageConfig};
 use cc_lb_server::app::{BuildError, build_app_with_storage};
 use cc_lb_server::scheduler_factory::SchedulerFactoryError;
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
+use cc_lb_storage_api::{ManagedKeyStore, MetaStore, Storage as StorageTrait};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
@@ -65,10 +65,10 @@ fn app_config(storage: StorageConfig) -> Config {
 async fn open_main_sqlite(path: &Path) -> TestResult<Arc<cc_lb_storage_sqlite::SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?,
     );
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
@@ -76,7 +76,7 @@ async fn build_failing_app(
     config: Config,
     main_storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
 ) -> BuildError {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let managed_store: Arc<dyn ManagedKeyStore> = main_storage.clone();
     let storage: Arc<dyn StorageTrait> = main_storage;
     match build_app_with_storage(

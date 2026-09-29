@@ -22,19 +22,17 @@ where
         let range_start = 1_900_500_000_u64;
         let upstream_id = Uuid::from_u128(0x51);
         let other_upstream_id = Uuid::from_u128(0x52);
-        let long_principal = format!("{} ignored suffix", "x".repeat(64));
+        let team_principal = Uuid::from_u128(0x56).to_string();
         let uuid_principal = Uuid::from_u128(0x53).to_string();
-        let padded_uuid_principal = Uuid::from_u128(0x54).to_string();
-        let padded_uuid_raw = format!(" {padded_uuid_principal} ");
-        let compact_uuid_principal = Uuid::from_u128(0x55).simple().to_string();
-        let extra_hyphen_principal = "1234-678-0123-5678-9abc-def012345678".to_owned();
-        let partial_principal = normalize_usage_rollup_dimension(Some("negative/partial"));
+        let unselected_principal = Uuid::from_u128(0x57).to_string();
+        let partial_principal =
+            normalize_usage_rollup_dimension(Some(Uuid::from_u128(0x58).to_string().as_str()));
 
         storage
             .append_request_event(&cost_event(
                 range_start + 5,
                 "principal-cost-modern",
-                Some("\u{00a0}\tteam/A\u{3000}"),
+                Some(&team_principal),
                 upstream_id,
                 Some(15),
                 Some([1, 2, 3, 4, 5]),
@@ -45,7 +43,7 @@ where
             .append_request_event(&cost_event(
                 range_start + 10,
                 "principal-cost-legacy",
-                Some("team A"),
+                Some(&team_principal),
                 upstream_id,
                 Some(10),
                 None,
@@ -56,7 +54,7 @@ where
             .append_request_event(&cost_event(
                 range_start + 15,
                 "principal-cost-other-upstream",
-                Some("team A"),
+                Some(&team_principal),
                 other_upstream_id,
                 Some(20),
                 Some([2, 3, 4, 5, 6]),
@@ -76,39 +74,6 @@ where
             .await?;
         storage
             .append_request_event(&cost_event(
-                range_start + 25,
-                "principal-cost-padded-uuid",
-                Some(&padded_uuid_raw),
-                upstream_id,
-                Some(17),
-                Some([2, 3, 4, 3, 5]),
-                None,
-            ))
-            .await?;
-        storage
-            .append_request_event(&cost_event(
-                range_start + 30,
-                "principal-cost-compact-uuid",
-                Some(&compact_uuid_principal),
-                upstream_id,
-                Some(19),
-                Some([3, 4, 5, 3, 4]),
-                None,
-            ))
-            .await?;
-        storage
-            .append_request_event(&cost_event(
-                range_start + 35,
-                "principal-cost-extra-hyphen",
-                Some(&extra_hyphen_principal),
-                upstream_id,
-                Some(23),
-                Some([4, 5, 6, 3, 5]),
-                None,
-            ))
-            .await?;
-        storage
-            .append_request_event(&cost_event(
                 range_start + 65,
                 "principal-cost-zero",
                 None,
@@ -122,28 +87,17 @@ where
             .append_request_event(&cost_event(
                 range_start + 70,
                 "principal-cost-unrecorded",
-                Some("legacy-only"),
+                Some(&unselected_principal),
                 upstream_id,
                 Some(7),
                 None,
                 None,
             ))
             .await?;
-        storage
-            .append_request_event(&cost_event(
-                range_start + 75,
-                "principal-cost-truncated",
-                Some(&long_principal),
-                upstream_id,
-                Some(3),
-                Some([1, 1, 1, 0, 0]),
-                None,
-            ))
-            .await?;
         let mut partial_event = cost_event(
             range_start + 80,
             "principal-cost-negative-partial",
-            Some("negative/partial"),
+            Some(&partial_principal),
             upstream_id,
             Some(-11),
             None,
@@ -155,23 +109,55 @@ where
         partial_event.cost_cache_creation_1h_micros = None;
         partial_event.cost_cache_read_micros = Some(0);
         storage.append_request_event(&partial_event).await?;
+        // Only a NULL principal_id belongs to the "unknown" bucket. Blank and
+        // other non-UUID principal ids are neither UUID keys nor NULL, so the
+        // aggregation must drop them instead of normalizing them into a series.
+        storage
+            .append_request_event(&cost_event(
+                range_start + 25,
+                "principal-cost-null-other-upstream",
+                None,
+                other_upstream_id,
+                Some(17),
+                Some([1, 2, 3, 4, 5]),
+                None,
+            ))
+            .await?;
+        for (offset, request_id, principal_id, cost) in [
+            (26, "principal-cost-empty", "", 101),
+            (27, "principal-cost-whitespace", "   ", 103),
+            (28, "principal-cost-non-uuid", "legacy-principal", 107),
+        ] {
+            storage
+                .append_request_event(&cost_event(
+                    range_start + offset,
+                    request_id,
+                    Some(principal_id),
+                    upstream_id,
+                    Some(cost),
+                    Some([cost, 0, 0, 0, 0]),
+                    None,
+                ))
+                .await?;
+        }
         storage
             .append_request_event(&cost_event(
                 range_start + 120,
                 "principal-cost-exclusive-end",
-                Some("team A"),
+                Some(&team_principal),
                 upstream_id,
                 Some(999),
                 Some([999, 0, 0, 0, 0]),
                 None,
             ))
             .await?;
-        let normalized_principal = normalize_usage_rollup_dimension(Some("team A"));
-        let normalized_long_principal =
-            normalize_usage_rollup_dimension(Some(long_principal.as_str()));
+        let normalized_principal = normalize_usage_rollup_dimension(Some(&team_principal));
+        ensure!(
+            normalized_principal == team_principal,
+            "canonical UUID principal keys must normalize to themselves"
+        );
         let selected_principals = vec![
             normalized_principal.clone(),
-            normalized_long_principal.clone(),
             "unknown".to_owned(),
             partial_principal.clone(),
         ];
@@ -235,24 +221,6 @@ where
                 && zero.cost_cache_read_micros == 0,
             "zero component values must remain zero"
         );
-        let truncated = buckets
-            .iter()
-            .find(|bucket| {
-                bucket.principal == normalized_long_principal
-                    && bucket.bucket_start_unix_secs == range_start + 60
-            })
-            .expect("truncated principal bucket");
-        ensure!(
-            truncated.principal.chars().count() == 64,
-            "principal key must be truncated to 64 characters"
-        );
-        ensure!(truncated.total_cost_micros == 3, "truncated total mismatch");
-        ensure!(
-            truncated.cost_input_micros == 1
-                && truncated.cost_output_micros == 1
-                && truncated.cost_cache_creation_5m_micros == 1,
-            "truncated principal components mismatch"
-        );
         let partial = buckets
             .iter()
             .find(|bucket| {
@@ -283,6 +251,40 @@ where
                 .all(|bucket| selected_principals.contains(&bucket.principal)),
             "unselected normalized principals must be excluded"
         );
+        let unknown_first = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.principal == "unknown" && bucket.bucket_start_unix_secs == range_start
+            })
+            .expect("NULL-principal bucket");
+        ensure!(
+            unknown_first.total_cost_micros == 17
+                && unknown_first.component_costs_recorded
+                && unknown_first.cost_input_micros == 1
+                && unknown_first.cost_output_micros == 2
+                && unknown_first.cost_cache_creation_5m_micros == 3
+                && unknown_first.cost_cache_creation_1h_micros == 4
+                && unknown_first.cost_cache_read_micros == 5,
+            "unknown must aggregate only NULL-principal rows, not blank or non-UUID ids"
+        );
+
+        let non_uuid_buckets = storage
+            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
+                since_unix_secs: range_start,
+                until_unix_secs: range_start + 120,
+                bucket_width_secs: 60,
+                upstream_id: None,
+                principal_keys: vec![
+                    "legacy-principal".to_owned(),
+                    String::new(),
+                    "   ".to_owned(),
+                ],
+            })
+            .await?;
+        ensure!(
+            non_uuid_buckets.is_empty(),
+            "non-UUID principal keys must not select blank or non-UUID rows: {non_uuid_buckets:?}"
+        );
 
         let uuid_buckets = storage
             .request_event_principal_costs(&RequestEventPrincipalCostQuery {
@@ -311,89 +313,18 @@ where
                 && uuid_bucket.cost_cache_read_micros == 4,
             "UUID principal component costs mismatch"
         );
-        let padded_uuid_buckets = storage
-            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
-                since_unix_secs: range_start,
-                until_unix_secs: range_start + 120,
-                bucket_width_secs: 60,
-                upstream_id: Some(upstream_id),
-                principal_keys: vec![padded_uuid_principal.clone()],
-            })
-            .await?;
-        ensure!(
-            padded_uuid_buckets.len() == 1,
-            "normalized padded UUID selection must return exactly one bucket"
-        );
-        let padded_uuid_bucket = &padded_uuid_buckets[0];
-        ensure!(
-            padded_uuid_bucket.principal == padded_uuid_principal,
-            "padded UUID principal must preserve rollup normalization"
-        );
-        ensure!(
-            padded_uuid_bucket.total_cost_micros == 17
-                && padded_uuid_bucket.cost_input_micros == 2
-                && padded_uuid_bucket.cost_output_micros == 3
-                && padded_uuid_bucket.cost_cache_creation_5m_micros == 4
-                && padded_uuid_bucket.cost_cache_creation_1h_micros == 3
-                && padded_uuid_bucket.cost_cache_read_micros == 5,
-            "padded UUID principal component costs mismatch"
-        );
-        let compact_uuid_buckets = storage
-            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
-                since_unix_secs: range_start,
-                until_unix_secs: range_start + 120,
-                bucket_width_secs: 60,
-                upstream_id: Some(upstream_id),
-                principal_keys: vec![compact_uuid_principal.clone()],
-            })
-            .await?;
-        ensure!(
-            compact_uuid_buckets.len() == 1,
-            "compact UUID selection must not double count exact and fallback paths"
-        );
-        ensure!(
-            compact_uuid_buckets[0].total_cost_micros == 19
-                && compact_uuid_buckets[0].cost_input_micros == 3
-                && compact_uuid_buckets[0].cost_output_micros == 4
-                && compact_uuid_buckets[0].cost_cache_creation_5m_micros == 5
-                && compact_uuid_buckets[0].cost_cache_creation_1h_micros == 3
-                && compact_uuid_buckets[0].cost_cache_read_micros == 4,
-            "compact UUID principal component costs mismatch"
-        );
-        let extra_hyphen_buckets = storage
-            .request_event_principal_costs(&RequestEventPrincipalCostQuery {
-                since_unix_secs: range_start,
-                until_unix_secs: range_start + 120,
-                bucket_width_secs: 60,
-                upstream_id: Some(upstream_id),
-                principal_keys: vec![extra_hyphen_principal.clone()],
-            })
-            .await?;
-        ensure!(
-            extra_hyphen_buckets.len() == 1,
-            "extra-hyphen principal must remain covered by the fallback path"
-        );
-        ensure!(
-            extra_hyphen_buckets[0].total_cost_micros == 23
-                && extra_hyphen_buckets[0].cost_input_micros == 4
-                && extra_hyphen_buckets[0].cost_output_micros == 5
-                && extra_hyphen_buckets[0].cost_cache_creation_5m_micros == 6
-                && extra_hyphen_buckets[0].cost_cache_creation_1h_micros == 3
-                && extra_hyphen_buckets[0].cost_cache_read_micros == 5,
-            "extra-hyphen principal component costs mismatch"
-        );
         let mixed_shape_buckets = storage
             .request_event_principal_costs(&RequestEventPrincipalCostQuery {
                 since_unix_secs: range_start,
                 until_unix_secs: range_start + 120,
                 bucket_width_secs: 60,
                 upstream_id: Some(upstream_id),
-                principal_keys: vec![uuid_principal.clone(), normalized_principal.clone()],
+                principal_keys: vec![uuid_principal.clone(), "unknown".to_owned()],
             })
             .await?;
         ensure!(
             mixed_shape_buckets.len() == 2,
-            "mixed UUID and non-UUID selection must return both static-query branches"
+            "mixed UUID and NULL-principal selection must return both static-query branches"
         );
         ensure!(
             mixed_shape_buckets.iter().any(|bucket| {
@@ -403,9 +334,12 @@ where
         );
         ensure!(
             mixed_shape_buckets.iter().any(|bucket| {
-                bucket.principal == normalized_principal && bucket.total_cost_micros == 25
+                bucket.principal == "unknown"
+                    && bucket.bucket_start_unix_secs == range_start + 60
+                    && bucket.total_cost_micros == 0
+                    && bucket.component_costs_recorded
             }),
-            "mixed selection must retain normalized non-UUID costs"
+            "mixed selection must retain NULL-principal costs"
         );
 
         let filtered_buckets = storage
@@ -457,7 +391,7 @@ where
             .append_request_event(&cost_event(
                 range_start + 40,
                 "principal-cost-transition-same-upstream",
-                Some("team A"),
+                Some(&team_principal),
                 upstream_id,
                 Some(29),
                 Some([5, 6, 7, 5, 6]),
@@ -501,7 +435,7 @@ where
             .append_request_event(&cost_event(
                 range_start + 45,
                 "principal-cost-transition-other-upstream",
-                Some("team A"),
+                Some(&team_principal),
                 other_upstream_id,
                 Some(31),
                 Some([6, 7, 8, 4, 6]),

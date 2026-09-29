@@ -187,7 +187,7 @@ These eight fields are children of `proxy_setup_ms`. The new `request_body_read_
 
 - `bulkhead_wait_ms`, `dns_ms`, `connect_ms`, `shape_ms`, `sign_ms`, `upstream_ttfb_ms`
 - `stream_total_ms`, `upstream_body_ms`, `first_body_chunk_ms`
-- `proxy_setup_ms`, setup detail stages, `limit_reconcile_ms`
+- `proxy_setup_ms`, setup detail stages
 
 Renewal is a synthetic source that does not go through client ingress/body read or the normal proxy pipeline. Do not force-fill the proxy stage formula; separate it into a per-source-kind model.
 
@@ -215,8 +215,6 @@ Lifecycle duration
 │  └─ Provider wait        derived residual inside upstream_ttfb_ms
 ├─ Response body           one of stream_total_ms / upstream_body_ms
 └─ Finalize                finalize_ms
-   ├─ Limit reconcile      limit_reconcile_ms
-   └─ Other finalize       derived residual inside finalize_ms
 ```
 
 Parent and child may appear together in the detail display but are included only once in the sum.
@@ -280,7 +278,7 @@ The following is the **fixed contract** that every implementation segment must u
 | --- | --- | --- | --- | --- |
 | `request_body_read_ms` | `Option<u64>` / nullable optional number | server `lifecycle_handler` | Monotonic elapsed from just before the `read_request_body` call until success or a read/limit error return | Independent parent stage before `proxy_setup_ms` |
 | `request_body_bytes` | `Option<u64>` / nullable optional number | server body collector | Number of original ingress body bytes successfully collected and passed to `Lifecycle::handle` | Not used in the time sum |
-| `finalize_ms` | `Option<u64>` / nullable optional number | engine terminal path | Mandatory finalization elapsed from after response body completion or cancellation observation until just before `RequestTerminated` is published | Parent that includes `limit_reconcile_ms`; never double-sum with the child |
+| `finalize_ms` | `Option<u64>` / nullable optional number | engine terminal path | Mandatory finalization elapsed from after response body completion or cancellation observation until just before `RequestTerminated` is published | Parent stage that includes limit/accounting reconcile |
 
 Additional rules:
 
@@ -289,7 +287,6 @@ Additional rules:
 - `request_body_bytes` is not copied by trusting the `Content-Length` header. Success rows record the actually collected `Bytes::len()`.
 - `request_body_bytes` is separate from the existing response `body_bytes`.
 - When body-too-large is rejected immediately on `Content-Length` alone, the actual received body size is unknown, so `request_body_bytes=None` is allowed. When the cap is exceeded mid-stream-read, record the value only if the implementation can safely return the actually observed bytes.
-- `finalize_ms` includes `limit_reconcile_ms`. The UI displays detail as `Other finalize = max(0, finalize_ms - limit_reconcile_ms)`.
 - Normal completed streams preserve `stream_total_ms` as before. For 499 client cancellation, the rule is `stream_total_ms=None`, `upstream_body_ms=Some(partial_elapsed)`.
 
 ## 8. Lifecycle/event change contract
@@ -312,7 +309,7 @@ Implement the following in `crates/cc-lb-engine/src/terminal_observer.rs` and `c
 - Add three optional fields to `TerminalState` and `LifecycleEvent::RequestTerminated`.
 - Request body timing must be storable via a setter before `Lifecycle::handle` is called.
 - Take a monotonic finalize start right after the upstream body frame loop ends for non-stream, and right after the last downstream body frame is confirmed for stream.
-- Store `finalize_ms` just before calling `finish()`, after limit/accounting reconcile and terminal status/error finalization are done. Therefore `limit_reconcile_ms` is included inside the `finalize_ms` parent and only the parent is used in the sum.
+- Store `finalize_ms` just before calling `finish()`, after limit/accounting reconcile and terminal status/error finalization are done. Therefore limit/accounting reconcile time is included inside `finalize_ms`.
 - Drop, timeout, early rejection, and normal stream/non-stream must not overwrite already-completed stages. Paths that need to re-invoke a setter must not turn `Some` back into `None`.
 
 ### 8.3 499 Drop
@@ -403,7 +400,7 @@ Apply the following rules in `computeStageGroups.ts` and `LatencyTimeline.tsx`:
 3. Keep the existing `proxy_setup_ms` child stage and parent summation rules.
 4. For a complete stream, use `stream_total_ms` as the body parent and do not add the equal `upstream_body_ms` again.
 5. For a 499 incomplete stream, display partial `upstream_body_ms` as the `Partial stream (client cancelled)` stage.
-6. `Finalize` uses the `finalize_ms` parent in the sum. Detail may split into `limit_reconcile_ms` and derived `Other finalize`, but do not double-sum them with the parent.
+6. `Finalize` uses the `finalize_ms` parent in the sum.
 7. On normal proxy with all new instrumentation present, display the residual as `Unaccounted` and make it visually identifiable when it exceeds the 10ms budget.
 8. Clamp negative residuals with `max(0, ...)`, but do not hide over-accounting from tests. Development computation helpers must also expose the raw signed residual or `accounted_ms` for verification.
 

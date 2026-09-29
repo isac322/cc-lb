@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use cc_lb_plugin_wire::{CachePricingSummary, FilterRequest, Principal, UpstreamCandidate};
 use cc_lb_runtime_wasmtime::RuntimeSlotKey;
-use cc_lb_runtime_wasmtime::{WasmtimeRuntime, call_filter_hook};
+use cc_lb_runtime_wasmtime::{WasmPluginWireDispatch, WasmtimeRuntime};
 use rkyv::rancor::Error;
 
 fn cache_aware_wasm() -> Option<Vec<u8>> {
@@ -137,15 +137,17 @@ fn evict_slot_leaves_prior_arc_dispatchable() {
         .register_filter(key.clone(), "cache-aware-wasmtime", &wasm)
         .expect("register");
 
-    // Caller retained the Arc from register (mimics in-flight dispatch
-    // that pulled the Arc via get_slot moments earlier).
-    let cell = slot.current.load_full();
+    // Caller retained a dispatch handle from register (mimics in-flight
+    // dispatch that pulled the Arc via get_slot moments earlier).
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, rt.config_arc());
     assert!(rt.evict_slot(&key), "evict_slot returns true");
     assert!(rt.get_slot(&key).is_none(), "map entry gone");
 
     let req = tiny_filter_request();
     let in_bytes = rkyv::to_bytes::<Error>(&req).expect("encode");
-    let out = call_filter_hook(&cell, in_bytes.as_slice()).expect("hook still callable");
+    let out = dispatch
+        .call_filter_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
+        .expect("hook still callable");
     assert!(
         !out.is_empty(),
         "filter response is non-empty (cache-aware returns at least one decision)",

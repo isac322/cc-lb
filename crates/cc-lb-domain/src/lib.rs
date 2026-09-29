@@ -12,13 +12,11 @@ mod routing;
 mod upstream;
 
 pub use cache::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix,
-    CachePricingSummary, CacheScore, TtlClass, WarmCacheEntry,
+    CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, CacheScore,
+    TtlClass, WarmCacheEntry,
 };
 pub use error::{InternalError, InternalErrorKind, InternalErrorStage};
-pub use identity::{
-    GLOBAL_PRINCIPAL, Principal, PrincipalKind, PrincipalKindLite, ReplicaIdentity,
-};
+pub use identity::{Principal, PrincipalKind, PrincipalKindLite, ReplicaIdentity};
 pub use plan::PlanInfo;
 pub use quota::{
     RateLimitKind, RateLimitObservation, SubscriptionQuotaCandidateSnapshot,
@@ -30,6 +28,5 @@ pub use routing::{
 };
 pub use upstream::{
     ANTHROPIC_IDENTITY_HEADERS, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CredentialStrategy, Upstream, UpstreamCandidate,
-    UpstreamKind,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, Upstream, UpstreamCandidate, UpstreamKind,
 };

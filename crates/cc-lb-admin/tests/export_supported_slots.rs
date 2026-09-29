@@ -16,10 +16,8 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 sha256: [42; 32],
                 bytes: vec![42; 42],
                 size_bytes: 42,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: "plugin-slots".to_owned(),
                 version: None,
                 original_filename: "plugin-slots.wasm".to_owned(),

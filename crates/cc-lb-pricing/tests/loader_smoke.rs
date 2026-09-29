@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, LiteLlmLoader, LoaderError, PriceCatalog};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PriceCatalogCache, PriceCatalogSnapshotFetch,
-    PriceCatalogSnapshotMetadata, PriceCatalogSnapshotRecord, StorageError, StorageResult,
+    MetaStore, PriceCatalogCache, PriceCatalogSnapshotFetch, PriceCatalogSnapshotMetadata,
+    StorageError, StorageResult,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use sha2::{Digest as _, Sha256};
@@ -74,24 +74,11 @@ impl PriceCatalogCache for LocalPollStorage {
             }
         })
     }
-
-    fn get_price_snapshot<'a, 'future>(
-        &'a self,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = StorageResult<Option<PriceCatalogSnapshotRecord>>> + Send + 'future,
-        >,
-    >
-    where
-        'a: 'future,
-        Self: 'future,
-    {
-        Box::pin(async { panic!("local poll must not fetch the catalog payload") })
-    }
 }
 
 #[tokio::test]
-async fn refresh_once_fetches_installs_and_persists() -> Result<(), Box<dyn std::error::Error>> {
+async fn fetch_persist_and_install_latest_local_round_trips_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/prices"))
@@ -111,23 +98,24 @@ async fn refresh_once_fetches_installs_and_persists() -> Result<(), Box<dyn std:
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     );
 
-    loader.refresh_once().await?;
-    assert!(
-        catalog
-            .lookup("claude-3-5-sonnet-20241022", None, None)
-            .is_some()
-    );
+    let fetched = loader.fetch_and_fingerprint().await?;
+    loader.persist_snapshot(&fetched).await?;
+    assert!(loader.install_latest_local().await?);
+    assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
     assert_eq!(
         catalog.current().payload_hash,
         hex::encode(Sha256::digest(SAMPLE_LITELLM_JSON.as_bytes()))
     );
-    assert!(storage.get_price_snapshot().await?.is_some());
+    assert!(matches!(
+        storage.get_price_snapshot_if_changed("").await?,
+        PriceCatalogSnapshotFetch::Changed(_)
+    ));
     server.verify().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn install_latest_local_reads_disk_cache_after_refresh_failure()
+async fn install_latest_local_reads_disk_cache_after_fetch_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -151,22 +139,18 @@ async fn install_latest_local_reads_disk_cache_after_refresh_failure()
     );
 
     let error = loader
-        .refresh_once()
+        .fetch_and_fingerprint()
         .await
-        .expect_err("refresh should fail");
+        .expect_err("fetch should fail");
     assert!(error.to_string().contains("unexpected status 500"));
     assert!(loader.install_latest_local().await?);
-    assert!(
-        catalog
-            .lookup("claude-3-5-sonnet-20241022", None, None)
-            .is_some()
-    );
+    assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
     server.verify().await;
     Ok(())
 }
 
 #[tokio::test]
-async fn install_latest_local_returns_false_without_cache_after_refresh_failure()
+async fn install_latest_local_returns_false_without_cache_after_fetch_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -188,9 +172,9 @@ async fn install_latest_local_returns_false_without_cache_after_refresh_failure(
     );
 
     let error = loader
-        .refresh_once()
+        .fetch_and_fingerprint()
         .await
-        .expect_err("refresh should fail");
+        .expect_err("fetch should fail");
     assert!(error.to_string().contains("unexpected status 500"));
     assert!(!loader.install_latest_local().await?);
     assert_eq!(catalog.status(), CatalogStatus::CostDisabled);
@@ -329,6 +313,6 @@ async fn sqlite_storage(
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     )
     .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

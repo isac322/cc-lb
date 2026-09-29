@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
+use cc_lb_clock::SystemClock;
 use cc_lb_engine::{
-    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, SystemClock,
-    start_subscription_quota_writer,
+    SubscriptionQuotaSink, SubscriptionQuotaWriterConfig, start_subscription_quota_writer,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
+    MetaStore, Storage, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage;
+use sqlx::Row;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -32,17 +33,11 @@ async fn checkpoint_writer_latest_freshness() -> Result<(), Box<dyn std::error::
         .await?;
     assert_eq!(latest, [freshest]);
 
-    let checkpoints = storage
-        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
-        .await?;
+    let checkpoints = latest_checkpoints(&storage, upstream).await?;
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
-        checkpoints[0].changed_at_unix_millis,
-        first.observed_at_unix_millis
-    );
-    assert_eq!(
         checkpoints[0].semantic_fingerprint,
-        first.semantic_checkpoint_fingerprint()
+        *first.semantic_checkpoint_fingerprint().as_bytes()
     );
     Ok(())
 }
@@ -62,9 +57,7 @@ async fn checkpoint_writer_representative_claim_only() -> Result<(), Box<dyn std
         .await?;
     assert_eq!(latest, [changed_claim]);
 
-    let checkpoints = storage
-        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
-        .await?;
+    let checkpoints = latest_checkpoints(&storage, upstream).await?;
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
         checkpoints[0].representative_claim,
@@ -82,9 +75,7 @@ async fn checkpoint_writer_semantic_payload_change() -> Result<(), Box<dyn std::
 
     write_records(storage.clone(), [first, changed_payload.clone()]).await?;
 
-    let checkpoints = storage
-        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
-        .await?;
+    let checkpoints = latest_checkpoints(&storage, upstream).await?;
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
         checkpoints[0].changed_at_unix_millis,
@@ -103,9 +94,7 @@ async fn checkpoint_writer_decrease() -> Result<(), Box<dyn std::error::Error>> 
 
     write_records(storage.clone(), [first, decreased.clone()]).await?;
 
-    let checkpoints = storage
-        .list_latest_subscription_quota_checkpoints_for_upstreams(&[upstream])
-        .await?;
+    let checkpoints = latest_checkpoints(&storage, upstream).await?;
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(
         checkpoints[0].changed_at_unix_millis,
@@ -138,6 +127,58 @@ async fn write_records<const N: usize>(
     Ok(())
 }
 
+/// Persisted fields of the latest checkpoint per `(window, source)` key.
+struct LatestCheckpoint {
+    changed_at_unix_millis: u64,
+    semantic_fingerprint: [u8; 32],
+    representative_claim: Option<String>,
+    utilization: Option<f64>,
+}
+
+/// Test-only read of the checkpoint table: storage exposes only slim
+/// checkpoints, which omit the semantic fingerprint and representative claim.
+async fn latest_checkpoints(
+    storage: &SqliteStorage,
+    upstream_id: Uuid,
+) -> Result<Vec<LatestCheckpoint>, Box<dyn std::error::Error>> {
+    let rows = sqlx::query(
+        "SELECT checkpoint.changed_at_unix_millis, checkpoint.semantic_fingerprint, \
+                checkpoint.representative_claim, checkpoint.utilization \
+         FROM upstream_subscription_quota_checkpoints_v1 checkpoint \
+         WHERE checkpoint.upstream_id = ? \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer \
+               WHERE newer.upstream_id = checkpoint.upstream_id \
+                 AND newer.window = checkpoint.window \
+                 AND newer.source = checkpoint.source \
+                 AND (newer.changed_at_unix_millis > checkpoint.changed_at_unix_millis \
+                      OR (newer.changed_at_unix_millis = checkpoint.changed_at_unix_millis \
+                          AND newer.sample_id > checkpoint.sample_id)) \
+           ) \
+         ORDER BY checkpoint.window ASC, checkpoint.source ASC",
+    )
+    .bind(upstream_id.to_string())
+    .fetch_all(storage.pool())
+    .await?;
+    rows.into_iter()
+        .map(
+            |row| -> Result<LatestCheckpoint, Box<dyn std::error::Error>> {
+                let fingerprint: Vec<u8> = row.try_get("semantic_fingerprint")?;
+                let fingerprint = <[u8; 32]>::try_from(fingerprint)
+                    .map_err(|bytes| format!("fingerprint has {} bytes", bytes.len()))?;
+                Ok(LatestCheckpoint {
+                    changed_at_unix_millis: u64::try_from(
+                        row.try_get::<i64, _>("changed_at_unix_millis")?,
+                    )?,
+                    semantic_fingerprint: fingerprint,
+                    representative_claim: row.try_get("representative_claim")?,
+                    utilization: row.try_get("utilization")?,
+                })
+            },
+        )
+        .collect()
+}
+
 async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;
@@ -148,7 +189,7 @@ async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dy
             .display()
     );
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok((dir, Arc::new(storage)))
 }
 

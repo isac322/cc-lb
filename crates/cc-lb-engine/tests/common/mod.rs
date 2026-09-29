@@ -1,4 +1,4 @@
-#![allow(dead_code, deprecated)]
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -9,16 +9,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, PrincipalKind, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::api_keys::key_store::KeyStore;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_engine::api_keys::secret;
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::secret;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, PrincipalKind, Upstream};
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
-    LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
     ApiKeyMutation, IssueParams, KeyStatus, ManagedKeyStore, StorageResult, StoredApiKeyRecord,
@@ -114,7 +113,7 @@ pub fn managed_authn(principal_id: &str) -> Arc<BuiltinAuthn> {
     });
     Arc::new(BuiltinAuthn::new(
         Arc::new(KeyStore::new(storage)),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     ))
 }
 
@@ -206,28 +205,6 @@ impl ApiKeyAwareSignerFactory for TestAuthn {
         Arc::new(TestSignerFactory {
             state: self.state.clone(),
             refresh_allowed: self.refresh_allowed,
-        })
-    }
-}
-
-#[derive(Clone)]
-pub struct TestRouter {
-    pub base_url: Url,
-}
-
-impl RouterPlugin for TestRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Ok(RouteDecision {
-            upstream_id: None,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(PassthroughDialect {
-                base_url: self.base_url.clone(),
-            }),
         })
     }
 }
@@ -365,25 +342,16 @@ impl UpstreamDispatch for MockDispatch {
 }
 
 pub fn lifecycle_with(authn: TestAuthn, dispatcher: MockDispatch) -> Lifecycle {
-    lifecycle_with_parts(
-        authn,
-        Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
-        Arc::new(dispatcher),
-        LifecycleConfig::default(),
-    )
+    lifecycle_with_parts(authn, Arc::new(dispatcher), LifecycleConfig::default())
 }
 
 pub fn lifecycle_with_parts(
     authn: TestAuthn,
-    global_router: Arc<dyn RouterPlugin>,
     dispatcher: Arc<dyn UpstreamDispatch>,
     config: LifecycleConfig,
 ) -> Lifecycle {
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(global_router)
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .build();
@@ -392,21 +360,18 @@ pub fn lifecycle_with_parts(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
 pub fn lifecycle_with_cache(
     authn: TestAuthn,
     dispatcher: MockDispatch,
-    cache: Arc<parking_lot::RwLock<cc_lb_engine::UpstreamRateLimitCache>>,
+    cache: Arc<parking_lot::RwLock<cc_lb_control::UpstreamRateLimitCache>>,
 ) -> Lifecycle {
     let dispatcher = Arc::new(dispatcher);
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .upstream_rate_limit_cache(cache)
@@ -416,7 +381,7 @@ pub fn lifecycle_with_cache(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -474,6 +439,28 @@ pub async fn settle() {
     }
 }
 
+/// Reads every persisted request event in append order through the cursor
+/// API (at most 500 rows, far above any single test's volume).
+pub async fn stored_request_events<S>(
+    storage: &S,
+) -> StorageResult<Vec<cc_lb_storage_api::RequestEvent>>
+where
+    S: cc_lb_storage_api::RequestEventStore + ?Sized,
+{
+    let cursor = storage.current_request_event_cursor().await?;
+    Ok(storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect())
+}
+
 pub async fn signed_request(base_url: &str) -> SignedRequest {
     let upstream = Upstream::AnthropicDirect { base_url: None };
     let ctx = DialectShapeContext {
@@ -487,7 +474,6 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
     let principal = Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let shaped = shape_request(
         &PassthroughDialect {
@@ -569,7 +555,7 @@ fn default_json_for_status(status: StatusCode) -> serde_json::Value {
 }
 
 pub struct TestLifecycleBus {
-    pub bus: Arc<cc_lb_engine::InMemoryBus>,
+    pub bus: Arc<cc_lb_control::InMemoryBus>,
     _assembler: Option<cc_lb_engine::RequestEventAssemblerHandle>,
     _rate_limit_header: Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>,
 }
@@ -577,16 +563,16 @@ pub struct TestLifecycleBus {
 impl TestLifecycleBus {
     pub fn new() -> Self {
         Self {
-            bus: Arc::new(cc_lb_engine::InMemoryBus::new()),
+            bus: Arc::new(cc_lb_control::InMemoryBus::new()),
             _assembler: None,
             _rate_limit_header: None,
         }
     }
 
     pub fn with_assembler(mut self, storage: Arc<dyn cc_lb_storage_api::Storage>) -> Self {
-        let rx = self
-            .bus
-            .attach_lifecycle_assembler(cc_lb_engine::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY);
+        let rx = self.bus.attach_lifecycle_assembler(
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
+        );
         let bus_arc: Arc<dyn cc_lb_control::RequestEventBus> = self.bus.clone();
         self._assembler = Some(cc_lb_engine::spawn_request_event_assembler(
             rx,
@@ -602,10 +588,10 @@ impl TestLifecycleBus {
         sink: cc_lb_engine::UpstreamRateLimitSink,
     ) -> Self {
         let rx = self.bus.attach_lifecycle_rate_limit_header(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
         );
         let cache = Arc::new(parking_lot::RwLock::new(
-            cc_lb_engine::UpstreamRateLimitCache::default(),
+            cc_lb_control::UpstreamRateLimitCache::default(),
         ));
         self._rate_limit_header = Some(cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
             rx,
@@ -618,10 +604,10 @@ impl TestLifecycleBus {
     pub fn with_rate_limit_header_subscriber_and_cache(
         mut self,
         sink: cc_lb_engine::UpstreamRateLimitSink,
-        cache: Arc<parking_lot::RwLock<cc_lb_engine::UpstreamRateLimitCache>>,
+        cache: Arc<parking_lot::RwLock<cc_lb_control::UpstreamRateLimitCache>>,
     ) -> Self {
         let rx = self.bus.attach_lifecycle_rate_limit_header(
-            cc_lb_engine::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
+            cc_lb_control::event_bus::DEFAULT_LIFECYCLE_RATE_LIMIT_HEADER_CAPACITY,
         );
         self._rate_limit_header = Some(cc_lb_engine::spawn_lifecycle_rate_limit_header_subscriber(
             rx,

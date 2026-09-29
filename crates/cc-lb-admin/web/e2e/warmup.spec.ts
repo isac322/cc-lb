@@ -215,7 +215,7 @@ async function installAppFixtures(
         upstreams: upstreams.map((upstream) => ({ id: upstream.id, name: upstream.name, status: upstream.enabled ? 'active' : 'disabled', last_apply_at_unix_secs: null, last_apply_error: null })),
       });
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       return json(200, {
         range: url.searchParams.get('range') ?? '24h',
         step: url.searchParams.get('step') ?? 'hour',
@@ -223,10 +223,10 @@ async function installAppFixtures(
         window_start_unix_secs: Math.floor(Date.now() / 1000) - 3600,
         window_end_unix_secs: Math.floor(Date.now() / 1000),
         observed: true,
-        series: [{ key: 'claude-sonnet', buckets: [{ bucket_start_unix_secs: Math.floor(Date.now() / 1000) - 1800, request_count: 1, input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, error_count: 0, virtual_cost_micros: 1234, latency_ms_sum: 100, latency_count: 1, proxy_setup_ms_sum: 1, proxy_setup_ms_count: 1, shape_ms_sum: 1, shape_ms_count: 1, sign_ms_sum: 1, sign_ms_count: 1, upstream_ttfb_ms_sum: 1, upstream_ttfb_ms_count: 1, upstream_body_ms_sum: 1, upstream_body_ms_count: 1 }] }],
+        series: [{ key: 'claude-sonnet', buckets: [{ bucket_start_unix_secs: Math.floor(Date.now() / 1000) - 1800, request_count: 1, input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, error_count: 0, virtual_cost_micros: 1234, latency_ms_sum: 100, latency_count: 1 }] }],
       });
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     if (pathname === '/admin/v1/subscription-quotas/latest') {

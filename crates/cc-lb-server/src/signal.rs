@@ -11,7 +11,7 @@ pub type SighupHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 type ShutdownHookFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ShutdownHook = Arc<dyn Fn() -> ShutdownHookFuture + Send + Sync + 'static>;
 
-use crate::drain::DrainController;
+use cc_lb_engine::DrainController;
 
 #[derive(Clone)]
 pub struct SignalHandle {
@@ -20,7 +20,6 @@ pub struct SignalHandle {
     drain: DrainController,
     drain_timeout: Duration,
     shutdown_started: Arc<AtomicBool>,
-    debug_logging: Arc<AtomicBool>,
     tasks: SignalTasks,
     shutdown_hooks: ShutdownHooks,
 }
@@ -54,10 +53,6 @@ impl SignalHandle {
             )
             .await;
         });
-    }
-
-    pub fn debug_logging_enabled(&self) -> bool {
-        self.debug_logging.load(Ordering::Relaxed)
     }
 
     pub fn is_draining(&self) -> bool {
@@ -118,14 +113,12 @@ pub fn install(
         drain,
         drain_timeout,
         shutdown_started: Arc::new(AtomicBool::new(false)),
-        debug_logging: Arc::new(AtomicBool::new(false)),
         tasks: SignalTasks::default(),
         shutdown_hooks: ShutdownHooks::default(),
     };
 
     install_sigterm(handle.clone());
     install_sighup(sighup_handler, handle.tasks.clone());
-    install_sigusr1(handle.debug_logging.clone(), handle.tasks.clone());
     handle
 }
 
@@ -218,39 +211,6 @@ fn install_sighup(handler: Option<SighupHandler>, tasks: SignalTasks) {
 
 #[cfg(not(unix))]
 fn install_sighup(_handler: Option<SighupHandler>, _tasks: SignalTasks) {}
-
-#[cfg(unix)]
-fn install_sigusr1(debug_logging: Arc<AtomicBool>, tasks: SignalTasks) {
-    tasks.spawn(async move {
-        let Ok(mut sigusr1) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-        else {
-            return;
-        };
-        let reset_sleep = tokio::time::sleep(Duration::from_secs(60));
-        tokio::pin!(reset_sleep);
-
-        loop {
-            tokio::select! {
-                signal = sigusr1.recv() => {
-                    if signal.is_none() {
-                        return;
-                    }
-                    debug_logging.store(true, Ordering::Relaxed);
-                    reset_sleep.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60));
-                    tracing::info!("temporary debug logging enabled by SIGUSR1");
-                }
-                _ = &mut reset_sleep, if debug_logging.load(Ordering::Relaxed) => {
-                debug_logging.store(false, Ordering::Relaxed);
-                tracing::info!("temporary debug logging disabled");
-                }
-            }
-        }
-    });
-}
-
-#[cfg(not(unix))]
-fn install_sigusr1(_debug_logging: Arc<AtomicBool>, _tasks: SignalTasks) {}
 
 #[derive(Clone, Default)]
 struct SignalTasks {

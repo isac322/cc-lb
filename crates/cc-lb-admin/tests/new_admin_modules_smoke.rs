@@ -11,7 +11,7 @@ async fn dashboard_summary_with_range_smoke() {
     for range in ["1h", "6h", "24h", "7d", "30d"] {
         let (status, _, _) = server
             .client
-            .get(&format!("/admin/dashboard/summary?range={range}"))
+            .get(&format!("/admin/v1/dashboard/summary?range={range}"))
             .await;
         let _ = status;
     }
@@ -22,7 +22,7 @@ async fn dashboard_summary_invalid_range_smoke() {
     let server = spawn_admin_server().await;
     let (status, _, _) = server
         .client
-        .get("/admin/dashboard/summary?range=not-a-range")
+        .get("/admin/v1/dashboard/summary?range=not-a-range")
         .await;
     let _ = status;
 }
@@ -39,7 +39,7 @@ async fn dashboard_usage_with_step_and_group_by_smoke() {
         let (status, _, _) = server
             .client
             .get(&format!(
-                "/admin/usage?range={range}&step={step}&group_by={group}"
+                "/admin/v1/dashboard/usage?range={range}&step={step}&group_by={group}"
             ))
             .await;
         let _ = status;
@@ -54,7 +54,10 @@ async fn dashboard_usage_invalid_params_smoke() {
         "?range=24h&group_by=garbage",
         "?range=1h&step=1d",
     ] {
-        let (status, _, _) = server.client.get(&format!("/admin/usage{query}")).await;
+        let (status, _, _) = server
+            .client
+            .get(&format!("/admin/v1/dashboard/usage{query}"))
+            .await;
         let _ = status;
     }
 }
@@ -65,7 +68,7 @@ async fn events_recent_smoke() {
     for query in ["", "?limit=10", "?principal_id=p", "?route=admin_v1_status"] {
         let (status, _, _) = server
             .client
-            .get(&format!("/admin/events/recent{query}"))
+            .get(&format!("/admin/v1/events/recent{query}"))
             .await;
         let _ = status;
     }
@@ -97,13 +100,6 @@ async fn admin_json_extractor_rejections_use_json_envelope() {
     );
     assert_eq!(json["error"], "validation_failed");
     assert!(json["message"].as_str().unwrap().contains("EOF"));
-}
-
-#[tokio::test]
-async fn plugins_status_alias_smoke() {
-    let server = spawn_admin_server().await;
-    let (status, _, _) = server.client.get("/admin/plugins").await;
-    let _ = status;
 }
 
 #[tokio::test]

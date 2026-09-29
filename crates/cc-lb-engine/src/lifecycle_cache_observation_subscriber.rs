@@ -208,8 +208,7 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event_bus::InMemoryBus;
-    use cc_lb_control::LifecycleBusReceiver;
+    use cc_lb_control::event_bus::InMemoryBus;
     use cc_lb_lifecycle::{ParseInfo, TerminationReason};
 
     fn eid(s: &str) -> EventId {
@@ -220,9 +219,7 @@ mod tests {
     async fn hit_state_published_when_only_cache_read_tokens() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
-        let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut sub_rx = bus.subscribe_lifecycle();
         let handle = spawn_lifecycle_cache_observation_subscriber(rx, bus.clone());
 
         tx.send(LifecycleEvent::ParseCompleted {
@@ -261,7 +258,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -289,9 +285,7 @@ mod tests {
     async fn write_state_when_only_creation_tokens() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
-        let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut sub_rx = bus.subscribe_lifecycle();
         let handle = spawn_lifecycle_cache_observation_subscriber(rx, bus.clone());
 
         tx.send(LifecycleEvent::UsageObserved {
@@ -314,7 +308,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -342,9 +335,7 @@ mod tests {
     async fn terminated_without_partial_publishes_unknown() {
         let bus = Arc::new(InMemoryBus::new());
         let (tx, rx) = mpsc::channel(16);
-        let LifecycleBusReceiver::InMemory(mut sub_rx) = bus.subscribe_lifecycle() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut sub_rx = bus.subscribe_lifecycle();
         let handle = spawn_lifecycle_cache_observation_subscriber(rx, bus.clone());
 
         tx.send(LifecycleEvent::RequestTerminated {
@@ -357,7 +348,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

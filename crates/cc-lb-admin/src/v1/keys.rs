@@ -9,8 +9,7 @@ use axum::{
 };
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStoreError};
 use cc_lb_control::api_keys::secret;
-use cc_lb_storage_api::types::KeyStatus;
-use cc_lb_storage_api::{RequestEventKeyLastUsedQuery, StorageError};
+use cc_lb_storage_api::{KeyStatus, RequestEventKeyLastUsedQuery, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -48,7 +47,6 @@ struct ListKeysQuery {
 #[serde(rename_all = "snake_case")]
 enum ListKeysStatus {
     Active,
-    Disabled,
     Revoked,
     All,
 }
@@ -57,7 +55,6 @@ impl ListKeysStatus {
     const fn as_str(&self) -> &'static str {
         match self {
             Self::Active => "active",
-            Self::Disabled => "disabled",
             Self::Revoked => "revoked",
             Self::All => "all",
         }
@@ -325,7 +322,6 @@ async fn list_keys(
 fn matches_status(status: KeyStatus, requested: Option<&ListKeysStatus>) -> bool {
     match requested.unwrap_or(&ListKeysStatus::Active) {
         ListKeysStatus::Active => status == KeyStatus::Active,
-        ListKeysStatus::Disabled => status == KeyStatus::Disabled,
         ListKeysStatus::Revoked => status == KeyStatus::Revoked,
         ListKeysStatus::All => true,
     }
@@ -401,10 +397,8 @@ mod tests {
     use async_trait::async_trait;
     use axum::http::StatusCode;
     use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
-    use cc_lb_storage_api::types::KeyStatus;
     use cc_lb_storage_api::{
-        AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore, StorageError,
-        StorageResult,
+        AuditEntry, AuditQueryScope, AuditStore, KeyStatus, MetaStore, StorageError, StorageResult,
     };
 
     use super::{issue_key_error_response, record_issue_audit_or_revoke, secret};
@@ -419,18 +413,6 @@ mod tests {
             Err(StorageError::Unavailable {
                 message: "injected audit append failure".to_owned(),
             })
-        }
-
-        async fn query_audit(
-            &self,
-            principal_id: Option<&str>,
-            since: u64,
-            until: u64,
-            limit: usize,
-        ) -> StorageResult<Vec<AuditEntry>> {
-            self.inner
-                .query_audit(principal_id, since, until, limit)
-                .await
         }
 
         async fn query_recent_audit(
@@ -457,10 +439,6 @@ mod tests {
             self.inner
                 .query_audit_by_actor(authority, subject, since, until, limit)
                 .await
-        }
-
-        async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
-            self.inner.prune_audit(older_than).await
         }
 
         async fn prune_audit_before(
@@ -498,10 +476,7 @@ mod tests {
             cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage opens");
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("storage initializes");
+        storage.initialize().await.expect("storage initializes");
         let storage = Arc::new(storage);
         let key_store = KeyStore::new(storage.clone());
         let (issued, plaintext) = key_store

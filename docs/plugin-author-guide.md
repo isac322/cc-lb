@@ -141,7 +141,7 @@ sections, and one `cc_lb.plugin.v1` metadata custom section.
 
 ## Hook Contracts
 
-cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more hooks, and upload-time `slot_kind=filter|shape` selects which slot the registration targets.
+cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more hooks; upload registers the artifact for every slot whose hook it exports.
 
 | Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
@@ -267,11 +267,9 @@ Required per-hook fields:
 Upload rejection names relevant to plugin authors include:
 
 - `missing_part`: a required multipart field is absent.
-- `invalid_slot_kind`: `slot_kind` is not `filter` or `shape`.
 - `invalid_wasm_magic`: uploaded bytes do not start with the wasm magic.
 - `invalid_wasm_length`: uploaded bytes are too short to be wasm.
 - `wasm_too_large`: the wasm exceeds the 32 MiB upload limit.
-- `identity_mismatch`: multipart `name` does not match plugin metadata `name`.
 - `invalid_wasm`: wasmtime admission rejected exports, metadata, wire versions,
   fingerprints, imports, or the runtime probe.
 
@@ -328,10 +326,11 @@ chain or called on user traffic.
 
 ## Layout Fingerprint (`WireSchema`)
 
-The wire layout fingerprint is derived from the Rust type AST with
-`#[derive(WireSchema)]`. The derive macro builds a canonical descriptor string
-from the type name, fields, variants, and field types, then embeds
-`BLAKE3(descriptor)` as a 32-byte fingerprint.
+Each hook wire type carries a layout fingerprint. `cc-lb-plugin-wire` builds a
+canonical descriptor string from the type name, fields, variants, and field
+types, and embeds `BLAKE3(descriptor)` as a 32-byte fingerprint.
+`#[cc_lb_plugin]` embeds the fingerprint of each handler's request type in the
+plugin.
 
 Plugin authors do not edit schema tags or manual hashes. A field edit naturally
 changes the descriptor and the embedded fingerprint. During admission, the host
@@ -383,9 +382,7 @@ Upload through the admin API:
 curl -sS -X POST \
   -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \
   -F "bytes=@target/wasm32-unknown-unknown/release/my_plugin.wasm" \
-  -F "name=my-plugin" \
   -F "original_filename=my-plugin.wasm" \
-  -F "slot_kind=filter" \
   "http://localhost:$ADMIN_PORT/admin/v1/plugins/wasm"
 ```
 

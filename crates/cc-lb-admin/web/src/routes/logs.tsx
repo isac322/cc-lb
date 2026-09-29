@@ -65,7 +65,6 @@ import {
   useEventsHistogram,
   usePrincipalNameMap,
   useRecentEventsPage,
-  useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
 import {
@@ -115,17 +114,13 @@ export const logsSearchSchema = z
     session: z.string().optional(),
     model: z.string().optional(),
     status: z.enum(LOG_STATUS_FILTER_VALUES).optional(),
-    // Old bookmarks may still carry `source_kind`; it is stripped as an
-    // unknown key. Absent or invalid `event_kind` means the default kind,
-    // `messages` (`effectiveEventKind`), so the default URL stays clean;
-    // `all` is the explicit opt-out that lists every endpoint category.
+    // Absent or invalid `event_kind` means the default kind, `messages`
+    // (`effectiveEventKind`), so the default URL stays clean; `all` is the
+    // explicit opt-out that lists every endpoint category.
     event_kind: z
       .union([RequestEventKindSchema, z.literal(ALL_EVENT_KINDS)])
       .optional()
       .catch(undefined),
-    // Accepted only so bookmarked preset URLs do not fail validateSearch and
-    // fall through to the route error boundary. Normalized away on load.
-    time_range: z.string().optional(),
     since_unix_secs: unixSecondsSearchParam,
     until_unix_secs: unixSecondsSearchParam,
   })
@@ -143,14 +138,6 @@ export const logsSearchSchema = z
     }
     return filters;
   });
-
-/** Legacy preset widths, kept only to rewrite old bookmarks into absolute epochs. */
-const LEGACY_PRESET_SECONDS: Record<string, number> = {
-  '1h': 3600,
-  '6h': 6 * 3600,
-  '24h': 24 * 3600,
-  '7d': 7 * 24 * 3600,
-};
 
 export const Route = createFileRoute('/logs')({
   validateSearch: logsSearchSchema,
@@ -345,35 +332,10 @@ function LogsPage() {
     activeCursorStack[clampedPage] ?? INITIAL_LOGS_PAGE_PARAM;
   const recent = useRecentEventsPage(historicalFilters, currentPageParam);
   const principalNameMap = usePrincipalNameMap();
-  const upstreamNameMap = useUpstreamNameMap();
   const { effectiveTailing } = getLogsRouteState({
     userRequestedTailing,
     until_unix_secs: filters.until_unix_secs,
   });
-
-  // Legacy preset bookmarks (`?time_range=24h`) are rewritten to an absolute
-  // lower bound with an open right edge, preserving both the window they used
-  // to mean and live tailing.
-  useEffect(() => {
-    if (filters.time_range == null) return;
-    const width = LEGACY_PRESET_SECONDS[filters.time_range];
-    // resetScroll: false on every search-only navigate below: the router's
-    // scrollRestoration would snap the page to the top, but a range or filter
-    // change re-scopes the rows in place.
-    navigate({
-      resetScroll: false,
-      replace: true,
-      search: (prev) => ({
-        ...prev,
-        time_range: undefined,
-        since_unix_secs:
-          width == null
-            ? prev.since_unix_secs
-            : Math.floor(Date.now() / 1000) - width,
-        until_unix_secs: width == null ? prev.until_unix_secs : undefined,
-      }),
-    });
-  }, [filters.time_range, navigate]);
 
   const routeModel = filters.model ?? '';
   // Only external navigations (Clear, back/forward, a shared URL) may overwrite
@@ -1092,7 +1054,6 @@ function LogsPage() {
             events={pageRows}
             onAnchorRange={focusAround}
             principalNameMap={principalNameMap}
-            upstreamNameMap={upstreamNameMap}
             loading={initialRowsLoading}
             reservedRowCount={LOGS_RESERVED_ROW_COUNT}
             liveFlashIds={

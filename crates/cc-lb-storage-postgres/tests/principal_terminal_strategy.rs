@@ -3,7 +3,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use cc_lb_storage_api::principal::{Limit, LimitKind};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, PrincipalUpdate,
+    MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, PrincipalUpdate,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use serde_json::json;
@@ -36,7 +36,7 @@ async fn run_test(url: &str) -> Result<()> {
         fixture.pool.clone(),
         std::sync::Arc::new(cc_lb_clock::SystemClock),
     );
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     default_strategy_is_first_pick(&storage).await?;
     update_strategy_to_random_roundtrips(&storage).await?;

@@ -4,7 +4,7 @@
  "source_state": {
   "kind": "merged_master",
   "base_commit": "fd3a15eb19ae7b987aba897d59ea83a62e443c98",
-  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits. deployed_commit still identifies the running production image, which lags this tree."
+  "note": "Source hashes and references describe merged master; every admin bug fix, the migration version-collision fix, and the skill-path consolidation are landed commits."
  },
  "source_files": [
   {
@@ -153,137 +153,6 @@
   }
  ],
  "endpoints": [
-  {
-   "method": "POST",
-   "path": "/admin/principals/{id}/keys/{key_id}/revoke",
-   "source": "crates/cc-lb-admin/src/routes.rs:31",
-   "handler": "revoke_api_key",
-   "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-   "ui_clients": [],
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::revoke_zero_secrets:SqliteStorage::revoke_zero_secrets",
-    "postgres:ManagedKeyStore::revoke_zero_secrets:PostgresManagedKeyStore::revoke_zero_secrets",
-    "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-    "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-   ],
-   "cache_or_no_query": "Invalidates in-memory KeyStore cache; deletes index from fast-lookup map",
-   "side_effects": "Audit event `principal_key_revoke`; sets status to Revoked and zeroes secret salts/hashes in DB; permanently revokes key QA restore: Re-issue key or restore database snapshot (revocation zeroes secrets permanently).",
-   "risk_tier": "destructive_write",
-   "parameters": {
-    "path": [
-     {
-      "name": "id",
-      "type": "String",
-      "required": true,
-      "description": "Target principal identifier"
-     },
-     {
-      "name": "key_id",
-      "type": "String",
-      "required": true,
-      "description": "Target key identifier"
-     }
-    ],
-    "query": [],
-    "header": [
-     {
-      "name": "authorization",
-      "type": "String",
-      "required": true,
-      "description": "Bearer admin auth token"
-     }
-    ],
-    "body": []
-   }
-  },
-  {
-   "method": "POST",
-   "path": "/admin/principals/{id}/keys/{key_id}/disable",
-   "source": "crates/cc-lb-admin/src/routes.rs:35",
-   "handler": "disable_api_key",
-   "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-   "ui_clients": [],
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::update:SqliteStorage::update",
-    "postgres:ManagedKeyStore::update:PostgresManagedKeyStore::update",
-    "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-    "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-   ],
-   "cache_or_no_query": "Updates KeyStore cached status to Disabled",
-   "side_effects": "Audit event `principal_key_disable`; prevents incoming proxy requests from authenticating with this key QA restore: Call POST /admin/principals/{id}/keys/{key_id}/enable.",
-   "risk_tier": "reversible_write",
-   "parameters": {
-    "path": [
-     {
-      "name": "id",
-      "type": "String",
-      "required": true,
-      "description": "Target principal identifier"
-     },
-     {
-      "name": "key_id",
-      "type": "String",
-      "required": true,
-      "description": "Target key identifier"
-     }
-    ],
-    "query": [],
-    "header": [
-     {
-      "name": "authorization",
-      "type": "String",
-      "required": true,
-      "description": "Bearer admin auth token"
-     }
-    ],
-    "body": []
-   }
-  },
-  {
-   "method": "POST",
-   "path": "/admin/principals/{id}/keys/{key_id}/enable",
-   "source": "crates/cc-lb-admin/src/routes.rs:39",
-   "handler": "enable_api_key",
-   "auth": "require_admin_auth; non-GET method is authorized as AdminAction::Write",
-   "ui_clients": [],
-   "storage_operation_ids": [
-    "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-    "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-    "sqlite:ManagedKeyStore::update:SqliteStorage::update",
-    "postgres:ManagedKeyStore::update:PostgresManagedKeyStore::update",
-    "sqlite:AuditStore::append_audit:SqliteStorage::append_audit",
-    "postgres:AuditStore::append_audit:PostgresStorage::append_audit"
-   ],
-   "cache_or_no_query": "Updates KeyStore cached status to Active",
-   "side_effects": "Audit event `principal_key_enable`; permits incoming proxy requests authenticating with this key QA restore: Call POST /admin/principals/{id}/keys/{key_id}/disable.",
-   "risk_tier": "reversible_write",
-   "parameters": {
-    "path": [
-     {
-      "name": "id",
-      "type": "String",
-      "required": true,
-      "description": "Target principal identifier"
-     },
-     {
-      "name": "key_id",
-      "type": "String",
-      "required": true,
-      "description": "Target key identifier"
-     }
-    ],
-    "query": [],
-    "header": [
-     {
-      "name": "authorization",
-      "type": "String",
-      "required": true,
-      "description": "Bearer admin auth token"
-     }
-    ],
-    "body": []
-   }
-  },
   {
    "method": "PUT",
    "path": "/admin/v1/config/draft",
@@ -2571,32 +2440,6 @@
    ]
   },
   {
-   "id": "postgres:ManagedKeyStore::get:PostgresManagedKeyStore::get",
-   "engine": "postgres",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-    "symbol": "PostgresManagedKeyStore::get",
-    "line_start": 93,
-    "line_end": 112,
-    "sha256": "724f8c19ed51b5c9ca3691d660388b9d5134bf52f125555f7c73c1e2a8c7d376"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 280,
-      "line_end": 282
-     },
-     "branches": [],
-     "bind_parameters": []
-    }
-   ]
-  },
-  {
    "id": "postgres:ManagedKeyStore::issue:PostgresManagedKeyStore::issue",
    "engine": "postgres",
    "trait_method": "ManagedKeyStore::issue",
@@ -2757,79 +2600,6 @@
      },
      "branches": [
       "After revoke and index deletion, before commit"
-     ],
-     "bind_parameters": [
-      "principal_id"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "postgres:ManagedKeyStore::update:PostgresManagedKeyStore::update",
-   "engine": "postgres",
-   "trait_method": "ManagedKeyStore::update",
-   "source": {
-    "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-    "symbol": "PostgresManagedKeyStore::update",
-    "line_start": 187,
-    "line_end": 223,
-    "sha256": "724f8c19ed51b5c9ca3691d660388b9d5134bf52f125555f7c73c1e2a8c7d376"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, verify_hash, secret_salt, limit_overrides, status, expires_at_unix_secs, last_4, description, index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2 FOR UPDATE",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_FOR_UPDATE_SQL",
-      "line_start": 283,
-      "line_end": 285
-     },
-     "branches": [
-      "Executed in retryable transaction before mutation"
-     ],
-     "bind_parameters": [
-      "principal_id",
-      "key_id"
-     ]
-    },
-    {
-     "kind": "literal",
-     "text": "UPDATE managed_api_keys_v1 SET label = $3, revoked_at_unix_secs = $4, key_hash_b64 = $5, verify_hash = $6, secret_salt = $7, limit_overrides = $8, status = $9, expires_at_unix_secs = $10, last_4 = $11, description = $12, index_hash = $13, updated_at = NOW() WHERE principal_id = $1 AND key_id = $2",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "update_record",
-      "line_start": 345,
-      "line_end": 349
-     },
-     "branches": [],
-     "bind_parameters": [
-      "principal_id",
-      "key_id",
-      "&record.label",
-      "option_u64_to_i64_sqlx( record.revoked_at_unix_secs, \"revoked_at_unix_secs\", )?",
-      "&record.key_hash_b64",
-      "record.verify_hash.as_slice()",
-      "record.secret_salt.as_slice()",
-      "serde_json::to_value(&record.limit_overrides) .map_err(|error| sqlx::Error::Encode(Box::new(error)))?,",
-      "key_status_as_str(record.status)",
-      "option_u64_to_i64_sqlx( record.expires_at_unix_secs, \"expires_at_unix_secs\", )?",
-      "&record.last_4",
-      "&record.description",
-      "record.index_hash.as_slice()"
-     ]
-    },
-    {
-     "kind": "literal",
-     "text": "SELECT pg_notify('cclb_principal_changed', $1)",
-     "source": {
-      "file": "crates/cc-lb-storage-postgres/src/adapter/managed_keys.rs",
-      "symbol": "notify_principal_changed",
-      "line_start": 273,
-      "line_end": 273
-     },
-     "branches": [
-      "After update, before commit"
      ],
      "bind_parameters": [
       "principal_id"
@@ -4937,32 +4707,6 @@
    ]
   },
   {
-   "id": "sqlite:ManagedKeyStore::get:SqliteStorage::get",
-   "engine": "sqlite",
-   "trait_method": "ManagedKeyStore::get",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "symbol": "SqliteStorage::get",
-    "line_start": 48,
-    "line_end": 64,
-    "sha256": "81d0988c73bb03a72a43d0fafb2e641502c8a0e1c518398044c411aa601785ad"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, description, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 140,
-      "line_end": 142
-     },
-     "branches": [],
-     "bind_parameters": []
-    }
-   ]
-  },
-  {
    "id": "sqlite:ManagedKeyStore::issue:SqliteStorage::issue",
    "engine": "sqlite",
    "trait_method": "ManagedKeyStore::issue",
@@ -5029,64 +4773,6 @@
      },
      "branches": [
       "Reads current record before zeroing secret material"
-     ],
-     "bind_parameters": [
-      "principal_id",
-      "key_id"
-     ]
-    },
-    {
-     "kind": "literal",
-     "text": "UPDATE managed_keys_v1 SET secret_hash = ?, expires_at = ?, status = ?, label = ?, revoked_at = ?, verify_hash = ?, secret_salt = ?, limit_overrides = ?, last_4 = ?, description = ?, index_hash = ?, updated_at = ? WHERE principal_id = ? AND key_id = ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-      "symbol": "update_record",
-      "line_start": 208,
-      "line_end": 212
-     },
-     "branches": [],
-     "bind_parameters": [
-      "&record.key_hash_b64",
-      "option_u64_to_i64( record.expires_at_unix_secs, \"expires_at_unix_secs\", )?",
-      "key_status_as_str(record.status)",
-      "&record.label",
-      "option_u64_to_i64( record.revoked_at_unix_secs, \"revoked_at_unix_secs\", )?",
-      "record.verify_hash.as_slice()",
-      "record.secret_salt.as_slice()",
-      "limit_overrides",
-      "&record.last_4",
-      "&record.description",
-      "record.index_hash.as_slice()",
-      "now_i64(storage.clock())?",
-      "principal_id",
-      "key_id"
-     ]
-    }
-   ]
-  },
-  {
-   "id": "sqlite:ManagedKeyStore::update:SqliteStorage::update",
-   "engine": "sqlite",
-   "trait_method": "ManagedKeyStore::update",
-   "source": {
-    "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-    "symbol": "SqliteStorage::update",
-    "line_start": 103,
-    "line_end": 118,
-    "sha256": "81d0988c73bb03a72a43d0fafb2e641502c8a0e1c518398044c411aa601785ad"
-   },
-   "statements": [
-    {
-     "kind": "literal",
-     "text": "SELECT principal_id, key_id, label, created_at, revoked_at, secret_hash, verify_hash, secret_salt, limit_overrides, status, expires_at, last_4, description, index_hash FROM managed_keys_v1 WHERE principal_id = ? AND key_id = ?",
-     "source": {
-      "file": "crates/cc-lb-storage-sqlite/src/adapter/managed_keys.rs",
-      "symbol": "SELECT_BY_KEY_SQL",
-      "line_start": 140,
-      "line_end": 142
-     },
-     "branches": [
-      "Reads current record before applying ApiKeyMutation"
      ],
      "bind_parameters": [
       "principal_id",
@@ -7002,10 +6688,6 @@
   }
  ],
  "gaps": [
-  {
-   "area": "legacy_key_routes",
-   "description": "POST /admin/principals/{id}/keys/{key_id}/{revoke|disable|enable} are backend compatibility routes. Admin Web uses only the v1 issue/revoke routes; disable/enable remain direct API or operator-CLI-only."
-  },
   {
    "area": "operator_cli_only_endpoints",
    "description": "No Admin Web caller exists for POST /admin/v1/router/preview, POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance, or PUT /admin/v1/plugin-chain-entries/{id}; each is cataloged with its source behavior and parameters."

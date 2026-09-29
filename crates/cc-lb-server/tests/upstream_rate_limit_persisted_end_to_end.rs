@@ -6,12 +6,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore,
-    RateLimitKind, Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
+    ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, RateLimitKind,
+    Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
     UpstreamRateLimitStateStore, UpstreamStore,
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -27,7 +27,7 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let upstream_server = spawn_upstream().await?;
     let dir = tempfile::tempdir()?;
     let aead = Arc::new(AeadService::from_master_key([0; 32]));
@@ -138,8 +138,8 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
 
 async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }
 

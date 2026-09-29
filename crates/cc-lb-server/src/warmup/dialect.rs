@@ -40,7 +40,7 @@ pub struct WarmupDialectDispatchParams<'a> {
     pub lazy_refresher: Arc<LazyRefresher>,
     pub upstream: &'a UpstreamRecord,
     pub http: &'a WarmupHttpClient,
-    pub clock: cc_lb_engine::ClockHandle,
+    pub clock: cc_lb_clock::ClockHandle,
 }
 
 #[derive(Debug, Error)]
@@ -114,12 +114,8 @@ pub async fn dispatch_warmup_with_dialect(
         .await
         .map_err(|error| WarmupDispatchError::Materialize(error.to_string()))?;
     let manifest = PluginManifest {
-        pure: true,
         name: registry_entry.name,
         artifact: wasm_path.to_string_lossy().into_owned(),
-        wire_version: None,
-        config: plugin_ref.config.clone(),
-        metadata: std::collections::BTreeMap::new(),
     };
 
     let synth_name = format!("__warmup__{}", params.upstream.id);
@@ -154,7 +150,6 @@ pub async fn dispatch_warmup_with_dialect(
     let principal = Principal {
         id: params.upstream.id.to_string(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let upstream_api = Upstream::AnthropicDirect {
         base_url: params.upstream.base_url.clone(),
@@ -209,7 +204,5 @@ fn registry_entry_unsupported_slot(
     registry_entry: &WasmRegistryEntry,
     slot: PluginSlotKind,
 ) -> bool {
-    !registry_entry.is_builtin
-        && !registry_entry.supported_slots.is_empty()
-        && !registry_entry.supported_slots.contains(&slot)
+    !registry_entry.is_builtin && !registry_entry.supported_slots.contains(&slot)
 }

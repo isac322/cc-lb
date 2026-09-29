@@ -7,9 +7,6 @@ use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-#[doc(hidden)]
-pub use cc_lb_quota::unified_observation_to_sample;
-
 pub const DEFAULT_SUBSCRIPTION_QUOTA_CHANNEL_CAPACITY: usize = 4096;
 
 #[derive(Clone, Debug)]

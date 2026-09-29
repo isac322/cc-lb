@@ -15,9 +15,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, PostgresPoolConfig, StorageConfig};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
-use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError,
-};
+use cc_lb_storage_api::{ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use serde_json::{Value, json};
@@ -229,7 +227,7 @@ async fn build_running_app(
     upstream_addr: SocketAddr,
     label: &'static str,
 ) -> TestResult<RunningApp> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(16)
         .connect(&database_url)
@@ -240,7 +238,7 @@ async fn build_running_app(
         clock.clone(),
     ));
     let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool, clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     seed_app_testing_storage(
         storage.as_ref(),
         Some(Url::parse(&format!("http://{upstream_addr}"))?),
@@ -305,9 +303,9 @@ fn test_config(database_url: &str) -> Config {
 }
 
 async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
-    use cc_lb_engine::Clock as _;
+    use cc_lb_clock::Clock as _;
 
-    let clock = cc_lb_engine::SystemClock;
+    let clock = cc_lb_clock::SystemClock;
     let now = clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -333,14 +331,14 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
 }
 
 async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
-    let clock: cc_lb_engine::ClockHandle = Arc::new(cc_lb_engine::SystemClock);
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
         .await?;
     let storage: Arc<dyn StorageTrait> =
         Arc::new(PostgresStorage::new(pool.clone(), clock.clone()));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;

@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_engine::{ClockHandle, SystemClock};
+use cc_lb_clock::{ClockHandle, SystemClock};
 use cc_lb_storage_api::{BackendKind, MetaStore};
 #[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::PostgresStorage;
@@ -80,7 +80,7 @@ impl ConformanceBackend for SqlitePrincipalBackend {
 
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
         let storage = open_sqlite(&fixture.database_url, self.clock.clone()).await?;
-        storage.initialize(BackendKind::Sqlite).await?;
+        storage.initialize().await?;
         Ok(storage)
     }
 
@@ -130,7 +130,7 @@ impl ConformanceBackend for PostgresPrincipalBackend {
             )
             .await?;
         let storage = PostgresStorage::new(pool.clone(), self.clock.clone());
-        MetaStore::initialize(&storage, BackendKind::Postgres).await?;
+        MetaStore::initialize(&storage).await?;
         Ok(PostgresFixture {
             url: self.url.clone(),
             schema,

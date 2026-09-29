@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use cc_lb_aead::EncryptedOAuthTokens;
@@ -20,7 +17,6 @@ struct FakeUpstreamsState {
     record: UpstreamRecord,
     completed_generation: u64,
     complete_calls: usize,
-    read_generations: VecDeque<Option<u64>>,
 }
 
 impl FakeUpstreams {
@@ -30,14 +26,8 @@ impl FakeUpstreams {
                 record,
                 completed_generation,
                 complete_calls: 0,
-                read_generations: VecDeque::new(),
             })),
         }
-    }
-
-    pub fn with_read_generations<const N: usize>(self, generations: [Option<u64>; N]) -> Self {
-        self.state.lock().expect("upstreams lock").read_generations = generations.into();
-        self
     }
 
     pub fn complete_calls(&self) -> usize {
@@ -65,11 +55,13 @@ impl OAuthRefreshUpstreams for FakeUpstreams {
     }
 
     async fn read_oauth_token_generation(&self, _id: Uuid) -> Result<Option<u64>> {
-        let mut state = self.state.lock().expect("upstreams lock");
-        Ok(state
-            .read_generations
-            .pop_front()
-            .unwrap_or(Some(state.record.oauth_token_generation)))
+        Ok(Some(
+            self.state
+                .lock()
+                .expect("upstreams lock")
+                .record
+                .oauth_token_generation,
+        ))
     }
 }
 
@@ -106,14 +98,5 @@ pub fn capture_metadata(
     move |job| {
         *enqueued.lock().expect("enqueued lock") = Some(job);
         std::future::ready(Ok(()))
-    }
-}
-
-pub fn count_refresh_calls(
-    calls: Arc<Mutex<usize>>,
-) -> impl FnOnce(UpstreamRecord) -> std::future::Ready<Result<EncryptedOAuthTokens>> {
-    move |_| {
-        *calls.lock().expect("refresh lock") += 1;
-        std::future::ready(Ok(encrypted_tokens(2)))
     }
 }

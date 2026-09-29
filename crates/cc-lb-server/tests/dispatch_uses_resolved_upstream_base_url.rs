@@ -19,20 +19,17 @@ use std::time::UNIX_EPOCH;
 use async_trait::async_trait;
 use axum::body::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens};
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_engine::{
-    Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
-    UpstreamDispatch,
-};
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_engine::{Body, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
-    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate,
+    UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use cc_lb_upstream::SignedRequest;
@@ -49,11 +46,11 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path().join("base-url-dispatch.sqlite").display()
     );
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("storage"),
     );
-    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    storage.initialize().await.unwrap();
 
     // Two enabled AnthropicApiKey upstreams.
     //   * A "aaa-primary"          — no base_url override (defaults to https://api.anthropic.com)
@@ -149,17 +146,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         prompt_cache_observations: storage.clone(),
     });
 
-    let oauth_cfg = Arc::new(AnthropicOAuthConfig {
-        client_id: "unused-by-this-test".to_owned(),
-        auth_url: Url::parse("http://unused.invalid/authorize").expect("auth url"),
-        token_url: Url::parse("http://unused.invalid/token").expect("token url"),
-        redirect_uri: Url::parse("http://unused.invalid/callback").expect("redirect url"),
-        scopes: vec!["messages".to_owned()],
-    });
     let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
     let view = build_dynamic_view(
         stores.as_ref(),
-        oauth_cfg.as_ref(),
         aead.clone(),
         None,
         0,
@@ -167,10 +156,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path(),
         Arc::new(SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("dynamic view builds");
@@ -185,12 +173,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let lifecycle = Lifecycle::new_with_dynamic_view(
         Arc::new(BuiltinAuthn::new(
             key_store,
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         )),
         holder.clone(),
         recording,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let request = message_request(key_secret.expose());
@@ -246,7 +234,6 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     assert_eq!(cleared.base_url, None);
     let refreshed = build_dynamic_view(
         stores.as_ref(),
-        oauth_cfg.as_ref(),
         aead,
         None,
         holder.generation(),
@@ -254,10 +241,9 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path(),
         Arc::new(SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("dynamic view rebuilds after clearing");
@@ -439,9 +425,9 @@ fn message_request(api_key: &str) -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
+    use cc_lb_clock::Clock as _;
 
-    let clock = cc_lb_engine::SystemClock;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)

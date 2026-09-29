@@ -12,7 +12,7 @@ use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage, PostgresSchedulerBackend, SchedulerBackend,
 };
 use cc_lb_server::refresh::{LazyRefresher, LazyRefresherDeps, LazyRefresherParams};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 use sqlx::postgres::PgPoolOptions;
 use storage_sqlx::postgres::PgPoolOptions as StoragePgPoolOptions;
 use testcontainers_modules::{
@@ -53,7 +53,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         storage_pool.clone(),
         Arc::new(cc_lb_clock::SystemClock),
     ));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     let config = postgres_queue_config();
     let backend = SchedulerBackend::Postgres(PostgresSchedulerBackend::new(pool.clone()));

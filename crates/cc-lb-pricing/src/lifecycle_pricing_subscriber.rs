@@ -1,7 +1,7 @@
 //! Pricing subscriber.
 //!
-//! Consumes the `LifecycleEvent` stream, tracks `(model, upstream_kind,
-//! usage)` per `event_id`, and on `RequestTerminated` emits a derived
+//! Consumes the `LifecycleEvent` stream, tracks `(model, usage)` per
+//! `event_id`, and on `RequestTerminated` emits a derived
 //! `LifecycleEvent::Priced` back onto the same bus. The event assembler
 //! merges `Priced` events into the request row's cost columns.
 //!
@@ -61,7 +61,6 @@ pub fn spawn_with_config(
 struct Partial {
     inserted_at: Option<Instant>,
     model: Option<String>,
-    upstream_kind_label: Option<String>,
     service_tier: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
@@ -172,7 +171,6 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if let Some(model) = info.model {
                 partial.model = Some(model);
             }
-            partial.upstream_kind_label = info.upstream_kind;
         }
         LifecycleEvent::UsageObserved { usage, .. } => {
             partial.input_tokens = usage.input_tokens;
@@ -204,10 +202,6 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let upstream_kind = partial
-        .upstream_kind_label
-        .as_deref()
-        .and_then(pricing_upstream_kind_from_label);
     let breakdown = crate::virtual_cost_micros_full(
         model,
         partial.input_tokens,
@@ -215,18 +209,9 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         partial.cache_creation_5m,
         partial.cache_creation_1h,
         partial.cache_read,
-        upstream_kind,
         partial.service_tier.as_deref(),
     );
     Some(event_cost_breakdown_from_pricing(breakdown))
-}
-
-fn pricing_upstream_kind_from_label(label: &str) -> Option<crate::UpstreamKind> {
-    match label {
-        "anthropic_key" => Some(crate::UpstreamKind::AnthropicKey),
-        "anthropic_oauth" => Some(crate::UpstreamKind::AnthropicOAuth),
-        _ => None,
-    }
 }
 
 fn event_cost_breakdown_from_pricing(
@@ -276,7 +261,6 @@ mod tier_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_control::{BusReceiver, LifecycleBusReceiver};
     use cc_lb_lifecycle::{
         ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot, UsageSource,
     };
@@ -298,17 +282,16 @@ mod tests {
     impl RequestEventBus for TestBus {
         fn publish(&self, _update: RequestEventUpdate) {}
 
-        fn subscribe(&self) -> BusReceiver {
-            let (_, request_rx) = broadcast::channel(1);
-            BusReceiver::InMemory(request_rx)
+        fn subscribe(&self) -> broadcast::Receiver<RequestEventUpdate> {
+            broadcast::channel(1).1
         }
 
         fn publish_lifecycle(&self, event: LifecycleEvent) {
             let _ = self.lifecycle_tx.send(event);
         }
 
-        fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
-            LifecycleBusReceiver::InMemory(self.lifecycle_tx.subscribe())
+        fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent> {
+            self.lifecycle_tx.subscribe()
         }
     }
 
@@ -319,9 +302,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_with_usage_emits_priced() {
         let bus = Arc::new(TestBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx_bcast = bus.subscribe_lifecycle();
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_pricing_subscriber(rx, bus.clone());
 
@@ -362,8 +343,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         })
@@ -390,7 +369,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,
@@ -419,9 +397,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_without_usage_skips_priced() {
         let bus = Arc::new(TestBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx_bcast = bus.subscribe_lifecycle();
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_pricing_subscriber(rx, bus.clone());
 
@@ -435,7 +411,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,
@@ -461,9 +436,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn stream_success_terminated_emits_priced() {
         let bus = Arc::new(TestBus::new());
-        let LifecycleBusReceiver::InMemory(mut rx_bcast) = bus.subscribe_lifecycle() else {
-            panic!("expected in-memory lifecycle receiver");
-        };
+        let mut rx_bcast = bus.subscribe_lifecycle();
         let (tx, rx) = mpsc::channel(16);
         let handle = spawn_lifecycle_pricing_subscriber(rx, bus.clone());
 
@@ -491,8 +464,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         })
@@ -523,7 +494,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,

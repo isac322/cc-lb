@@ -17,7 +17,7 @@ async fn reorder_chain_revalidates_slot_drift() {
         &server.storage,
         31,
         "shape-drifted-to-router-reorder",
-        vec![PluginSlotKind::Shape],
+        vec![PluginSlotKind::Router],
     )
     .await;
     let chain = seed_chain_with_slot(
@@ -28,11 +28,6 @@ async fn reorder_chain_revalidates_slot_drift() {
         sparse_order::STEP,
     )
     .await;
-    server
-        .storage
-        .update_supported_slots(registry.id, vec![PluginSlotKind::Router])
-        .await
-        .unwrap();
 
     let (status, _, body) = server
         .client
@@ -65,7 +60,7 @@ async fn rebalance_chain_revalidates_slot_drift() {
         &server.storage,
         32,
         "shape-drifted-to-router-rebalance",
-        vec![PluginSlotKind::Shape],
+        vec![PluginSlotKind::Router],
     )
     .await;
     seed_chain_with_slot(
@@ -76,17 +71,12 @@ async fn rebalance_chain_revalidates_slot_drift() {
         sparse_order::STEP,
     )
     .await;
-    server
-        .storage
-        .update_supported_slots(registry.id, vec![PluginSlotKind::Router])
-        .await
-        .unwrap();
 
     let (status, _, body) = server
         .client
         .json(
             "POST",
-            &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Shape"),
+            &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=shape"),
             None,
             &[],
         )
@@ -135,10 +125,8 @@ async fn seed_registry_with_slots(
                 sha256: [seed; 32],
                 bytes: vec![seed; seed as usize],
                 size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),

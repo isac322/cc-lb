@@ -122,7 +122,6 @@ import {
   useSubscriptionQuotaSeries,
   useTriggerSubscriptionMetadataRefresh,
   useUpdateUpstreamWarmupSettings,
-  useUpstreamNameMap,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
   useUpstreams,
@@ -844,7 +843,6 @@ function DetailView({
   );
   const statusQ = useStatus();
   const principalNameMap = usePrincipalNameMap();
-  const upstreamNameMap = useUpstreamNameMap();
   const upstreamRuntimeStatus = useMemo(
     () => statusQ.data?.upstreams.find((u) => u.id === upstream.id) ?? null,
     [statusQ.data, upstream.id],
@@ -1692,7 +1690,6 @@ function DetailView({
               <RequestEventsTable
                 events={recentForUpstream}
                 principalNameMap={principalNameMap}
-                upstreamNameMap={upstreamNameMap}
                 loading={recentPending}
                 columns={{
                   upstream: false,

@@ -41,13 +41,6 @@ const PRINCIPAL_KIND_LABEL: Record<string, string> = {
   o_auth_subject: 'OAuth subject',
   oauth_subject: 'OAuth subject',
   internal_key: 'Internal key',
-  workload_identity: 'Workload identity',
-  subscription_bearer: 'Subscription bearer',
-};
-
-/** The provider an event's upstream speaks (`event.upstream`). */
-const UPSTREAM_PROVIDER_LABEL: Record<string, string> = {
-  anthropic_direct: 'Anthropic',
 };
 
 /** Sentence-case label for a server enum value; unknown values keep their words. */
@@ -221,11 +214,6 @@ export function RequestEventIdentity({
           value={
             <span className="break-all min-w-0">
               {event.upstream_name ?? DASH}
-              {event.upstream && event.upstream !== event.upstream_name ? (
-                <span className="text-text-faint ml-2">
-                  {enumLabel(UPSTREAM_PROVIDER_LABEL, event.upstream)}
-                </span>
-              ) : null}
             </span>
           }
         />

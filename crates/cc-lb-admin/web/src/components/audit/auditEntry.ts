@@ -12,7 +12,6 @@ export interface AuditEntryLike {
   actor_kind?: string | null;
   actor_email?: string | null;
   admin_action?: string | null;
-  kind?: string | null;
   payload?: Record<string, unknown> | null;
   [k: string]: unknown;
 }
@@ -44,7 +43,7 @@ export interface ParsedAction {
 
 /** Splits `upstream_update(id=…, fields=a,b)` into its name and parameters. */
 export function parseAuditAction(entry: AuditEntryLike): ParsedAction {
-  const raw = entry.admin_action ?? entry.kind ?? '';
+  const raw = entry.admin_action ?? '';
   const match = /^([^(]+)\((.*)\)$/s.exec(raw);
   if (!match) return { name: raw, params: [] };
   const params: Array<[string, string]> = [];

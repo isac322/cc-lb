@@ -8,15 +8,15 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_engine::{DynamicViewHolder, Lifecycle, LifecycleConfig};
+use cc_lb_control::DynamicViewHolder;
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
-    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate,
+    UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
@@ -264,57 +264,6 @@ async fn api_key_upstream_resolves_canonical_raw_utf8_credential() {
 }
 
 #[tokio::test]
-async fn api_key_upstream_resolves_legacy_id_aad_json_quoted_credential() {
-    // Pre-PR PATCH/PUT writes: AAD = upstream.id, plaintext = serde_json::to_vec(&String),
-    // i.e. the key wrapped in literal double quotes.
-    let fixture = Fixture::new().await;
-    let upstream_id = fixture
-        .create_api_key_upstream_record("api-key-legacy-update")
-        .await;
-    let plaintext =
-        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
-    fixture
-        .store_api_key_ciphertext(upstream_id, upstream_id.as_bytes(), &plaintext)
-        .await;
-
-    let (status, body) =
-        drive_proxied_request(&fixture, "api-key-legacy-update-principal", upstream_id).await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-
-    let last = fetch_last_request(&fixture).await;
-    assert_eq!(
-        last.x_api_key.as_deref(),
-        Some("sk-ant-UPSTREAM-SECRET"),
-        "legacy JSON-quoted credential must be unquoted before signing"
-    );
-}
-
-#[tokio::test]
-async fn api_key_upstream_resolves_legacy_name_aad_json_quoted_credential() {
-    // Pre-PR POST /admin/v1/upstreams writes: AAD = upstream.name, plaintext =
-    // the same JSON-quoted form.
-    let fixture = Fixture::new().await;
-    let name = "api-key-legacy-create";
-    let upstream_id = fixture.create_api_key_upstream_record(name).await;
-    let plaintext =
-        serde_json::to_vec(&"sk-ant-UPSTREAM-SECRET".to_owned()).expect("json plaintext");
-    fixture
-        .store_api_key_ciphertext(upstream_id, name.as_bytes(), &plaintext)
-        .await;
-
-    let (status, body) =
-        drive_proxied_request(&fixture, "api-key-legacy-create-principal", upstream_id).await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-
-    let last = fetch_last_request(&fixture).await;
-    assert_eq!(
-        last.x_api_key.as_deref(),
-        Some("sk-ant-UPSTREAM-SECRET"),
-        "legacy name-AAD credential must decrypt and be unquoted before signing"
-    );
-}
-
-#[tokio::test]
 async fn api_key_upstream_rejects_credential_that_is_not_a_valid_header_value() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture
@@ -377,7 +326,6 @@ struct Fixture {
     storage: Arc<Storage>,
     stores: Arc<Stores>,
     aead: Arc<AeadService>,
-    oauth_cfg: Arc<AnthropicOAuthConfig>,
     fake_base: String,
 }
 
@@ -390,11 +338,11 @@ impl Fixture {
             dir.path().join("composite-dispatch.sqlite").display()
         );
         let storage = Arc::new(
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("storage"),
         );
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        storage.initialize().await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: Arc::new(OrderedUpstreamStore {
                 inner: storage.clone(),
@@ -412,19 +360,11 @@ impl Fixture {
         });
         let aead = Arc::new(AeadService::from_master_key([33; 32]));
         let fake_base = format!("http://{fake_addr}");
-        let oauth_cfg = Arc::new(AnthropicOAuthConfig {
-            client_id: "test-client".to_owned(),
-            auth_url: Url::parse(&format!("{fake_base}/oauth/authorize")).expect("auth url"),
-            token_url: Url::parse(&format!("{fake_base}/oauth/token")).expect("token url"),
-            redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
-            scopes: vec!["messages".to_owned()],
-        });
         Self {
             _dir: dir,
             storage,
             stores,
             aead,
-            oauth_cfg,
             fake_base,
         }
     }
@@ -537,7 +477,6 @@ impl Fixture {
         let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
         let view = build_dynamic_view(
             self.stores.as_ref(),
-            self.oauth_cfg.as_ref(),
             self.aead.clone(),
             None,
             0,
@@ -545,22 +484,21 @@ impl Fixture {
             self._dir.path(),
             Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
             30,
-            None,
-            None,
+            Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
             1800,
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         )
         .await
         .expect("dynamic view builds");
         Lifecycle::new_with_dynamic_view(
             Arc::new(BuiltinAuthn::new(
                 key_store,
-                Arc::new(cc_lb_engine::SystemClock),
+                Arc::new(cc_lb_clock::SystemClock),
             )),
             Arc::new(DynamicViewHolder::new(view)),
             cc_lb_engine::make_default_dispatcher(50),
             LifecycleConfig::default(),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         )
     }
 }
@@ -960,9 +898,9 @@ fn message_request_bearer(api_key: &str) -> Request<Bytes> {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
+    use cc_lb_clock::Clock as _;
 
-    let clock = cc_lb_engine::SystemClock;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)

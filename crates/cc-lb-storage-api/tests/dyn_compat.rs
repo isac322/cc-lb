@@ -11,7 +11,7 @@ fn sqlite_storage_is_dyn_compatible() -> Result<(), Box<dyn std::error::Error>> 
     let path = dir.path().join("storage.sqlite");
     let database_url = format!("sqlite://{}", path.display());
     let storage = tokio::runtime::Runtime::new()?.block_on(async {
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock)).await
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock)).await
     })?;
 
     let _: Arc<dyn StorageTrait> = Arc::new(storage);

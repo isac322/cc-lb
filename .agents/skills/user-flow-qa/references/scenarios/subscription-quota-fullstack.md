@@ -107,7 +107,7 @@ Mutation primitives (apply Template T with these deltas):
 - **M7 cleanup/backfill**: `cc-lb compact-subscription-quota-history --storage-path $TDB [--drop-raw-observations]`. Writes meta markers `subscription_quota_checkpoint_backfill_v1_complete` / `_cleanup_v1_complete`; idempotent (marker present ⇒ returns cached report, no destructive work).
 - **Live trigger** (no SQL): `curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:52252/admin/v1/upstreams/<id>/warmup/fire-now` ⇒ real warmup, header-source observation persisted.
 
-Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_batch]`, `put_subscription_quota_checkpoint(s)`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs:283-350, traits.rs:259-283).
+Programmatic seed alt: `UpstreamSubscriptionQuotaStore::record_subscription_quota_samples`, `put_subscription_quota_checkpoints`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs, traits.rs).
 
 ## 3. Part A — Point-in-time QA
 
@@ -115,7 +115,7 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 - latest upserted every accepted observation; checkpoint only on semantic change; evidence-only change ⇒ no checkpoint.
 - series returns last-checkpoint-before-`since` (left anchor) + checkpoints in `[since,until]`; NEVER fabricates leading zeroes (ADR 0007; test `subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes`).
 
-### 3.2 HTTP endpoint contracts (all paths also under legacy `/admin/…`)  — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
+### 3.2 HTTP endpoint contracts — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
 | Endpoint | Required params | Key defaults | Guardrail → 400 error code |
 |---|---|---|---|
 | `GET /admin/v1/subscription-quotas/latest` | — | windows=all, source=merged, upstream_ids=all-active-oauth, max_staleness=routing cfg | `invalid_source` / `invalid_window` / `invalid_upstream_id` |
@@ -251,7 +251,6 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | Case | Layer(s) | Result | Evidence |
 |------|----------|--------|----------|
 | §3.2 endpoint contracts | API | PASS | /series + /latest HTTP 200 with correct payloads during T1/T4 |
-| T14 analysis range rejection/recovery | API | Retired | `/analysis` endpoint removed 2026-09-28 |
 | §3.1 storage invariants | storage | PASS | +1 checkpoint only on semantic change; latest guarded by observed_at>= |
 | §3.3 TC-1..8 (frontend) | UI | PASS (prior run) | subscription-quota-frontend.md verdict PASS |
 | **T1 utilization ↑** | storage→API | **PASS** | /series last bucket `utilization_last` 0.82→0.917; checkpoints 5402→5403 (+1) |

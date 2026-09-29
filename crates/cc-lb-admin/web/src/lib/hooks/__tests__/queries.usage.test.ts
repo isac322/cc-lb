@@ -67,7 +67,7 @@ describe('useUsage', () => {
           ? input.toString()
           : input.url;
     expect(url).toBe(
-      '/admin/usage?range=6h&step=minute&group_by=principal&projection=totals',
+      '/admin/v1/dashboard/usage?range=6h&step=minute&group_by=principal&projection=totals',
     );
     expect(qk.usage('6h', 'minute', 'principal')).not.toEqual(
       qk.usage('6h', 'minute', 'principal', undefined, 'totals'),

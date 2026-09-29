@@ -4,12 +4,11 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalStore,
-    StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
+    AuditEntry, AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
+    PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
     },
-    types::AuditEntry,
     validate_identifier,
 };
 use serde_json::json;
@@ -42,8 +41,7 @@ where
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
     hard_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_referenced_by_audit_conflicts(Arc::clone(&backend)).await?;
-    validate_identifier_rejects_invalid_name(Arc::clone(&backend)).await?;
-    set_last_apply_error_roundtrip(backend).await?;
+    validate_identifier_rejects_invalid_name(backend).await?;
     Ok(())
 }
 
@@ -570,35 +568,6 @@ where
     .await
 }
 
-async fn set_last_apply_error_roundtrip<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore,
-{
-    with_fixture(backend, |storage| async move {
-        let record = PrincipalStore::create(&*storage, principal_create(13), BASE_TS).await?;
-        let errored = PrincipalStore::set_last_apply_error(
-            &*storage,
-            record.id,
-            Some("router compile failed".to_owned()),
-            BASE_TS + 3,
-        )
-        .await?
-        .unwrap();
-        ensure!(errored.last_apply_error == Some("router compile failed".to_owned()));
-        ensure!(errored.last_apply_at_unix_secs == Some(BASE_TS + 3));
-        ensure!(errored.revision == record.revision);
-        let cleared = PrincipalStore::set_last_apply_error(&*storage, record.id, None, BASE_TS + 4)
-            .await?
-            .unwrap();
-        ensure!(cleared.last_apply_error.is_none());
-        ensure!(cleared.last_apply_at_unix_secs == Some(BASE_TS + 4));
-        ensure!(cleared.revision == record.revision);
-        Ok(())
-    })
-    .await
-}
-
 async fn with_fixture<B, F, Fut>(backend: Arc<B>, run: F) -> Result<()>
 where
     B: ConformanceBackend,
@@ -648,7 +617,7 @@ fn audit_entry(record: &PrincipalRecord) -> AuditEntry {
         output_tokens: Some(2),
         duration_ms: 3,
         agent_label: None,
-        kind: Some("principal_store".to_owned()),
+        admin_action: Some("principal_store".to_owned()),
         payload: None,
         ..Default::default()
     }
@@ -666,10 +635,8 @@ where
                 sha256: [seed; 32],
                 bytes: vec![seed],
                 size_bytes: 1,
-                parse_validated_at_unix_secs: BASE_TS,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: format!("principal-cascade-plugin-{seed}"),
                 version: None,
                 original_filename: format!("principal-cascade-plugin-{seed}.wasm"),
@@ -711,7 +678,7 @@ fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "filter hook".to_owned(),
             usage: "called by router".to_owned(),
-            mode: Default::default(),
+            mode: cc_lb_plugin_wire::metadata::HookMode::Active,
         },
     )])
 }

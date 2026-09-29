@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    RequestEventStore, UpstreamCreate, UpstreamStore, UpstreamUpdate, UsageRollupStore,
-    types::{RequestEvent, RequestEventUpstream, UsageRollup, UsageRollupResolution},
-    upstream::UpstreamKind,
+    RequestEvent, RequestEventStore, UpstreamCreate, UpstreamStore, UpstreamUpdate, UsageRollup,
+    UsageRollupResolution, UsageRollupStore, upstream::UpstreamKind,
 };
 use uuid::Uuid;
 
@@ -56,7 +55,7 @@ where
         "first rollup should persist a checkpoint"
     );
 
-    let rollups = storage.query_usage_rollups().await?;
+    let rollups = all_usage_rollups(storage.as_ref()).await?;
     ensure!(
         rollups.len() == 5,
         "expected 5 rollup rows, got {}",
@@ -119,7 +118,7 @@ where
         "idempotent rerun should keep the same checkpoint"
     );
     ensure!(
-        storage.query_usage_rollups().await? == rollups,
+        all_usage_rollups(storage.as_ref()).await? == rollups,
         "idempotent rerun should not mutate existing rollups"
     );
     ensure!(
@@ -187,7 +186,7 @@ where
         .await?;
     storage.rollup_usage_once().await?;
 
-    let rollups = storage.query_usage_rollups().await?;
+    let rollups = all_usage_rollups(storage.as_ref()).await?;
     let by_upstream_id = rollups
         .iter()
         .filter(|rollup| rollup.upstream_id == upstream_id)
@@ -272,6 +271,18 @@ fn assert_rollup(rollup: &UsageRollup, expected: ExpectedRollup) -> Result<()> {
     Ok(())
 }
 
+async fn all_usage_rollups<S: UsageRollupStore + ?Sized>(storage: &S) -> Result<Vec<UsageRollup>> {
+    let mut rollups = Vec::new();
+    for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+        rollups.extend(
+            storage
+                .query_usage_rollups_in_range(resolution, 0, i64::MAX as u64)
+                .await?,
+        );
+    }
+    Ok(rollups)
+}
+
 fn find_rollup<'a>(
     rollups: &'a [UsageRollup],
     resolution: UsageRollupResolution,
@@ -305,7 +316,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_005,
             "usage-req-a-1",
             "usage-principal-a",
-            RequestEventUpstream::AnthropicDirect,
+            "anthropic_direct",
             "claude-sonnet-4-5",
             200,
             Some(10),
@@ -316,7 +327,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_030,
             "usage-req-a-2",
             "usage-principal-a",
-            RequestEventUpstream::AnthropicDirect,
+            "anthropic_direct",
             "claude-sonnet-4-5",
             429,
             Some(5),
@@ -327,7 +338,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_065,
             "usage-req-a-3",
             "usage-principal-a",
-            RequestEventUpstream::AnthropicDirect,
+            "anthropic_direct",
             "claude-sonnet-4-5",
             200,
             Some(7),
@@ -338,7 +349,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_045,
             "usage-req-b-1",
             "usage-principal-b",
-            RequestEventUpstream::AnthropicDirect,
+            "anthropic_direct",
             "claude-opus-4-1",
             500,
             None,
@@ -353,7 +364,7 @@ fn request_event(
     ts: u64,
     request_id: &str,
     principal: &str,
-    upstream: RequestEventUpstream,
+    upstream_name: &str,
     model: &str,
     status: u16,
     input_tokens: Option<u64>,
@@ -362,10 +373,12 @@ fn request_event(
 ) -> RequestEvent {
     RequestEvent {
         ts,
+        ts_ms: Some(ts * 1_000),
         request_id: request_id.to_owned(),
+        event_id: Some(request_id.to_owned()),
         principal_id: Some(principal.to_owned()),
         principal_kind: Some("api_key".to_owned()),
-        upstream: Some(upstream),
+        upstream_name: Some(upstream_name.to_owned()),
         model: Some(model.to_owned()),
         status,
         input_tokens,
@@ -385,10 +398,11 @@ fn request_event_with_upstream_identity(
 ) -> RequestEvent {
     RequestEvent {
         ts,
+        ts_ms: Some(ts * 1_000),
         request_id: request_id.to_owned(),
+        event_id: Some(request_id.to_owned()),
         principal_id: Some(principal.to_owned()),
         principal_kind: Some("api_key".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(upstream_id),
         upstream_name: Some(upstream_name.to_owned()),
         model: Some("claude-sonnet-4-5".to_owned()),

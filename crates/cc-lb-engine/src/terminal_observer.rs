@@ -43,11 +43,11 @@ use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage};
 use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, RequestSetupTimings, TerminationReason};
 use cc_lb_observability::{RedactionPolicy, redact_internal_errors, truncate_reason};
-use cc_lb_storage_api::types::PrincipalKindLite;
+use cc_lb_storage_api::PrincipalKindLite;
 use http::StatusCode;
 use uuid::Uuid;
 
-use crate::clock::{ClockHandle, unix_millis};
+use cc_lb_clock::{ClockHandle, unix_millis};
 
 const STREAM_ERROR_CHAIN_MAX_DEPTH: usize = 8;
 
@@ -398,7 +398,6 @@ struct TerminalState {
     request_span: Option<tracing::Span>,
     request_body_read_ms: Option<u64>,
     request_body_bytes: Option<u64>,
-    limit_reconcile_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     setup_timings: RequestSetupTimings,
     io_timings: RequestIoTimings,
@@ -562,15 +561,11 @@ impl LifecycleContext {
 
     pub(crate) fn set_termination_timings(
         &self,
-        limit_reconcile_ms: Option<u64>,
         proxy_setup_ms: Option<u64>,
         upstream_body_ms: Option<u64>,
         first_body_chunk_ms: Option<u64>,
     ) {
         let mut state = self.lock_state();
-        if let Some(value) = limit_reconcile_ms {
-            state.limit_reconcile_ms = Some(value);
-        }
         if let Some(value) = proxy_setup_ms {
             state.proxy_setup_ms = Some(value);
         }
@@ -885,7 +880,6 @@ impl Inner {
                     duration_ms,
                     request_body_read_ms: state.request_body_read_ms,
                     request_body_bytes: state.request_body_bytes,
-                    limit_reconcile_ms: state.limit_reconcile_ms,
                     proxy_setup_ms: state.proxy_setup_ms,
                     setup_timings: state.setup_timings,
                     io_timings: state.io_timings,
@@ -929,15 +923,11 @@ mod tests {
     use tracing_subscriber::{Layer, Registry};
 
     use super::*;
-    use crate::clock::SystemClock;
-    use crate::event_bus::InMemoryBus;
+    use cc_lb_clock::SystemClock;
+    use cc_lb_control::event_bus::InMemoryBus;
 
     fn subscribe(bus: &Arc<InMemoryBus>) -> tokio::sync::broadcast::Receiver<LifecycleEvent> {
-        use cc_lb_control::LifecycleBusReceiver;
-        let LifecycleBusReceiver::InMemory(rx) = bus.subscribe_lifecycle() else {
-            panic!("expected InMemory lifecycle receiver");
-        };
-        rx
+        bus.subscribe_lifecycle()
     }
     #[derive(Clone, Default)]
     struct RequestTimingLayer {
@@ -1237,8 +1227,8 @@ mod tests {
         observer.set_io_timings(RequestIoTimings::default());
         observer.set_request_body_timing(7, Some(4_096));
         observer.set_request_body_timing(8, None);
-        observer.set_termination_timings(Some(1), Some(3), Some(4), Some(5));
-        observer.set_termination_timings(None, None, None, None);
+        observer.set_termination_timings(Some(3), Some(4), Some(5));
+        observer.set_termination_timings(None, None, None);
         observer.set_upstream_body_ms_if_absent(99);
         observer.set_finalize_ms(6);
         observer.finish();
@@ -1247,7 +1237,6 @@ mod tests {
         let LifecycleEvent::RequestTerminated {
             request_body_read_ms,
             request_body_bytes,
-            limit_reconcile_ms,
             proxy_setup_ms,
             upstream_body_ms,
             first_body_chunk_ms,
@@ -1260,7 +1249,6 @@ mod tests {
         };
         assert_eq!(request_body_read_ms, Some(8));
         assert_eq!(request_body_bytes, Some(4_096));
-        assert_eq!(limit_reconcile_ms, Some(1));
         assert_eq!(proxy_setup_ms, Some(3));
         assert_eq!(upstream_body_ms, Some(4));
         assert_eq!(first_body_chunk_ms, Some(5));
@@ -1351,7 +1339,7 @@ mod tests {
         let (span, recorded) = request_span();
         observer.set_request_span(span);
         observer.set_request_body_timing(u64::MAX, None);
-        observer.set_termination_timings(None, Some(7), Some(11), None);
+        observer.set_termination_timings(Some(7), Some(11), None);
         observer.set_attempt_timings(Some(13), Some(17), Some(19));
         observer.set_finalize_ms(23);
         observer.finish();

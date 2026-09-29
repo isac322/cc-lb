@@ -5,10 +5,10 @@ use cc_lb_upstream::UpstreamDialect;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Router output selecting both an upstream and its dialect boundary object.
+/// Routing outcome selecting both an upstream and its dialect boundary object.
 pub struct RouteDecision {
-    /// Stable upstream identifier selected by the router, when provided by the plugin.
-    pub upstream_id: Option<Uuid>,
+    /// Stable upstream identifier selected for the request.
+    pub upstream_id: Uuid,
     /// Upstream selected for the request.
     pub upstream: Upstream,
     /// Dialect plugin that shapes the request for the selected upstream.

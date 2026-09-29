@@ -50,17 +50,20 @@ fn plugin_metadata_parse_validates_required_fields() {
                 "filter":{
                     "wire_version":1,
                     "description":"Filters upstream candidates.",
-                    "usage":"Return accept/reject reasons."
+                    "usage":"Return accept/reject reasons.",
+                    "mode":"active"
                 },
                 "transform_response":{
                     "wire_version":1,
                     "description":"Transforms buffered responses.",
-                    "usage":"Return unchanged or replacement response parts."
+                    "usage":"Return unchanged or replacement response parts.",
+                    "mode":"noop"
                 },
                 "transform_sse_event":{
                     "wire_version":1,
                     "description":"Transforms one SSE event.",
-                    "usage":"Return unchanged, replacement events, or drop."
+                    "usage":"Return unchanged, replacement events, or drop.",
+                    "mode":"noop"
                 }
             }
         }"#,
@@ -82,7 +85,8 @@ fn plugin_metadata_parse_validates_required_fields() {
                 "sign":{
                     "wire_version":1,
                     "description":"Invalid hook.",
-                    "usage":"Should fail."
+                    "usage":"Should fail.",
+                    "mode":"active"
                 }
             }
         }"#,

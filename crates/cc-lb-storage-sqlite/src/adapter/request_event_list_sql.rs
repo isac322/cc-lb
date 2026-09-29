@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventUpstream, StatusClass,
-    StorageResult, model_filter_like_pattern,
+    RequestEvent, RequestEventListItem, RequestEventListQuery, StatusClass, StorageResult,
+    model_filter_like_pattern,
 };
 use sqlx::FromRow;
 
@@ -34,7 +34,6 @@ SELECT \
     thinking_budget_tokens, \
     thinking_tokens, \
     service_tier, \
-    list_upstream AS upstream, \
     list_status AS status, \
     list_duration_ms AS duration_ms, \
     error_code, \
@@ -66,7 +65,6 @@ SELECT \
     list_dns_ms AS dns_ms, \
     list_connect_ms AS connect_ms, \
     list_connection_reused AS connection_reused, \
-    list_limit_reconcile_ms AS limit_reconcile_ms, \
     list_finalize_ms AS finalize_ms, \
     list_proxy_setup_ms AS proxy_setup_ms, \
     list_shape_ms AS shape_ms, \
@@ -93,38 +91,37 @@ WHERE ts >= ?1 AND ts <= ?2 \
   AND (?3 IS NULL OR principal_id = ?3) \
   AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\') \
   AND (?5 IS NULL OR upstream_id = ?5) \
-  AND (?14 IS NULL OR thread_id = ?14) \
-  AND (?6 IS NULL OR list_upstream = ?6) \
-  AND (?7 IS NULL OR list_status BETWEEN ?7 AND ?8) \
-  AND (?16 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
+  AND (?13 IS NULL OR thread_id = ?13) \
+  AND (?6 IS NULL OR list_status BETWEEN ?6 AND ?7) \
+  AND (?15 = 0 OR list_status >= 400 OR error_code IS NOT NULL) \
   AND ( \
-        ?12 = 1 \
-     OR (?13 IS NOT NULL AND source_kind = ?13) \
-     OR (?13 IS NULL AND ?15 IS NOT NULL) \
-     OR (?13 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
+        ?11 = 1 \
+     OR (?12 IS NOT NULL AND source_kind = ?12) \
+     OR (?12 IS NULL AND ?14 IS NOT NULL) \
+     OR (?12 IS NULL AND (source_kind IS NULL OR source_kind <> 'renewal')) \
   )";
 
 // Emitted only when `event_kind` is `Some`: a direct equality against the
 // effective kind so the query can seek
-// `request_events_v1_event_kind_list_order_idx`. The `?15 IS NULL OR ...`
+// `request_events_v1_event_kind_list_order_idx`. The `?14 IS NULL OR ...`
 // optional form cannot use that index, so the clause is omitted entirely when
-// no kind filter is set. `?15` stays bound in both branches because the
+// no kind filter is set. `?14` stays bound in both branches because the
 // source_kind clause above still references it.
 const LIST_REQUEST_EVENTS_EVENT_KIND_FILTER: &str = " \
   AND CASE WHEN source_kind = 'renewal' THEN 'renewal' \
-           ELSE COALESCE(event_kind, 'unclassified') END = ?15 ";
+           ELSE COALESCE(event_kind, 'unclassified') END = ?14 ";
 
 const LIST_REQUEST_EVENTS_SQL_TAIL: &str = "\
   AND ( \
-        ?9 IS NULL \
-     OR list_ts_ms < ?9 \
-     OR (list_ts_ms = ?9 \
-         AND ?10 IS NOT NULL AND list_event_key < ?10) \
+        ?8 IS NULL \
+     OR list_ts_ms < ?8 \
+     OR (list_ts_ms = ?8 \
+         AND ?9 IS NOT NULL AND list_event_key < ?9) \
   ) \
 ORDER BY list_ts_ms DESC, \
          list_event_key DESC, \
          id DESC \
-LIMIT ?11";
+LIMIT ?10";
 
 #[derive(FromRow)]
 pub(super) struct ListRow {
@@ -150,7 +147,6 @@ pub(super) struct ListRow {
     pub(super) thinking_budget_tokens: Option<i64>,
     pub(super) thinking_tokens: Option<i64>,
     pub(super) service_tier: Option<String>,
-    pub(super) upstream: Option<String>,
     pub(super) status: Option<i64>,
     pub(super) duration_ms: Option<i64>,
     pub(super) error_code: Option<String>,
@@ -182,7 +178,6 @@ pub(super) struct ListRow {
     pub(super) dns_ms: Option<i64>,
     pub(super) connect_ms: Option<i64>,
     pub(super) connection_reused: Option<i64>,
-    pub(super) limit_reconcile_ms: Option<i64>,
     pub(super) finalize_ms: Option<i64>,
     pub(super) proxy_setup_ms: Option<i64>,
     pub(super) shape_ms: Option<i64>,
@@ -253,7 +248,6 @@ pub(super) async fn list_request_events(
                 .map(model_filter_like_pattern),
         )
         .bind(query.filters.upstream_id.map(|id| id.to_string()))
-        .bind(query.filters.upstream.map(upstream_as_str))
         .bind(status_min)
         .bind(status_max)
         .bind(
@@ -290,12 +284,6 @@ pub(super) async fn get_request_event(
     payload
         .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
         .transpose()
-}
-
-pub(super) fn upstream_as_str(upstream: RequestEventUpstream) -> &'static str {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-    }
 }
 
 pub(super) fn status_class_range(class: StatusClass) -> (i64, i64) {

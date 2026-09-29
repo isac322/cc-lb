@@ -11,12 +11,6 @@ pub struct EnvGuard {
 }
 
 impl EnvGuard {
-    pub fn remove(key: &'static str) -> Self {
-        let previous = env::var_os(key);
-        unsafe { env::remove_var(key) };
-        Self { key, previous }
-    }
-
     pub fn set(key: &'static str, value: &str) -> Self {
         let previous = env::var_os(key);
         unsafe { env::set_var(key, value) };
@@ -46,9 +40,9 @@ pub fn use_temp_sqlite(config: &mut Config, prefix: &str, key_env: &'static str)
 }
 
 fn unique_sqlite_path(prefix: &str) -> std::path::PathBuf {
-    use cc_lb_engine::Clock as _;
+    use cc_lb_clock::Clock as _;
 
-    let clock = cc_lb_engine::SystemClock;
+    let clock = cc_lb_clock::SystemClock;
     let nanos = clock
         .now()
         .duration_since(std::time::UNIX_EPOCH)

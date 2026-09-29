@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, bail, ensure};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     PriceCatalogCache, PriceCatalogSnapshotFetch, PriceCatalogSnapshotMetadata,
@@ -21,10 +21,6 @@ where
     B::Storage: PriceCatalogCache,
 {
     with_conformance_fixture(backend, |storage| async move {
-        ensure!(
-            storage.get_price_snapshot().await?.is_none(),
-            "empty price catalog should return None"
-        );
         ensure!(
             storage.get_price_snapshot_if_changed("missing").await?
                 == PriceCatalogSnapshotFetch::Missing,
@@ -73,10 +69,11 @@ where
             "unchanged conditional fetch must return metadata without payload"
         );
 
-        let snapshot = storage
-            .get_price_snapshot()
-            .await?
-            .context("snapshot should exist")?;
+        let PriceCatalogSnapshotFetch::Changed(snapshot) =
+            storage.get_price_snapshot_if_changed("").await?
+        else {
+            bail!("snapshot should exist");
+        };
         ensure!(
             snapshot
                 == PriceCatalogSnapshotRecord {
@@ -145,10 +142,11 @@ where
         storage.put_price_snapshot(payload, 2_000).await?;
         storage.put_price_snapshot(payload, 1_500).await?;
 
-        let snapshot = storage
-            .get_price_snapshot()
-            .await?
-            .context("snapshot should exist after repeated puts")?;
+        let PriceCatalogSnapshotFetch::Changed(snapshot) =
+            storage.get_price_snapshot_if_changed("").await?
+        else {
+            bail!("snapshot should exist after repeated puts");
+        };
         ensure!(
             snapshot.json_bytes == payload,
             "payload should round-trip after dedup"

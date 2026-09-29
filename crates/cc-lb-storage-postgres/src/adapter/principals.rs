@@ -1,11 +1,11 @@
 use async_trait::async_trait;
+use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{
     BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
     PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
     validate_identifier,
 };
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, Row};
 use uuid::Uuid;
@@ -67,7 +67,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -76,7 +76,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -94,7 +94,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -275,30 +275,6 @@ impl PrincipalStore for PostgresStorage {
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(deleted)
     }
-
-    async fn set_last_apply_error(
-        &self,
-        id: Uuid,
-        error: Option<String>,
-        applied_at_unix_secs: u64,
-    ) -> StorageResult<Option<PrincipalRecord>> {
-        let applied_at = unix_secs_to_datetime(applied_at_unix_secs, "principal.last_apply_at")?;
-        let row = sqlx::query(
-            "UPDATE principals_v1 SET last_apply_error = $2, last_apply_at = $3 WHERE id = $1 RETURNING *",
-        )
-        .bind(id)
-        .bind(error)
-        .bind(applied_at)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let record = principal_from_row(row)?;
-        self.notify_principal_changed(record.id).await?;
-        Ok(Some(record))
-    }
 }
 
 impl PostgresStorage {
@@ -352,8 +328,6 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
     let default_limits: Value = row.try_get("default_limits").map_err(map_sqlx_error)?;
     let created_at: DateTime<Utc> = row.try_get("created_at").map_err(map_sqlx_error)?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at").map_err(map_sqlx_error)?;
-    let last_apply_at: Option<DateTime<Utc>> =
-        row.try_get("last_apply_at").map_err(map_sqlx_error)?;
     let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at").map_err(map_sqlx_error)?;
     let router_terminal_strategy: String = row
         .try_get("router_terminal_strategy")
@@ -375,10 +349,6 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         allowed_upstreams,
         default_limits: serde_json::from_value(default_limits)?,
         enabled: row.try_get("enabled").map_err(map_sqlx_error)?,
-        last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
-        last_apply_at_unix_secs: last_apply_at
-            .map(|value| datetime_to_unix_secs(value, "principal.last_apply_at"))
-            .transpose()?,
         deleted_at_unix_secs: deleted_at
             .map(|value| datetime_to_unix_secs(value, "principal.deleted_at"))
             .transpose()?,
@@ -388,27 +358,17 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         )?,
         created_at_unix_secs: datetime_to_unix_secs(created_at, "principal.created_at")?,
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
-        router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy),
+        router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy)?,
         cache_keepalive,
     })
 }
 
-fn terminal_strategy_from_db_value<T>(value: &str) -> T
-where
-    T: DeserializeOwned + Default,
-{
-    match serde_json::from_value(Value::String(value.to_owned())) {
-        Ok(strategy) => strategy,
-        Err(error) => {
-            tracing::warn!(
-                storage_backend = "postgres",
-                router_terminal_strategy = %value,
-                %error,
-                "unexpected principal router_terminal_strategy; defaulting to first-pick"
-            );
-            T::default()
+fn terminal_strategy_from_db_value(value: &str) -> StorageResult<TerminalStrategy> {
+    serde_json::from_value(Value::String(value.to_owned())).map_err(|error| {
+        StorageError::Corrupted {
+            message: format!("invalid principal router_terminal_strategy {value}: {error}"),
         }
-    }
+    })
 }
 
 fn terminal_strategy_to_db_value(strategy: &impl serde::Serialize) -> StorageResult<String> {

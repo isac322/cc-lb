@@ -2,7 +2,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::storage_types_common::RequestEventStreamFilters;
-use cc_lb_request_log::{RequestEventKind, RequestEventUpstream};
+use cc_lb_request_log::RequestEventKind;
 
 /// Slim projection of a [`cc_lb_request_log::RequestEvent`] limited to the
 /// fields the admin request-event LIST view displays. Backends may populate
@@ -20,7 +20,6 @@ pub struct RequestEventListItem {
     /// `event_kind` column existed (historical `unclassified`).
     pub event_kind: Option<RequestEventKind>,
     pub principal_id: Option<String>,
-    pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub upstream_name: Option<String>,
     pub thread_id: Option<String>,
@@ -68,7 +67,6 @@ pub struct RequestEventListItem {
     pub dns_ms: Option<u64>,
     pub connect_ms: Option<u64>,
     pub connection_reused: Option<bool>,
-    pub limit_reconcile_ms: Option<u64>,
     pub proxy_setup_ms: Option<u64>,
     pub shape_ms: Option<u64>,
     pub sign_ms: Option<u64>,
@@ -140,25 +138,6 @@ pub struct RequestEventKeyLastUsed {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequestEventKeyUsageQuery {
-    pub principal_id: String,
-    pub key_id: String,
-    pub range_start_ms: u64,
-    pub range_end_ms: u64,
-    pub step_ms: u64,
-    pub bucket_count: u64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RequestEventKeyUsageBucket {
-    pub bucket_start_unix_secs: u64,
-    pub request_count: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cost_usd_micros: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestEventPrincipalCostQuery {
     pub since_unix_secs: u64,
     pub until_unix_secs: u64,
@@ -226,7 +205,6 @@ mod tests {
             source_kind: None,
             event_kind: None,
             principal_id: None,
-            upstream: None,
             upstream_id: None,
             upstream_name: None,
             thread_id: None,
@@ -269,7 +247,6 @@ mod tests {
             dns_ms: None,
             connect_ms: None,
             connection_reused: None,
-            limit_reconcile_ms: None,
             proxy_setup_ms: None,
             shape_ms: None,
             sign_ms: None,

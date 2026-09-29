@@ -211,10 +211,7 @@ impl HandlerKind {
     }
 
     pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
-        match self {
-            Self::Filter => wire_version == 1,
-            Self::Shape | Self::TransformResponse | Self::TransformSseEvent => wire_version == 1,
-        }
+        wire_version == 1
     }
 
     pub(crate) fn export_name(self) -> &'static str {

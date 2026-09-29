@@ -4,8 +4,8 @@ use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    AuditStore as _, RequestEventStore as _,
-    types::{AuditEntry, RequestEvent, RequestEventUpstream},
+    AuditEntry, AuditQueryScope, AuditStore as _, RequestEvent, RequestEventStore as _,
+    RequestEventStreamFilters,
 };
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -19,9 +19,13 @@ pub async fn audit_append_order<B: ConformanceBackend>(backend: Arc<B>) -> Resul
             storage.append_audit(&audit_entry(index)).await?;
         }
 
-        let entries = storage.query_audit(None, 0, u64::MAX, 1_000).await?;
+        let entries = storage
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 1_000, false)
+            .await?;
         assert_eq!(entries.len(), 1_000);
-        for (index, entry) in entries.iter().enumerate() {
+        // Newest first; timestamp ties fall back to reverse append order.
+        for (position, entry) in entries.iter().enumerate() {
+            let index = 999 - position;
             assert_eq!(entry.request_id, format!("req-{index:04}"));
         }
 
@@ -37,7 +41,13 @@ pub async fn audit_principal_filter<B: ConformanceBackend>(backend: Arc<B>) -> R
         }
 
         let entries = storage
-            .query_audit(Some("alice"), AUDIT_BASE_TS + 5, u64::MAX, 7)
+            .query_recent_audit(
+                AuditQueryScope::Principal("alice"),
+                AUDIT_BASE_TS + 5,
+                AUDIT_BASE_TS + 6,
+                7,
+                false,
+            )
             .await?;
         let request_ids = entries
             .iter()
@@ -47,11 +57,15 @@ pub async fn audit_principal_filter<B: ConformanceBackend>(backend: Arc<B>) -> R
         assert_eq!(
             request_ids,
             vec![
-                "req-0050", "req-0052", "req-0054", "req-0056", "req-0058", "req-0060", "req-0062",
+                "req-0068", "req-0066", "req-0064", "req-0062", "req-0060", "req-0058", "req-0056",
             ]
         );
         assert!(entries.iter().all(|entry| entry.principal_id == "alice"));
-        assert!(entries.iter().all(|entry| entry.ts >= AUDIT_BASE_TS + 5));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| { entry.ts >= AUDIT_BASE_TS + 5 && entry.ts <= AUDIT_BASE_TS + 6 })
+        );
 
         Ok(())
     })
@@ -64,12 +78,17 @@ pub async fn audit_prune<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
             storage.append_audit(&audit_entry(index)).await?;
         }
 
-        let pruned = storage.prune_audit(AUDIT_BASE_TS + 50).await?;
-        let remaining = storage.query_audit(None, 0, u64::MAX, 1_000).await?;
+        let pruned = storage
+            .prune_audit_before((AUDIT_BASE_TS + 50) * 1_000_000, 1_000)
+            .await?;
+        let remaining = storage
+            .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 1_000, false)
+            .await?;
 
         assert_eq!(pruned, 500);
         assert_eq!(remaining.len(), 500);
-        assert_eq!(remaining[0].request_id, "req-0500");
+        assert_eq!(remaining[0].request_id, "req-0999");
+        assert_eq!(remaining[remaining.len() - 1].request_id, "req-0500");
         assert!(remaining.iter().all(|entry| entry.ts >= AUDIT_BASE_TS + 50));
 
         Ok(())
@@ -79,86 +98,35 @@ pub async fn audit_prune<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
 
 pub async fn request_event_append_order<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
     with_fixture(backend, |storage| async move {
+        let mut cursors = Vec::with_capacity(100);
         for index in 0..100 {
-            storage.append_request_event(&request_event(index)).await?;
+            cursors.push(storage.append_request_event(&request_event(index)).await?);
         }
+        assert!(cursors.windows(2).all(|w| w[0] < w[1]));
 
-        let events = storage
-            .query_request_events(REQUEST_EVENT_BASE_TS + 2, u64::MAX, 5)
+        let current = storage.current_request_event_cursor().await?;
+        assert_eq!(current, cursors[99]);
+
+        let rows = storage
+            .query_request_events_between_cursors(
+                cursors[19],
+                current,
+                5,
+                &RequestEventStreamFilters::default(),
+            )
             .await?;
 
-        assert_eq!(events.len(), 5);
-        assert_eq!(events[0].request_id, "req-0020");
-        assert_eq!(events[4].request_id, "req-0024");
-        assert!(
-            events
-                .iter()
-                .all(|event| event.ts >= REQUEST_EVENT_BASE_TS + 2)
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].1.request_id, "req-0020");
+        assert_eq!(rows[4].1.request_id, "req-0024");
+        assert_eq!(
+            rows.iter().map(|(cursor, _)| *cursor).collect::<Vec<_>>(),
+            cursors[20..25].to_vec()
         );
-
-        Ok(())
-    })
-    .await
-}
-
-pub async fn request_event_recent_descending<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
-    with_fixture(backend, |storage| async move {
-        for index in 0..100 {
-            storage.append_request_event(&request_event(index)).await?;
-        }
-
-        let events = storage.query_recent_request_events(0, u64::MAX, 5).await?;
-
-        assert_eq!(events.len(), 5);
-        assert_eq!(events[0].request_id, "req-0099");
-        assert_eq!(events[4].request_id, "req-0095");
-        assert!(events.windows(2).all(|w| w[0].ts >= w[1].ts));
-
-        let in_range = storage
-            .query_recent_request_events(REQUEST_EVENT_BASE_TS + 5, REQUEST_EVENT_BASE_TS + 6, 100)
-            .await?;
-        assert_eq!(in_range.len(), 20);
-        assert_eq!(in_range[0].request_id, "req-0069");
-        assert_eq!(in_range[19].request_id, "req-0050");
-
-        let empty_range = storage
-            .query_recent_request_events(REQUEST_EVENT_BASE_TS + 4, REQUEST_EVENT_BASE_TS + 3, 100)
-            .await?;
-        assert!(empty_range.is_empty());
-
-        let zero_limit = storage.query_recent_request_events(0, u64::MAX, 0).await?;
-        assert!(zero_limit.is_empty());
-
-        Ok(())
-    })
-    .await
-}
-
-pub async fn request_event_time_range<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
-    with_fixture(backend, |storage| async move {
-        for index in 0..50 {
-            storage.append_request_event(&request_event(index)).await?;
-        }
-
-        let events = storage
-            .query_request_events(REQUEST_EVENT_BASE_TS + 2, REQUEST_EVENT_BASE_TS + 3, 100)
-            .await?;
-        assert_eq!(events.len(), 20);
-        assert_eq!(events[0].request_id, "req-0020");
-        assert_eq!(events[19].request_id, "req-0039");
-        assert!(events.iter().all(|event| {
-            (REQUEST_EVENT_BASE_TS + 2..=REQUEST_EVENT_BASE_TS + 3).contains(&event.ts)
-        }));
-
-        let empty_range = storage
-            .query_request_events(REQUEST_EVENT_BASE_TS + 4, REQUEST_EVENT_BASE_TS + 3, 100)
-            .await?;
-        assert!(empty_range.is_empty());
-
-        let empty_limit = storage
-            .query_request_events(REQUEST_EVENT_BASE_TS, REQUEST_EVENT_BASE_TS + 4, 0)
-            .await?;
-        assert!(empty_limit.is_empty());
+        assert!(
+            rows.iter()
+                .all(|(_, event)| event.ts >= REQUEST_EVENT_BASE_TS + 2)
+        );
 
         Ok(())
     })
@@ -169,9 +137,7 @@ pub async fn run_all<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
     audit_append_order(Arc::clone(&backend)).await?;
     audit_principal_filter(Arc::clone(&backend)).await?;
     audit_prune(Arc::clone(&backend)).await?;
-    request_event_append_order(Arc::clone(&backend)).await?;
-    request_event_time_range(Arc::clone(&backend)).await?;
-    request_event_recent_descending(backend).await?;
+    request_event_append_order(backend).await?;
 
     Ok(())
 }
@@ -215,12 +181,14 @@ fn audit_entry(index: usize) -> AuditEntry {
 }
 
 fn request_event(index: usize) -> RequestEvent {
+    let ts = REQUEST_EVENT_BASE_TS + (index / 10) as u64;
     RequestEvent {
-        ts: REQUEST_EVENT_BASE_TS + (index / 10) as u64,
+        ts,
+        ts_ms: Some(ts * 1_000),
         request_id: format!("req-{index:04}"),
+        event_id: Some(format!("event-{index:04}")),
         principal_id: Some("principal-a".to_owned()),
         principal_kind: Some("api_key".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
         input_tokens: Some(index as u64),

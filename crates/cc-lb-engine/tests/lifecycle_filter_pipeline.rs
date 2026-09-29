@@ -5,12 +5,11 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::StatusCode;
 use parking_lot::Mutex as ParkingMutex;
@@ -24,14 +23,13 @@ async fn pipeline_filters_candidates_before_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(RecordingFilter {
         name: "keep-default",
         calls: filter_calls.clone(),
         kept_upstream_ids: vec![upstream_id],
     })];
-    let lifecycle = lifecycle_with_pipeline(filters, router_calls.clone(), state.clone());
+    let lifecycle = lifecycle_with_pipeline(filters, state.clone());
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,
@@ -49,7 +47,6 @@ async fn pipeline_filters_candidates_before_terminal_strategy()
         filter_calls.lock().unwrap().as_slice(),
         &[vec![upstream_id]]
     );
-    assert!(router_calls.lock().unwrap().is_empty());
     Ok(())
 }
 
@@ -58,13 +55,12 @@ async fn request_model_reaches_filters_without_prompt_cache_shadow()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let canonical_models = Arc::new(ParkingMutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let filters: Vec<Arc<dyn FilterPlugin>> = vec![Arc::new(RecordingModelFilter {
         canonical_models: canonical_models.clone(),
         kept_upstream_ids: vec![upstream_id],
     })];
-    let lifecycle = lifecycle_with_pipeline(filters, router_calls, state);
+    let lifecycle = lifecycle_with_pipeline(filters, state);
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-fable-5","messages":[]}"#,
@@ -88,7 +84,6 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
         let upstream_id = default_upstream_id();
         let error_filter_calls = Arc::new(Mutex::new(Vec::new()));
         let keep_filter_calls = Arc::new(Mutex::new(Vec::new()));
-        let router_calls = Arc::new(Mutex::new(Vec::new()));
         let state = TestState::default();
         let filters: Vec<Arc<dyn FilterPlugin>> = vec![
             Arc::new(ErrorFilter {
@@ -102,7 +97,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
                 kept_upstream_ids: vec![upstream_id],
             }),
         ];
-        let lifecycle = lifecycle_with_pipeline(filters, router_calls.clone(), state.clone());
+        let lifecycle = lifecycle_with_pipeline(filters, state.clone());
 
         let request = messages_request(Bytes::from_static(
             br#"{"model":"claude-test","messages":[]}"#,
@@ -124,7 +119,6 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             keep_filter_calls.lock().unwrap().as_slice(),
             &[vec![upstream_id]]
         );
-        assert!(router_calls.lock().unwrap().is_empty());
     }
     Ok(())
 }
@@ -135,7 +129,6 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
     let upstream_id = default_upstream_id();
     let empty_filter_calls = Arc::new(Mutex::new(Vec::new()));
     let later_filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let filters: Vec<Arc<dyn FilterPlugin>> = vec![
         Arc::new(RecordingFilter {
@@ -149,7 +142,7 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
             kept_upstream_ids: Vec::new(),
         }),
     ];
-    let lifecycle = lifecycle_with_pipeline(filters, router_calls.clone(), state.clone());
+    let lifecycle = lifecycle_with_pipeline(filters, state.clone());
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,
@@ -171,15 +164,10 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
         later_filter_calls.lock().unwrap().as_slice(),
         &[Vec::<Uuid>::new()]
     );
-    assert!(router_calls.lock().unwrap().is_empty());
     Ok(())
 }
 
-fn lifecycle_with_pipeline(
-    filters: Vec<Arc<dyn FilterPlugin>>,
-    router_calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
-    state: TestState,
-) -> Lifecycle {
+fn lifecycle_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>, state: TestState) -> Lifecycle {
     let principal_view = principal_view(filters);
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
     let dispatcher = Arc::new(MockDispatch {
@@ -188,9 +176,6 @@ fn lifecycle_with_pipeline(
     });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(RecordingTerminalRouter {
-            calls: router_calls,
-        }))
         .principal_view(principal_view)
         .upstream_records(vec![test_upstream_record()])
         .build();
@@ -199,7 +184,7 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -248,36 +233,6 @@ fn test_upstream_record() -> UpstreamRecord {
 
 fn default_upstream_id() -> Uuid {
     Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("default upstream id parses")
-}
-
-struct RecordingTerminalRouter {
-    calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
-}
-
-impl RouterPlugin for RecordingTerminalRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.calls.lock().unwrap().push(
-            candidates
-                .iter()
-                .map(|candidate| candidate.upstream_id)
-                .collect(),
-        );
-        let candidate = candidates.first().ok_or_else(|| RouteError::NoRoute {
-            reason: "no candidates after filters".to_owned(),
-        })?;
-        Ok(RouteDecision {
-            upstream_id: Some(candidate.upstream_id),
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(common::PassthroughDialect {
-                base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            }),
-        })
-    }
 }
 
 struct RecordingFilter {

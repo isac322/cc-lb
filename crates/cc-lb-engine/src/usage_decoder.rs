@@ -5,9 +5,8 @@
 //! Upstream responses can be compressed (`content-encoding: gzip|deflate|br|zstd`)
 //! whenever a downstream client advertises `accept-encoding`. The proxy MUST
 //! forward those compressed bytes to the client verbatim (preserving on-the-wire
-//! shape), but the proxy's in-flight usage extractor — the SSE parser in
-//! [`crate::lifecycle`] and the JSON parser in
-//! [`crate::sse_relay::usage_from_json_bytes`] — needs PLAINTEXT to find
+//! shape), but the proxy's in-flight usage extractor — the SSE and JSON parsers
+//! in [`crate::usage_parser`] — needs PLAINTEXT to find
 //! `data:` SSE event lines and the `"usage"` field. This module owns that
 //! decompression for the metric path only; the response body that flows to the
 //! client is never touched.

@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use apalis_core::task::{Task, builder::TaskBuilder};
 use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::anthropic_compat::{
@@ -39,17 +38,6 @@ impl MetadataRefreshJob {
             "adaptive:metadata_refresh:{}:{}",
             self.upstream_id, self.credential_generation
         )
-    }
-
-    pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
-    where
-        Ctx: Default,
-    {
-        let idempotency_key = self.idempotency_key();
-        TaskBuilder::<Self, Ctx, IdType>::new(self)
-            .run_at_timestamp(run_at_unix_secs)
-            .with_idempotency_key(idempotency_key)
-            .build()
     }
 }
 

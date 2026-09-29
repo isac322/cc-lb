@@ -84,8 +84,6 @@ impl PrincipalView {
             allowed_upstreams: vec![],
             default_limits,
             enabled,
-            last_apply_error: None,
-            last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
             created_at_unix_secs: 0,

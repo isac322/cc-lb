@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_domain::TerminalStrategy;
-use cc_lb_storage_api::{BackendKind, MetaStore, PrincipalStore};
+use cc_lb_storage_api::{MetaStore, PrincipalStore};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -54,10 +54,7 @@ async fn migration_normalizes_legacy_removed_terminal_strategies_to_first_pick()
     .await
     .expect("seed legacy principal rows");
 
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("run sqlite migrations");
+    storage.initialize().await.expect("run sqlite migrations");
 
     let round_robin_db_value: String =
         sqlx::query_scalar("SELECT router_terminal_strategy FROM principals_v1 WHERE id = ?")

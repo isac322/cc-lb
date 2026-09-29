@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AeadError {
-    #[error("invalid AEAD master key length: got {got}, want 32 bytes")]
-    InvalidMasterKey { got: usize },
-
     #[error("AEAD encryption failed")]
     EncryptionFailed,
 

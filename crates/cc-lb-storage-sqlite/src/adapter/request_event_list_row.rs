@@ -1,6 +1,4 @@
-use cc_lb_storage_api::{
-    RequestEventKind, RequestEventListItem, RequestEventUpstream, StorageError, StorageResult,
-};
+use cc_lb_storage_api::{RequestEventKind, RequestEventListItem, StorageError, StorageResult};
 use uuid::Uuid;
 
 use super::request_event_list_sql::ListRow;
@@ -22,7 +20,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .map(parse_event_kind)
             .transpose()?,
         principal_id: row.principal_id,
-        upstream: row.upstream.as_deref().map(parse_upstream).transpose()?,
         upstream_id: row
             .upstream_id
             .map(|value| parse_uuid(&value, "request event list upstream_id"))
@@ -118,10 +115,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             .map(|value| i64_to_u64(value, "request event list connect_ms"))
             .transpose()?,
         connection_reused: row.connection_reused.map(|value| value != 0),
-        limit_reconcile_ms: row
-            .limit_reconcile_ms
-            .map(|value| i64_to_u64(value, "request event list limit_reconcile_ms"))
-            .transpose()?,
         finalize_ms: row
             .finalize_ms
             .map(|value| i64_to_u64(value, "request event list finalize_ms"))
@@ -189,15 +182,6 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
         cost_cache_creation_1h_micros: row.cost_cache_creation_1h_micros,
         cost_cache_read_micros: row.cost_cache_read_micros,
     })
-}
-
-fn parse_upstream(value: &str) -> StorageResult<RequestEventUpstream> {
-    match value {
-        "anthropic_direct" => Ok(RequestEventUpstream::AnthropicDirect),
-        other => Err(StorageError::Corrupted {
-            message: format!("request event list unknown upstream value: {other}"),
-        }),
-    }
 }
 
 fn parse_event_kind(value: &str) -> StorageResult<RequestEventKind> {

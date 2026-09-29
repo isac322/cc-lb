@@ -10,11 +10,7 @@ mod corpus;
 #[path = "prompt_cache_byte_oracle/oracles.rs"]
 mod oracles;
 
-use oracles::{
-    block_digest_serializer_bytes, digest_bytes_preserving_cache_control,
-    legacy_block_digest_oracle_bytes, legacy_prefix_oracle_bytes,
-    prefix_bytes_stripping_cache_control, prefix_serializer_bytes, token_count,
-};
+use oracles::{prefix_bytes_stripping_cache_control, prefix_oracle_bytes};
 
 const CANONICAL_MODEL: &str = "claude-sonnet-4-5-20250929";
 
@@ -52,31 +48,14 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
 
         for block in &analysis.blocks {
             record_coverage(&mut coverage, block);
-            assert_eq!(
-                block_digest_serializer_bytes(block),
-                legacy_block_digest_oracle_bytes(block),
-                "block-digest bytes diverged for {} at {}",
-                case.name,
-                block.path
-            );
         }
 
         for breakpoint in &analysis.breakpoints {
             let index = breakpoint.block_index as usize;
-            let blocks = &analysis.blocks[..=index];
-            let legacy_prefix = legacy_prefix_oracle_bytes(CANONICAL_MODEL, blocks);
-            let serializer_prefix = prefix_serializer_bytes(CANONICAL_MODEL, blocks);
-            assert_eq!(
-                serializer_prefix, legacy_prefix,
-                "prefix bytes diverged for {} at {}",
-                case.name, breakpoint.path
-            );
-            let legacy_tokens = token_count(&legacy_prefix);
-            let serializer_tokens = token_count(&serializer_prefix);
-            assert_eq!(serializer_tokens, legacy_tokens, "tokens: {}", case.name);
+            let prefix = prefix_oracle_bytes(CANONICAL_MODEL, &analysis.blocks[..=index]);
             assert_eq!(
                 breakpoint.prefix_token_count,
-                legacy_prefix.len() as u64,
+                prefix.len() as u64,
                 "live prefix size: {}",
                 case.name
             );
@@ -119,19 +98,9 @@ fn prompt_cache_byte_oracle_prefix_preserves_cache_control() {
         }]}]
     });
     let analysis = analyze_v3_prompt_cache(&request, CANONICAL_MODEL);
-    let block = analysis.blocks.first().expect("cacheable sentinel block");
     let breakpoint = analysis.breakpoints.first().expect("sentinel breakpoint");
 
-    let stripped_digest_bytes = legacy_block_digest_oracle_bytes(block);
-    let preserved_digest_bytes = digest_bytes_preserving_cache_control(block);
-    assert_ne!(stripped_digest_bytes, preserved_digest_bytes);
-    assert_eq!(
-        block_digest_serializer_bytes(block),
-        stripped_digest_bytes,
-        "block-digest oracle must strip cache_control"
-    );
-
-    let preserved_prefix = legacy_prefix_oracle_bytes(CANONICAL_MODEL, &analysis.blocks);
+    let preserved_prefix = prefix_oracle_bytes(CANONICAL_MODEL, &analysis.blocks);
     let stripped_prefix = prefix_bytes_stripping_cache_control(CANONICAL_MODEL, &analysis.blocks);
     assert!(
         String::from_utf8_lossy(&preserved_prefix).contains("cache_control"),
@@ -167,8 +136,8 @@ fn prompt_cache_byte_oracle_key_reordering_is_byte_stable() {
     assert_eq!(first_analysis.blocks, second_analysis.blocks);
     assert_eq!(first_analysis.breakpoints, second_analysis.breakpoints);
     assert_eq!(
-        legacy_prefix_oracle_bytes(CANONICAL_MODEL, &first_analysis.blocks),
-        legacy_prefix_oracle_bytes(CANONICAL_MODEL, &second_analysis.blocks)
+        prefix_oracle_bytes(CANONICAL_MODEL, &first_analysis.blocks),
+        prefix_oracle_bytes(CANONICAL_MODEL, &second_analysis.blocks)
     );
 }
 

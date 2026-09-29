@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker, TestClock};
+use cc_lb_clock::TestClock;
+use cc_lb_engine::{BreakerError, BreakerRuntimeConfig, CircuitBreaker};
 
 #[test]
 fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn std::error::Error>> {

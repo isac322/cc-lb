@@ -46,23 +46,13 @@ const STALE_DATA_CAVEAT: &str =
 pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/v1/subscription-quotas/latest", get(handle_latest))
-        .route("/admin/subscription-quotas/latest", get(handle_latest))
         .route("/admin/v1/subscription-quotas/series", get(handle_series))
-        .route("/admin/subscription-quotas/series", get(handle_series))
         .route(
             "/admin/v1/subscription-quotas/aggregate",
             get(handle_aggregate),
         )
         .route(
-            "/admin/subscription-quotas/aggregate",
-            get(handle_aggregate),
-        )
-        .route(
             "/admin/v1/subscription-quotas/pool-history",
-            get(handle_pool_history),
-        )
-        .route(
-            "/admin/subscription-quotas/pool-history",
             get(handle_pool_history),
         )
 }

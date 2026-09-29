@@ -8,8 +8,6 @@ pub struct Principal {
     pub id: String,
     /// Principal category inferred by the authentication plugin.
     pub kind: PrincipalKind,
-    /// Plugin-provided claims available to router and observability layers.
-    pub claims: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Principal categories supported by first-party and custom auth plugins.
@@ -22,10 +20,6 @@ pub enum PrincipalKind {
     OAuthSubject,
     /// Principal authenticated by an internal key managed by cc-lb.
     InternalKey,
-    /// Principal authenticated through a workload identity mechanism.
-    WorkloadIdentity,
-    /// Principal authenticated by a Claude subscription bearer token.
-    SubscriptionBearer,
 }
 
 /// Compact principal category stored with managed API keys and lifecycle events.
@@ -38,9 +32,6 @@ pub enum PrincipalKindLite {
     #[default]
     Machine,
 }
-
-/// Sentinel principal id used for proxy-wide global plugin slots.
-pub const GLOBAL_PRINCIPAL: &str = "__global__";
 
 /// Stable identity of one running cc-lb replica.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

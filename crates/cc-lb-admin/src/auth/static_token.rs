@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use http::{HeaderMap, header};
+use subtle::ConstantTimeEq;
 
 use super::{AdminActorKind, AdminAuthProvider, AdminIdentity, ProviderOutcome};
 
@@ -36,9 +37,7 @@ impl AdminAuthProvider for StaticTokenProvider {
             return ProviderOutcome::NotPresent;
         };
 
-        if ring::constant_time::verify_slices_are_equal(token.as_bytes(), self.token.as_bytes())
-            .is_err()
-        {
+        if !bool::from(token.as_bytes().ct_eq(self.token.as_bytes())) {
             return ProviderOutcome::Rejected("static_token_mismatch");
         }
 

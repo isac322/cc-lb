@@ -108,7 +108,7 @@ function RequestDetail({
     <>
       <div className="px-4 py-3 border-b border-row min-w-0">
         <div className="text-body text-text truncate">
-          {principalLabel} → {merged.upstream_name ?? merged.upstream ?? DASH}
+          {principalLabel} → {merged.upstream_name ?? DASH}
         </div>
         <div className="mt-1 flex items-center gap-1.5 flex-wrap min-w-0">
           <span

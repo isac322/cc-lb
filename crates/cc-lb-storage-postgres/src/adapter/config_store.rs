@@ -109,18 +109,13 @@ impl ConfigStore for PostgresStorage {
         revision: u64,
         applied_at_unix_secs: u64,
     ) -> StorageResult<()> {
-        let entry = HistoryEntry {
-            revision,
-            applied_at_unix_secs,
-        };
-        let config = serde_json::to_value(&entry)?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
 
         sqlx::query(
-            "INSERT INTO config_history_v1 (revision, config, created_at)              VALUES ($1, $2, NOW())",
+            "INSERT INTO config_history_v1 (revision, applied_at_unix_secs, created_at)              VALUES ($1, $2, NOW())",
         )
         .bind(u64_to_i64(revision, "history revision")?)
-        .bind(config)
+        .bind(u64_to_i64(applied_at_unix_secs, "history applied_at_unix_secs")?)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -140,8 +135,8 @@ impl ConfigStore for PostgresStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_scalar::<_, Value>(
-            "SELECT config FROM config_history_v1 ORDER BY revision DESC LIMIT $1",
+        let rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT revision, applied_at_unix_secs FROM config_history_v1 ORDER BY revision DESC LIMIT $1",
         )
         .bind(u64_to_i64(limit as u64, "history limit")?)
         .fetch_all(&self.pool)
@@ -149,7 +144,15 @@ impl ConfigStore for PostgresStorage {
         .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|config| serde_json::from_value(config).map_err(Into::into))
+            .map(|(revision, applied_at_unix_secs)| {
+                Ok(HistoryEntry {
+                    revision: i64_to_u64(revision, "history revision")?,
+                    applied_at_unix_secs: i64_to_u64(
+                        applied_at_unix_secs,
+                        "history applied_at_unix_secs",
+                    )?,
+                })
+            })
             .collect()
     }
 }

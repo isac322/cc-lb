@@ -171,31 +171,6 @@ impl PoolQuotaHistoryStore for PostgresStorage {
         )
         .await
     }
-
-    async fn delete_pool_quota_snapshots_before(
-        &self,
-        cutoff_unix_secs: i64,
-        batch_size: u32,
-    ) -> StorageResult<u64> {
-        if batch_size == 0 {
-            return Ok(0);
-        }
-        let result = sqlx::query(
-            r#"DELETE FROM pool_subscription_quota_history_v1
-                WHERE ctid IN (
-                    SELECT ctid FROM pool_subscription_quota_history_v1
-                     WHERE snapshot_at_unix_secs < $1
-                     ORDER BY snapshot_at_unix_secs ASC
-                     LIMIT $2
-                )"#,
-        )
-        .bind(cutoff_unix_secs)
-        .bind(i64::from(batch_size))
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
-    }
 }
 
 fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {

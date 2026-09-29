@@ -68,7 +68,6 @@ async fn save_atomically_replaces_file_preserves_runtime_and_clears_draft() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["revision"], 2);
-    assert_eq!(response["restart_required"], true);
     assert!(
         response["fingerprint"]
             .as_str()
@@ -82,7 +81,6 @@ async fn save_atomically_replaces_file_preserves_runtime_and_clears_draft() {
         authed_json(app.clone(), "GET", "/admin/v1/config/editor", None).await;
     assert_eq!(editor_after["draft"], serde_json::Value::Null);
     assert_eq!(editor_after["revision"], 2);
-    assert_eq!(editor_after["restart_required"], true);
     assert_ne!(
         editor_after["file_config"]["runtime"]["data_dir"],
         editor_after["effective_config"]["runtime"]["data_dir"]

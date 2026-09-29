@@ -42,7 +42,7 @@ fn semantic_checkpoint_ignores_runtime_and_evidence_fields() {
     // Given: two observations with the same quota state but different sample evidence.
     let base = semantic_checkpoint_base_record();
     let mut noisy = base.clone();
-    noisy.sample_kind = SubscriptionQuotaSampleKind::ProcessStart;
+    noisy.sample_kind = SubscriptionQuotaSampleKind::Absent;
     noisy.observed_at_unix_millis += 60_000;
     noisy.ingested_at_unix_millis += 90_000;
     noisy.sample_id = Uuid::from_u128(3);

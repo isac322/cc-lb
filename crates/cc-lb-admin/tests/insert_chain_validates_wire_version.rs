@@ -22,7 +22,7 @@ async fn insert_chain_rejects_unsupported_slot_from_registry_metadata() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Shape",
+            "slot": "shape",
             "wasm_registry_id": entry.id,
         })),
     )
@@ -44,7 +44,7 @@ async fn insert_chain_accepts_registry_entry() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": entry.id
         })),
     )
@@ -69,7 +69,7 @@ async fn insert_chain_accepts_unspecified_metadata() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": entry.id
         })),
     )
@@ -93,7 +93,7 @@ async fn insert_chain_accepts_builtin_subscription_preference() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "router",
             "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID
         })),
     )
@@ -136,10 +136,8 @@ async fn seed_registry_with_wire_version(
                 sha256: [seed; 32],
                 bytes: vec![seed; seed as usize],
                 size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),

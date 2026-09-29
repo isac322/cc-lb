@@ -28,7 +28,7 @@ export interface CostSegment {
   value: number;
 }
 
-/** Field carrying each category on a `/admin/usage` bucket. */
+/** Field carrying each category on a `/admin/v1/dashboard/usage` bucket. */
 const USAGE_COST_FIELD = {
   input: 'cost_input_micros',
   output: 'cost_output_micros',

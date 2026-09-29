@@ -1,6 +1,5 @@
 // Visual presentation for the limit-reset ("coupon") nudge: a ticket-shaped
-// header button (real notches + dashed count compartment) plus a
-// non-interactive badge inside the sidebar upstream row.
+// header button (real notches + dashed count compartment).
 // All decisions come from lib/couponNudge.deriveCouponNudge; these components
 // only render the result and never consume or mutate coupon state. Quota
 // stays the single source of truth for usage numbers.
@@ -22,7 +21,6 @@ import {
   loadPendingLimitResetOp,
   useLimitResets,
 } from '../../lib/limitResets';
-import type { Upstream } from '../../lib/queries';
 import type { PolledDataResult } from '../../lib/usePolledData';
 import { cx, Spinner } from '../ui/primitives';
 
@@ -33,7 +31,6 @@ const TONE: Record<
   CouponNudgeKind,
   {
     icon: string;
-    text: string;
     divider: string;
     fill: string;
     stroke: string;
@@ -41,14 +38,12 @@ const TONE: Record<
 > = {
   quiet: {
     icon: 'text-text-faint',
-    text: 'text-text-faint',
     divider: 'border-[color:var(--color-border)]',
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[var(--color-border)]',
   },
   expiry: {
     icon: 'text-[color:var(--color-warn-text)]',
-    text: 'text-[color:var(--color-warn-text)]',
     divider: 'border-[color:var(--color-warn)]/40',
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[color-mix(in_oklab,var(--color-warn)_50%,transparent)]',
@@ -57,7 +52,6 @@ const TONE: Record<
   // accent (it is reserved for focus, the switch and the one primary action).
   limit: {
     icon: 'text-text',
-    text: 'text-text',
     divider: 'border-[color:var(--color-border-strong)]',
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[var(--color-border-strong)]',
@@ -360,51 +354,5 @@ export function CouponActionButton({
         {expiryLabel}
       </span>
     </span>
-  );
-}
-
-/** Compact expiry for the sidebar badge: "<1m" / "45m" / "2h" / "3d". */
-function formatExpiryShort(ms: number): string {
-  if (ms < 60_000) return '<1m';
-  const mins = Math.round(ms / 60_000);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.round(mins / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.round(hours / 24)}d`;
-}
-
-/** Non-interactive badge inside a sidebar upstream row (the row itself is the
- *  button — this must never be or contain a button). Rendered only when there
- *  is something to say; a soon expiry is shown even when the limit hint is
- *  also active. */
-export function SidebarCouponNudge({
-  upstream,
-  windows,
-}: {
-  upstream: Upstream;
-  windows: readonly NudgeQuotaWindow[];
-}) {
-  const isOauth = upstream.kind === 'anthropic_oauth';
-  const { nudge, nowMs } = useCouponNudge(
-    isOauth ? upstream.id : null,
-    windows,
-  );
-  const expiryMs =
-    nudge?.expiresSoonAt != null ? nudge.expiresSoonAt - nowMs : null;
-  if (!nudge || (nudge.kind === 'quiet' && expiryMs == null)) return null;
-  const tone = TONE[nudge.kind];
-  return (
-    <div className={cx('flex items-center gap-1.5 text-caption', tone.text)}>
-      <Ticket className="h-3 w-3 shrink-0" />
-      {nudge.label ? <span className="truncate">{nudge.label}</span> : null}
-      {nudge.activeCount > 0 ? (
-        <span className="shrink-0 tabular-nums">×{nudge.activeCount}</span>
-      ) : null}
-      {expiryMs != null ? (
-        <span className="shrink-0 whitespace-nowrap text-[color:var(--color-warn-text)]">
-          · exp {formatExpiryShort(expiryMs)}
-        </span>
-      ) : null}
-    </div>
   );
 }

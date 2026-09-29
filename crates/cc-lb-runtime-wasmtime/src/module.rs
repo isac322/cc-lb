@@ -1,14 +1,10 @@
-//! Wasm module compilation pipeline.
+//! Wasm module admission pipeline.
 //!
-//! Phase 1 W5 — pipeline is:
-//!
-//!   `wasm bytes -> inspect_wasm (imports/exports/schema_hash) -> Engine::precompile_module -> Module::deserialize -> InstancePre`
+//!   `wasm bytes -> inspect_wasm (imports/exports/schema fingerprints) -> CompiledModuleCache::get_or_compile (Engine::precompile_module -> Module::deserialize -> InstancePre) -> probe`
 //!
 //! Inspection happens against the raw `.wasm` because
 //! `Module::custom_sections` does not round-trip through
-//! `precompile_module → deserialize`. Disk-cache trust + on-boot
-//! re-verification is Phase 1+ once `data/plugins/wasm/cache/{sha}.wasm`
-//! is wired in.
+//! `precompile_module → deserialize`.
 
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -71,27 +67,12 @@ fn compute_content_hash_with_policy_version(
     *hasher.finalize().as_bytes()
 }
 
-/// Compile raw `.wasm` bytes into an [`InstancePre`] bound to `engine`,
-/// returning the load-time [`ModuleInspection`] alongside it.
+/// Compile raw `.wasm` bytes into an [`InstancePre`](wasmtime::InstancePre) bound to `engine`.
 ///
 /// `Module::deserialize` is documented `unsafe` because tampered compiled
-/// artifacts can execute arbitrary code. The wasmtime runtime always
-/// feeds it bytes produced in-memory by `Engine::precompile_module(wasm_bytes)`
-/// in the same process — i.e. the cwasm never crosses a trust boundary.
-/// Disk reload of `.cwasm` (untrusted bytes) is deferred to a later
-/// phase once the integrity-binding policy from §Operational invariants
-/// is wired.
-pub fn compile_module(
-    engine: &Engine,
-    linker: &Linker<HostState>,
-    kind: HookKind,
-    wasm_bytes: &[u8],
-) -> Result<(Arc<wasmtime::InstancePre<HostState>>, ModuleInspection), WasmtimeRuntimeError> {
-    let inspection = inspect_wasm(kind, wasm_bytes)?;
-    let (instance_pre, _) = compile_instance_pre(engine, linker, wasm_bytes)?;
-    Ok((instance_pre, inspection))
-}
-
+/// artifacts can execute arbitrary code. This function only ever feeds it
+/// bytes produced in-memory by `Engine::precompile_module(wasm_bytes)`
+/// in the same process, so the cwasm never crosses a trust boundary.
 #[allow(unsafe_code)]
 fn compile_instance_pre(
     engine: &Engine,

@@ -9,7 +9,6 @@ pub mod oauth_usage_poll;
 pub mod pool_quota_snapshot;
 pub mod price_catalog;
 pub mod prompt_cache_purge;
-pub mod quota_gc;
 pub mod upstream_affinity_purge;
 pub mod usage_prune;
 pub mod usage_rollup;

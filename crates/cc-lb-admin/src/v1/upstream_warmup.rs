@@ -27,7 +27,6 @@ const WARMUP_JOB_KIND: &str = "warmup";
 pub(crate) struct WarmupAttemptsQuery {
     limit: Option<u32>,
     before: Option<String>,
-    #[serde(alias = "outcome")]
     status: Option<WarmupAttemptStatus>,
 }
 
