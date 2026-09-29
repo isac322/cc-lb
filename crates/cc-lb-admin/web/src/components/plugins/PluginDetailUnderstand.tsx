@@ -1,11 +1,17 @@
+import type { ReactNode } from 'react';
 import type { PluginEntry } from '../../lib/queries';
-import { Badge, Card, CardBody, Section } from '../ui/primitives';
+import { Badge, Card, Section } from '../ui/primitives';
+import {
+  EmptyValue,
+  Table,
+  TableCell,
+  TableHead,
+  TableHeadCell,
+} from '../ui/Table';
 import { SLOTS } from './slots/model';
 
 const SLOT_DESCRIPTIONS: Record<string, string> = {
   router: 'Filters or reorders upstreams before a request is sent.',
-  observability_hook:
-    'Receives events for logging, metrics, or other side effects.',
   shape:
     'Modifies requests before they are sent and responses before they are returned.',
 };
@@ -18,84 +24,76 @@ function getSlotForHook(hookName: string): string {
     hookName === 'transform_sse_event'
   )
     return 'Shape';
-  if (hookName === 'observe') return 'Observability';
   return 'Unknown';
 }
 
-export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
+/** A labelled block in a section: 13px label above 14px copy. */
+function Detail({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Section
-      title={
-        <span className="flex items-baseline gap-2">
-          <span className="text-lg font-medium">What this plugin does</span>
-        </span>
-      }
-    >
-      <Card>
-        <CardBody className="space-y-4">
-          <div>
-            <h3 className="text-sm font-medium text-text mb-1">Description</h3>
-            <p className="text-sm text-text-faint">
-              {plugin.description || 'No description provided.'}
-            </p>
-          </div>
-          <div>
-            <h3 className="text-sm font-medium text-text mb-1">Usage</h3>
-            <p className="text-sm text-text-faint whitespace-pre-wrap">
-              {plugin.usage || 'No usage instructions provided.'}
-            </p>
-          </div>
-          <div>
-            <h3 className="text-sm font-medium text-text mb-2 flex items-baseline gap-2">
-              <span>Where it can run</span>
-            </h3>
-            <div className="flex flex-col gap-2">
-              {plugin.supported_slots?.map((slot) => (
-                <div key={slot} className="flex items-start gap-2">
-                  <Badge tone="accent">
-                    {SLOTS.find((s) => s.id === slot)?.label ?? slot}
-                  </Badge>
-                  <div className="text-xs mt-0.5 flex flex-col gap-0.5">
-                    <span className="text-text-faint">
+    <div>
+      <dt className="text-label text-text-muted">{label}</dt>
+      <dd className="mt-1 text-body text-text">{children}</dd>
+    </div>
+  );
+}
+
+export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
+  const hooks = plugin.hook_metadata
+    ? Object.entries(plugin.hook_metadata)
+    : [];
+  return (
+    <>
+      <Section title="What this plugin does">
+        <div>
+          <dl className="space-y-5">
+            <Detail label="Description">
+              {plugin.description || (
+                <span className="text-text-faint">
+                  No description provided.
+                </span>
+              )}
+            </Detail>
+            <Detail label="Usage">
+              {plugin.usage ? (
+                <span className="whitespace-pre-wrap">{plugin.usage}</span>
+              ) : (
+                <span className="text-text-faint">
+                  No usage instructions provided.
+                </span>
+              )}
+            </Detail>
+            <div>
+              <dt className="text-label text-text-muted">Where it can run</dt>
+              <dd className="mt-1.5 flex flex-col gap-1.5">
+                {plugin.supported_slots?.map((slot) => (
+                  <div key={slot} className="flex items-start gap-2">
+                    <Badge tone="neutral" className="shrink-0">
+                      {SLOTS.find((s) => s.id === slot)?.label ?? slot}
+                    </Badge>
+                    <span className="text-body text-text-muted">
                       {SLOT_DESCRIPTIONS[slot] ?? ''}
                     </span>
                   </div>
-                </div>
-              ))}
+                ))}
+              </dd>
             </div>
-          </div>
+          </dl>
           {plugin.metadata && (
-            <div className="space-y-3 pt-4 border-t border-subtle">
-              <h3 className="text-sm font-medium text-text">
-                Built-in Metadata
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                <div>
-                  <span className="text-text-faint block mb-1">Purpose</span>
-                  <span>{plugin.metadata.purpose}</span>
-                </div>
-                <div>
-                  <span className="text-text-faint block mb-1">
-                    Empty Behavior
-                  </span>
-                  <span>{plugin.metadata.empty_behavior}</span>
-                </div>
-                <div>
-                  <span className="text-text-faint block mb-1">Keeps</span>
-                  <span>{plugin.metadata.keeps}</span>
-                </div>
-                <div>
-                  <span className="text-text-faint block mb-1">Drops</span>
-                  <span>{plugin.metadata.drops}</span>
-                </div>
-              </div>
+            <div className="mt-10">
+              <h3 className="text-title-card text-text">Built-in metadata</h3>
+              <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-5 md:grid-cols-2">
+                <Detail label="Purpose">{plugin.metadata.purpose}</Detail>
+                <Detail label="Empty behavior">
+                  {plugin.metadata.empty_behavior}
+                </Detail>
+                <Detail label="Keeps">{plugin.metadata.keeps}</Detail>
+                <Detail label="Drops">{plugin.metadata.drops}</Detail>
+              </dl>
               {plugin.metadata.examples &&
                 plugin.metadata.examples.length > 0 && (
-                  <div className="mt-2">
-                    <span className="text-text-faint block mb-1 text-sm">
-                      Examples
-                    </span>
-                    <ul className="list-disc pl-4 text-sm space-y-1">
+                  <div className="mt-5">
+                    <div className="text-label text-text-muted">Examples</div>
+                    <ul className="mt-1 list-disc space-y-1 pl-4 text-body text-text">
                       {plugin.metadata.examples.map((ex, i) => (
                         <li key={i}>{ex}</li>
                       ))}
@@ -104,60 +102,82 @@ export function PluginDetailUnderstand({ plugin }: { plugin: PluginEntry }) {
                 )}
             </div>
           )}
-          {plugin.hook_metadata &&
-            Object.keys(plugin.hook_metadata).length > 0 && (
-              <div className="pt-4 border-t border-subtle">
-                <h3 className="text-sm font-medium text-text mb-2">Hooks</h3>
-                <div className="overflow-x-auto border border-subtle rounded-sm">
-                  <table className="w-full text-xs text-left">
-                    <thead className="bg-bg-sub border-b border-subtle">
-                      <tr>
-                        <th className="px-3 py-2 font-medium">Hook</th>
-                        <th className="px-3 py-2 font-medium">Slot</th>
-                        <th className="px-3 py-2 font-medium">Version</th>
-                        <th className="px-3 py-2 font-medium">Mode</th>
-                        <th className="px-3 py-2 font-medium">Description</th>
-                        <th className="px-3 py-2 font-medium">Usage</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-subtle">
-                      {Object.entries(plugin.hook_metadata).map(
-                        ([hookName, meta]) => (
-                          <tr key={hookName}>
-                            <td className="px-3 py-2 font-mono">{hookName}</td>
-                            <td className="px-3 py-2">
-                              {getSlotForHook(hookName)}
-                            </td>
-                            <td className="px-3 py-2">v{meta.wire_version}</td>
-                            <td className="px-3 py-2">
-                              {meta.mode ? (
-                                <Badge
-                                  tone={
-                                    meta.mode === 'active' ? 'ok' : 'neutral'
-                                  }
-                                >
-                                  {meta.mode}
-                                </Badge>
-                              ) : (
-                                <span className="text-text-faint">—</span>
-                              )}
-                            </td>
-                            <td className="px-3 py-2 text-text-faint">
-                              {meta.description}
-                            </td>
-                            <td className="px-3 py-2 text-text-faint">
-                              {meta.usage}
-                            </td>
-                          </tr>
-                        ),
-                      )}
-                    </tbody>
-                  </table>
+        </div>
+      </Section>
+      {hooks.length > 0 && (
+        // Below `lg` the detail is one column; hooks are the most technical
+        // part, so they follow "Used by" and "Use this plugin" there.
+        <Section title="Hooks" className="max-lg:order-last">
+          {/* Phones: one stacked block per hook instead of a sideways-
+              scrolling three-column table. */}
+          <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
+            {hooks.map(([hookName, meta]) => (
+              <li key={hookName} className="px-4 py-3">
+                <div className="font-mono text-data text-text break-all">
+                  {hookName}
                 </div>
-              </div>
-            )}
-        </CardBody>
-      </Card>
-    </Section>
+                <div className="mt-0.5 text-caption text-text-faint">
+                  {getSlotForHook(hookName)} · wire v{meta.wire_version}
+                  {meta.mode === 'noop' ? ' · No-op' : null}
+                </div>
+                {meta.description ? (
+                  <p className="mt-2 text-body text-text-muted">
+                    {meta.description}
+                  </p>
+                ) : null}
+                {meta.usage ? (
+                  <div className="mt-2">
+                    <div className="text-label text-text-faint">Usage</div>
+                    <p className="mt-0.5 text-body text-text-muted">
+                      {meta.usage}
+                    </p>
+                  </div>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+          <Card className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[640px] table-fixed">
+              <colgroup>
+                <col className="w-[22%]" />
+                <col />
+                <col />
+              </colgroup>
+              <TableHead sticky={false}>
+                <tr>
+                  <TableHeadCell>Hook</TableHeadCell>
+                  <TableHeadCell>Description</TableHeadCell>
+                  <TableHeadCell>Usage</TableHeadCell>
+                </tr>
+              </TableHead>
+              <tbody>
+                {hooks.map(([hookName, meta]) => (
+                  <tr
+                    key={hookName}
+                    className="border-b border-row last:border-b-0 align-top"
+                  >
+                    <TableCell className="py-3 align-top">
+                      <div className="font-mono text-data text-text break-all">
+                        {hookName}
+                      </div>
+                      <div className="mt-1 text-caption text-text-faint">
+                        {getSlotForHook(hookName)} · wire v{meta.wire_version}
+                        {meta.mode === 'noop' ? ' · No-op' : null}
+                      </div>
+                    </TableCell>
+                    <TableCell className="py-3 align-top text-text-muted">
+                      {meta.description || <EmptyValue />}
+                    </TableCell>
+                    <TableCell className="py-3 align-top text-text-muted">
+                      {meta.usage || <EmptyValue />}
+                    </TableCell>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          </Card>
+        </Section>
+      )}
+    </>
   );
 }

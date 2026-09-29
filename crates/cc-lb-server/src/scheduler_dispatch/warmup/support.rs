@@ -1,27 +1,16 @@
-use cc_lb_engine::clock::{Clock, unix_secs};
+use cc_lb_clock::{Clock, unix_secs};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::WarmupPermanentFailureReason;
 
 use crate::warmup::execute::WarmupAttemptExecutionResult;
-use crate::warmup::{WarmupAbandonReason, WarmupResult, classify_response};
 
 use super::request::{WarmupDispatchAttempt, WarmupDispatchResult};
 
-pub(super) fn response_is_auth_failed(
-    attempt: &WarmupDispatchAttempt,
-    expected_cycle_key: i64,
-) -> bool {
-    match &attempt.result {
-        WarmupDispatchResult::Response {
-            status,
-            observations,
-        } => matches!(
-            classify_response(*status, observations, expected_cycle_key),
-            WarmupResult::AbandonCyclePermanent(WarmupAbandonReason::AuthFailed)
-        ),
-        WarmupDispatchResult::TransientFailure { .. }
-        | WarmupDispatchResult::PermanentFailure { .. } => false,
-    }
+pub(super) fn response_is_auth_failed(attempt: &WarmupDispatchAttempt) -> bool {
+    matches!(
+        attempt.result,
+        WarmupDispatchResult::Response { status, .. } if status == http::StatusCode::UNAUTHORIZED
+    )
 }
 
 pub(super) fn execution_result_from_dispatch_attempt(

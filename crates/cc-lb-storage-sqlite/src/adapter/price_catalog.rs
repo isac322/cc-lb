@@ -56,7 +56,7 @@ impl PriceCatalogCache for SqliteStorage {
     ) -> StorageResult<PriceCatalogSnapshotFetch> {
         let row = sqlx::query(
             "SELECT CASE \
-                 WHEN payload_hash IS NOT NULL AND payload_hash <> '' AND payload_hash = ? \
+                 WHEN payload_hash = ? \
                  THEN NULL ELSE payload END AS payload, \
                  payload_hash, fetched_at_ms \
              FROM price_catalog_snapshots_v1 \
@@ -75,7 +75,7 @@ impl PriceCatalogCache for SqliteStorage {
             .try_get::<Option<String>, _>("payload")
             .map_err(map_sqlx_error)?;
         let payload_hash = row
-            .try_get::<Option<String>, _>("payload_hash")
+            .try_get::<String, _>("payload_hash")
             .map_err(map_sqlx_error)?;
         let fetched_at_ms = row
             .try_get::<i64, _>("fetched_at_ms")
@@ -101,15 +101,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn snapshot_fetch_from_parts(
     payload: Option<String>,
-    payload_hash: Option<String>,
+    payload_hash: String,
     fetched_at_ms: u64,
 ) -> StorageResult<PriceCatalogSnapshotFetch> {
     let Some(payload) = payload else {
-        let payload_hash = payload_hash
-            .filter(|hash| !hash.is_empty())
-            .ok_or_else(|| StorageError::Corrupted {
-                message: "price catalog metadata-only row has no payload hash".to_owned(),
-            })?;
         return Ok(PriceCatalogSnapshotFetch::Unchanged(
             PriceCatalogSnapshotMetadata {
                 payload_hash,
@@ -120,14 +115,10 @@ fn snapshot_fetch_from_parts(
 
     let json_bytes = payload.into_bytes();
     let actual_hash = sha256_hex(&json_bytes);
-    let expected_hash = payload_hash
-        .as_deref()
-        .filter(|hash| !hash.is_empty())
-        .unwrap_or(&actual_hash);
-    if actual_hash != expected_hash {
+    if actual_hash != payload_hash {
         return Err(StorageError::Corrupted {
             message: format!(
-                "price catalog payload hash mismatch: expected {expected_hash}, got {actual_hash}"
+                "price catalog payload hash mismatch: expected {payload_hash}, got {actual_hash}"
             ),
         });
     }
@@ -160,29 +151,11 @@ mod tests {
     fn changed_snapshot_rejects_mismatched_payload_hash() {
         let error = snapshot_fetch_from_parts(
             Some(r#"{"models":[]}"#.to_owned()),
-            Some("not-the-payload-hash".to_owned()),
+            "not-the-payload-hash".to_owned(),
             123,
         )
         .expect_err("mismatched payload hash must be rejected");
 
         assert!(matches!(error, StorageError::Corrupted { .. }));
-    }
-
-    #[test]
-    fn changed_snapshot_accepts_legacy_missing_or_empty_hash() {
-        let payload = r#"{"models":[]}"#;
-
-        for payload_hash in [None, Some(String::new())] {
-            let result = snapshot_fetch_from_parts(Some(payload.to_owned()), payload_hash, 123)
-                .expect("legacy hash must be treated as changed");
-
-            assert_eq!(
-                result,
-                PriceCatalogSnapshotFetch::Changed(PriceCatalogSnapshotRecord {
-                    json_bytes: payload.as_bytes().to_vec(),
-                    fetched_at_ms: 123,
-                })
-            );
-        }
     }
 }

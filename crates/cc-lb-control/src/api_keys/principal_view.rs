@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cc_lb_domain::TerminalStrategy;
-use cc_lb_observability::ObservabilityHook;
 use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
 use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
@@ -37,12 +36,6 @@ impl RouterPipelineCache {
 }
 
 #[derive(Clone)]
-pub enum ObservabilityHooksCache {
-    Inherit,
-    Explicit(Vec<Arc<dyn ObservabilityHook>>),
-}
-
-#[derive(Clone)]
 pub enum DialectCache {
     Inherit,
     Explicit(ShapePluginCache),
@@ -53,11 +46,7 @@ pub struct ShapePluginCache {
     pub dialect: Arc<dyn UpstreamDialect>,
 }
 
-pub type PrincipalRoutingArtifacts = (
-    Option<Arc<RouterPipelineCache>>,
-    ObservabilityHooksCache,
-    DialectCache,
-);
+pub type PrincipalRoutingArtifacts = (Option<Arc<RouterPipelineCache>>, DialectCache);
 
 #[derive(Debug)]
 pub struct PrincipalView {
@@ -75,7 +64,6 @@ pub struct PrincipalSpecCached {
     enabled: bool,
     router_pipeline: Option<Arc<RouterPipelineCache>>,
     default_router_pipeline: Arc<RouterPipelineCache>,
-    observability_hooks: ObservabilityHooksCache,
     dialect: DialectCache,
     cache_keepalive: Option<Arc<CacheKeepaliveConfig>>,
 }
@@ -96,8 +84,6 @@ impl PrincipalView {
             allowed_upstreams: vec![],
             default_limits,
             enabled,
-            last_apply_error: None,
-            last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
             created_at_unix_secs: 0,
@@ -105,11 +91,9 @@ impl PrincipalView {
             router_terminal_strategy: Default::default(),
             cache_keepalive: None,
         };
-        principal_chains.entry(principal_id.to_owned()).or_insert((
-            None,
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ));
+        principal_chains
+            .entry(principal_id.to_owned())
+            .or_insert((None, DialectCache::Inherit));
         Self::from_db(&[principal], principal_chains)
     }
 
@@ -147,12 +131,9 @@ impl PrincipalView {
                 });
                 let principal_id = principal.name.clone();
                 name_aliases.insert(principal.id.to_string(), principal_id.clone());
-                let (router_pipeline, observability_hooks, dialect) =
-                    principal_chains.remove(&principal_id).unwrap_or((
-                        None,
-                        ObservabilityHooksCache::Inherit,
-                        DialectCache::Inherit,
-                    ));
+                let (router_pipeline, dialect) = principal_chains
+                    .remove(&principal_id)
+                    .unwrap_or((None, DialectCache::Inherit));
                 let default_router_pipeline = Arc::new(RouterPipelineCache::empty(
                     principal.router_terminal_strategy.clone(),
                 ));
@@ -172,7 +153,6 @@ impl PrincipalView {
                     enabled: principal.enabled,
                     router_pipeline,
                     default_router_pipeline,
-                    observability_hooks,
                     dialect,
                     cache_keepalive,
                 };
@@ -270,16 +250,6 @@ impl PrincipalSpecCached {
             .unwrap_or_else(|| Arc::clone(&self.default_router_pipeline))
     }
 
-    pub fn resolved_hooks<'a>(
-        &'a self,
-        global: &'a [Arc<dyn ObservabilityHook>],
-    ) -> &'a [Arc<dyn ObservabilityHook>] {
-        match &self.observability_hooks {
-            ObservabilityHooksCache::Inherit => global,
-            ObservabilityHooksCache::Explicit(hooks) => hooks.as_slice(),
-        }
-    }
-
     pub fn resolved_dialect<'a>(
         &'a self,
         fallback: &'a Arc<dyn UpstreamDialect>,
@@ -303,7 +273,6 @@ fn is_glob_pattern(model: &str) -> bool {
 mod tests {
     use super::*;
     use cc_lb_domain::{Principal, UpstreamCandidate};
-    use cc_lb_observability::{ObservabilityError, ObserveEvent};
     use cc_lb_routing::{FilterError, FilterOutput, RoutingContext};
 
     struct StubFilter(&'static str);
@@ -326,17 +295,7 @@ mod tests {
         }
     }
 
-    struct StubHook(&'static str);
-    impl ObservabilityHook for StubHook {
-        fn observe(&self, _: ObserveEvent) -> Result<(), ObservabilityError> {
-            unimplemented!("StubHook({}) is for identity comparison only", self.0)
-        }
-    }
-
-    fn cached(
-        pipeline: Option<Arc<RouterPipelineCache>>,
-        hooks: ObservabilityHooksCache,
-    ) -> PrincipalSpecCached {
+    fn cached(pipeline: Option<Arc<RouterPipelineCache>>) -> PrincipalSpecCached {
         PrincipalSpecCached {
             id: "test".to_owned(),
             principal_kind: DbPrincipalKind::Machine,
@@ -349,7 +308,6 @@ mod tests {
             default_router_pipeline: Arc::new(RouterPipelineCache::empty(
                 TerminalStrategy::FirstPick,
             )),
-            observability_hooks: hooks,
             dialect: DialectCache::Inherit,
             cache_keepalive: None,
         }
@@ -362,7 +320,7 @@ mod tests {
             terminal: TerminalStrategy::FirstPick,
             instantiation_error: None,
         });
-        let spec = cached(None, ObservabilityHooksCache::Inherit);
+        let spec = cached(None);
 
         let resolved = spec.resolved_pipeline(Some(&global));
 
@@ -380,38 +338,11 @@ mod tests {
             terminal: TerminalStrategy::Random,
             instantiation_error: None,
         });
-        let spec = cached(Some(explicit.clone()), ObservabilityHooksCache::Inherit);
+        let spec = cached(Some(explicit.clone()));
 
         let resolved = spec.resolved_pipeline(Some(&global));
 
         assert!(Arc::ptr_eq(&resolved, &explicit));
         assert!(!Arc::ptr_eq(&resolved, &global));
-    }
-
-    #[test]
-    fn principal_spec_cached_inherit_hooks_returns_global_slice() {
-        let global: Vec<Arc<dyn ObservabilityHook>> =
-            vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
-        let spec = cached(None, ObservabilityHooksCache::Inherit);
-
-        let resolved = spec.resolved_hooks(&global);
-
-        assert_eq!(resolved.len(), 2);
-        assert!(Arc::ptr_eq(&resolved[0], &global[0]));
-        assert!(Arc::ptr_eq(&resolved[1], &global[1]));
-    }
-
-    #[test]
-    fn principal_spec_cached_explicit_empty_hooks_returns_empty() {
-        let global: Vec<Arc<dyn ObservabilityHook>> =
-            vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
-        let spec = cached(None, ObservabilityHooksCache::Explicit(Vec::new()));
-
-        let resolved = spec.resolved_hooks(&global);
-
-        assert!(
-            resolved.is_empty(),
-            "Explicit(vec![]) must return an empty slice, NOT the global chain"
-        );
     }
 }

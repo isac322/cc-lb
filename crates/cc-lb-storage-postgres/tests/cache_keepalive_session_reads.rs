@@ -2,14 +2,14 @@ use std::{collections::BTreeSet, future::Future, str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow,
-    CacheKeepaliveSessionCursor, CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter,
-    CacheKeepaliveSessionListItem, CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl,
-    MetaStore, RequestEvent, RequestEventProjections, RequestEventStore, StorageError,
+    CacheKeepaliveConfigSnapshot, CacheKeepaliveDecisionRow, CacheKeepaliveSessionCursor,
+    CacheKeepaliveSessionEntrySource, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListItem,
+    CacheKeepaliveSessionListQuery, CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore,
+    CacheKeepaliveTerminalReason, CacheKeepaliveTurnRecord, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore, StorageError,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{AssertSqlSafe, PgPool, Row, postgres::PgConnectOptions, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 const PRINCIPAL_ID: &str = "principal-a";
@@ -120,13 +120,6 @@ fn cursor_mismatch_fails_before_query() {
 }
 
 #[test]
-fn nullable_decision_timestamp_uses_ts_millis() {
-    run_postgres_case("ST-12 nullable timestamp", |url| async move {
-        nullable_decision_timestamp_uses_ts_millis_case(&url).await
-    });
-}
-
-#[test]
 fn list_boundaries_preserve_error_contract() {
     run_postgres_case("ST-13 limits and ranges", |url| async move {
         list_boundaries_preserve_error_contract_case(&url).await
@@ -140,24 +133,10 @@ fn selected_corruption_is_not_silently_dropped() {
     });
 }
 
-#[test]
-fn cursor_entry_id_preserves_legacy_sql_comparison() {
-    run_postgres_case("ST-15 arbitrary cursor", |url| async move {
-        cursor_entry_id_preserves_legacy_sql_comparison_case(&url).await
-    });
-}
-
-#[test]
-fn list_and_detail_match_legacy_on_same_database_collation() {
-    run_postgres_case("ST-16 database collation", |url| async move {
-        list_and_detail_match_legacy_on_same_database_collation_case(&url).await
-    });
-}
-
 async fn read_model_contract(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     // Given: stateful sessions and an unjoined decision-only row.
     let renewed = storage
@@ -464,80 +443,10 @@ async fn read_model_contract(url: &str) -> Result<()> {
     fixture.drop_schema().await
 }
 
-const LEGACY_ORDER_SQL: &str = "
-WITH entries AS (
-    SELECT
-        'session'::TEXT AS entry_source,
-        'session:' || session_key_hash AS entry_id,
-        session_key_hash,
-        principal_id,
-        upstream_id,
-        last_message_at_ms,
-        ttl,
-        generation,
-        refresh_count,
-        status,
-        enqueue_state,
-        terminal_reason,
-        NULL::TEXT AS decision,
-        CASE terminal_reason
-            WHEN 'max_refreshes' THEN 'max renewals reached'
-            WHEN 'max_duration' THEN 'max duration reached (4h)'
-            WHEN 'expired' THEN 'TTL expired before follow-up'
-            WHEN 'dispatch_error' THEN 'renewal dispatch unavailable'
-            ELSE display_reason
-        END AS reason,
-        error,
-        config_snapshot
-    FROM cache_keepalive_sessions
-    WHERE principal_id = $1
-    UNION ALL
-    SELECT
-        'decision'::TEXT AS entry_source,
-        'decision:' || source_ref_id AS entry_id,
-        session_key_hash,
-        principal_id,
-        upstream_id,
-        COALESCE(last_message_at_ms, ts * 1000) AS last_message_at_ms,
-        ttl,
-        generation,
-        NULL::BIGINT AS refresh_count,
-        NULL::TEXT AS status,
-        NULL::TEXT AS enqueue_state,
-        NULL::TEXT AS terminal_reason,
-        decision,
-        reason,
-        error,
-        config_snapshot
-    FROM cache_keepalive_decisions
-    WHERE principal_id = $2
-      AND NOT EXISTS (
-          SELECT 1 FROM cache_keepalive_turns turn_row
-          WHERE turn_row.source_ref_id = cache_keepalive_decisions.source_ref_id
-      )
-)
-SELECT *
-FROM entries
-WHERE ($3::BIGINT IS NULL OR last_message_at_ms >= $4)
-  AND CASE $5
-      WHEN 'all' THEN TRUE
-      WHEN 'renewed' THEN entry_source = 'session' AND status = 'active' AND refresh_count > 0
-      WHEN 'scheduled' THEN entry_source = 'session' AND status = 'active' AND refresh_count = 0
-      WHEN 'capped' THEN entry_source = 'session' AND terminal_reason IN ('max_refreshes', 'max_duration')
-      WHEN 'expired' THEN entry_source = 'session' AND terminal_reason = 'expired'
-      WHEN 'not_tracked' THEN entry_source = 'decision' AND decision = 'not_tracked'
-      WHEN 'error' THEN error IS NOT NULL
-      ELSE FALSE
-  END
-  AND ($6::BIGINT IS NULL OR last_message_at_ms < $7 OR (last_message_at_ms = $8 AND entry_id > $9))
-ORDER BY last_message_at_ms DESC, entry_id ASC
-LIMIT $10
-";
-
 async fn initialized_storage(url: &str) -> Result<(Fixture, PostgresStorage)> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     Ok((fixture, storage))
 }
 
@@ -579,45 +488,10 @@ async fn candidate_keys(
     Ok(keys)
 }
 
-async fn legacy_keys(
-    storage: &PostgresStorage,
-    query: &CacheKeepaliveSessionListQuery,
-) -> Result<Vec<(String, u64)>> {
-    query.validate_cursor()?;
-    let horizon = query.horizon_start_ms.map(i64::try_from).transpose()?;
-    let cursor_timestamp = query
-        .cursor
-        .as_ref()
-        .map(|cursor| i64::try_from(cursor.last_message_at_ms))
-        .transpose()?;
-    let cursor_entry_id = query.cursor.as_ref().map(|cursor| cursor.entry_id.as_str());
-    let rows = sqlx::query(LEGACY_ORDER_SQL)
-        .bind(&query.principal_id)
-        .bind(&query.principal_id)
-        .bind(horizon)
-        .bind(horizon)
-        .bind(query.filter.as_str())
-        .bind(cursor_timestamp)
-        .bind(cursor_timestamp)
-        .bind(cursor_timestamp)
-        .bind(cursor_entry_id)
-        .bind(i64::from(query.limit))
-        .fetch_all(storage.pool())
-        .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok((
-                row.try_get::<String, _>("entry_id")?,
-                u64::try_from(row.try_get::<i64, _>("last_message_at_ms")?)?,
-            ))
-        })
-        .collect()
-}
-
 struct DecisionFixture<'a> {
     principal: &'a str,
     id: &'a str,
-    last_message_ms: Option<i64>,
+    last_message_ms: i64,
     ts: i64,
     decision: &'a str,
     error: Option<&'a str>,
@@ -712,8 +586,12 @@ async fn direct_lookup_returns_exact_session_case(url: &str) -> Result<()> {
     assert_eq!(item.generation, 1);
     assert_eq!(item.principal_id, PRINCIPAL_ID);
     assert_eq!(
-        legacy_keys(&storage, &query(PRINCIPAL_ID, 10)).await?[0],
-        item_key(&item)
+        item_key(&item),
+        ("session:sess-100".to_owned(), 1_700_000_000)
+    );
+    assert_eq!(
+        candidate_keys(&storage, query(PRINCIPAL_ID, 10)).await?,
+        vec![item_key(&item)]
     );
     fixture.drop_schema().await
 }
@@ -725,7 +603,7 @@ async fn direct_lookup_returns_visible_decision_case(url: &str) -> Result<()> {
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "dec-200",
-            last_message_ms: Some(1_700_000_123),
+            last_message_ms: 1_700_000_123,
             ts: 1_700_000,
             decision: "not_tracked",
             error: None,
@@ -752,7 +630,7 @@ async fn direct_lookup_hides_decision_after_late_turn_case(url: &str) -> Result<
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "dec-300",
-            last_message_ms: Some(3_000),
+            last_message_ms: 3_000,
             ts: 3,
             decision: "not_tracked",
             error: None,
@@ -791,7 +669,7 @@ async fn direct_lookup_uses_newest_collision_candidate_case(url: &str) -> Result
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "clash-400",
-            last_message_ms: Some(1_000),
+            last_message_ms: 1_000,
             ts: 1,
             decision: "not_tracked",
             error: None,
@@ -835,7 +713,7 @@ async fn direct_lookup_preserves_equal_timestamp_namespace_order_case(url: &str)
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "clash-500",
-            last_message_ms: Some(1_000),
+            last_message_ms: 1_000,
             ts: 1,
             decision: "not_tracked",
             error: None,
@@ -843,12 +721,21 @@ async fn direct_lookup_preserves_equal_timestamp_namespace_order_case(url: &str)
         },
     )
     .await?;
-    let legacy = legacy_keys(&storage, &query(PRINCIPAL_ID, 2)).await?;
     let selected = storage
         .get_cache_keepalive_list_item(PRINCIPAL_ID, "clash-500")
         .await?
         .expect("collision candidate");
-    assert_eq!(item_key(&selected), legacy[0]);
+    assert_eq!(
+        candidate_keys(&storage, query(PRINCIPAL_ID, 2)).await?,
+        vec![
+            ("decision:clash-500".to_owned(), 1_000),
+            ("session:clash-500".to_owned(), 1_000),
+        ]
+    );
+    assert_eq!(
+        item_key(&selected),
+        ("decision:clash-500".to_owned(), 1_000)
+    );
     assert_eq!(selected.source, CacheKeepaliveSessionEntrySource::Decision);
     fixture.drop_schema().await
 }
@@ -868,7 +755,7 @@ async fn direct_lookup_is_principal_scoped_case(url: &str) -> Result<()> {
         DecisionFixture {
             principal: "principal-b",
             id: "tenant-decision",
-            last_message_ms: Some(10_000),
+            last_message_ms: 10_000,
             ts: 10,
             decision: "not_tracked",
             error: None,
@@ -922,7 +809,7 @@ async fn summary_input_matches_legacy_full_scan_case(url: &str) -> Result<()> {
             DecisionFixture {
                 principal: PRINCIPAL_ID,
                 id: &id,
-                last_message_ms: Some(2_000_000_000 + index),
+                last_message_ms: 2_000_000_000 + index,
                 ts: 2_000_000,
                 decision: "not_tracked",
                 error: None,
@@ -942,14 +829,18 @@ async fn summary_input_matches_legacy_full_scan_case(url: &str) -> Result<()> {
         .read_cache_keepalive_summary_input(PRINCIPAL_ID, 1_999_999_999)
         .await?;
     assert_eq!(summary.recent_decisions, 3);
-    let legacy = legacy_keys(&storage, &query(PRINCIPAL_ID, 20_000)).await?;
-    let legacy_sessions = legacy
-        .into_iter()
-        .filter(|(id, _)| id.starts_with("session:"))
+    let expected_sessions = (0..50_u64)
+        .rev()
+        .map(|index| {
+            (
+                format!("session:summary-session-{index:02}"),
+                (2_000_000 + index) * 1_000,
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         summary.sessions.iter().map(item_key).collect::<Vec<_>>(),
-        legacy_sessions
+        expected_sessions
     );
     fixture.drop_schema().await
 }
@@ -963,7 +854,7 @@ async fn summary_recent_decisions_applies_anti_join_case(url: &str) -> Result<()
             DecisionFixture {
                 principal: PRINCIPAL_ID,
                 id: &id,
-                last_message_ms: Some(5_000 + index),
+                last_message_ms: 5_000 + index,
                 ts: 5,
                 decision: "not_tracked",
                 error: None,
@@ -997,16 +888,23 @@ async fn pagination_reaches_terminal_with_engine_parity_case(url: &str) -> Resul
           upstream_id, error, ttl, config_snapshot, last_message_at_ms) \
          SELECT 'page-' || lpad(value::TEXT, 4, '0'), 'not_tracked', 'page', 1, \
                 2_000_000 - (value / 5), $1, NULL, $2, NULL, '5m', NULL, \
-                CASE WHEN value % 3 = 0 THEN NULL ELSE (2_000_000 - (value / 5)) * 1000 END \
+                (2_000_000 - (value / 5)) * 1000 \
          FROM generate_series(1, 1005) AS series(value)",
     )
     .bind(PRINCIPAL_ID)
     .bind(UPSTREAM_ID)
     .execute(storage.pool())
     .await?;
-    let legacy = legacy_keys(&storage, &query(PRINCIPAL_ID, 2_000)).await?;
+    let expected = (1..=1005_u64)
+        .map(|value| {
+            (
+                format!("decision:page-{value:04}"),
+                (2_000_000 - value / 5) * 1_000,
+            )
+        })
+        .collect::<Vec<_>>();
     let candidate = candidate_keys(&storage, query(PRINCIPAL_ID, 47)).await?;
-    assert_eq!(candidate, legacy);
+    assert_eq!(candidate, expected);
     assert_eq!(candidate.len(), 1005);
     fixture.drop_schema().await
 }
@@ -1027,7 +925,7 @@ async fn single_source_filters_skip_unrelated_branch_case(url: &str) -> Result<(
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "visible-decision",
-            last_message_ms: Some(21_000),
+            last_message_ms: 21_000,
             ts: 21,
             decision: "not_tracked",
             error: None,
@@ -1058,7 +956,7 @@ async fn single_source_filters_skip_unrelated_branch_case(url: &str) -> Result<(
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "corrupt-decision",
-            last_message_ms: Some(23_000),
+            last_message_ms: 23_000,
             ts: 23,
             decision: "not_tracked",
             error: None,
@@ -1107,47 +1005,6 @@ async fn cursor_mismatch_fails_before_query_case(url: &str) -> Result<()> {
         StorageError::InvalidInput { ref field, .. }
             if field == "cache_keepalive_session_cursor"
     ));
-    fixture.drop_schema().await
-}
-
-async fn nullable_decision_timestamp_uses_ts_millis_case(url: &str) -> Result<()> {
-    let (fixture, storage) = initialized_storage(url).await?;
-    insert_decision_raw(
-        &storage,
-        DecisionFixture {
-            principal: PRINCIPAL_ID,
-            id: "nullable-ts",
-            last_message_ms: None,
-            ts: 1_700_000,
-            decision: "not_tracked",
-            error: None,
-            config_snapshot: None,
-        },
-    )
-    .await?;
-    let direct = storage
-        .get_cache_keepalive_list_item(PRINCIPAL_ID, "nullable-ts")
-        .await?
-        .expect("nullable timestamp decision");
-    assert_eq!(direct.last_message_at_ms, 1_700_000_000);
-    assert_eq!(
-        storage
-            .list_cache_keepalive_sessions(&CacheKeepaliveSessionListQuery {
-                horizon_start_ms: Some(1_700_000_000),
-                ..query(PRINCIPAL_ID, 10)
-            })
-            .await?
-            .rows[0]
-            .last_message_at_ms,
-        1_700_000_000
-    );
-    assert_eq!(
-        storage
-            .read_cache_keepalive_summary_input(PRINCIPAL_ID, 1_700_000_000)
-            .await?
-            .recent_decisions,
-        1
-    );
     fixture.drop_schema().await
 }
 
@@ -1220,7 +1077,7 @@ async fn selected_corruption_is_not_silently_dropped_case(url: &str) -> Result<(
         DecisionFixture {
             principal: PRINCIPAL_ID,
             id: "old-corrupt",
-            last_message_ms: Some(1_000),
+            last_message_ms: 1_000,
             ts: 1,
             decision: "not_tracked",
             error: None,
@@ -1265,116 +1122,6 @@ async fn selected_corruption_is_not_silently_dropped_case(url: &str) -> Result<(
             .expect_err("selected list corruption"),
         StorageError::Corrupted { .. }
     ));
-    fixture.drop_schema().await
-}
-
-async fn cursor_entry_id_preserves_legacy_sql_comparison_case(url: &str) -> Result<()> {
-    let (fixture, storage) = initialized_storage(url).await?;
-    for id in ["x", "session::x", "decision:é", "Ω", "colon:value"] {
-        storage
-            .replace_from_real_request(&request(id, 10, "cursor"))
-            .await?;
-        set_session_fields(&storage, id, 10_000, 0).await?;
-        insert_decision_raw(
-            &storage,
-            DecisionFixture {
-                principal: PRINCIPAL_ID,
-                id: &format!("d-{id}"),
-                last_message_ms: Some(10_000),
-                ts: 10,
-                decision: "not_tracked",
-                error: None,
-                config_snapshot: None,
-            },
-        )
-        .await?;
-    }
-    for cursor_entry_id in ["x", "session::x", "decision:é", "Ω", "decision::x"] {
-        let query = CacheKeepaliveSessionListQuery {
-            cursor: Some(CacheKeepaliveSessionCursor {
-                principal_id: PRINCIPAL_ID.to_owned(),
-                horizon_start_ms: None,
-                filter: CacheKeepaliveSessionFilter::All,
-                last_message_at_ms: 10_000,
-                entry_id: cursor_entry_id.to_owned(),
-            }),
-            ..query(PRINCIPAL_ID, 100)
-        };
-        let candidate = storage
-            .list_cache_keepalive_sessions(&query)
-            .await?
-            .rows
-            .iter()
-            .map(item_key)
-            .collect::<Vec<_>>();
-        assert_eq!(candidate, legacy_keys(&storage, &query).await?);
-    }
-    fixture.drop_schema().await
-}
-
-async fn list_and_detail_match_legacy_on_same_database_collation_case(url: &str) -> Result<()> {
-    let (fixture, storage) = initialized_storage(url).await?;
-    let collation: String =
-        sqlx::query_scalar("SELECT datcollate FROM pg_database WHERE datname = current_database()")
-            .fetch_one(storage.pool())
-            .await?;
-    assert!(!collation.is_empty());
-    for id in ["ascii", "é", "Ω", "colon:value", "session::shape"] {
-        storage
-            .replace_from_real_request(&request(id, 20, "collation"))
-            .await?;
-        set_session_fields(&storage, id, 20_000, 0).await?;
-        insert_decision_raw(
-            &storage,
-            DecisionFixture {
-                principal: PRINCIPAL_ID,
-                id: &format!("decision-{id}"),
-                last_message_ms: Some(20_000),
-                ts: 20,
-                decision: "not_tracked",
-                error: None,
-                config_snapshot: None,
-            },
-        )
-        .await?;
-    }
-    storage
-        .replace_from_real_request(&request("collation-clash", 20, "collision"))
-        .await?;
-    set_session_fields(&storage, "collation-clash", 20_000, 0).await?;
-    insert_decision_raw(
-        &storage,
-        DecisionFixture {
-            principal: PRINCIPAL_ID,
-            id: "collation-clash",
-            last_message_ms: Some(20_000),
-            ts: 20,
-            decision: "not_tracked",
-            error: None,
-            config_snapshot: None,
-        },
-    )
-    .await?;
-    let legacy = legacy_keys(&storage, &query(PRINCIPAL_ID, 100)).await?;
-    assert_eq!(
-        candidate_keys(&storage, query(PRINCIPAL_ID, 3)).await?,
-        legacy
-    );
-    let expected = legacy
-        .iter()
-        .find(|(entry_id, _)| {
-            entry_id == "decision:collation-clash" || entry_id == "session:collation-clash"
-        })
-        .expect("legacy collision");
-    assert_eq!(
-        item_key(
-            &storage
-                .get_cache_keepalive_list_item(PRINCIPAL_ID, "collation-clash")
-                .await?
-                .expect("direct collision"),
-        ),
-        expected.clone()
-    );
     fixture.drop_schema().await
 }
 

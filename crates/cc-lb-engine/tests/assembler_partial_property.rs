@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use cc_lb_control::{BusReceiver, RequestEventBus};
-use cc_lb_engine::InMemoryBus;
+use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_lifecycle::{
     EventId, LifecycleEvent, ParseInfo, RouteInfo, StreamSuccess, TerminationReason, UsageSnapshot,
     UsageSource,
@@ -59,15 +58,6 @@ impl RequestEventStore for PropertyStore {
         }
         state.rows.push((cursor, event.clone()));
         Ok(cursor)
-    }
-
-    async fn query_request_events(
-        &self,
-        _since: u64,
-        _until: u64,
-        _limit: usize,
-    ) -> StorageResult<Vec<RequestEvent>> {
-        Ok(Vec::new())
     }
 
     async fn current_request_event_cursor(&self) -> StorageResult<u64> {
@@ -262,8 +252,6 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         },
@@ -303,8 +291,6 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: Some(profile.token_base() + 7),
-            observability_post_ms: Some(profile.token_base() + 8),
             proxy_setup_ms: Some(profile.token_base() + 9),
             request_body_read_ms: None,
             request_body_bytes: None,
@@ -326,9 +312,7 @@ fn run_events(events: Vec<LifecycleEvent>) -> (Vec<RequestEvent>, Vec<RequestEve
         let (tx, rx) = mpsc::channel(events.len().max(1) + 8);
         let store = Arc::new(PropertyStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut bus_rx) = bus.subscribe() else {
-            panic!("expected in-memory receiver");
-        };
+        let mut bus_rx = bus.subscribe();
         let handle = cc_lb_engine::spawn_request_event_assembler(
             rx,
             store.clone(),

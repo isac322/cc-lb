@@ -10,30 +10,27 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
-use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache,
+use cc_lb_control::RequestEventBus;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::{
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache,
 };
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
-    LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability,
 };
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Response, StatusCode};
@@ -92,7 +89,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -322,10 +319,7 @@ fn assert_tail_error_frame(frame: &Bytes) {
 }
 
 fn lifecycle_receiver(test_bus: &TestLifecycleBus) -> broadcast::Receiver<LifecycleEvent> {
-    let LifecycleBusReceiver::InMemory(rx) = test_bus.bus.subscribe_lifecycle() else {
-        panic!("expected in-memory lifecycle receiver");
-    };
-    rx
+    test_bus.bus.subscribe_lifecycle()
 }
 
 async fn wait_for_terminal(rx: &mut broadcast::Receiver<LifecycleEvent>) -> (LifecycleEvent, bool) {
@@ -345,7 +339,7 @@ async fn wait_for_terminal(rx: &mut broadcast::Receiver<LifecycleEvent>) -> (Lif
     .expect("request terminates")
 }
 
-fn assert_request_setup_timings(event: &cc_lb_storage_api::types::RequestEvent) {
+fn assert_request_setup_timings(event: &cc_lb_storage_api::RequestEvent) {
     for timing in [event.json_parse_ms, event.prepare_signer_ms] {
         assert!(timing.is_some_and(|value| value.is_finite() && value >= 0.0));
     }
@@ -357,19 +351,19 @@ async fn sqlite_storage(
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
 async fn wait_for_events(
     storage: &dyn RequestEventStore,
     expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        let events = common::stored_request_events(storage).await?;
         if events.len() >= expected {
             return Ok(events);
         }
@@ -493,8 +487,6 @@ fn lifecycle_with_terminal_and_upstream_dispatch(
             choices,
             signer_fails,
         }))
-        .global_router(Arc::new(NullRouter))
-        .global_observability_hooks(Vec::new())
         .principal_view(principal_view)
         .upstream_records(records)
         .build();
@@ -504,7 +496,7 @@ fn lifecycle_with_terminal_and_upstream_dispatch(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -568,11 +560,7 @@ fn principal_view(
     let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::from_db(&[principal()], chains))
 }
@@ -586,8 +574,6 @@ fn principal() -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -630,46 +616,6 @@ fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
 
 fn upstream_id(index: u128) -> Uuid {
     Uuid::from_u128(index)
-}
-
-struct NullRouter;
-
-impl RouterPlugin for NullRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Ok(RouteDecision {
-            upstream_id: None,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(NullDialect),
-        })
-    }
-}
-
-struct NullDialect;
-
-impl UpstreamDialect for NullDialect {
-    fn shape(
-        &self,
-        ctx: &DialectShapeContext,
-        upstream: &Upstream,
-        _principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        let _ = upstream;
-        let mut url = Url::parse("http://upstream.local/")?;
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
-        Ok(builder.shaped_request(
-            url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
-        ))
-    }
 }
 
 struct RecordingSignerFactory {

@@ -3,8 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveSessionReadStore, CacheKeepaliveTurnRecord,
-    CacheKeepaliveTurnRow, CacheTtl, RequestEventProjections, RequestEventStore,
-    types::RequestEvent,
+    CacheKeepaliveTurnRow, CacheTtl, RequestEvent, RequestEventProjections, RequestEventStore,
 };
 use uuid::Uuid;
 

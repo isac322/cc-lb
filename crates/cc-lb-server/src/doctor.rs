@@ -1,8 +1,6 @@
 use std::io::Write;
 
-use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginRegistryStore, PluginSlotKind, PrincipalStore,
-};
+use cc_lb_storage_api::{MetaStore, PluginRegistryStore, PluginSlotKind, PrincipalStore};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -37,7 +35,7 @@ struct AbandonedChainEntryReport {
 }
 
 pub async fn run_list_abandoned_chain_entries(
-    clock: cc_lb_engine::ClockHandle,
+    clock: cc_lb_clock::ClockHandle,
 ) -> Result<(), DoctorError> {
     let path = storage_path_from_env();
     if !path.exists() {
@@ -51,7 +49,7 @@ pub async fn run_list_abandoned_chain_entries(
         .await
         .map_err(DoctorError::StorageOpen)?;
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .map_err(DoctorError::StorageOpen)?;
     let mut abandoned_chain_entries = Vec::new();
@@ -61,11 +59,7 @@ pub async fn run_list_abandoned_chain_entries(
         .map_err(DoctorError::StorageQuery)?;
 
     for principal in principals {
-        for slot in [
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ] {
+        for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
             let chain_entries = storage
                 .list_chain_for_principal(principal.id, slot)
                 .await
@@ -78,7 +72,9 @@ pub async fn run_list_abandoned_chain_entries(
                 else {
                     continue;
                 };
-                if registry_entry.supported_slots.is_empty() && !registry_entry.is_builtin {
+                if !registry_entry.is_builtin
+                    && !registry_entry.supported_slots.contains(&chain_entry.slot)
+                {
                     abandoned_chain_entries.push(AbandonedChainEntryReport {
                         principal_id: chain_entry.principal_id.to_string(),
                         wasm_registry_id: registry_entry.id.to_string(),

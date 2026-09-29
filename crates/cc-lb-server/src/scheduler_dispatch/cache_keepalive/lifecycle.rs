@@ -138,8 +138,6 @@ pub(super) fn publish_renewal_lifecycle(
         request_body_read_ms: None,
         request_body_bytes: None,
         finalize_ms: None,
-        limit_reconcile_ms: None,
-        observability_post_ms: None,
         proxy_setup_ms: None,
         setup_timings: Default::default(),
         upstream_body_ms: None,
@@ -204,8 +202,6 @@ fn route_info(upstream: &UpstreamRecord, model: &str) -> RouteInfo {
         quota_urgency_7d: None,
         quota_urgency_combined: None,
         quota_warning_multiplier: None,
-        lineage_would_have_predicted_read_tokens: None,
-        lineage_would_have_picked_upstream_id: None,
     }
 }
 

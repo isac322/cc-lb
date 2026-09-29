@@ -5,27 +5,21 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicView, DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, Body, DispatchError, DynamicView, DynamicViewBuilder,
-    DynamicViewHolder, Lifecycle, LifecycleConfig, RequestKind, UpstreamDispatch, build_candidates,
+    ApiKeyAwareSignerFactory, Body, DispatchError, Lifecycle, LifecycleConfig, RequestKind,
+    UpstreamDispatch, build_candidates,
 };
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
-    UpstreamError,
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
 };
 use http::{Request, Response, StatusCode};
-use url::Url;
 use uuid::Uuid;
 
 struct TestSignerFactory;
@@ -60,19 +54,6 @@ impl Signer for TestSigner {
     }
 }
 
-struct TestRouter;
-
-impl RouterPlugin for TestRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        panic!("candidate builder test must not route")
-    }
-}
-
 struct TestDispatcher;
 
 #[async_trait]
@@ -82,14 +63,6 @@ impl UpstreamDispatch for TestDispatcher {
             .status(StatusCode::OK)
             .body(Body::from(Bytes::new()))
             .expect("test response builds"))
-    }
-}
-
-struct TestHook;
-
-impl ObservabilityHook for TestHook {
-    fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-        Ok(())
     }
 }
 
@@ -123,7 +96,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         RequestKind::AnthropicMessages,
         &[],
         &HashMap::new(),
-        &cc_lb_engine::SystemClock,
+        &cc_lb_clock::SystemClock,
     );
     assert_eq!(
         candidate_ids(&limited),
@@ -136,7 +109,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         RequestKind::AnthropicMessages,
         &[],
         &HashMap::new(),
-        &cc_lb_engine::SystemClock,
+        &cc_lb_clock::SystemClock,
     );
     assert_eq!(
         candidate_ids(&all),
@@ -150,7 +123,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
             RequestKind::AnthropicMessages,
             &[],
             &HashMap::new(),
-            &cc_lb_engine::SystemClock
+            &cc_lb_clock::SystemClock
         )
         .is_empty()
     );
@@ -164,7 +137,6 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     let third = Uuid::from_u128(3);
     let not_allowed = Uuid::from_u128(4);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let filter: Arc<dyn FilterPlugin> = Arc::new(KeepIdsFilter {
         kept_upstream_ids: vec![second, third],
         calls: Arc::clone(&filter_calls),
@@ -177,11 +149,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     let mut chains = HashMap::new();
     chains.insert(
         "limited".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     let principal_view = Arc::new(PrincipalView::from_db(
         &[principal("limited", vec![third, first, second])],
@@ -189,9 +157,6 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
     ));
     let view = test_view_with_principal_view(
         Arc::clone(&principal_view),
-        Arc::new(RecordingRouter {
-            calls: Arc::clone(&router_calls),
-        }),
         vec![
             upstream(third, UpstreamKind::AnthropicApiKey, true, None),
             upstream(not_allowed, UpstreamKind::AnthropicApiKey, true, None),
@@ -206,7 +171,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         RequestKind::AnthropicMessages,
         &[],
         &HashMap::new(),
-        &cc_lb_engine::SystemClock,
+        &cc_lb_clock::SystemClock,
     );
     assert_eq!(candidate_ids(&built), vec![first, second, third]);
 
@@ -216,7 +181,7 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         Arc::new(DynamicViewHolder::new(view)),
         Arc::new(TestDispatcher),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let request = Request::builder()
@@ -237,10 +202,6 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_str
         filter_calls.lock().expect("filter calls lock").as_slice(),
         &[vec![first, second, third]],
     );
-    assert!(
-        router_calls.lock().expect("router calls lock").is_empty(),
-        "terminal strategy must not invoke the legacy router"
-    );
     Ok(())
 }
 
@@ -250,20 +211,16 @@ fn test_view(principals: Vec<PrincipalRecord>, upstreams: Vec<UpstreamRecord>) -
             &principals,
             std::collections::HashMap::new(),
         )),
-        Arc::new(TestRouter),
         upstreams,
     )
 }
 
 fn test_view_with_principal_view(
     principal_view: Arc<PrincipalView>,
-    router: Arc<dyn RouterPlugin>,
     upstreams: Vec<UpstreamRecord>,
 ) -> Arc<DynamicView> {
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
-        .global_router(router)
-        .global_observability_hooks(vec![Arc::new(TestHook)])
         .principal_view(principal_view)
         .upstream_records(upstreams)
         .build()
@@ -278,8 +235,6 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
         allowed_upstreams,
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -354,54 +309,5 @@ impl FilterPlugin for KeepIdsFilter {
 
     fn plugin_name(&self) -> &str {
         "candidate-builder-keep-ids"
-    }
-}
-
-struct RecordingRouter {
-    calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
-}
-
-impl RouterPlugin for RecordingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.calls
-            .lock()
-            .expect("router calls lock")
-            .push(candidate_ids(candidates));
-        let candidate = candidates.first().ok_or_else(|| RouteError::NoRoute {
-            reason: "no routed candidate".to_owned(),
-        })?;
-        Ok(RouteDecision {
-            upstream_id: Some(candidate.upstream_id),
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(PassthroughDialect),
-        })
-    }
-}
-
-struct PassthroughDialect;
-
-impl UpstreamDialect for PassthroughDialect {
-    fn shape(
-        &self,
-        ctx: &DialectShapeContext,
-        upstream: &Upstream,
-        _principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        let _ = upstream;
-        let mut url = Url::parse("http://upstream.local/")?;
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
-        Ok(builder.shaped_request(
-            url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
-        ))
     }
 }

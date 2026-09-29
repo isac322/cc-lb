@@ -201,7 +201,7 @@ async fn post_happy(server: &common::TestServer) -> common::RawResponse {
 async fn open_admin_sse(addr: SocketAddr) -> BufReader<TcpStream> {
     let mut stream = TcpStream::connect(addr).await.expect("connect admin sse");
     let request = format!(
-        "GET /admin/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+        "GET /admin/v1/events/stream HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -525,12 +525,11 @@ async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
     assert!(fetch_i64(&pool, "SELECT input_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
     assert!(fetch_i64(&pool, "SELECT output_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
     assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND error_code IS NULL").await > 0);
-    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND cache_state IS NOT NULL").await > 0);
+    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND json_extract(payload, '$.cache_state') IS NOT NULL").await > 0);
 
     let payload = fetch_payload_json(&pool, where_clause).await;
     assert_eq!(json_i64(&payload, "status"), 200);
     assert_eq!(json_str(&payload, "principal_kind"), "machine");
-    assert_eq!(json_str(&payload, "upstream"), "anthropic_direct");
     for field in [
         "cost_usd_micros",
         "cost_input_micros",
@@ -646,7 +645,7 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
     //
     // The SSE stream also carries `phase="final"` frames unrelated to this POST:
     // `common::spawn_test_server` runs a `GET /v1/models` readiness probe (see
-    // `wait_for_proxy_ready`) that goes through the lifecycle pipeline and
+    // `wait_for_proxy_ready_or_exit`) that goes through the lifecycle pipeline and
     // publishes its own terminal frame with no model, no usage, and no cost —
     // sometimes still in flight (via backfill or the live bus) when this test
     // subscribes. Filter on `model == HAPPY_MODEL` so we assert on the frame
@@ -899,8 +898,6 @@ async fn lqa_5f_assembler_row_records_anthropic_upstream_uuid_name_and_model() {
     assert!(upstream_id.parse::<Uuid>().is_ok());
     assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
     assert_eq!(fetch_text(&pool, "SELECT model FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, HAPPY_MODEL);
-    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
-    assert_eq!(json_str(&payload, "upstream"), "anthropic_direct");
 }
 
 #[tokio::test]

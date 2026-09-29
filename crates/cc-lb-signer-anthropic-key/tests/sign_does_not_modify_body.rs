@@ -41,7 +41,6 @@ async fn sign_does_not_modify_body() {
     let principal = Principal {
         id: "alice".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let shaped = shape_request(
         &BodyDialect,

@@ -1,7 +1,7 @@
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::{LimitEngine, RejectReason};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_storage_api::types::{
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::{LimitEngine, RejectReason};
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_storage_api::{
     KeyStatus, Limit as StoredLimit, LimitKind as StoredLimitKind, StoredApiKeyRecord,
 };
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     (
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         ),
         view,
     )
@@ -98,16 +98,6 @@ fn principal_disabled_rejects() {
     let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
 
     assert_eq!(result.err(), Some(RejectReason::PrincipalDisabled));
-}
-
-#[test]
-fn record_disabled_rejects() {
-    let (engine, view) = engine(true);
-    let record = record(KeyStatus::Disabled, Vec::new());
-
-    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
-
-    assert_eq!(result.err(), Some(RejectReason::KeyDisabled));
 }
 
 #[test]

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ApiError } from '../../lib/api';
 import type { UploadWasmResponse } from '../../lib/queries';
-import { Card, CardHeader, ConfirmDialog, cx } from '../ui/primitives';
+import { ConfirmDialog, cx, Section } from '../ui/primitives';
 
 interface ReplacementConfirmationBody {
   error: 'replacement_confirmation_required';
@@ -46,11 +46,14 @@ type PluginUploadMutation = Pick<
 
 export function PluginUploadCard({
   autoFocus = false,
+  bare = false,
   onAutoFocus,
   onUploaded,
   upload,
 }: {
   autoFocus?: boolean;
+  /** Render only the drop zone, for hosts (the upload dialog) that already title it. */
+  bare?: boolean;
   onAutoFocus?: () => void;
   onUploaded?: (id: string) => void;
   upload: PluginUploadMutation;
@@ -110,108 +113,118 @@ export function PluginUploadCard({
     if (document.activeElement === browseRef.current) onAutoFocus?.();
   }, [autoFocus, onAutoFocus, uploading]);
 
+  const dropZone = (
+    <div
+      ref={browseRef}
+      role="button"
+      tabIndex={uploading ? -1 : 0}
+      aria-disabled={uploading || undefined}
+      aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
+      aria-busy={uploading}
+      // Phones get a compact one-line picker (icon beside the copy, no drag
+      // hint: touch has no drag and drop); from `md` it is the centered
+      // drop zone.
+      className={cx(
+        'flex items-center gap-3 rounded-sm border border-dashed border-subtle-strong px-4 py-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 md:flex-col md:justify-center md:gap-0 md:py-8 md:text-center',
+        uploading
+          ? 'cursor-wait opacity-70'
+          : 'cursor-pointer hover:border-text-faint hover:bg-hover-bg',
+      )}
+      onClick={() => {
+        if (!uploading) fileRef.current?.click();
+      }}
+      onKeyDown={(e) => {
+        if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          fileRef.current?.click();
+        }
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        if (!uploading) handleFile(e.dataTransfer.files?.[0]);
+      }}
+    >
+      <UploadCloud
+        strokeWidth={1.75}
+        aria-hidden="true"
+        className={cx(
+          'size-6 shrink-0 md:mb-2',
+          uploading
+            ? 'text-text-muted motion-safe:animate-pulse'
+            : 'text-text-faint',
+        )}
+      />
+      <div className="min-w-0">
+        <div className="text-body font-medium text-text">
+          {uploading ? 'Uploading…' : 'Choose .wasm file'}
+        </div>
+        <div className="mt-0.5 text-body-sm text-text-muted md:mt-1">
+          <span className="md:hidden">Tap to browse. Max 32 MiB.</span>
+          <span className="max-md:hidden">
+            Drag and drop or click to browse. Max 32 MiB.
+          </span>
+        </div>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        aria-label="Plugin file"
+        accept=".wasm"
+        className="hidden"
+        disabled={uploading}
+        onChange={(e) => {
+          handleFile(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
+    </div>
+  );
+
   return (
     <>
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-baseline gap-2">
-              <span className="text-base font-medium">Upload plugin</span>
-            </span>
-          }
-          subtitle={
-            <div className="space-y-1">
-              <div>
-                Choose the .wasm file you received. After upload, review what it
-                can do and where it can be used.
-              </div>
-            </div>
-          }
-        />
-        <div
-          ref={browseRef}
-          role="button"
-          tabIndex={uploading ? -1 : 0}
-          aria-disabled={uploading || undefined}
-          aria-label={uploading ? 'Uploading plugin' : 'Choose .wasm file'}
-          aria-busy={uploading}
-          className={cx(
-            'm-4 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-            uploading
-              ? 'cursor-wait opacity-70 border-accent/40'
-              : 'cursor-pointer hover:border-accent/40',
-          )}
-          onClick={() => {
-            if (!uploading) fileRef.current?.click();
-          }}
-          onKeyDown={(e) => {
-            if (!uploading && (e.key === 'Enter' || e.key === ' ')) {
-              e.preventDefault();
-              fileRef.current?.click();
-            }
-          }}
-          onDragOver={(e) => {
-            e.preventDefault();
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (!uploading) handleFile(e.dataTransfer.files?.[0]);
-          }}
+      {bare ? (
+        dropZone
+      ) : (
+        <Section
+          title="Upload plugin"
+          subtitle="Choose the .wasm file you received. After upload, review what it can do and where it can be used."
         >
-          <UploadCloud
-            className={cx(
-              'w-8 h-8 mb-2',
-              uploading ? 'text-accent animate-pulse' : 'text-text-faint',
-            )}
-          />
-          <div className="text-sm">
-            {uploading ? 'Uploading…' : 'Choose .wasm file'}
-          </div>
-          <div className="text-[11px] text-text-faint mt-1">
-            Drag and drop or click to browse. Max 32 MiB.
-          </div>
-          <input
-            ref={fileRef}
-            type="file"
-            aria-label="Plugin file"
-            accept=".wasm"
-            className="hidden"
-            disabled={uploading}
-            onChange={(e) => {
-              handleFile(e.target.files?.[0]);
-              e.target.value = '';
-            }}
-          />
-        </div>
-      </Card>
+          {dropZone}
+        </Section>
+      )}
 
       <ConfirmDialog
         open={pendingReplacement !== null}
         onOpenChange={(o) => {
           if (!o) setPendingReplacement(null);
         }}
-        title="Confirm Plugin Replacement"
+        title="Confirm plugin replacement"
         description={
           pendingReplacement ? (
-            <span className="space-y-2 block">
+            <span className="block space-y-3">
               <span className="block">
                 A plugin named{' '}
-                <span className="font-mono">{pendingReplacement.name}</span>{' '}
+                <span className="font-medium text-text">
+                  {pendingReplacement.name}
+                </span>{' '}
                 already exists.
               </span>
-              <span className="text-xs bg-overlay-1 p-2 rounded-sm border border-subtle block">
+              <span className="well block space-y-1 p-3 text-body">
                 <span className="block">
-                  <strong>Current:</strong>{' '}
+                  <span className="font-medium text-text">Current:</span>{' '}
                   {pendingReplacement.currentVersion || 'none'} (
-                  <code className="text-[10px]">
+                  <code className="font-mono text-data">
                     {pendingReplacement.currentSha256Hex.slice(0, 12)}
                   </code>
                   )
                 </span>
                 <span className="block">
-                  <strong>Incoming:</strong>{' '}
+                  <span className="font-medium text-text">Incoming:</span>{' '}
                   {pendingReplacement.incomingVersion || 'none'} (
-                  <code className="text-[10px]">
+                  <code className="font-mono text-data">
                     {pendingReplacement.incomingSha256Hex.slice(0, 12)}
                   </code>
                   )

@@ -8,19 +8,13 @@ expression: body
   "plugins": {
     "chains": {
       "principal-alpha": {
-        "ObservabilityHook": [],
         "Router": [
           {
-            "batched_events_per_flush": 1,
-            "batched_flush_ms": 100,
             "config": {},
             "order": 0,
-            "sse_per_event": false,
             "wasm_registry_name": "subscription-preference"
           },
           {
-            "batched_events_per_flush": 3,
-            "batched_flush_ms": 250,
             "config": {
               "alpha": {
                 "alpha": false,
@@ -29,7 +23,6 @@ expression: body
               "zeta": 1
             },
             "order": 1000,
-            "sse_per_event": true,
             "wasm_registry_name": "plugin-alpha"
           }
         ]

@@ -203,7 +203,7 @@ async fn create_split(
 
     if let Some(api_key_ciphertext) = create.api_key_ciphertext {
         sqlx::query(
-            "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, secret_revision, created_at, updated_at) VALUES ($1, $2, 1, NOW(), NOW())",
+            "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, created_at, updated_at) VALUES ($1, $2, NOW(), NOW())",
         )
         .bind(id)
         .bind(api_key_ciphertext)
@@ -214,7 +214,7 @@ async fn create_split(
 
     if let Some(oauth_token_generation) = create.oauth_token_generation {
         sqlx::query(
-            "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at) VALUES ($1, NULL, 1, $2, NULL, NOW(), NOW())",
+            "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, oauth_token_generation, created_at, updated_at) VALUES ($1, NULL, $2, NOW(), NOW())",
         )
         .bind(id)
         .bind(u64_to_i64(oauth_token_generation, "oauth token generation")?)
@@ -417,11 +417,10 @@ async fn update_split_api_key_secret_in_tx(
 ) -> StorageResult<()> {
     ensure_split_spec_active_in_tx(tx, id).await?;
     sqlx::query(
-        "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, secret_revision, created_at, updated_at)
-         VALUES ($1, $2, 1, NOW(), NOW())
+        "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, created_at, updated_at)
+         VALUES ($1, $2, NOW(), NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET api_key_ciphertext = EXCLUDED.api_key_ciphertext,
-             secret_revision = upstream_api_key_secret_v1.secret_revision + 1,
              updated_at = NOW()",
     )
     .bind(id)
@@ -441,13 +440,11 @@ async fn update_split_oauth_token(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, token_revision, refreshed_at, created_at, updated_at)
-         VALUES ($1, $2, $3, 1, NOW(), NOW(), NOW())
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, created_at, updated_at)
+         VALUES ($1, $2, $3, NOW(), NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = EXCLUDED.oauth_credentials_ciphertext,
              never_refresh = EXCLUDED.never_refresh,
-             token_revision = upstream_oauth_token_v1.token_revision + 1,
-             refreshed_at = NOW(),
              updated_at = NOW()",
     )
     .bind(id)
@@ -470,8 +467,8 @@ async fn update_split_oauth_token_generation_in_tx(
 ) -> StorageResult<()> {
     ensure_split_spec_active_in_tx(tx, id).await?;
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
-         VALUES ($1, NULL, 1, $2, NULL, NOW(), NOW())
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, oauth_token_generation, created_at, updated_at)
+         VALUES ($1, NULL, $2, NOW(), NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_token_generation = EXCLUDED.oauth_token_generation,
              updated_at = NOW()",
@@ -493,13 +490,11 @@ async fn complete_split_refresh(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
-         VALUES ($1, $2, 1, 1, NOW(), NOW(), NOW())
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, oauth_token_generation, created_at, updated_at)
+         VALUES ($1, $2, 1, NOW(), NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = EXCLUDED.oauth_credentials_ciphertext,
-             token_revision = upstream_oauth_token_v1.token_revision + 1,
              oauth_token_generation = upstream_oauth_token_v1.oauth_token_generation + 1,
-             refreshed_at = NOW(),
              updated_at = NOW()",
     )
     .bind(id)
@@ -616,7 +611,7 @@ async fn set_split_status(
     let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = $1",
+        "SELECT last_apply_error, last_apply_at, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -635,30 +630,6 @@ async fn set_split_status(
         .transpose()
         .map_err(map_sqlx_error)?
         .flatten();
-    let mut observed_spec_revision = optional_i64_to_u64(
-        row.as_ref()
-            .map(|row| row.try_get::<Option<i64>, _>("observed_spec_revision"))
-            .transpose()
-            .map_err(map_sqlx_error)?
-            .flatten(),
-        "observed_spec_revision",
-    )?;
-    let mut observed_api_key_secret_revision = optional_i64_to_u64(
-        row.as_ref()
-            .map(|row| row.try_get::<Option<i64>, _>("observed_api_key_secret_revision"))
-            .transpose()
-            .map_err(map_sqlx_error)?
-            .flatten(),
-        "observed_api_key_secret_revision",
-    )?;
-    let mut observed_oauth_token_revision = optional_i64_to_u64(
-        row.as_ref()
-            .map(|row| row.try_get::<Option<i64>, _>("observed_oauth_token_revision"))
-            .transpose()
-            .map_err(map_sqlx_error)?
-            .flatten(),
-        "observed_oauth_token_revision",
-    )?;
     let mut last_warmup_at = optional_i64_to_u64(
         row.as_ref()
             .map(|row| row.try_get::<Option<i64>, _>("last_warmup_at"))
@@ -676,49 +647,22 @@ async fn set_split_status(
             .map(|unix_secs| unix_secs_to_datetime(unix_secs, "last_apply_at"))
             .transpose()?;
     }
-    if let Some(value) = patch.observed_spec_revision {
-        observed_spec_revision = value;
-    }
-    if let Some(value) = patch.observed_api_key_secret_revision {
-        observed_api_key_secret_revision = value;
-    }
-    if let Some(value) = patch.observed_oauth_token_revision {
-        observed_oauth_token_revision = value;
-    }
     if let Some(value) = patch.last_warmup_at_unix_secs {
         last_warmup_at = value;
     }
 
     sqlx::query(
-        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, last_warmup_at, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET last_apply_error = EXCLUDED.last_apply_error,
              last_apply_at = EXCLUDED.last_apply_at,
-             observed_spec_revision = EXCLUDED.observed_spec_revision,
-             observed_api_key_secret_revision = EXCLUDED.observed_api_key_secret_revision,
-             observed_oauth_token_revision = EXCLUDED.observed_oauth_token_revision,
              last_warmup_at = EXCLUDED.last_warmup_at,
              updated_at = NOW()",
     )
     .bind(id)
     .bind(last_apply_error)
     .bind(last_apply_at)
-    .bind(
-        observed_spec_revision
-            .map(|value| u64_to_i64(value, "observed_spec_revision"))
-            .transpose()?,
-    )
-    .bind(
-        observed_api_key_secret_revision
-            .map(|value| u64_to_i64(value, "observed_api_key_secret_revision"))
-            .transpose()?,
-    )
-    .bind(
-        observed_oauth_token_revision
-            .map(|value| u64_to_i64(value, "observed_oauth_token_revision"))
-            .transpose()?,
-    )
     .bind(
         last_warmup_at
             .map(|value| u64_to_i64(value, "last_warmup_at"))

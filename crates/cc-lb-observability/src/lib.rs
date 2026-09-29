@@ -1,26 +1,20 @@
 #![forbid(unsafe_code)]
 
-//! Observability primitives for `cc-lb` tracing, metrics, hooks, and panic reporting.
+//! Observability primitives for `cc-lb` tracing, metrics, and panic reporting.
 
 #[path = "metrics.rs"]
 mod cclb_metrics;
+mod dropped_events;
 mod engine_hook;
-mod hook;
-mod host;
 mod init;
-pub mod lifecycle_metrics;
 mod panic_hook;
 mod propagation;
 mod redaction;
 mod trace_layer;
 
 pub use cclb_metrics::{prometheus14_metric_definitions, touch_prometheus14_metrics};
+pub use dropped_events::increment_dropped_events_by;
 pub use engine_hook::{EngineMetricsHook, MetricsCrateHook, NoopMetricsHook};
-pub use hook::{
-    BoundedChannelHook, DEFAULT_HOOK_CHANNEL_CAPACITY, dropped_events_total,
-    increment_dropped_events_by,
-};
-pub use host::{ObservabilityError, ObservabilityHook, ObserveEvent};
 pub use init::{
     InitError, MetricDefinition, MetricKind, ObservabilityConfig, TracingGuard, init,
     metric_definitions, panic_total, register_metrics,
@@ -32,7 +26,10 @@ pub use redaction::{
     RedactionLayer, RedactionPolicy, enforce_routing_trace_caps, redact_internal_errors,
     redact_routing_trace, truncate_reason,
 };
-pub use trace_layer::{ObservabilityTraceLayer, ProxyMakeSpan, RouteTemplateFn, trace_layer};
+pub use trace_layer::{
+    ObservabilityTraceLayer, ProxyMakeSpan, ProxyOnBodyChunk, ProxyOnRequest, ProxyOnResponse,
+    RouteTemplateFn, trace_layer,
+};
 
 pub mod cache_observation_dropped_reason {
     // Fixed reasons keep metric label cardinality bounded.

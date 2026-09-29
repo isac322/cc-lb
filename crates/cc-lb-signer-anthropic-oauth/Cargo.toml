@@ -11,10 +11,6 @@ publish = false
 name = "integration"
 path = "tests/all.rs"
 
-[features]
-sqlite = []
-postgres = []
-
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
@@ -27,7 +23,6 @@ cc-lb-upstream.workspace = true
 dashmap.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 oauth2.workspace = true

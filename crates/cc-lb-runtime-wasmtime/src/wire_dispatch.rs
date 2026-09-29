@@ -3,13 +3,13 @@ use std::sync::Arc;
 use rkyv::util::AlignedVec;
 
 use crate::cache::{
-    call_filter_hook_scoped, call_observe_hook, call_shape_hook_scoped,
-    call_transform_response_hook_scoped, call_transform_sse_event_hook_scoped,
+    call_filter_hook_scoped, call_shape_hook_scoped, call_transform_response_hook_scoped,
+    call_transform_sse_event_hook_scoped,
 };
 use crate::cell::{LoadedPluginSlot, PluginCell};
 use crate::error::WasmtimeRuntimeError;
 use crate::policy::{PluginWireBounds, ShapeOriginPolicy};
-use crate::{HotEngineConfig, SlotKind};
+use crate::{HookKind, HotEngineConfig};
 
 /// Wire-level dispatch handle for a single loaded plugin slot.
 ///
@@ -22,7 +22,7 @@ use crate::{HotEngineConfig, SlotKind};
 /// the host↔wire type conversion.
 pub struct WasmPluginWireDispatch {
     pub(crate) cell: Arc<PluginCell>,
-    pub(crate) kind: SlotKind,
+    pub(crate) kind: HookKind,
     pub(crate) config: Arc<HotEngineConfig>,
 }
 
@@ -34,8 +34,8 @@ impl WasmPluginWireDispatch {
         Self { cell, kind, config }
     }
 
-    /// The [`SlotKind`] this dispatch handle was built for.
-    pub fn kind(&self) -> SlotKind {
+    /// The [`HookKind`] this dispatch handle was built for.
+    pub fn kind(&self) -> HookKind {
         self.kind
     }
 
@@ -59,13 +59,9 @@ impl WasmPluginWireDispatch {
         self.config.cookie_redaction
     }
 
-    /// Dispatch a filter call. `input` must be rkyv-encoded `FilterRequest` bytes.
-    /// Returns rkyv-encoded `FilterResponse` bytes.
-    pub fn call_filter(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.call_filter_scoped(input, <[u8]>::to_vec)
-    }
-
     /// Dispatch a filter call and consume its checked output while guest memory is borrowed.
+    /// `input` must be rkyv-encoded `FilterRequest` bytes; the callback receives
+    /// rkyv-encoded `FilterResponse` bytes.
     ///
     /// The callback receives only the bounded guest-memory slice. Its higher-ranked lifetime
     /// prevents that slice from escaping in the return value:
@@ -91,13 +87,9 @@ impl WasmPluginWireDispatch {
         call_filter_hook_scoped(&self.cell, input, with_output)
     }
 
-    /// Dispatch a shape call. `input` must be rkyv-encoded `ShapeRequest` bytes.
-    /// Returns rkyv-encoded `ShapeResponse` bytes.
-    pub fn call_shape(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.call_shape_scoped(input, <[u8]>::to_vec)
-    }
-
     /// Dispatch a shape call and consume its checked output before the fresh Store is dropped.
+    /// `input` must be rkyv-encoded `ShapeRequest` bytes; the callback receives
+    /// rkyv-encoded `ShapeResponse` bytes.
     pub fn call_shape_scoped<R, F>(
         &self,
         input: &[u8],
@@ -107,12 +99,6 @@ impl WasmPluginWireDispatch {
         F: for<'a> FnOnce(&'a [u8]) -> R,
     {
         call_shape_hook_scoped(&self.cell, input, with_output)
-    }
-
-    /// Dispatch an observe call. `input` must be rkyv-encoded `ObserveEvent` bytes.
-    /// The guest returns `(0, 0)` for observe; the returned `Vec<u8>` is always empty.
-    pub fn call_observe(&self, input: &[u8]) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        call_observe_hook(&self.cell, input)
     }
 
     /// Dispatch a transform_response call. Returns aligned bytes for rkyv access.
@@ -178,15 +164,6 @@ impl WasmPluginWireDispatch {
             .metadata
             .hooks
             .get(cc_lb_plugin_wire::schema::HookKind::Shape.as_str())
-            .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
-    }
-
-    /// Wire version for the observe hook, if declared in plugin metadata.
-    pub fn observe_wire_version(&self) -> Option<cc_lb_plugin_wire::schema::WireVersion> {
-        self.cell
-            .metadata
-            .hooks
-            .get(cc_lb_plugin_wire::schema::HookKind::Observe.as_str())
             .and_then(|m| cc_lb_plugin_wire::schema::WireVersion::from_u8(m.wire_version))
     }
 

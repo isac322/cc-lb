@@ -122,7 +122,6 @@ pub struct ConfigEditorResponse {
     pub saved_at_unix_secs: Option<u64>,
     pub file: ConfigFileInfo,
     pub overrides: Vec<ConfigOverrideInfo>,
-    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +173,6 @@ pub struct DownloadConfigDraftRequest {
 pub struct SaveConfigFileResponse {
     pub revision: u64,
     pub saved_at_unix_secs: u64,
-    pub restart_required: bool,
     pub fingerprint: String,
 }
 
@@ -232,7 +230,6 @@ pub async fn editor_response(state: &AdminState) -> Result<ConfigEditorResponse,
         saved_at_unix_secs: draft_state.saved_at_unix_secs,
         file: snapshot.info,
         overrides,
-        restart_required: true,
     })
 }
 
@@ -383,7 +380,6 @@ pub async fn save_config_file(
     Ok(SaveConfigFileResponse {
         revision,
         saved_at_unix_secs,
-        restart_required: true,
         fingerprint,
     })
 }

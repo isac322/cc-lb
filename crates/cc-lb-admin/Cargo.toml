@@ -23,11 +23,8 @@ async-trait.workspace = true
 async-stream.workspace = true
 arc-swap.workspace = true
 axum = { workspace = true, features = ["multipart"] }
-chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-schemars.workspace = true
-serde_yaml = "0.9"
 tokio.workspace = true
 tokio-util.workspace = true
 rust-embed.workspace = true
@@ -36,7 +33,6 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
-cc-lb-lifecycle.workspace = true
 cc-lb-quota.workspace = true
 cc-lb-request-log.workspace = true
 cc-lb-config = { path = "../cc-lb-config" }
@@ -52,11 +48,9 @@ http.workspace = true
 http-body-util.workspace = true
 figment.workspace = true
 hex.workspace = true
-humantime = "2.3"
 metrics.workspace = true
 bytes.workspace = true
 base64.workspace = true
-hyper = { workspace = true, features = ["client", "http1"] }
 hyper-rustls.workspace = true
 reqwest.workspace = true
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
@@ -64,31 +58,26 @@ oauth2.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
 semver = "1"
-siphasher = "1"
 tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 sonic-rs.workspace = true
+subtle = "2.6.1"
 url.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 mime_guess = "2.0.5"
 
 [dev-dependencies]
-cc-lb-observability = { path = "../cc-lb-observability" }
 tower.workspace = true
 http-body-util.workspace = true
 wat = "1"
-blake3 = { workspace = true, features = ["std"] }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
-humantime = "2.4"
 insta.workspace = true
 tempfile.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
-fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 apalis-postgres = "^1.0.0-rc.8"
 apalis-sqlite = "^1.0.0-rc.8"
-metrics-exporter-prometheus.workspace = true
 sqlx.workspace = true
 scheduler-sqlx = { package = "sqlx", version = "=0.8.6", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }
 wiremock = "0.6"

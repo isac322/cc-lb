@@ -1,44 +1,37 @@
 import type { PluginEntry } from '../../lib/queries';
-import { Card, CardBody, Section } from '../ui/primitives';
+import { Section } from '../ui/primitives';
 
-const SHARED_LINK_CLASS =
-  'inline-flex items-center justify-center rounded-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:pointer-events-none disabled:opacity-50 bg-bg-sub text-text border border-subtle hover:bg-overlay-1 h-9 px-4 py-2 text-sm';
+/**
+ * Same look as a `secondary` md `Button`, for real navigation anchors. Phones
+ * stack them full width at a 40px touch height.
+ */
+const SECONDARY_LINK_CLASS =
+  'inline-flex h-8 items-center justify-center rounded-sm border border-subtle-strong px-3 text-label font-medium whitespace-nowrap text-text transition-colors hover:bg-panel-strong focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 max-sm:h-10 max-sm:w-full';
 
 export function PluginDetailApply({ plugin }: { plugin: PluginEntry }) {
   return (
     <Section title="Use this plugin">
-      <Card>
-        <CardBody className="space-y-4">
-          <div className="text-sm space-y-1">
-            <p className="text-text-faint">
-              Choose where this plugin should run. You can attach it from the
-              page that owns that traffic or upstream.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            {plugin.supported_slots?.includes('router') && (
-              <a href="/principals" className={SHARED_LINK_CLASS}>
-                Apply to Router (Principals)
-              </a>
-            )}
-            {plugin.supported_slots?.includes('observability_hook') && (
-              <a href="/principals" className={SHARED_LINK_CLASS}>
-                Apply to Observability (Principals)
-              </a>
-            )}
-            {plugin.supported_slots?.includes('shape') && (
-              <>
-                <a href="/principals" className={SHARED_LINK_CLASS}>
-                  Apply to Shape (Principals)
-                </a>
-                <a href="/upstreams" className={SHARED_LINK_CLASS}>
-                  Apply to Warmup Dialect (Upstreams)
-                </a>
-              </>
-            )}
-          </div>
-        </CardBody>
-      </Card>
+      <p className="text-body text-text-muted">
+        Choose where this plugin should run. You can attach it from the page
+        that owns that traffic or upstream.
+      </p>
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+        {plugin.supported_slots?.includes('router') && (
+          <a href="/principals" className={SECONDARY_LINK_CLASS}>
+            Apply to router (Principals)
+          </a>
+        )}
+        {plugin.supported_slots?.includes('shape') && (
+          <>
+            <a href="/principals" className={SECONDARY_LINK_CLASS}>
+              Apply to shape (Principals)
+            </a>
+            <a href="/upstreams" className={SECONDARY_LINK_CLASS}>
+              Apply to warmup dialect (Upstreams)
+            </a>
+          </>
+        )}
+      </div>
     </Section>
   );
 }

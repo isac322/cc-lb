@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 
 pub const DEFAULT_LIMIT_RECONCILE_MAP_CAP: usize = 4096;
 pub const DEFAULT_LIMIT_RECONCILE_TTL: Duration = Duration::from_secs(300);
@@ -360,13 +360,13 @@ fn drop_oldest(partials: &mut HashMap<EventId, Partial>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
     use cc_lb_lifecycle::{LimitDecisionKind, UsageSource};
 
     fn build_engine() -> Arc<LimitEngine> {
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(crate::clock::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         )
     }
 
@@ -411,8 +411,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -454,8 +452,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -487,8 +483,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

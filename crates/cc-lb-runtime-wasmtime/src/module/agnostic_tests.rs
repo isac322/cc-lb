@@ -1,37 +1,38 @@
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
-use cc_lb_plugin_wire::v1::FilterResponse;
+use cc_lb_plugin_wire::v1::{FilterResponse, ShapeResponse};
 
 use crate::inspect::{expected_fingerprint, schema_section_name};
 use crate::{WasmtimeRuntime, WasmtimeRuntimeError, inspect_wasm_agnostic};
 
-#[derive(Clone, Copy)]
-enum ObserveSignature {
-    Compatible,
-    I32Result,
-}
+const FILTER_RESPONSE_OFFSET: u64 = 4096;
+const SHAPE_RESPONSE_OFFSET: u64 = 8192;
 
-fn plugin_wasm(
-    declared_hooks: &[(HookKind, Option<&str>)],
-    observe_signature: ObserveSignature,
-) -> Vec<u8> {
-    let response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
+fn plugin_wasm(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
+    let filter_response = rkyv::to_bytes::<rkyv::rancor::Error>(&FilterResponse {
         results: Box::new([]),
     })
     .expect("encode filter response");
-    let response_data = response
-        .iter()
-        .map(|byte| format!("\\{byte:02x}"))
-        .collect::<String>();
-    let packed_response = ((4096u64) << 32) | response.len() as u64;
+    let shape_response = rkyv::to_bytes::<rkyv::rancor::Error>(&ShapeResponse {
+        url: Box::from("https://example.test/v1/messages"),
+        method: Box::from("POST"),
+        headers: Box::new([]),
+        body: Box::new([]),
+    })
+    .expect("encode shape response");
+    let filter_data = wat_data(&filter_response);
+    let shape_data = wat_data(&shape_response);
+    let filter_packed = (FILTER_RESPONSE_OFFSET << 32) | filter_response.len() as u64;
+    let shape_packed = (SHAPE_RESPONSE_OFFSET << 32) | shape_response.len() as u64;
     let hook_exports = declared_hooks
         .iter()
-        .map(|(hook, _)| hook_export(*hook, observe_signature, packed_response))
+        .map(|(hook, _)| hook_export(*hook, filter_packed, shape_packed))
         .collect::<String>();
     let wat = format!(
         r#"
         (module
             (memory (export "memory") 1)
-            (data (i32.const 4096) "{response_data}")
+            (data (i32.const {FILTER_RESPONSE_OFFSET}) "{filter_data}")
+            (data (i32.const {SHAPE_RESPONSE_OFFSET}) "{shape_data}")
             (func (export "cc_lb_alloc") (param i32 i32) (result i32) i32.const 1024)
             (func (export "cc_lb_free") (param i32 i32 i32))
             {hook_exports}
@@ -52,29 +53,21 @@ fn plugin_wasm(
     wasm
 }
 
-fn hook_export(
-    hook: HookKind,
-    observe_signature: ObserveSignature,
-    packed_response: u64,
-) -> String {
+fn wat_data(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>()
+}
+
+fn hook_export(hook: HookKind, filter_packed: u64, shape_packed: u64) -> String {
     match hook {
         HookKind::Filter => format!(
-            r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {packed_response})"#
+            r#"(func (export "cc_lb_filter") (param i32 i32) (result i64) i64.const {filter_packed})"#
         ),
-        HookKind::Shape => {
-            r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const 0)"#
-                .to_owned()
-        }
-        HookKind::Observe => match observe_signature {
-            ObserveSignature::Compatible => {
-                r#"(func (export "cc_lb_observe") (param i32 i32) (result i64) i64.const 0)"#
-                    .to_owned()
-            }
-            ObserveSignature::I32Result => {
-                r#"(func (export "cc_lb_observe") (param i32 i32) (result i32) i32.const 0)"#
-                    .to_owned()
-            }
-        },
+        HookKind::Shape => format!(
+            r#"(func (export "cc_lb_shape") (param i32 i32) (result i64) i64.const {shape_packed})"#
+        ),
         HookKind::TransformResponse => {
             r#"(func (export "cc_lb_transform_response") (param i32 i32) (result i64) i64.const 0)"#
                 .to_owned()
@@ -86,23 +79,16 @@ fn hook_export(
     }
 }
 
-fn metadata(declared_hooks: &[(HookKind, Option<&str>)]) -> Vec<u8> {
+fn metadata(declared_hooks: &[(HookKind, &str)]) -> Vec<u8> {
     let hooks = declared_hooks
         .iter()
         .map(|(hook, mode)| {
-            let hook_metadata = match mode {
-                Some(mode) => serde_json::json!({
-                    "wire_version": 1,
-                    "description": format!("{} hook", hook.as_str()),
-                    "usage": format!("call {}", hook.as_str()),
-                    "mode": mode,
-                }),
-                None => serde_json::json!({
-                    "wire_version": 1,
-                    "description": format!("{} hook", hook.as_str()),
-                    "usage": format!("call {}", hook.as_str()),
-                }),
-            };
+            let hook_metadata = serde_json::json!({
+                "wire_version": 1,
+                "description": format!("{} hook", hook.as_str()),
+                "usage": format!("call {}", hook.as_str()),
+                "mode": mode,
+            });
             (hook.as_str().to_owned(), hook_metadata)
         })
         .collect::<serde_json::Map<_, _>>();
@@ -141,12 +127,14 @@ fn encode_leb128(buffer: &mut Vec<u8>, mut value: u64) {
 }
 
 #[test]
-fn agnostic_admission_accepts_filter_and_observe_hooks() {
-    // Given: one artifact declaring two independent slot hooks.
-    let wasm = plugin_wasm(
-        &[(HookKind::Filter, None), (HookKind::Observe, None)],
-        ObserveSignature::Compatible,
-    );
+fn agnostic_admission_accepts_filter_and_shape_hooks() {
+    // Given: one artifact declaring both independent slot hooks.
+    let wasm = plugin_wasm(&[
+        (HookKind::Filter, "active"),
+        (HookKind::Shape, "active"),
+        (HookKind::TransformResponse, "noop"),
+        (HookKind::TransformSseEvent, "noop"),
+    ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
     // When: admission is requested without selecting a slot.
@@ -154,14 +142,14 @@ fn agnostic_admission_accepts_filter_and_observe_hooks() {
         .admit_wasm_agnostic(&wasm)
         .expect("multi-hook artifact admitted");
 
-    // Then: both declared contracts are retained by the inspection.
-    assert_eq!(inspection.hook_versions.len(), 2);
+    // Then: every declared contract is retained by the inspection.
+    assert_eq!(inspection.hook_versions.len(), 4);
     assert_eq!(
         inspection.hook_versions.get(&HookKind::Filter),
         Some(&WireVersion::V1)
     );
     assert_eq!(
-        inspection.hook_versions.get(&HookKind::Observe),
+        inspection.hook_versions.get(&HookKind::Shape),
         Some(&WireVersion::V1)
     );
 }
@@ -169,10 +157,7 @@ fn agnostic_admission_accepts_filter_and_observe_hooks() {
 #[test]
 fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
     // Given: Shape is declared without either Shape-owned response hook.
-    let wasm = plugin_wasm(
-        &[(HookKind::Shape, Some("active"))],
-        ObserveSignature::Compatible,
-    );
+    let wasm = plugin_wasm(&[(HookKind::Shape, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("incomplete Shape ownership rejected");
@@ -188,10 +173,7 @@ fn agnostic_inspection_rejects_shape_without_owned_response_hooks() {
 #[test]
 fn agnostic_inspection_rejects_orphan_transform_response() {
     // Given: a response transform is declared without Shape ownership.
-    let wasm = plugin_wasm(
-        &[(HookKind::TransformResponse, Some("active"))],
-        ObserveSignature::Compatible,
-    );
+    let wasm = plugin_wasm(&[(HookKind::TransformResponse, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("orphan response hook rejected");
@@ -207,10 +189,7 @@ fn agnostic_inspection_rejects_orphan_transform_response() {
 #[test]
 fn agnostic_inspection_rejects_orphan_transform_sse_event() {
     // Given: an SSE transform is declared without Shape ownership.
-    let wasm = plugin_wasm(
-        &[(HookKind::TransformSseEvent, Some("active"))],
-        ObserveSignature::Compatible,
-    );
+    let wasm = plugin_wasm(&[(HookKind::TransformSseEvent, "active")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("orphan SSE hook rejected");
@@ -226,10 +205,7 @@ fn agnostic_inspection_rejects_orphan_transform_sse_event() {
 #[test]
 fn agnostic_inspection_rejects_noop_primary_hook() {
     // Given: a primary slot hook declares the response-only noop mode.
-    let wasm = plugin_wasm(
-        &[(HookKind::Filter, Some("noop"))],
-        ObserveSignature::Compatible,
-    );
+    let wasm = plugin_wasm(&[(HookKind::Filter, "noop")]);
 
     // When: the artifact is inspected without selecting a slot.
     let error = inspect_wasm_agnostic(&wasm).expect_err("primary noop rejected");
@@ -244,11 +220,14 @@ fn agnostic_inspection_rejects_noop_primary_hook() {
 
 #[test]
 fn agnostic_admission_probes_each_declared_hook() {
-    // Given: Filter is valid but the declared Observe export has the wrong result type.
-    let wasm = plugin_wasm(
-        &[(HookKind::Filter, None), (HookKind::Observe, None)],
-        ObserveSignature::I32Result,
-    );
+    // Given: Filter and Shape are valid but the active response transform
+    // returns the invalid `(0, 0)` output.
+    let wasm = plugin_wasm(&[
+        (HookKind::Filter, "active"),
+        (HookKind::Shape, "active"),
+        (HookKind::TransformResponse, "active"),
+        (HookKind::TransformSseEvent, "noop"),
+    ]);
     let runtime = WasmtimeRuntime::with_defaults().expect("runtime");
 
     // When: the structurally valid artifact reaches agnostic admission.
@@ -256,11 +235,11 @@ fn agnostic_admission_probes_each_declared_hook() {
         .admit_wasm_agnostic(&wasm)
         .expect_err("secondary hook probe must run");
 
-    // Then: probing reaches and rejects the malformed Observe hook.
+    // Then: probing reaches and rejects the malformed response transform.
     assert!(matches!(
         error,
         WasmtimeRuntimeError::ProbeFailed {
-            hook: "observe",
+            hook: "transform_response",
             ..
         }
     ));

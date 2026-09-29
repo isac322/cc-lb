@@ -4,23 +4,17 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthError;
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_observability::{ObservabilityError, ObservabilityHook, ObserveEvent};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthError;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
 use http::{HeaderMap, StatusCode};
-use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 use url::Url;
 
 use common::{
@@ -46,7 +40,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
     let engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
@@ -60,40 +54,13 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 }
 
 #[tokio::test]
-async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
--> Result<(), Box<dyn std::error::Error>> {
-    let global_router_hits = Arc::new(Mutex::new(Vec::new()));
-    let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
-    let explicit_hook_notify = Arc::new(Notify::new());
-    let global_hook_events = Arc::new(Mutex::new(Vec::new()));
-    let global_hook_notify = Arc::new(Notify::new());
-
-    let global_router: Arc<dyn RouterPlugin> = Arc::new(RecordingRouter {
-        name: "global",
-        hits: global_router_hits.clone(),
-    });
+async fn lifecycle_explicit_pipeline_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
     let explicit_pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![Arc::new(RecordingFilter { name: "explicit" })],
         terminal: TerminalStrategy::Random,
         instantiation_error: None,
     });
-    let explicit_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
-        name: "explicit",
-        events: explicit_hook_events.clone(),
-        notify: explicit_hook_notify.clone(),
-    });
-    let global_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
-        name: "global",
-        events: global_hook_events.clone(),
-        notify: global_hook_notify,
-    });
-    let view = principal_view(
-        "principal-a",
-        Some((
-            explicit_pipeline,
-            ObservabilityHooksCache::Explicit(vec![explicit_hook]),
-        )),
-    );
+    let view = principal_view("principal-a", Some(explicit_pipeline));
     let state = TestState::default();
     let authn = managed_test_authn("principal-a", view.clone(), state.clone());
     let dispatcher = Arc::new(MockDispatch {
@@ -102,8 +69,6 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
     });
     let dynamic_view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(global_router)
-        .global_observability_hooks(vec![global_hook])
         .principal_view(view)
         .upstream_records(vec![test_upstream_record()])
         .build();
@@ -112,7 +77,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         Arc::new(DynamicViewHolder::new(dynamic_view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     );
 
     let request = messages_request(Bytes::from_static(br#"{"model":"claude","messages":[]}"#));
@@ -124,40 +89,19 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        global_router_hits.lock().unwrap().as_slice(),
-        &[] as &[String]
-    );
-    timeout(
-        Duration::from_secs(1),
-        wait_named_event(
-            &explicit_hook_events,
-            &explicit_hook_notify,
-            "explicit:Error",
-        ),
-    )
-    .await
-    .expect("explicit hook error observation arrives");
-    assert!(
-        !global_hook_events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event == "global:AuthnComplete")
-    );
     Ok(())
 }
 
 // TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn principal_view(
     principal_id: &str,
-    chain: Option<(Arc<RouterPipelineCache>, ObservabilityHooksCache)>,
+    chain: Option<Arc<RouterPipelineCache>>,
 ) -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
-    if let Some((router, obs)) = chain {
+    if let Some(router) = chain {
         chains.insert(
             principal_id.to_owned(),
-            (Some(router), obs, DialectCache::Inherit),
+            (Some(router), DialectCache::Inherit),
         );
     }
     Arc::new(PrincipalView::for_tests(
@@ -202,47 +146,6 @@ fn test_upstream_record() -> UpstreamRecord {
     }
 }
 
-struct RecordingRouter {
-    name: &'static str,
-    hits: Arc<Mutex<Vec<String>>>,
-}
-
-impl RouterPlugin for RecordingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.hits
-            .lock()
-            .unwrap()
-            .push(format!("{}:{}", self.name, principal.id));
-        Ok(RouteDecision {
-            upstream_id: None,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(common::PassthroughDialect {
-                base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            }),
-        })
-    }
-}
-
-struct RecordingNamedHook {
-    name: &'static str,
-    events: Arc<Mutex<Vec<String>>>,
-    notify: Arc<Notify>,
-}
-
-async fn wait_named_event(events: &Arc<Mutex<Vec<String>>>, notify: &Arc<Notify>, expected: &str) {
-    loop {
-        if events.lock().unwrap().iter().any(|event| event == expected) {
-            return;
-        }
-        notify.notified().await;
-    }
-}
-
 struct RecordingFilter {
     name: &'static str,
 }
@@ -268,27 +171,5 @@ impl FilterPlugin for RecordingFilter {
 
     fn plugin_name(&self) -> &str {
         self.name
-    }
-}
-
-impl ObservabilityHook for RecordingNamedHook {
-    fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-        self.events
-            .lock()
-            .unwrap()
-            .push(format!("{}:{}", self.name, event_name(&event)));
-        self.notify.notify_waiters();
-        Ok(())
-    }
-}
-
-fn event_name(event: &ObserveEvent) -> &'static str {
-    match event {
-        ObserveEvent::RequestStarted { .. } => "RequestStarted",
-        ObserveEvent::AuthnComplete { .. } => "AuthnComplete",
-        ObserveEvent::UpstreamChosen { .. } => "UpstreamChosen",
-        ObserveEvent::Chunk { .. } => "Chunk",
-        ObserveEvent::RequestFinished { .. } => "RequestFinished",
-        ObserveEvent::Error { .. } => "Error",
     }
 }

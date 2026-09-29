@@ -26,6 +26,7 @@ mod cost_first;
 mod fable_pressure;
 mod fable_resetless;
 mod fable_uniform_classification;
+mod weekly_pace_gate;
 
 const SONNET_MODEL: &str = "claude-sonnet-4-5-20250929";
 const OPUS_MODEL: &str = "claude-opus-4-8-20250514";
@@ -1056,7 +1057,8 @@ fn short_reset_underuse_has_greater_pressure_and_share() {
 
 #[test]
 fn combined_pressure_is_dominated_by_tight_window() {
-    // Q2: ADR 0008 smoothmax remains dominated by the tight 5h pressure.
+    // Q2: ADR 0008 smoothmax remains dominated by the tight 5h pressure while
+    // the shared weekly quota is still behind pace (so the 5h loss is real).
     let tight_5h = oauth_at_t0(
         "tight-5h",
         1,
@@ -1067,9 +1069,9 @@ fn combined_pressure_is_dominated_by_tight_window() {
                 .reset_at(T0_SECS + 60)
                 .build(),
             fresh(WINDOW_SEVEN_DAY)
-                .util(0.5)
+                .util(0.1)
                 .status("allowed")
-                .reset_at(T0_SECS + 365 * 86_400)
+                .reset_at(T0_SECS + 6 * 86_400)
                 .build(),
         ],
     );
@@ -1102,7 +1104,8 @@ fn resets_at_missing_window_excluded_from_urgency() {
     // and the other doesn't. Both windows still classify as
     // CurrentPositive (fresh + allowed), so both stay in KnownBase. The
     // one without resets_at contributes zero pressure but remains selectable
-    // through ADR 0008's neutral factor.
+    // through ADR 0008's neutral factor. Weekly usage stays behind pace so the
+    // weekly pace gate keeps the 5h pressure.
     let with_reset = oauth_at_t0(
         "with-reset",
         1,
@@ -1113,7 +1116,7 @@ fn resets_at_missing_window_excluded_from_urgency() {
                 .reset_at(T0_SECS + 3600)
                 .build(),
             fresh(WINDOW_SEVEN_DAY)
-                .util(0.5)
+                .util(0.1)
                 .status("allowed")
                 .reset_at(T0_SECS + 6 * 86_400)
                 .build(),
@@ -1124,7 +1127,7 @@ fn resets_at_missing_window_excluded_from_urgency() {
         2,
         vec![
             fresh(WINDOW_FIVE_HOUR).util(0.5).status("allowed").build(),
-            fresh(WINDOW_SEVEN_DAY).util(0.5).status("allowed").build(),
+            fresh(WINDOW_SEVEN_DAY).util(0.1).status("allowed").build(),
         ],
     );
     let output = filter_for_model(&[with_reset.clone(), no_reset.clone()], MODEL_AGNOSTIC);
@@ -1139,6 +1142,7 @@ fn resets_at_missing_window_excluded_from_urgency() {
 #[test]
 fn high_util_short_remaining_has_greater_pressure_and_share() {
     // Q5: ADR 0008 compares remaining quota against the time-shaped target.
+    // Both weekly windows are behind pace, so the 5h pressure is a real loss.
     let low_util_long = oauth_at_t0(
         "low-util-long",
         1,
@@ -1165,7 +1169,7 @@ fn high_util_short_remaining_has_greater_pressure_and_share() {
                 .reset_at(T0_SECS + 300)
                 .build(),
             fresh(WINDOW_SEVEN_DAY)
-                .util(0.9)
+                .util(0.1)
                 .status("allowed")
                 .reset_at(T0_SECS + 6 * 86_400)
                 .build(),
@@ -1200,7 +1204,7 @@ fn plan_capacity_ratio_does_not_change_base_pressure() {
                     .reset_at(T0_SECS + 3600)
                     .build(),
                 fresh(WINDOW_SEVEN_DAY)
-                    .util(0.5)
+                    .util(0.1)
                     .status("allowed")
                     .reset_at(T0_SECS + 6 * 86_400)
                     .build(),
@@ -1218,7 +1222,7 @@ fn plan_capacity_ratio_does_not_change_base_pressure() {
                 .reset_at(T0_SECS + 3600)
                 .build(),
             fresh(WINDOW_SEVEN_DAY)
-                .util(0.5)
+                .util(0.1)
                 .status("allowed")
                 .reset_at(T0_SECS + 6 * 86_400)
                 .build(),
@@ -2155,7 +2159,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 
@@ -2174,7 +2177,6 @@ fn oauth_with(
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
         observed_at_unix_secs: 0,
         cache_score: None,
@@ -2221,7 +2223,6 @@ fn api_key(name: &str, id_seed: u8) -> UpstreamCandidate {
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicApiKey,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: Vec::new(),
         observed_at_unix_secs: 0,
         cache_score: None,

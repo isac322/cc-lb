@@ -83,14 +83,13 @@ impl Parse for HandlerArgs {
                 Meta::Path(path)
                     if path.is_ident("filter")
                         || path.is_ident("shape")
-                        || path.is_ident("observe")
                         || path.is_ident("transform_response")
                         || path.is_ident("transform_sse_event") =>
                 {
                     kind = Some(HandlerKind::from_path(&path).ok_or_else(|| {
                         Error::new_spanned(
                             &path,
-                            "unknown handler kind (supported: filter, shape, observe, transform_response, transform_sse_event)",
+                            "unknown handler kind (supported: filter, shape, transform_response, transform_sse_event)",
                         )
                     })?);
                 }
@@ -183,7 +182,6 @@ impl HandlerMode {
 pub(crate) enum HandlerKind {
     Filter,
     Shape,
-    Observe,
     TransformResponse,
     TransformSseEvent,
 }
@@ -193,7 +191,6 @@ impl HandlerKind {
         Some(match path.get_ident()?.to_string().as_str() {
             "filter" => Self::Filter,
             "shape" => Self::Shape,
-            "observe" => Self::Observe,
             "transform_response" => Self::TransformResponse,
             "transform_sse_event" => Self::TransformSseEvent,
             _ => return None,
@@ -204,7 +201,6 @@ impl HandlerKind {
         match self {
             Self::Filter => "filter",
             Self::Shape => "shape",
-            Self::Observe => "observe",
             Self::TransformResponse => "transform_response",
             Self::TransformSseEvent => "transform_sse_event",
         }
@@ -215,19 +211,13 @@ impl HandlerKind {
     }
 
     pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
-        match self {
-            Self::Filter => wire_version == 1,
-            Self::Shape | Self::Observe | Self::TransformResponse | Self::TransformSseEvent => {
-                wire_version == 1
-            }
-        }
+        wire_version == 1
     }
 
     pub(crate) fn export_name(self) -> &'static str {
         match self {
             Self::Filter => "cc_lb_filter",
             Self::Shape => "cc_lb_shape",
-            Self::Observe => "cc_lb_observe",
             Self::TransformResponse => "cc_lb_transform_response",
             Self::TransformSseEvent => "cc_lb_transform_sse_event",
         }
@@ -239,15 +229,12 @@ impl HandlerKind {
             (Self::Filter, 1, true) => Some("run_filter_view"),
             (Self::Shape, 1, false) => Some("run_shape"),
             (Self::Shape, 1, true) => Some("run_shape_view"),
-            (Self::Observe, 1, false) => Some("run_observe"),
-            (Self::Observe, 1, true) => Some("run_observe_view"),
             (Self::TransformResponse, 1, false) => Some("run_transform_response"),
             (Self::TransformResponse, 1, true) => Some("run_transform_response_view"),
             (Self::TransformSseEvent, 1, false) => Some("run_transform_sse_event"),
             (Self::TransformSseEvent, 1, true) => Some("run_transform_sse_event_view"),
             (Self::Filter, _, _)
             | (Self::Shape, _, _)
-            | (Self::Observe, _, _)
             | (Self::TransformResponse, _, _)
             | (Self::TransformSseEvent, _, _) => None,
         }
@@ -261,7 +248,6 @@ impl HandlerKind {
         match (self, wire_version) {
             (Self::Filter, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::FilterRequest }),
             (Self::Shape, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ShapeRequest }),
-            (Self::Observe, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ObserveEvent }),
             (Self::TransformResponse, 1) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformResponseRequest })
             }
@@ -270,7 +256,6 @@ impl HandlerKind {
             }
             (Self::Filter, _)
             | (Self::Shape, _)
-            | (Self::Observe, _)
             | (Self::TransformResponse, _)
             | (Self::TransformSseEvent, _) => None,
         }
@@ -280,7 +265,6 @@ impl HandlerKind {
         match self {
             Self::Filter => "FILTER",
             Self::Shape => "SHAPE",
-            Self::Observe => "OBSERVE",
             Self::TransformResponse => "TRANSFORM_RESPONSE",
             Self::TransformSseEvent => "TRANSFORM_SSE_EVENT",
         }

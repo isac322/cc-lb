@@ -4,19 +4,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_clock::SystemClock;
+use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config, SchedulerConfig, StorageConfig};
 use cc_lb_control::RequestEventBus;
 use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::Upstream;
+use cc_lb_engine::ApiKeyAwareSignerFactory;
 use cc_lb_engine::cache_keepalive::{
     DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RequestSnapshot,
 };
-use cc_lb_engine::clock::{ClockHandle, TestClock};
-use cc_lb_engine::{ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, SystemClock};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_runtime_wasmtime::{HotEngineConfig, WasmtimeRuntime};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::oauth_refresh::RefreshOutcome;
@@ -25,7 +26,7 @@ use cc_lb_storage_api::upstream::{
     UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamUpdate,
 };
-use cc_lb_storage_api::{BackendKind, MetaStore, Storage, StorageError, StorageResult};
+use cc_lb_storage_api::{MetaStore, Storage, StorageError, StorageResult};
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError,
@@ -345,10 +346,7 @@ impl DispatchFixture {
                 .await
                 .expect("open sqlite"),
         );
-        storage
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("initialize sqlite");
+        storage.initialize().await.expect("initialize sqlite");
         let scheduler = crate::scheduler_factory::open_scheduler_storage(
             &StorageConfig::Sqlite {
                 path: sqlite_path.clone(),
@@ -418,8 +416,6 @@ impl DispatchFixture {
         let dynamic_view = Arc::new(DynamicViewHolder::new(
             DynamicViewBuilder::new(0)
                 .signer_factory(Arc::new(StubSignerFactory))
-                .global_router(Arc::new(NoRouteRouter))
-                .global_observability_hooks(Vec::new())
                 .principal_view(Arc::new(PrincipalView::from_db(&[], HashMap::new())))
                 .build(),
         ));
@@ -730,21 +726,6 @@ impl Signer for StubSigner {
     }
 }
 
-struct NoRouteRouter;
-
-impl RouterPlugin for NoRouteRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "unused in oauth dispatch tests".to_owned(),
-        })
-    }
-}
-
 /// The real poll path against a loopback provider: `poll_usage` issues one
 /// `GET {base_url}/api/oauth/usage?cedar_ember=1`; the single response updates
 /// the quota cache and persists a durable, credential- and epoch-bound
@@ -755,11 +736,13 @@ impl RouterPlugin for NoRouteRouter {
 /// Like the real provider, the loopback only exposes an eligible coupon to a
 /// recognised Claude Code client: any other user agent sees
 /// `eligible: false`. The client version comes from the compat-refreshed
-/// store, not the pinned fallback.
+/// latest store, not the pinned fallback.
 #[tokio::test]
 async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     use axum::extract::Request as AxumRequest;
-    use cc_lb_control::anthropic_compat::{CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent};
+    use cc_lb_control::anthropic_compat::{
+        CLAUDE_CODE_LATEST_VERSION_KEY, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+    };
     use cc_lb_control::anthropic_metadata::{
         CedarEmberIdentityRecord, CedarEmberPollRecord, cedar_ember_epoch_meta_key,
         cedar_ember_identity_meta_key, cedar_ember_meta_key,
@@ -867,17 +850,28 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
         .put_meta_value(&cedar_ember_epoch_meta_key(upstream.id), &epoch.to_string())
         .await
         .expect("seed epoch");
-    // The daily compat refresh already stored a newer CLI version than the
-    // pinned fallback; the poll must present exactly that client.
+    // The daily compat refresh already stored a newer CLI version for the
+    // latest channel than the pinned fallback; the poll must present exactly
+    // that client. The stable row keeps an older version: if the poll read it,
+    // the loopback would deny the coupon.
     AnthropicCompatibilityKvStore::put_compatibility_kv_value(
         fixture.storage.as_ref(),
         CLAUDE_CODE_STABLE_VERSION_KEY,
+        "2.1.274",
+        1_700_000_000,
+        None,
+    )
+    .await
+    .expect("seed stored stable cli version");
+    AnthropicCompatibilityKvStore::put_compatibility_kv_value(
+        fixture.storage.as_ref(),
+        CLAUDE_CODE_LATEST_VERSION_KEY,
         STORED_CLI_VERSION,
         1_700_000_000,
         None,
     )
     .await
-    .expect("seed stored cli version");
+    .expect("seed stored latest cli version");
 
     async fn poll(fixture: &DispatchFixture, upstream_id: Uuid) {
         let observation = fixture
@@ -963,6 +957,128 @@ async fn poll_usage_persists_quota_and_cedar_ember_from_one_response() {
     let record = read_coupon(&fixture, upstream.id).await;
     assert!(record.status.is_none(), "malformed block clears the coupon");
     assert_eq!(record.epoch, Some(epoch));
+}
+
+/// Fresh install before the first compat-refresh tick: the latest row is
+/// absent, so the poll must present the pinned latest-release fallback —
+/// never the stable row, which is seeded here with a different version.
+#[tokio::test]
+async fn poll_usage_uses_latest_fallback_before_first_compat_refresh() {
+    use axum::extract::Request as AxumRequest;
+    use cc_lb_control::anthropic_compat::{
+        CLAUDE_CODE_LATEST_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+    };
+    use cc_lb_control::anthropic_metadata::{
+        CedarEmberPollRecord, cedar_ember_epoch_meta_key, cedar_ember_meta_key,
+    };
+    use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
+    use cc_lb_storage_api::{AnthropicCompatibilityKvStore, MetaStore};
+
+    let fallback_user_agent = claude_code_user_agent(CLAUDE_CODE_LATEST_VERSION_FALLBACK);
+    let app = axum::Router::new()
+        .route(
+            "/api/oauth/usage",
+            axum::routing::get(move |request: AxumRequest| {
+                let recognised = request
+                    .headers()
+                    .get(http::header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(fallback_user_agent.as_str());
+                async move {
+                    let cedar_ember = if recognised {
+                        serde_json::json!({
+                            "eligible": true,
+                            "at_limit": true,
+                            "grants": [{"id": "grant_01", "resets_left": 1}],
+                            "next_grant_id": "grant_01"
+                        })
+                    } else {
+                        serde_json::json!({
+                            "eligible": false,
+                            "ineligible_reason": "surface",
+                            "at_limit": true,
+                            "grants": []
+                        })
+                    };
+                    axum::Json(serde_json::json!({
+                        "five_hour": {"utilization": 50.0, "resets_at": "2026-09-24T20:00:00Z"},
+                        "extra_usage": {"is_enabled": true, "monthly_limit": 30000, "used_credits": 0},
+                        "cedar_ember": cedar_ember
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/api/oauth/profile",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "account": {"uuid": "account-a"},
+                    "organization": {"uuid": "org-shared"}
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let base_url = Url::parse(&format!(
+        "http://{}/",
+        listener.local_addr().expect("local addr")
+    ))
+    .expect("loopback url");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve loopback");
+    });
+
+    let fixture = DispatchFixture::new().await;
+    let upstream = fixture.oauth_upstream(true).await;
+    UpstreamStore::update_spec(
+        fixture.storage.as_ref(),
+        upstream.id,
+        upstream.revision,
+        UpstreamUpdate {
+            base_url: Some(Some(base_url)),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await
+    .expect("set base url");
+    let epoch = Uuid::new_v4();
+    fixture
+        .storage
+        .put_meta_value(&cedar_ember_epoch_meta_key(upstream.id), &epoch.to_string())
+        .await
+        .expect("seed epoch");
+    AnthropicCompatibilityKvStore::put_compatibility_kv_value(
+        fixture.storage.as_ref(),
+        CLAUDE_CODE_STABLE_VERSION_KEY,
+        "2.1.274",
+        1_700_000_000,
+        None,
+    )
+    .await
+    .expect("seed stored stable cli version");
+
+    let observation = fixture
+        .dispatch
+        .poll_usage(upstream.id, None)
+        .await
+        .expect("poll dispatch");
+    assert!(
+        matches!(observation, OAuthUsagePollObservation::Success { .. }),
+        "poll must succeed: {observation:?}"
+    );
+
+    let raw = fixture
+        .storage
+        .get_meta_value(&cedar_ember_meta_key(upstream.id))
+        .await
+        .expect("coupon read")
+        .expect("coupon record persisted");
+    let record: CedarEmberPollRecord = serde_json::from_str(&raw).expect("coupon record parses");
+    assert!(
+        record.status.expect("coupon status persisted").eligible,
+        "fallback UA must be recognised as a Claude Code client"
+    );
 }
 
 /// A live claim fence makes the poll skip its coupon write (quota still

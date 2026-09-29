@@ -153,8 +153,6 @@ impl RecordingUsagePruneRunner {
         );
         PruneResult {
             request_events_removed,
-            usage_rollups_removed: 0,
-            principal_limit_states_removed: 0,
             audit_log_removed,
         }
     }
@@ -222,8 +220,6 @@ fn done_result(
     UsagePruneJobResult::Done {
         result: PruneResult {
             request_events_removed,
-            usage_rollups_removed: 0,
-            principal_limit_states_removed: 0,
             audit_log_removed,
         },
         api_key_usage_compaction: ApiKeyUsageCompactionRun {

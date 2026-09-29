@@ -37,8 +37,6 @@ pub enum UsageSource {
     MessageDelta,
     /// Terminator (`message_stop`) boundary.
     MessageStop,
-    /// `content_block_delta.thinking_delta.estimated_tokens` — deltas summed.
-    ContentBlockDelta,
     /// Non-streaming JSON body top-level `usage.*`.
     NonStreamBody,
 }

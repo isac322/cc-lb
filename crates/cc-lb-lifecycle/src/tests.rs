@@ -25,36 +25,7 @@ fn request_started_roundtrip() {
 }
 
 #[test]
-fn request_started_source_metadata_defaults_without_legacy_json_fields() {
-    let legacy_started = r#"{
-        "kind":"request_started",
-        "event_id":"01978c00-0000-7000-8000-000000000000",
-        "request_id":"req-legacy",
-        "ts_ms":1730000000000,
-        "stream":false
-    }"#;
-
-    let started: LifecycleEvent =
-        serde_json::from_str(legacy_started).expect("deserialize legacy request started");
-
-    assert!(matches!(
-        &started,
-        LifecycleEvent::RequestStarted {
-            source_kind: None,
-            source_ref_id: None,
-            ..
-        }
-    ));
-    let started_json = serde_json::to_value(&started).expect("serialize legacy request started");
-    let started_object = started_json
-        .as_object()
-        .expect("request started serializes to object");
-    assert!(!started_object.contains_key("source_kind"));
-    assert!(!started_object.contains_key("source_ref_id"));
-}
-
-#[test]
-fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads() {
+fn request_terminated_preserves_nested_io_timings() {
     let event = LifecycleEvent::RequestTerminated {
         event_id: sample_event_id(),
         reason: TerminationReason::Success,
@@ -62,8 +33,6 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
         duration_ms: 1,
         request_body_read_ms: None,
         request_body_bytes: None,
-        limit_reconcile_ms: None,
-        observability_post_ms: None,
         proxy_setup_ms: Some(1),
         setup_timings: RequestSetupTimings {
             json_parse_ms: Some(0.125),
@@ -107,46 +76,6 @@ fn request_terminated_preserves_nested_io_timings_and_defaults_legacy_payloads()
     let restored: LifecycleEvent =
         serde_json::from_value(json).expect("deserialize terminal setup timings");
     assert_eq!(restored, event);
-
-    let legacy = r#"{
-        "kind":"request_terminated",
-        "event_id":"01978c00-0000-7000-8000-000000000000",
-        "reason":"success",
-        "client_status":200,
-        "duration_ms":1
-    }"#;
-    let restored: LifecycleEvent =
-        serde_json::from_str(legacy).expect("deserialize legacy terminal event");
-    assert!(matches!(
-        restored,
-        LifecycleEvent::RequestTerminated {
-            setup_timings,
-            io_timings,
-            ..
-        } if setup_timings == RequestSetupTimings::default()
-            && io_timings == RequestIoTimings::default()
-    ));
-
-    let explicit_null = r#"{
-        "kind":"request_terminated",
-        "event_id":"01978c00-0000-7000-8000-000000000000",
-        "reason":"success",
-        "client_status":200,
-        "duration_ms":1,
-        "io_timings":{"request_body_wait_ms":null}
-    }"#;
-    let restored: LifecycleEvent =
-        serde_json::from_str(explicit_null).expect("deserialize null I/O timing");
-    assert!(matches!(
-        restored,
-        LifecycleEvent::RequestTerminated {
-            io_timings: RequestIoTimings {
-                request_body_wait_ms: None,
-                ..
-            },
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -194,9 +123,18 @@ fn kind_labels_cover_every_variant() {
             event_id: sample_event_id(),
             decision: LimitDecisionKind::Rejected {
                 reason: "quota".into(),
-                subject: None,
-                request_summary: None,
-                route_summary: None,
+                subject: LimitSubject {
+                    principal_id: "p".into(),
+                    key_id: "k".into(),
+                },
+                request_summary: LimitRequestSummary {
+                    model: "m".into(),
+                    path: "/v1/messages".into(),
+                    method: "POST".into(),
+                },
+                route_summary: RouteSummary {
+                    upstream_name: "u".into(),
+                },
                 limit_violation: None,
             },
         }
@@ -244,8 +182,6 @@ fn kind_labels_cover_every_variant() {
             duration_ms: 1,
             request_body_read_ms: None,
             request_body_bytes: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

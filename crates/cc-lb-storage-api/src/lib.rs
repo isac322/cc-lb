@@ -1,5 +1,3 @@
-#![allow(ambiguous_glob_reexports)]
-
 pub mod anthropic_compatibility_kv;
 pub mod api_key_usage;
 pub mod audit;
@@ -23,7 +21,6 @@ pub mod sparse_order;
 mod storage_types_common;
 mod storage_types_keys;
 pub mod traits;
-pub mod types;
 pub mod upstream;
 pub mod upstream_affinity;
 pub mod upstream_rate_limit;
@@ -33,8 +30,6 @@ pub mod upstream_subscription_quota_checkpoint;
 pub mod usage_pruner;
 pub mod validation;
 pub mod warmup_attempts;
-
-use async_trait::async_trait;
 
 pub use anthropic_compatibility_kv::*;
 pub use api_key_usage::*;
@@ -57,13 +52,14 @@ pub use prompt_cache_observation::{PromptCacheObservationRecord, PromptCacheObse
 pub use request_event_list::*;
 pub use request_event_projections::*;
 pub use runtime_change_notifier::*;
+pub use storage_types_common::*;
+pub use storage_types_keys::*;
 pub use traits::UsageTokenIntervalStore;
 pub use traits::{
-    ApiKeyConcurrencyHoldStore, ApiKeyUsageBucketStore, AuditStore, CURRENT_CONTRACT_VERSION,
-    CacheKeepaliveProjectionStore, ConfigStore, ManagedKeyStore, MetaStore, PriceCatalogCache,
-    RequestEventStore, Storage, UsageRollupStore,
+    ApiKeyConcurrencyHoldStore, ApiKeyUsageBucketStore, AuditStore, CacheKeepaliveProjectionStore,
+    ConfigStore, ManagedKeyStore, MetaStore, PriceCatalogCache, RequestEventStore, Storage,
+    UsageRollupStore,
 };
-pub use types::*;
 pub use upstream::*;
 pub use upstream_affinity::*;
 pub use upstream_rate_limit::*;
@@ -74,15 +70,9 @@ pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;
 pub use warmup_attempts::*;
 
-pub type RepoError = StorageError;
-
-#[async_trait]
-pub trait PluginBlobRepo: Send + Sync {
-    async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError>;
-
-    async fn get_blob(&self, sha256: &[u8; 32]) -> Result<Option<Vec<u8>>, RepoError>;
-
-    async fn delete_blob(&self, sha256: &[u8; 32]) -> Result<(), RepoError>;
-
-    async fn list_blob_keys(&self) -> Result<Vec<[u8; 32]>, RepoError>;
-}
+pub use cc_lb_domain::PrincipalKindLite;
+pub use cc_lb_request_log::{
+    FinalRequestEventUpdate, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+    RequestCacheState, RequestEvent, RequestEventKind, RequestEventPartial, RequestEventPhase,
+    RequestEventUpdate,
+};

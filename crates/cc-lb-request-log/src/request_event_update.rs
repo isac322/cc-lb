@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{RequestEvent, RequestEventKind, RequestEventUpstream};
+use crate::{RequestEvent, RequestEventKind};
 
 /// In-flight snapshot of an active request, emitted by the lifecycle event
 /// assembler while the request is still executing (before finalization).
@@ -48,8 +48,6 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<RequestEventUpstream>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,10 +245,6 @@ impl RequestEventUpdate {
         }
     }
 
-    pub fn is_final(&self) -> bool {
-        matches!(self, Self::Final(_))
-    }
-
     pub fn event_id(&self) -> &str {
         match self {
             Self::Partial(snapshot) => &snapshot.event_id,
@@ -280,66 +274,6 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize partial");
 
         assert_eq!(partial, restored);
-    }
-
-    #[test]
-    fn request_event_partial_source_metadata_defaults_without_legacy_json_fields() {
-        let legacy_partial = r#"{
-            "event_id":"event-req-legacy",
-            "request_id":"req-legacy",
-            "ts":1700000000,
-            "ts_ms":1700000000000,
-            "last_update_ms":1700000000010,
-            "elapsed_ms":10,
-            "stream":false,
-            "request_body_wait_ms":null,
-            "response_body_wait_ms":null
-        }"#;
-        let partial: RequestEventPartial =
-            serde_json::from_str(legacy_partial).expect("deserialize legacy partial");
-
-        assert_eq!(partial.source_kind, None);
-        assert_eq!(partial.source_ref_id, None);
-        assert_eq!(partial.request_body_read_ms, None);
-        assert_eq!(partial.request_body_bytes, None);
-        assert_eq!(partial.request_body_first_chunk_ms, None);
-        assert_eq!(partial.request_body_receive_ms, None);
-        assert_eq!(partial.request_body_wait_ms, None);
-        assert_eq!(partial.request_body_process_ms, None);
-        assert_eq!(partial.request_body_chunk_count, None);
-        assert_eq!(partial.upstream_body_ms, None);
-        assert_eq!(partial.finalize_ms, None);
-        assert_eq!(partial.response_body_wait_ms, None);
-        assert_eq!(partial.response_body_process_ms, None);
-        assert_eq!(partial.response_body_downstream_poll_gap_ms, None);
-        assert_eq!(partial.retry_overhead_ms, None);
-
-        let partial_json = serde_json::to_value(&partial).expect("serialize legacy partial");
-        let partial_object = partial_json
-            .as_object()
-            .expect("request event partial serializes to object");
-        assert!(!partial_object.contains_key("source_kind"));
-        assert!(!partial_object.contains_key("source_ref_id"));
-        assert!(!partial_object.contains_key("request_body_read_ms"));
-        assert!(!partial_object.contains_key("request_body_bytes"));
-        assert!(!partial_object.contains_key("upstream_body_ms"));
-        assert!(!partial_object.contains_key("finalize_ms"));
-        for field in [
-            "request_body_first_chunk_ms",
-            "request_body_receive_ms",
-            "request_body_wait_ms",
-            "request_body_process_ms",
-            "request_body_chunk_count",
-            "response_body_wait_ms",
-            "response_body_process_ms",
-            "response_body_downstream_poll_gap_ms",
-            "retry_overhead_ms",
-        ] {
-            assert!(
-                !partial_object.contains_key(field),
-                "{field} must be omitted"
-            );
-        }
     }
 
     #[test]

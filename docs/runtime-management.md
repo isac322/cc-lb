@@ -153,12 +153,9 @@ remove the entry or change its position among other router plugins.
 
 ```json
 {
-  "slot": "Router",
+  "slot": "router",
   "wasm_registry_id": "<PLUGIN_ID>",
   "config": {},
-  "sse_per_event": false,
-  "batched_events_per_flush": 0,
-  "batched_flush_ms": 0,
   "position": null
 }
 ```
@@ -270,12 +267,11 @@ You upload Wasm plugins via a multipart POST request to `/admin/v1/plugins/wasm`
 ```bash
 curl -X POST http://localhost:8001/admin/v1/plugins/wasm \
   -H "Authorization: Bearer <TOKEN>" \
-  -F "slot_kind=shape" \
   -F "original_filename=plugin.wasm" \
   -F "bytes=@path/to/plugin.wasm"
 ```
 
-`slot_kind` is required and must be one of `filter`, `shape`, or `observe`. `name` is optional legacy input; if present, it must match the plugin metadata name embedded in the Wasm. `original_filename` is optional and defaults to `<metadata-name>.wasm`.
+Supported slots are derived from the hooks the Wasm exports, and the registry name comes from the plugin metadata embedded in the Wasm. `original_filename` is optional and defaults to `<metadata-name>.wasm`.
 
 Response:
 

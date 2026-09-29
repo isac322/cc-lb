@@ -1,12 +1,12 @@
+use cc_lb_clock::unix_secs;
 use cc_lb_engine::cache_keepalive::{RenewalFinalization, RenewalUsage, RequestSnapshot};
-use cc_lb_engine::clock::unix_secs;
-use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, virtual_cost_micros_full};
+use cc_lb_pricing::virtual_cost_micros_full;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::upstream::UpstreamRecord;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventProjections, RequestEventStore, RequestEventUpstream, UpstreamStore,
+    RequestEventProjections, RequestEventStore, UpstreamStore,
 };
 
 use super::lifecycle::{RenewalLifecycleInput, publish_renewal_lifecycle};
@@ -39,7 +39,6 @@ impl SchedulerDispatch {
             finalization.usage.cache_creation_input_tokens_5m,
             finalization.usage.cache_creation_input_tokens_1h,
             finalization.usage.cache_read_input_tokens,
-            pricing_upstream_kind(upstream.kind),
             None,
         );
         let ts = unix_secs(self.clock.now());
@@ -152,13 +151,6 @@ fn duration_ms(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn pricing_upstream_kind(kind: UpstreamKind) -> Option<PricingUpstreamKind> {
-    match kind {
-        UpstreamKind::AnthropicApiKey => Some(PricingUpstreamKind::AnthropicKey),
-        UpstreamKind::AnthropicOauth => Some(PricingUpstreamKind::AnthropicOAuth),
-    }
-}
-
 fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
     RequestEvent {
         ts: input.ts,
@@ -170,7 +162,6 @@ fn renewal_request_event(input: RenewalRequestEventInput<'_>) -> RequestEvent {
         principal_id: Some(input.record.principal_id.clone()),
         key_id: input.record.accounting_key_id.clone(),
         principal_kind: None,
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(input.upstream.id),
         upstream_name: Some(input.upstream.name.clone()),
         model: Some(input.model.to_owned()),

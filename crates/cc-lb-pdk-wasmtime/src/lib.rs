@@ -62,7 +62,7 @@ mod wasm32_glue {
     }
 }
 
-pub use cc_lb_pdk_wasmtime_macros::{WireSchema, cc_lb_plugin, handler, plugin};
+pub use cc_lb_pdk_wasmtime_macros::{cc_lb_plugin, handler, plugin};
 
 /// Wire types shared with the host.
 pub use cc_lb_plugin_wire as types;
@@ -82,10 +82,10 @@ pub mod __private {
     use core::slice;
 
     use cc_lb_plugin_wire::{
-        ArchivedFilterRequest, ArchivedObserveEvent, ArchivedShapeRequest,
-        ArchivedTransformResponseRequest, ArchivedTransformSseEventRequest, FilterRequest,
-        FilterResponse, ObserveEvent, ShapeRequest, ShapeResponse, TransformResponseRequest,
-        TransformResponseResult, TransformSseEventRequest, TransformSseEventResult, pack_ret,
+        ArchivedFilterRequest, ArchivedShapeRequest, ArchivedTransformResponseRequest,
+        ArchivedTransformSseEventRequest, FilterRequest, FilterResponse, ShapeRequest,
+        ShapeResponse, TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+        TransformSseEventResult, pack_ret,
     };
     use rkyv::rancor::Error;
 
@@ -356,38 +356,6 @@ pub mod __private {
         let response = handler(archived);
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
         encode_and_pack::<ShapeResponse>(&response, "ShapeResponse")
-    }
-
-    /// Observe is side-effect-only — host hands an event, plugin
-    /// returns nothing. The packed return is `(0, 0)`.
-    #[allow(unsafe_code)]
-    pub fn run_observe<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(ObserveEvent),
-    {
-        // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedObserveEvent = rkyv::access::<ArchivedObserveEvent, Error>(in_bytes)
-            .expect("rkyv::access(ObserveEvent) failed");
-        let owned: ObserveEvent = rkyv::deserialize::<ObserveEvent, Error>(archived)
-            .expect("rkyv::deserialize(ObserveEvent) failed");
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        handler(owned);
-        pack_ret(0, 0)
-    }
-
-    #[allow(unsafe_code)]
-    pub fn run_observe_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
-    where
-        F: FnOnce(&ArchivedObserveEvent),
-    {
-        // SAFETY: same as run_filter.
-        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
-        let archived: &ArchivedObserveEvent = rkyv::access::<ArchivedObserveEvent, Error>(in_bytes)
-            .expect("rkyv::access(ObserveEvent) failed");
-        handler(archived);
-        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
-        pack_ret(0, 0)
     }
 
     #[allow(unsafe_code)]

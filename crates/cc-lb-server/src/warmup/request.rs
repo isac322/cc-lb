@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use cc_lb_engine::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
+use cc_lb_quota::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use http::{Method, Request, StatusCode};
 use http_body_util::Full;
 use hyper_util::client::legacy::Client;
@@ -33,7 +33,6 @@ pub enum WarmupRequestAttempt {
 pub fn build_warmup_request(
     access_token: &str,
     base_url: &Url,
-    _replica_id: &str,
 ) -> Result<Request<Full<Bytes>>, String> {
     let url = base_url
         .join("v1/messages")
@@ -68,33 +67,12 @@ fn warmup_body() -> Value {
     })
 }
 
-/// Dispatches a warmup request via HTTP client.
-/// Returns (StatusCode, Vec<UnifiedQuotaObservation>).
-pub async fn dispatch_warmup(
-    client: &WarmupHttpClient,
-    access_token: &str,
-    base_url: &Url,
-    replica_id: &str,
-) -> (StatusCode, Vec<UnifiedQuotaObservation>) {
-    match dispatch_warmup_attempt(client, access_token, base_url, replica_id).await {
-        WarmupRequestAttempt::Response {
-            status,
-            observations,
-        } => (status, observations),
-        WarmupRequestAttempt::RequestBuildFailed { error: _ } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, vec![])
-        }
-        WarmupRequestAttempt::NetworkError { error: _ } => (StatusCode::BAD_GATEWAY, vec![]),
-    }
-}
-
 pub async fn dispatch_warmup_attempt(
     client: &WarmupHttpClient,
     access_token: &str,
     base_url: &Url,
-    replica_id: &str,
 ) -> WarmupRequestAttempt {
-    let request = match build_warmup_request(access_token, base_url, replica_id) {
+    let request = match build_warmup_request(access_token, base_url) {
         Ok(req) => req,
         Err(error) => return WarmupRequestAttempt::RequestBuildFailed { error },
     };
@@ -125,13 +103,10 @@ mod tests {
     };
     use http_body_util::BodyExt;
 
-    const TEST_REPLICA_ID: &str = "replica-a";
-
     fn warmup_request() -> Request<Full<Bytes>> {
         let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
 
-        build_warmup_request("test-token", &base_url, TEST_REPLICA_ID)
-            .expect("request builds successfully")
+        build_warmup_request("test-token", &base_url).expect("request builds successfully")
     }
 
     async fn warmup_body_bytes_from_request() -> Bytes {
@@ -201,8 +176,8 @@ mod tests {
     async fn warmup_intent_contract_dispatch_warmup_attempt_shaped_input() {
         // Given: the exact request constructed before dispatch_warmup_attempt sends it.
         let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
-        let request = build_warmup_request("test-token", &base_url, TEST_REPLICA_ID)
-            .expect("request builds successfully");
+        let request =
+            build_warmup_request("test-token", &base_url).expect("request builds successfully");
         let (parts, body) = request.into_parts();
         let body = body.collect().await.expect("body collects").to_bytes();
         let dialect = WarmupRequestDialect {
@@ -222,7 +197,6 @@ mod tests {
         let principal = Principal {
             id: "warmup".to_owned(),
             kind: PrincipalKind::OAuthSubject,
-            claims: serde_json::Map::new(),
         };
 
         // When: a sealed ShapedRequest is built from the request's real parts.

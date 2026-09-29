@@ -3,24 +3,20 @@ use crate::common;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_control::{LifecycleBusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::{
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
+};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, PrincipalKind, TerminalStrategy, Upstream};
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache, ShapePluginCache,
-};
-use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, ProxyError,
-    UpstreamDispatch,
-};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
-use cc_lb_observability::ObserveEvent;
 use cc_lb_storage_api::principal::PrincipalRecord;
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, ResponseTransformHook,
@@ -38,10 +34,7 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
-use common::{
-    RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState, collect_body,
-    messages_request,
-};
+use common::{TestAuthn, TestLifecycleBus, TestState, collect_body, messages_request};
 
 #[tokio::test]
 async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
@@ -320,19 +313,19 @@ async fn sqlite_storage(
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
 async fn wait_for_events(
     storage: &dyn RequestEventStore,
     expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        let events = common::stored_request_events(storage).await?;
         if events.len() >= expected {
             return Ok(events);
         }
@@ -344,15 +337,14 @@ async fn wait_for_events(
 }
 
 #[tokio::test]
-async fn buffered_accounting_uses_pre_transform_usage() {
+async fn buffered_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "buffered-accounting.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(BufferedUsageMutatingTransform);
-    let recording = Arc::new(RecordingHook::default());
-    let lifecycle = lifecycle_with_transforms_and_hook(
-        Some(transform),
-        None,
-        buffered_dispatch(),
-        recording.clone(),
-    );
+    let lifecycle = lifecycle_with_transforms(Some(transform), None, buffered_dispatch())
+        .with_event_bus(test_bus.bus_arc());
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[],"stream":false}"#,
@@ -364,16 +356,13 @@ async fn buffered_accounting_uses_pre_transform_usage() {
 
     let body_text = std::str::from_utf8(&body).expect("body is utf8");
     assert!(body_text.contains(r#""input_tokens":999"#));
-    let events = recording.events.lock().expect("events lock").clone();
-    let usage = events.iter().find_map(|event| match event {
-        ObserveEvent::RequestFinished {
-            input_tokens,
-            output_tokens,
-            ..
-        } => Some((*input_tokens, *output_tokens)),
-        _ => None,
-    });
-    assert_eq!(usage, Some((Some(3), Some(5))));
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (events[0].input_tokens, events[0].output_tokens),
+        (Some(3), Some(5))
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -570,10 +559,7 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
         HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
     );
     let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -637,10 +623,7 @@ async fn content_length_malformed_sse_delivers_raw_bytes_before_error_telemetry(
         HeaderValue::from_str(&malformed.len().to_string()).expect("content length header"),
     );
     let test_bus = TestLifecycleBus::new();
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         None,
@@ -804,10 +787,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     let storage = Arc::new(sqlite_storage(&dir, "truncated-gzip.sqlite").await?);
     let test_bus =
         TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
-    let LifecycleBusReceiver::InMemory(mut lifecycle_rx) = test_bus.bus.subscribe_lifecycle()
-    else {
-        panic!("expected in-memory lifecycle receiver");
-    };
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
     let lifecycle = lifecycle_with_transforms(
         None,
         Some(transform.clone()),
@@ -1027,7 +1007,7 @@ async fn non_sse_gzip_decode_failure_skips_sse_transform() -> Result<(), Box<dyn
     .with_static_limit_subject(
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         ),
         "principal-test".to_owned(),
         "key-test".to_owned(),
@@ -1650,15 +1630,14 @@ async fn sse_incomplete_event_budget_after_output_uses_existing_error_frame() {
 }
 
 #[tokio::test]
-async fn sse_accounting_uses_pre_transform_usage() {
+async fn sse_accounting_uses_pre_transform_usage() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, "sse-accounting.sqlite").await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
     let transform = Arc::new(SseUsageMutatingTransform);
-    let recording = Arc::new(RecordingHook::default());
-    let lifecycle = lifecycle_with_transforms_and_hook(
-        None,
-        Some(transform),
-        sse_dispatch(true),
-        recording.clone(),
-    );
+    let lifecycle = lifecycle_with_transforms(None, Some(transform), sse_dispatch(true))
+        .with_event_bus(test_bus.bus_arc());
 
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[],"stream":false}"#,
@@ -1670,21 +1649,13 @@ async fn sse_accounting_uses_pre_transform_usage() {
 
     let text = std::str::from_utf8(&body).expect("sse body is utf8");
     assert!(text.contains(r#""input_tokens":999"#));
-    let event = tokio::time::timeout(
-        Duration::from_secs(1),
-        recording.wait_for_event(|event| matches!(event, ObserveEvent::RequestFinished { .. })),
-    )
-    .await
-    .expect("request-finished observation arrives");
-    let ObserveEvent::RequestFinished {
-        input_tokens,
-        output_tokens,
-        ..
-    } = event
-    else {
-        panic!("expected request-finished observation");
-    };
-    assert_eq!((input_tokens, output_tokens), (Some(7), Some(11)));
+    let events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        (events[0].input_tokens, events[0].output_tokens),
+        (Some(7), Some(11))
+    );
+    Ok(())
 }
 
 async fn handle_authenticated(
@@ -1717,37 +1688,6 @@ fn lifecycle_with_transforms_and_config(
     dispatcher: Arc<dyn UpstreamDispatch>,
     config: LifecycleConfig,
 ) -> Lifecycle {
-    lifecycle_with_transforms_and_hook_and_config(
-        response_transform,
-        sse_transform,
-        dispatcher,
-        Arc::new(RecordingHook::default()),
-        config,
-    )
-}
-
-fn lifecycle_with_transforms_and_hook(
-    response_transform: Option<Arc<dyn ResponseTransformHook>>,
-    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
-    dispatcher: Arc<dyn UpstreamDispatch>,
-    hook: Arc<RecordingHook>,
-) -> Lifecycle {
-    lifecycle_with_transforms_and_hook_and_config(
-        response_transform,
-        sse_transform,
-        dispatcher,
-        hook,
-        LifecycleConfig::default(),
-    )
-}
-
-fn lifecycle_with_transforms_and_hook_and_config(
-    response_transform: Option<Arc<dyn ResponseTransformHook>>,
-    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
-    dispatcher: Arc<dyn UpstreamDispatch>,
-    hook: Arc<RecordingHook>,
-    config: LifecycleConfig,
-) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
         sse_transform,
@@ -1760,7 +1700,6 @@ fn lifecycle_with_transforms_and_hook_and_config(
             Some(Arc::new(RouterPipelineCache::empty(
                 TerminalStrategy::FirstPick,
             ))),
-            ObservabilityHooksCache::Inherit,
             DialectCache::Explicit(ShapePluginCache { dialect }),
         ),
     );
@@ -1772,8 +1711,6 @@ fn lifecycle_with_transforms_and_hook_and_config(
         allowed_upstreams: vec![default_upstream_id()],
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -1787,10 +1724,6 @@ fn lifecycle_with_transforms_and_hook_and_config(
     );
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
-        .global_observability_hooks(vec![hook])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![default_upstream_record()])
         .build();
@@ -1799,7 +1732,7 @@ fn lifecycle_with_transforms_and_hook_and_config(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         config,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -2344,6 +2277,5 @@ fn _principal_for_doc() -> Principal {
     Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     }
 }

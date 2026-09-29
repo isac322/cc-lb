@@ -8,6 +8,13 @@
 - **T2 Docker plus netem** is the default realistic tier. It creates a private Docker fabric with directed netem impairment and records qdisc commands and counters. Docker resources are labeled and cleaned up after the run.
 - **Elevated netns** renders a host-network-namespace preview only. It does not execute elevated commands, does not invoke `sudo`, and requires an operator review outside this suite.
 
+The T1 layer is always installed on the proxy router and is inert while every `CC_LB_CHAOS_*` value is `0` or unset:
+
+- `CC_LB_CHAOS_LATENCY_MS`: fixed latency in milliseconds before returning the response head.
+- `CC_LB_CHAOS_DROP_PCT`: request drop probability from `0` to `100`; dropped requests return a synthetic `502`.
+- `CC_LB_CHAOS_RST_AFTER_BYTES`: abort non-SSE response bodies after this many bytes.
+- `CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS`: cleanly end SSE responses after this many `data:` events.
+
 ## Determinism Boundary
 
 Determinism applies to the scenario and command flow materialized in a manifest: seed-derived personas, request schedule, waves, topology references, and netem command references. `replay --dry-run` verifies that manifest integrity.

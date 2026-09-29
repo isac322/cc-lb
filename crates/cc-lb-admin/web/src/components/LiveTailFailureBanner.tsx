@@ -1,6 +1,6 @@
-import { AlertTriangle, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Button, IconButton } from './ui/primitives';
+import { Button, IconButton, Notice } from './ui/primitives';
 
 export function LiveTailFailureBanner({
   permanentFailure,
@@ -33,28 +33,27 @@ export function LiveTailFailureBanner({
   };
 
   return (
-    <div className="flex items-start gap-3 p-3 mb-4 rounded-sm border border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]">
-      <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
-      <div className="flex-1 min-w-0">
-        <h3 className="text-sm font-bold">Live tail disconnected</h3>
-        <p className="text-xs mt-1 opacity-90">
-          Unable to reach the admin event stream after {reconnectAttempts}{' '}
-          attempts over the last {formatMinutesSince(permanentFailureSince)}{' '}
-          minutes.
-        </p>
-        <div className="mt-3">
-          <Button variant="danger" size="sm" onClick={onRetry}>
+    <Notice
+      tone="danger"
+      variant="banner"
+      title="Live tail disconnected"
+      action={
+        <div className="flex items-center gap-1">
+          <Button size="sm" onClick={onRetry}>
             Retry now
           </Button>
+          <IconButton
+            label="Dismiss"
+            className="-mr-1.5"
+            onClick={() => setDismissed(true)}
+          >
+            <X aria-hidden="true" />
+          </IconButton>
         </div>
-      </div>
-      <IconButton
-        label="Dismiss"
-        className="shrink-0 -mt-1 -mr-1 text-[color:var(--color-danger)] hover:bg-red-500/20"
-        onClick={() => setDismissed(true)}
-      >
-        <X className="w-4 h-4" />
-      </IconButton>
-    </div>
+      }
+    >
+      Unable to reach the admin event stream after {reconnectAttempts} attempts
+      over the last {formatMinutesSince(permanentFailureSince)} minutes.
+    </Notice>
   );
 }

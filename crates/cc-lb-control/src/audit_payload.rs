@@ -267,7 +267,7 @@ mod tests {
     fn plugin_chain_update_serializes_registry_metadata() {
         let payload = AuditPayload::PluginChainUpdate {
             principal_id: "principal-1".to_owned(),
-            slots_changed: vec!["router", "observability_hook"],
+            slots_changed: vec!["router", "shape"],
             wasm_registry_id: "registry-1".to_owned(),
             sha256_hex: "abc123".to_owned(),
             supported_slots: vec!["router".to_owned(), "shape".to_owned()],
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(payload.get("principal_id"), Some(&json!("principal-1")));
         assert_eq!(
             payload.get("slots_changed"),
-            Some(&json!(["router", "observability_hook"]))
+            Some(&json!(["router", "shape"]))
         );
         assert_eq!(payload.get("wasm_registry_id"), Some(&json!("registry-1")));
         assert_eq!(payload.get("sha256_hex"), Some(&json!("abc123")));

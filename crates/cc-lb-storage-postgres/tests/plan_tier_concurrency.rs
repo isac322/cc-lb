@@ -2,7 +2,7 @@ use std::{str::FromStr, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, MetadataTierMappingOverrideRecord, PlanTierStore, TierResolutionSource,
+    MetaStore, MetadataTierMappingOverrideRecord, PlanTierStore, TierResolutionSource,
     UpstreamPlanTierRecord,
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -167,7 +167,7 @@ impl Fixture {
 
         let pool = schema_pool(url, &schema, 4).await?;
         PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock))
-            .initialize(BackendKind::Postgres)
+            .initialize()
             .await?;
 
         Ok(Self {

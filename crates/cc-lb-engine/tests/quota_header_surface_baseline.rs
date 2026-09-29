@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use crate::common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, lifecycle_with,
     messages_request,
 };
 use bytes::Bytes;
-use cc_lb_engine::{build_subscription_quota_samples, parse_anthropic_unified_headers};
+use cc_lb_quota::build_subscription_quota_samples;
+use cc_lb_quota::rate_limit_headers::parse_anthropic_unified_headers;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use uuid::Uuid;
@@ -39,7 +39,6 @@ async fn quota_header_surface_and_sample_remain_byte_stable() {
             state,
             mode: DispatchMode::HeadersOk(headers),
         },
-        Arc::new(RecordingHook::default()),
     );
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,

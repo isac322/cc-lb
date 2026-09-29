@@ -1,8 +1,6 @@
 #[path = "common/mod.rs"]
 mod common;
 
-#[path = "bounded_hook_drops.rs"]
-mod bounded_hook_drops;
 #[path = "engine_metrics_hook.rs"]
 mod engine_metrics_hook;
 #[path = "metrics_describe.rs"]

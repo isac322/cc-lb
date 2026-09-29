@@ -24,7 +24,7 @@ const NOW_UNIX_SECS: u64 = 1_700_000_000;
 // pass, so this does not prove index usage — measure the plan separately.
 const MAX_LOOKUP_ELAPSED: Duration = Duration::from_millis(500);
 
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -104,7 +104,7 @@ impl Fixture {
             .await?;
         // Real migrator, not a hand-picked subset — see the note in `prompt_cache_observation.rs`.
         PostgresStorage::new(pool.clone(), std::sync::Arc::new(cc_lb_clock::SystemClock))
-            .initialize(BackendKind::Postgres)
+            .initialize()
             .await?;
 
         Ok(Some(Self { url, schema, pool }))

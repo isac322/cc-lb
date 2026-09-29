@@ -171,30 +171,6 @@ impl PoolQuotaHistoryStore for SqliteStorage {
         )
         .await
     }
-
-    async fn delete_pool_quota_snapshots_before(
-        &self,
-        cutoff_unix_secs: i64,
-        batch_size: u32,
-    ) -> StorageResult<u64> {
-        if batch_size == 0 {
-            return Ok(0);
-        }
-        let result = sqlx::query(
-            r#"DELETE FROM pool_subscription_quota_history_v1 WHERE rowid IN (
-                SELECT rowid FROM pool_subscription_quota_history_v1
-                 WHERE snapshot_at_unix_secs < ?
-                 ORDER BY snapshot_at_unix_secs ASC
-                 LIMIT ?
-            )"#,
-        )
-        .bind(cutoff_unix_secs)
-        .bind(batch_size)
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
-    }
 }
 
 fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapshotRecord> {

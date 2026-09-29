@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_wire::metadata::HookMetadata;
+use cc_lb_plugin_wire::metadata::{HookMetadata, HookMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -27,7 +27,6 @@ pub struct WasmBlob {
     pub sha256: [u8; 32],
     pub bytes: Vec<u8>,
     pub size_bytes: u64,
-    pub parse_validated_at_unix_secs: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,15 +50,8 @@ pub struct WasmRegistryEntryInput {
     #[serde(default)]
     pub hook_metadata: BTreeMap<String, HookMetadata>,
     /// Slots the plugin exports a wire function for, derived from
-    /// `HandshakeAccept.implemented_functions`. Empty preserves legacy uploads
-    /// that did not supply this metadata.
-    #[serde(default)]
+    /// `HandshakeAccept.implemented_functions`.
     pub supported_slots: Vec<PluginSlotKind>,
-    /// 32-byte BLAKE3 schema hash from `cc_lb.schema.<kind>.v1` custom
-    /// section (set by the admin upload after `inspect_wasm`). `None`
-    /// preserves legacy uploads that pre-date the wasmtime ABI.
-    #[serde(default)]
-    pub schema_hash: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,25 +77,15 @@ pub struct WasmRegistryEntry {
     pub uploaded_by_admin_id: Uuid,
     pub refcount: i64,
     pub revision: u64,
-    #[serde(default = "default_plugin_kind")]
     pub kind: String,
-    #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub usage: String,
-    #[serde(default)]
     pub hook_metadata: BTreeMap<String, HookMetadata>,
-    #[serde(default)]
     pub is_builtin: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<PluginMetadata>,
-    /// Slots the plugin exports a wire function for. Empty when a legacy
-    /// entry has not yet been backfilled by `run_startup_handshake`.
-    #[serde(default)]
+    /// Slots the plugin exports a wire function for.
     pub supported_slots: Vec<PluginSlotKind>,
-    /// See [`WasmRegistryEntryInput::schema_hash`].
-    #[serde(default)]
-    pub schema_hash: Option<[u8; 32]>,
 }
 
 impl WasmRegistryEntry {
@@ -127,13 +109,8 @@ impl WasmRegistryEntry {
             is_builtin: true,
             metadata: Some(builtin_metadata_for_subscription_preference()),
             supported_slots: vec![PluginSlotKind::Router],
-            schema_hash: None,
         }
     }
-}
-
-fn default_plugin_kind() -> String {
-    BUILTIN_PLUGIN_KIND_FILTER.to_owned()
 }
 
 pub fn default_wire_version() -> u8 {
@@ -147,7 +124,7 @@ fn builtin_filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "Built-in filter hook".to_owned(),
             usage: "Called by the router filter pipeline.".to_owned(),
-            mode: Default::default(),
+            mode: HookMode::Active,
         },
     )])
 }
@@ -173,9 +150,6 @@ pub struct PluginChainEntryInput {
     pub order: i64,
     pub wasm_registry_id: Uuid,
     pub config: Value,
-    pub sse_per_event: bool,
-    pub batched_events_per_flush: u32,
-    pub batched_flush_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,18 +160,12 @@ pub struct PluginChainEntry {
     pub order: i64,
     pub wasm_registry_id: Uuid,
     pub config: Value,
-    pub sse_per_event: bool,
-    pub batched_events_per_flush: u32,
-    pub batched_flush_ms: u64,
     pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PluginChainEntryUpdate {
     pub config: Option<Value>,
-    pub sse_per_event: Option<bool>,
-    pub batched_events_per_flush: Option<u32>,
-    pub batched_flush_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

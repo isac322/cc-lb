@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use rkyv::util::AlignedVec;
 
-use super::{HookFn, call_hook_scoped};
+use cc_lb_plugin_wire::schema::HookKind;
+
+use super::call_hook_scoped;
 use crate::cell::PluginCell;
 use crate::error::WasmtimeRuntimeError;
 
@@ -14,7 +16,7 @@ fn copy_to_aligned(slice: &[u8]) -> AlignedVec<16> {
 
 /// Synchronous filter call. Builds a fresh `Store`, runs the hook,
 /// drops the `Store`.
-pub fn call_filter_hook(
+pub(crate) fn call_filter_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
@@ -29,12 +31,12 @@ pub(crate) fn call_filter_hook_scoped<R, F>(
 where
     F: for<'a> FnOnce(&'a [u8]) -> R,
 {
-    call_hook_scoped(cell, input, HookFn::Filter, with_output)
+    call_hook_scoped(cell, input, HookKind::Filter, with_output)
 }
 
 /// Synchronous shape call. Input is rkyv-encoded `ShapeRequest`,
 /// output rkyv-encoded `ShapeResponse`.
-pub fn call_shape_hook(
+pub(crate) fn call_shape_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
@@ -49,19 +51,10 @@ pub(crate) fn call_shape_hook_scoped<R, F>(
 where
     F: for<'a> FnOnce(&'a [u8]) -> R,
 {
-    call_hook_scoped(cell, input, HookFn::Shape, with_output)
+    call_hook_scoped(cell, input, HookKind::Shape, with_output)
 }
 
-/// Synchronous observe call. Guest returns `(0, 0)`; the returned
-/// `Vec<u8>` is always empty.
-pub fn call_observe_hook(
-    cell: &Arc<PluginCell>,
-    input: &[u8],
-) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-    call_hook_scoped(cell, input, HookFn::Observe, <[u8]>::to_vec)
-}
-
-pub fn call_transform_response_hook(
+pub(crate) fn call_transform_response_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
@@ -76,10 +69,10 @@ pub(crate) fn call_transform_response_hook_scoped<R, F>(
 where
     F: for<'a> FnOnce(&'a [u8]) -> R,
 {
-    call_hook_scoped(cell, input, HookFn::TransformResponse, with_output)
+    call_hook_scoped(cell, input, HookKind::TransformResponse, with_output)
 }
 
-pub fn call_transform_sse_event_hook(
+pub(crate) fn call_transform_sse_event_hook(
     cell: &Arc<PluginCell>,
     input: &[u8],
 ) -> Result<AlignedVec<16>, WasmtimeRuntimeError> {
@@ -94,5 +87,5 @@ pub(crate) fn call_transform_sse_event_hook_scoped<R, F>(
 where
     F: for<'a> FnOnce(&'a [u8]) -> R,
 {
-    call_hook_scoped(cell, input, HookFn::TransformSseEvent, with_output)
+    call_hook_scoped(cell, input, HookKind::TransformSseEvent, with_output)
 }

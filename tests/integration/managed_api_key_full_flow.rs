@@ -7,19 +7,15 @@ use http::{HeaderMap, StatusCode};
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AdminAuthProviderConfig, Config, StorageConfig};
-use cc_lb_engine::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
-    global_catalog,
-};
+use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore,
+    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore, RequestEvent,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
     },
-    types::{Limit as KeyLimit, LimitKind as KeyLimitKind},
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -106,22 +102,16 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "happy /v1/messages returned 200 with request and token rate-limit headers",
     )?;
 
-    let usage = wait_for_usage(&client, &server.admin_url, &key_id).await?;
+    let (request_count, cost_usd_micros) = wait_for_usage(&storage_path, &key_id).await?;
     append_step(
         5,
-        "usage rollup observed at least one request event for issued key",
+        "persisted request events observed at least one request for issued key",
     )?;
-    let first_series = usage["series"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|series| series["request_count"].as_u64().unwrap_or(0) > 0)
-        .expect("usage series with request count");
-    assert!(first_series["cost_usd_micros"].as_i64().unwrap_or(0) > 0);
-    assert!(first_series["request_count"].as_u64().unwrap_or(0) > 0);
+    assert!(cost_usd_micros > 0);
+    assert!(request_count > 0);
     append_step(
         6,
-        "usage rollup has positive request_count and virtual_cost_micros",
+        "persisted request events have positive request count and cost",
     )?;
 
     usage_tokens.store(10_000, Ordering::SeqCst);
@@ -147,73 +137,11 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         7,
         "cost cap reached and subsequent /v1/messages returned 429 with Retry-After",
     )?;
-
-    let disable_response = client
-        .request(
-            "POST",
-            &format!(
-                "{}/admin/principals/u1/keys/{key_id}/disable",
-                server.admin_url
-            ),
-            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
-            &[],
-        )
-        .await?;
-    assert_eq!(
-        disable_response.status(),
-        StatusCode::OK,
-        "disable response: {}",
-        disable_response.text().await?
-    );
-    let disabled = send_message(&client, &server.proxy_url, &plaintext_key).await?;
-    assert_eq!(
-        disabled.status(),
-        StatusCode::FORBIDDEN,
-        "disabled response: {}",
-        disabled.text().await?
-    );
-    append_step(8, "disabled key rejects /v1/messages with 403")?;
-
-    let enable_response = client
-        .request(
-            "POST",
-            &format!(
-                "{}/admin/principals/u1/keys/{key_id}/enable",
-                server.admin_url
-            ),
-            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
-            &[],
-        )
-        .await?;
-    assert_eq!(
-        enable_response.status(),
-        StatusCode::OK,
-        "enable response: {}",
-        enable_response.text().await?
-    );
-    let key_response = client
-        .request(
-            "GET",
-            &format!("{}/admin/principals/u1/keys/{key_id}", server.admin_url),
-            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
-            &[],
-        )
-        .await?;
-    assert_eq!(
-        key_response.status(),
-        StatusCode::OK,
-        "get key response: {}",
-        key_response.text().await?
-    );
-    let key_body: Value = key_response.json().await?;
-    assert_eq!(key_body["status"], "active");
-    append_step(9, "enabled key reports Active through GET key endpoint")?;
-
     let revoke_response = client
         .request(
             "POST",
             &format!(
-                "{}/admin/principals/u1/keys/{key_id}/revoke",
+                "{}/admin/v1/principals/u1/keys/{key_id}/revoke",
                 server.admin_url
             ),
             &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
@@ -233,7 +161,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "revoked response: {}",
         revoked.text().await?
     );
-    append_step(10, "revoked key rejects /v1/messages with 401")?;
+    append_step(8, "revoked key rejects /v1/messages with 401")?;
     server.shutdown().await;
 
     Ok(())
@@ -444,7 +372,7 @@ impl StartedServer {
         } = reserved;
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let clock: cc_lb_engine::ClockHandle = std::sync::Arc::new(cc_lb_engine::SystemClock);
+        let clock: cc_lb_clock::ClockHandle = std::sync::Arc::new(cc_lb_clock::SystemClock);
         let app = build_app(config, clock).await?;
         let signal = app.signal_handle();
         // Keep all selected ports reserved while build_app performs its async setup.
@@ -543,36 +471,39 @@ async fn send_message(
         .map_err(Into::into)
 }
 
+/// Test-only read of persisted request events for one key, straight from the
+/// SQLite payload column. Returns (request_count, summed cost_usd_micros).
 async fn wait_for_usage(
-    client: &TestClient,
-    admin_url: &str,
+    sqlite_path: &std::path::Path,
     key_id: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
+) -> Result<(u64, i64), Box<dyn std::error::Error>> {
+    use sqlx::Row;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    let database_url = format!("sqlite://{}", sqlite_path.display());
     let deadline = Instant::now() + Duration::from_secs(65);
     loop {
-        let response = client
-            .request(
-                "GET",
-                &format!("{admin_url}/admin/principals/u1/keys/{key_id}/usage?range=1h&step=1h"),
-                &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
-                &[],
-            )
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
             .await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "usage response: {}",
-            response.text().await?
-        );
-        let body: Value = response.json().await?;
-        let observed = body["series"].as_array().is_some_and(|series| {
-            !series.is_empty()
-                && series
-                    .iter()
-                    .any(|entry| entry["request_count"].as_u64().unwrap_or(0) >= 1)
-        });
-        if observed {
-            return Ok(body);
+        let rows = sqlx::query("SELECT payload FROM request_events_v1")
+            .fetch_all(&pool)
+            .await?;
+        pool.close().await;
+
+        let mut request_count = 0_u64;
+        let mut cost_usd_micros = 0_i64;
+        for row in rows {
+            let payload: String = row.try_get("payload")?;
+            let event: RequestEvent = serde_json::from_str(&payload)?;
+            if event.key_id.as_deref() == Some(key_id) {
+                request_count += 1;
+                cost_usd_micros += event.cost_usd_micros.unwrap_or(0);
+            }
+        }
+        if request_count >= 1 {
+            return Ok((request_count, cost_usd_micros));
         }
         if Instant::now() >= deadline {
             return Err("usage was not observed within 65s".into());
@@ -585,10 +516,7 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if global_catalog()
-            .lookup(MODEL, Some(PricingUpstreamKind::AnthropicKey), None)
-            .is_some()
-        {
+        if global_catalog().lookup(MODEL, None).is_some() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -638,8 +566,8 @@ fn evidence_dir() -> std::path::PathBuf {
 }
 
 fn now_secs() -> u64 {
-    use cc_lb_engine::Clock as _;
-    let clock = cc_lb_engine::SystemClock;
+    use cc_lb_clock::Clock as _;
+    let clock = cc_lb_clock::SystemClock;
     clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -726,7 +654,7 @@ async fn seed_runtime_state(
             },
         )
         .await?;
-    let (key_id, _) = cc_lb_engine::api_keys::secret::parse(plaintext.expose())?;
+    let (key_id, _) = cc_lb_control::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }
 
@@ -764,11 +692,7 @@ async fn sqlite_storage(
     path: &std::path::Path,
 ) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage = open_sqlite(
-        &database_url,
-        std::sync::Arc::new(cc_lb_engine::SystemClock),
-    )
-    .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_clock::SystemClock)).await?;
+    storage.initialize().await?;
     Ok(Arc::new(storage))
 }

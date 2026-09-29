@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, type Mock, vi } from 'vitest';
@@ -83,38 +84,35 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       />,
     );
 
-    expect(screen.getAllByText('Cache keepalive settings')[0]).toBeDefined();
-    expect(screen.getAllByText('Test Principal')[0]).toBeDefined();
-    expect(screen.getAllByLabelText('Close settings')[0]).toBeDefined();
+    const dialog = screen.getByRole('dialog', {
+      name: 'Cache keepalive settings',
+    });
+    expect(within(dialog).getAllByText('Test Principal')[0]).toBeDefined();
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeDefined();
 
-    expect(screen.getAllByText('Enabled')[0]).toBeDefined();
+    expect(screen.getAllByText('Cache keepalive enabled')[0]).toBeDefined();
     expect(screen.getAllByText('Renewal lead time · 5m TTL')[0]).toBeDefined();
     expect(
-      screen.getAllByText('→ renews 30s before the 5m cache expires')[0],
+      screen.getByText('Seconds. Renews 45s before the 5m cache expires.'),
     ).toBeDefined();
     expect(screen.getAllByText('Renewal lead time · 1h TTL')[0]).toBeDefined();
     expect(screen.getAllByText('Max renewals per session')[0]).toBeDefined();
     expect(screen.getAllByText('Max total duration')[0]).toBeDefined();
-    expect(screen.getAllByText('= 4h')[0]).toBeDefined();
+    expect(screen.getByText('Seconds. = 2h')).toBeDefined();
     expect(screen.getAllByText('Snapshot max bytes')[0]).toBeDefined();
-    expect(screen.getAllByText('= 512 KiB')[0]).toBeDefined();
-    expect(screen.getAllByText('extra_wait_for_user_tools')[0]).toBeDefined();
+    expect(screen.getByText('= 250 KiB')).toBeDefined();
+    expect(screen.getByText('Extra wait-for-user tools')).toBeDefined();
+    expect(screen.getByText('extra_wait_for_user_tools')).toBeDefined();
     expect(screen.getAllByPlaceholderText('Add tool...')[0]).toBeDefined();
-    expect(screen.getAllByText('treat end_turn as ambiguous')[0]).toBeDefined();
-    expect(screen.getAllByText('LLM Judge')[0]).toBeDefined();
-    expect(
-      screen.getAllByText('Reserved for a future release')[0],
-    ).toBeDefined();
+    expect(screen.getByText('Treat end of turn as ambiguous')).toBeDefined();
+    expect(screen.getByText('treat_end_turn_as_ambiguous')).toBeDefined();
 
     expect(screen.getAllByText('Reset')[0]).toBeDefined();
     expect(screen.getAllByText('Save changes')[0]).toBeDefined();
-
-    // Check max-w-md
-    const popup = screen.getByTestId('cache-keepalive-settings-drawer');
-    expect(popup.className).toContain('max-w-md');
   });
 
-  it('toggles have role switch and aria-checked', () => {
+  it('helper text follows the edited values', () => {
+    cleanup();
     renderWithProviders(
       <CacheKeepaliveSettingsDrawer
         open={true}
@@ -123,12 +121,34 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       />,
     );
 
-    const switches = screen.getAllByRole('switch');
-    const enabledSwitch = switches[0];
-    expect(enabledSwitch.getAttribute('aria-checked')).toBe('true');
+    fireEvent.change(screen.getByLabelText('Max total duration'), {
+      target: { value: '14400' },
+    });
+    expect(screen.getByText('Seconds. = 4h')).toBeDefined();
+    fireEvent.change(screen.getByLabelText('Snapshot max bytes'), {
+      target: { value: String(2 * 1024 * 1024) },
+    });
+    expect(screen.getByText('= 2 MiB')).toBeDefined();
+  });
 
-    const treatAmbiguousSwitch = switches[1];
-    expect(treatAmbiguousSwitch.getAttribute('aria-checked')).toBe('true');
+  it('toggles have role switch and reflect the stored config', () => {
+    renderWithProviders(
+      <CacheKeepaliveSettingsDrawer
+        open={true}
+        onOpenChange={() => {}}
+        principal={mockPrincipal}
+      />,
+    );
+
+    const enabledSwitch = screen.getByRole('switch', {
+      name: 'Cache keepalive enabled',
+    }) as HTMLInputElement;
+    expect(enabledSwitch.checked).toBe(true);
+
+    const treatAmbiguousSwitch = screen.getByRole('switch', {
+      name: 'Treat end of turn as ambiguous',
+    }) as HTMLInputElement;
+    expect(treatAmbiguousSwitch.checked).toBe(true);
   });
 
   it('populates fields from principal config', () => {
@@ -471,7 +491,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       />,
     );
 
-    const drawer = screen.getByTestId('cache-keepalive-settings-drawer');
+    const drawer = screen.getByRole('dialog', {
+      name: 'Cache keepalive settings',
+    });
     const fieldset = screen.getByTestId('cache-keepalive-settings-form');
     expect(fieldset.hasAttribute('disabled')).toBe(true);
     expect(fieldset.getAttribute('aria-busy')).toBe('true');
@@ -484,11 +506,11 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       expect(control.matches(':disabled')).toBe(true);
     }
 
-    const close = screen.getByRole('button', { name: 'Close settings' });
+    // The close control stays focusable; the drawer refuses to close while
+    // the save is in flight.
+    const close = within(drawer).getByRole('button', { name: 'Close' });
     const reset = screen.getByRole('button', { name: 'Reset' });
     const saving = screen.getByRole('button', { name: 'Saving...' });
-    expect(close.hasAttribute('disabled')).toBe(true);
-    expect(close.getAttribute('aria-disabled')).toBe('true');
     expect(reset.hasAttribute('disabled')).toBe(true);
     expect(saving.hasAttribute('disabled')).toBe(true);
     expect(saving.getAttribute('aria-busy')).toBe('true');
@@ -498,7 +520,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     fireEvent.keyDown(drawer, { key: 'Escape', code: 'Escape' });
 
     expect(onOpenChange).not.toHaveBeenCalled();
-    expect(screen.getByTestId('cache-keepalive-settings-drawer')).toBeDefined();
+    expect(
+      screen.getByRole('dialog', { name: 'Cache keepalive settings' }),
+    ).toBeDefined();
   });
 
   it('honors the same-principal write lock without claiming save progress', () => {
@@ -516,7 +540,9 @@ describe('CacheKeepaliveSettingsDrawer', () => {
 
     expect(queries.usePrincipalWritePending).toHaveBeenCalledWith('p-123');
 
-    const drawer = screen.getByTestId('cache-keepalive-settings-drawer');
+    const drawer = screen.getByRole('dialog', {
+      name: 'Cache keepalive settings',
+    });
     const fieldset = screen.getByTestId('cache-keepalive-settings-form');
     expect(fieldset.hasAttribute('disabled')).toBe(true);
     expect(fieldset.getAttribute('aria-busy')).toBe('false');
@@ -529,7 +555,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
       screen.getByRole('button', { name: 'Reset' }).hasAttribute('disabled'),
     ).toBe(true);
 
-    const close = screen.getByRole('button', { name: 'Close settings' });
+    const close = within(drawer).getByRole('button', { name: 'Close' });
     expect(close.hasAttribute('disabled')).toBe(false);
     fireEvent.click(close);
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -564,12 +590,11 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     opener.focus();
     fireEvent.click(opener);
 
-    const dialogs = await screen.findAllByTestId(
-      'cache-keepalive-settings-drawer',
-    );
-    expect(dialogs.length).toBeGreaterThan(0);
+    expect(
+      await screen.findByRole('dialog', { name: 'Cache keepalive settings' }),
+    ).toBeDefined();
 
-    const closeBtns = screen.getAllByLabelText('Close settings');
+    const closeBtns = screen.getAllByRole('button', { name: 'Close' });
     fireEvent.click(closeBtns[closeBtns.length - 1]);
 
     await waitFor(() => {

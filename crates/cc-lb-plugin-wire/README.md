@@ -13,8 +13,8 @@ the common PDK path.
 
 - Hook wire types under `cc_lb_plugin_wire::v1`.
 - `WireVersion::V1`.
-- `HookKind` for `filter`, `shape`, and `observe` hooks.
-- `WireSchema`, implemented by the PDK derive macro for layout fingerprints.
+- `HookKind` for `filter` and `shape` hooks.
+- `WireSchema`, the layout fingerprint of every hook wire type.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
 - `pack_ret` and `unpack_ret` helpers for guest ABI return values.
 
@@ -23,29 +23,17 @@ the common PDK path.
 `WireVersion` identifies the wire layout line. All hooks use V1, including
 filter hooks that need `FilterRequest::service_tier`.
 
-`HookKind` names the three supported plugin hooks:
+`HookKind` names the supported plugin hooks, including:
 
 - `Filter` maps to the `cc_lb_filter` export.
 - `Shape` maps to the `cc_lb_shape` export.
-- `Observe` maps to the `cc_lb_observe` export.
 
-`WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a type.
-The trait lives in this crate. The derive macro is re-exported by
-`cc-lb-pdk-wasmtime` for plugin authors.
-
-```rust
-use cc_lb_pdk_wasmtime::WireSchema;
-
-#[derive(WireSchema)]
-pub struct CacheDecision {
-    pub upstream_id: Box<str>,
-    pub decision: Box<str>,
-    pub reason: Box<str>,
-}
-```
-
-Any field addition, removal, rename, reorder, or type edit changes the derived
-descriptor and fingerprint. Plugin authors do not manage hashes manually.
+`WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a hook
+wire type. This crate's build script generates the impl for every wire type from
+its canonical descriptor, and `#[cc_lb_plugin]` embeds the fingerprint of each
+handler's request type in the plugin. Any field addition, removal, rename,
+reorder, or type edit changes the descriptor and fingerprint. Plugin authors do
+not manage hashes manually.
 
 ## PluginMetadata Schema
 
@@ -74,8 +62,8 @@ versions, and empty description or usage text.
 - `cc-lb-runtime-wasmtime`: wire-only Wasmtime admission and dispatch; the
   host adapters live in `cc-lb-server/src/wasm_host/`.
 - `cc-lb-pdk-wasmtime`: guest PDK runtime helpers and macro re-exports.
-- `cc-lb-pdk-wasmtime-macros`: macro implementation for `#[cc_lb_plugin]`,
-  `#[handler]`, and `#[derive(WireSchema)]`.
+- `cc-lb-pdk-wasmtime-macros`: macro implementation for `#[cc_lb_plugin]` and
+  `#[handler]`.
 - `cc-lb-plugin-conformance`: in-process ABI and admission test harness.
 
 ## Links

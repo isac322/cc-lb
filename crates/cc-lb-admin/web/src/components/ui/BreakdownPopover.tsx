@@ -27,17 +27,15 @@ export function BreakdownPopover({
   const visible = showZeroRows ? rows : rows.filter((r) => r.value > 0);
   const total = rows.reduce((a, r) => a + r.value, 0);
   return (
-    <div className="min-w-[200px] font-mono">
-      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1.5">
-        {title}
-      </div>
+    <div className="min-w-[200px] py-1">
+      <div className="text-label text-text mb-1.5">{title}</div>
       {visible.length === 0 ? (
         note ? (
-          <div className="max-w-[220px] whitespace-normal text-[11px] leading-snug text-text-muted">
+          <div className="max-w-[220px] whitespace-normal text-caption text-text-muted">
             {note}
           </div>
         ) : (
-          <div className="text-[11px] text-text-faint">—</div>
+          <div className="text-caption text-text-faint">—</div>
         )
       ) : (
         <div className="flex flex-col gap-1">
@@ -48,12 +46,12 @@ export function BreakdownPopover({
               <div
                 key={r.label}
                 className={cx(
-                  'flex items-center gap-2 text-[11px]',
+                  'flex items-center gap-2 text-caption',
                   isZero ? 'opacity-50' : '',
                 )}
               >
                 <span
-                  className="h-2 w-2 rounded-full shrink-0"
+                  className="h-2 w-2 rounded-xs shrink-0"
                   style={{ backgroundColor: r.color }}
                 />
                 <span className="text-text-muted flex-1 truncate">
@@ -71,9 +69,9 @@ export function BreakdownPopover({
         </div>
       )}
       {footer ? (
-        <div className="border-t border-subtle mt-1.5 pt-1 flex items-center gap-2 text-[11px]">
+        <div className="border-t border-row mt-1.5 pt-1 flex items-center gap-2 text-caption">
           <span className="h-2 w-2 shrink-0" />
-          <span className="text-text-faint flex-1">{footer.label}</span>
+          <span className="text-text-muted flex-1">{footer.label}</span>
           <span className="tabular-nums text-text w-14 text-right">
             {isPartial && footer.value <= 0 ? '—' : footer.fmt(footer.value)}
           </span>

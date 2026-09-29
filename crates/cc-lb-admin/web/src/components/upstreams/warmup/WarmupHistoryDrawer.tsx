@@ -1,4 +1,3 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { ChevronRight, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { formatRelativeUnixSeconds } from '../../../lib/format';
@@ -8,10 +7,18 @@ import {
   type WarmupAttempt,
   type WarmupAttemptStatus,
 } from '../../../lib/queries';
-import { Button, cx, EmptyState, Skeleton, Spinner } from '../../ui/primitives';
+import {
+  Button,
+  cx,
+  Drawer,
+  EmptyState,
+  IconButton,
+  SegmentedControl,
+  Skeleton,
+  Spinner,
+} from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 import { OUTCOME_LABEL, REASON_LABEL } from './parts/copy';
-import { WarmupOutcomeBadge } from './parts/WarmupOutcomeBadge';
 import {
   formatDuration,
   formatFreshnessLine,
@@ -20,6 +27,12 @@ import {
   SEVERITY_DOT_CLASS,
 } from './parts/warmupViewModel';
 
+const SEVERITY_TEXT_CLASS = {
+  ok: 'text-text',
+  neutral: 'text-text-muted',
+  warn: 'text-warn-text',
+  danger: 'text-danger-text',
+} as const;
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -82,9 +95,9 @@ function OverviewStrip({
   }
 
   return (
-    <div className="px-3 py-2.5 border-b border-subtle shrink-0">
+    <div className="px-4 py-3 border-b border-subtle shrink-0">
       <div className="flex min-h-5 items-baseline gap-2 mb-1 flex-wrap">
-        <span className="text-xs text-text-muted">
+        <span className="text-body-sm text-text-muted">
           Last {horizon === 'all' ? 'all-time' : horizon}:
         </span>
         {isPending ? (
@@ -94,10 +107,10 @@ function OverviewStrip({
           </>
         ) : (
           <>
-            <span className="text-sm font-medium text-text">
+            <span className="text-body-sm font-medium tabular-nums text-text">
               {total} attempts
             </span>
-            <span className="text-[11px] text-text-faint">
+            <span className="text-caption tabular-nums text-text-faint">
               · {counts.success} success · {failed} failed · {counts.skipped}{' '}
               skipped
             </span>
@@ -111,7 +124,7 @@ function OverviewStrip({
         {isPending ? (
           <Skeleton className="h-3 w-48" />
         ) : dominantReason && failed > 0 ? (
-          <p className="text-[11px] text-text-muted">
+          <p className="text-caption text-text-muted">
             Most common failure:{' '}
             <span className="text-text">{dominantReason}</span> ({maxCount}×)
           </p>
@@ -121,34 +134,11 @@ function OverviewStrip({
   );
 }
 
-function HorizonToggle({
-  value,
-  onChange,
-}: {
-  value: Horizon;
-  onChange: (h: Horizon) => void;
-}) {
-  const opts: Horizon[] = ['24h', '7d', 'all'];
-  return (
-    <div className="flex items-center gap-1 shrink-0">
-      {opts.map((o) => (
-        <button
-          key={o}
-          type="button"
-          onClick={() => onChange(o)}
-          className={cx(
-            'h-6 px-2 text-[11px] rounded-sm border',
-            value === o
-              ? 'bg-accent/15 border-accent/40 text-accent'
-              : 'bg-overlay-2 border-subtle text-text-muted hover:bg-overlay-4',
-          )}
-        >
-          {o === 'all' ? 'All' : o}
-        </button>
-      ))}
-    </div>
-  );
-}
+const HORIZON_OPTIONS: { value: Horizon; label: string }[] = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+  { value: 'all', label: 'All' },
+];
 
 function AttemptListSkeleton() {
   return (
@@ -159,9 +149,9 @@ function AttemptListSkeleton() {
     >
       {ATTEMPT_SKELETON_ROWS.map((row) => (
         <li data-testid="warmup-attempt-skeleton-row" key={row}>
-          <div className="w-full rounded-sm border border-subtle bg-overlay-1 px-2.5 py-1.5">
+          <div className="w-full rounded-sm px-2.5 py-1.5 max-md:py-2.5">
             <div className="flex min-h-5 items-center gap-2 flex-wrap leading-tight">
-              <Skeleton className="h-2 w-2 shrink-0 rounded-full" />
+              <Skeleton className="h-1.5 w-1.5 shrink-0 rounded-full" />
               <Skeleton className="h-3 w-16" />
               <Skeleton className="h-5 w-16 rounded-sm" />
               <Skeleton className="h-3 w-12" />
@@ -199,130 +189,116 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
   };
 
   return (
-    <BaseDialog.Root onOpenChange={handleOpenChange} open={open}>
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <BaseDialog.Popup
-          className="fixed right-0 top-0 bottom-0 w-full max-w-3xl bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full"
-          data-testid="warmup-history-drawer"
-        >
-          <BaseDialog.Title className="sr-only">
-            Warm-up history
-          </BaseDialog.Title>
-          <BaseDialog.Description className="sr-only">
-            Full list of warm-up attempts for {upstream.name}.
-          </BaseDialog.Description>
-
-          <header className="flex items-center justify-between gap-3 px-3 py-2.5 border-b border-subtle shrink-0">
-            <div className="min-w-0 flex items-center gap-3">
-              <div className="min-w-0">
-                <h3 className="text-sm font-medium text-text">
-                  Warm-up history
-                </h3>
-                <p className="text-[11px] text-text-faint font-mono truncate">
-                  {upstream.name}
-                </p>
-              </div>
-              <HorizonToggle value={horizon} onChange={setHorizon} />
-            </div>
-            <button
-              type="button"
-              onClick={() => handleOpenChange(false)}
-              aria-label="Close history"
-              className="inline-flex items-center justify-center w-7 h-7 rounded-sm text-text-muted hover:text-text hover:bg-overlay-5 shrink-0"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </header>
-
-          <OverviewStrip
-            attempts={allAttempts}
-            horizon={horizon}
-            isPending={attemptsPending}
+    <Drawer
+      open={open}
+      onOpenChange={handleOpenChange}
+      title="Warm-up history"
+      description={upstream.name}
+      width="xl"
+    >
+      <div data-testid="warmup-history-drawer" className="flex h-full flex-col">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-subtle px-4 py-2">
+          <span className="text-body-sm text-text-muted">Range</span>
+          <SegmentedControl
+            ariaLabel="History range"
+            size="sm"
+            value={horizon}
+            onChange={setHorizon}
+            options={HORIZON_OPTIONS}
           />
+        </div>
 
-          <div className="px-3 py-2 border-b border-subtle shrink-0 flex flex-wrap gap-1">
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                type="button"
-                onClick={() => setFilter(f.key)}
-                className={cx(
-                  'inline-flex items-center gap-1.5 px-2 h-6 rounded-sm text-[11px] transition-colors border',
-                  filter === f.key
-                    ? 'bg-accent/15 border-accent/40 text-accent'
-                    : 'bg-overlay-2 border-subtle text-text-muted hover:bg-overlay-4',
-                )}
-              >
-                {f.key !== 'all' && (
-                  <span
-                    className={cx(
-                      'w-1.5 h-1.5 rounded-full',
-                      SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[f.key]],
-                    )}
-                  />
-                )}
-                {f.label}
-              </button>
-            ))}
-          </div>
+        <OverviewStrip
+          attempts={allAttempts}
+          horizon={horizon}
+          isPending={attemptsPending}
+        />
 
-          <div className="flex-1 flex min-h-0">
-            <div
+        <div className="px-4 py-2 border-b border-subtle shrink-0 flex flex-wrap gap-1">
+          {FILTERS.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              aria-pressed={filter === f.key}
+              onClick={() => setFilter(f.key)}
               className={cx(
-                'overflow-y-auto p-2',
-                selected ? 'w-[44%] shrink-0 border-r border-subtle' : 'flex-1',
+                'inline-flex items-center gap-1.5 px-2 h-10 md:h-7 rounded-sm text-xs font-medium transition-colors',
+                'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+                filter === f.key
+                  ? 'bg-selected text-text'
+                  : 'text-text-muted hover:bg-hover-bg hover:text-text',
               )}
             >
-              {attemptsPending ? (
-                <AttemptListSkeleton />
-              ) : allAttempts.length === 0 ? (
-                <EmptyState
-                  title="No matching attempts"
-                  description="Try a different filter."
+              {f.key !== 'all' && (
+                <span
+                  className={cx(
+                    'status-dot',
+                    SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[f.key]],
+                  )}
                 />
-              ) : (
-                <ul className="flex flex-col gap-1">
-                  {allAttempts.map((a) => (
-                    <AttemptListRow
-                      key={a.id}
-                      attempt={a}
-                      isSelected={selected?.id === a.id}
-                      onSelect={() => setSelected(a)}
-                    />
-                  ))}
-                </ul>
               )}
-              {query.hasNextPage && (
-                <div className="flex justify-center pt-3 pb-4">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => query.fetchNextPage()}
-                    disabled={query.isFetchingNextPage}
-                    iconLeft={
-                      query.isFetchingNextPage ? <Spinner /> : undefined
-                    }
-                  >
-                    Load older
-                  </Button>
-                </div>
-              )}
-            </div>
+              {f.label}
+            </button>
+          ))}
+        </div>
 
-            {selected && (
-              <div className="flex-1 min-w-0 overflow-y-auto">
-                <AttemptDetail
-                  key={selected.id}
-                  attempt={selected}
-                  onClose={() => setSelected(null)}
-                />
+        {/* Phones show the attempt list or one attempt, never both side by
+            side: a 44% list column is too narrow to read at 390px. */}
+        <div className="flex-1 flex min-h-0">
+          <div
+            className={cx(
+              'overflow-y-auto p-2',
+              selected
+                ? 'max-md:hidden md:w-[44%] md:shrink-0 md:border-r md:border-subtle'
+                : 'flex-1',
+            )}
+          >
+            {attemptsPending ? (
+              <AttemptListSkeleton />
+            ) : allAttempts.length === 0 ? (
+              <EmptyState
+                title="No matching attempts"
+                description="Try a different filter."
+              />
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {allAttempts.map((a) => (
+                  <AttemptListRow
+                    key={a.id}
+                    attempt={a}
+                    isSelected={selected?.id === a.id}
+                    onSelect={() => setSelected(a)}
+                  />
+                ))}
+              </ul>
+            )}
+            {query.hasNextPage && (
+              <div className="flex justify-center pt-3 pb-4">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => query.fetchNextPage()}
+                  disabled={query.isFetchingNextPage}
+                  iconLeft={query.isFetchingNextPage ? <Spinner /> : undefined}
+                >
+                  Load older
+                </Button>
               </div>
             )}
           </div>
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+
+          {selected && (
+            <div className="flex-1 min-w-0 overflow-y-auto">
+              <AttemptDetail
+                key={selected.id}
+                attempt={selected}
+                onClose={() => setSelected(null)}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </Drawer>
   );
 }
 
@@ -341,38 +317,42 @@ function AttemptListRow({
         type="button"
         onClick={onSelect}
         className={cx(
-          'w-full text-left rounded-sm border px-2.5 py-1.5 transition-colors',
-          isSelected
-            ? 'bg-accent/10 border-accent/40'
-            : 'bg-overlay-1 border-subtle hover:bg-overlay-3',
+          'w-full text-left rounded-sm px-2.5 py-1.5 max-md:py-2.5 transition-colors focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+          isSelected ? 'bg-selected' : 'hover:bg-overlay-2',
         )}
+        aria-current={isSelected ? 'true' : undefined}
       >
         <div className="flex items-center gap-2 flex-wrap leading-tight">
           <span
             className={cx(
-              'w-2 h-2 rounded-full shrink-0',
+              'status-dot shrink-0',
               SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[attempt.status]],
             )}
             aria-hidden
           />
-          <span className="text-xs text-text">
+          <span
+            className={cx(
+              'text-body-sm font-medium',
+              SEVERITY_TEXT_CLASS[OUTCOME_SEVERITY[attempt.status]],
+            )}
+          >
+            {OUTCOME_LABEL[attempt.status]}
+          </span>
+          <span className="text-caption text-text-faint">
             <RelativeTime
               ts={formatRelativeUnixSeconds(attempt.attempted_at_unix_secs)}
             />
           </span>
-          <WarmupOutcomeBadge outcome={attempt.status} />
           {attempt.trigger === 'manual' && (
-            <span className="text-[10px] uppercase tracking-wider text-accent font-mono">
-              manual
-            </span>
+            <span className="text-caption text-text-faint">· Manual</span>
           )}
           {attempt.http_status != null && (
-            <span className="text-[10px] text-text-faint font-mono">
-              HTTP {attempt.http_status}
+            <span className="text-caption tabular-nums text-text-faint">
+              · HTTP {attempt.http_status}
             </span>
           )}
         </div>
-        <p className="text-[11px] text-text-muted mt-0.5 truncate">
+        <p className="text-caption text-text-muted mt-0.5 truncate pl-3.5">
           {attempt.reason
             ? REASON_LABEL[attempt.reason]
             : attempt.status === 'success'
@@ -409,38 +389,30 @@ function AttemptDetail({
   const lateBy = sched ? attempt.attempted_at_unix_secs - sched : null;
 
   return (
-    <div className="flex flex-col gap-3 p-3">
-      <div className="flex items-start justify-between gap-2 sticky top-0 bg-bg-sub -m-3 mb-0 px-3 py-2 border-b border-subtle z-10">
-        <h4 className="text-sm font-medium text-text">Attempt detail</h4>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-text-faint hover:text-text text-xs inline-flex items-center gap-1"
-        >
-          Close ▶
-        </button>
+    <div className="flex flex-col gap-4 p-4">
+      <div className="flex items-center justify-between gap-2 sticky top-0 bg-bg-sub -m-4 mb-0 px-4 py-2 border-b border-subtle z-10">
+        <h3 className="text-title-card text-text">Attempt detail</h3>
+        <IconButton label="Close attempt detail" onClick={onClose}>
+          <X aria-hidden="true" strokeWidth={1.75} />
+        </IconButton>
       </div>
 
       {/* Tier 1: narrative */}
       <div className="space-y-1">
-        <p className="text-sm text-text leading-snug">
-          {formatResultNarrative(attempt)}.
-        </p>
-        <p className="text-[12px] text-text-muted leading-snug">
+        <p className="text-body text-text">{formatResultNarrative(attempt)}.</p>
+        <p className="text-body-sm text-text-muted">
           {formatFreshnessLine(attempt)}
         </p>
         {attempt.error_detail && (
-          <p className="text-[11px] text-text-faint mt-1 font-mono break-words leading-snug bg-bg/40 border border-subtle rounded-sm px-2 py-1">
+          <p className="mt-2 rounded-sm bg-overlay-2 px-2.5 py-1.5 font-mono text-data break-words text-text-muted">
             {attempt.error_detail}
           </p>
         )}
       </div>
 
       {/* Tier 2: 5 secondary fields */}
-      <dl className="grid grid-cols-[96px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[12px]">
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
-          Trigger
-        </dt>
+      <dl className="grid grid-cols-[96px_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2 text-body-sm">
+        <dt className="text-label text-text-faint">Trigger</dt>
         <dd className="text-text">
           {attempt.trigger === 'manual' ? 'Manual fire-now' : 'Scheduled'}
           {attempt.trigger === 'scheduled' && lateBy != null && lateBy > 60 && (
@@ -451,23 +423,21 @@ function AttemptDetail({
           )}
         </dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
-          Duration
-        </dt>
+        <dt className="text-label text-text-faint">Duration</dt>
         <dd className="text-text">
           {duration != null && duration > 0 ? formatDuration(duration) : '—'}
         </dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
-          Dispatch
-        </dt>
-        <dd className="text-text">{attempt.dispatch_kind ?? '—'}</dd>
+        <dt className="text-label text-text-faint">Dispatch</dt>
+        <dd className="font-mono text-data text-text">
+          {attempt.dispatch_kind ?? '—'}
+        </dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">HTTP</dt>
-        <dd className="text-text">{attempt.http_status ?? '—'}</dd>
+        <dt className="text-label text-text-faint">HTTP</dt>
+        <dd className="tabular-nums text-text">{attempt.http_status ?? '—'}</dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">Cycle</dt>
-        <dd className="text-text font-mono text-[11px] break-all">
+        <dt className="text-label text-text-faint">Cycle</dt>
+        <dd className="text-text font-mono text-data break-all">
           {attempt.cycle_key != null ? attempt.cycle_key : '—'}
           {attempt.expected_cycle_key != null &&
             attempt.cycle_key !== attempt.expected_cycle_key && (
@@ -478,10 +448,8 @@ function AttemptDetail({
             )}
         </dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
-          Replica
-        </dt>
-        <dd className="text-text font-mono text-[11px] break-all">
+        <dt className="text-label text-text-faint">Replica</dt>
+        <dd className="text-text font-mono text-data break-all">
           {attempt.replica_id ?? '—'}
           {attempt.lease_holder &&
             attempt.lease_holder !== attempt.replica_id && (
@@ -492,10 +460,8 @@ function AttemptDetail({
             )}
         </dd>
 
-        <dt className="text-[10px] uppercase text-text-faint pt-0.5">
-          Spec rev
-        </dt>
-        <dd className="text-text font-mono text-[11px]">
+        <dt className="text-label text-text-faint">Spec revision</dt>
+        <dd className="tabular-nums text-text">
           {attempt.upstream_spec_revision ?? '—'}
         </dd>
       </dl>
@@ -506,18 +472,19 @@ function AttemptDetail({
           <button
             type="button"
             onClick={() => setPluginOpen((v) => !v)}
-            className="text-[11px] text-text-faint hover:text-text inline-flex items-center gap-1"
+            aria-expanded={pluginOpen}
+            className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
           >
             <ChevronRight
               className={cx(
-                'w-3 h-3 transition-transform',
+                'size-3 transition-transform',
                 pluginOpen && 'rotate-90',
               )}
             />
             Shape plugin snapshot at attempt time
           </button>
           {pluginOpen && (
-            <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap break-all bg-bg border border-subtle rounded-sm p-2 max-h-56 overflow-y-auto">
+            <pre className="mt-2 max-h-56 overflow-y-auto whitespace-pre-wrap break-all rounded-sm bg-overlay-2 p-2.5 font-mono text-data">
               {pluginJson}
             </pre>
           )}
@@ -529,18 +496,19 @@ function AttemptDetail({
         <button
           type="button"
           onClick={() => setRawOpen((v) => !v)}
-          className="text-[11px] text-text-faint hover:text-text inline-flex items-center gap-1"
+          aria-expanded={rawOpen}
+          className="inline-flex items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
         >
           <ChevronRight
             className={cx(
-              'w-3 h-3 transition-transform',
+              'size-3 transition-transform',
               rawOpen && 'rotate-90',
             )}
           />
           Raw attempt record
         </button>
         {rawOpen && (
-          <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap break-all bg-bg border border-subtle rounded-sm p-2 max-h-72 overflow-y-auto">
+          <pre className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-sm bg-overlay-2 p-2.5 font-mono text-data">
             {rawJson}
           </pre>
         )}

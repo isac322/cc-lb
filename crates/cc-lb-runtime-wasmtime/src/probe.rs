@@ -4,24 +4,22 @@ use cc_lb_plugin_wire::metadata::{HookMode, PluginMetadata};
 use cc_lb_plugin_wire::schema::{HookKind, WireVersion};
 use cc_lb_plugin_wire::v1::{
     ArchivedShapeResponse, ArchivedTransformResponseResult, ArchivedTransformSseEventResult,
-    Header, ObserveEvent, Principal, ShapeRequest, SseEvent, TransformResponseRequest,
-    TransformSseEventRequest, Upstream,
+    Header, Principal, ShapeRequest, SseEvent, TransformResponseRequest, TransformSseEventRequest,
+    Upstream,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
 use wasmtime::InstancePre;
 
 use crate::budget::StoreBudget;
-use crate::cache::{
-    call_observe_hook, call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook,
-};
+use crate::cache::{call_shape_hook, call_transform_response_hook, call_transform_sse_event_hook};
 use crate::cell::PluginCell;
 use crate::engine::HostState;
 use crate::error::WasmtimeRuntimeError;
 
 mod filter;
 
-use filter::probe_filter_v1;
+use filter::probe_filter;
 
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
@@ -42,7 +40,6 @@ pub(crate) fn probe_hook_dispatch(
     }
 
     let cell = Arc::new(PluginCell {
-        version_id: 0,
         instance_pre,
         metadata: metadata.clone(),
         memory_max_pages,
@@ -51,9 +48,8 @@ pub(crate) fn probe_hook_dispatch(
         content_hash: [0; 32],
     });
     match (hook, wire_version) {
-        (HookKind::Filter, WireVersion::V1) => probe_filter_v1(&cell),
+        (HookKind::Filter, WireVersion::V1) => probe_filter(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
-        (HookKind::Observe, WireVersion::V1) => probe_observe_v1(&cell),
         (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
         (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
     }
@@ -68,15 +64,6 @@ fn probe_shape_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
     aligned.extend_from_slice(&output);
     rkyv::access::<ArchivedShapeResponse, RkyvError>(&aligned)
         .map_err(|error| probe_failed(HookKind::Shape, format!("decode ShapeResponse: {error}")))?;
-    Ok(())
-}
-
-fn probe_observe_v1(cell: &Arc<PluginCell>) -> Result<(), WasmtimeRuntimeError> {
-    let input = rkyv::to_bytes::<RkyvError>(&sample_observe_event()).map_err(|error| {
-        probe_failed(HookKind::Observe, format!("encode ObserveEvent: {error}"))
-    })?;
-    call_observe_hook(cell, input.as_slice())
-        .map_err(|error| probe_failed(HookKind::Observe, error.to_string()))?;
     Ok(())
 }
 
@@ -130,13 +117,6 @@ fn sample_shape_request() -> ShapeRequest {
         upstream: Upstream::AnthropicDirect {
             base_url: Some(Box::from("https://example.test")),
         },
-    }
-}
-
-fn sample_observe_event() -> ObserveEvent {
-    ObserveEvent::RequestStarted {
-        request_id: Box::from("probe-req-1"),
-        downstream_user_agent: Some(Box::from("cc-lb-probe/1.0")),
     }
 }
 

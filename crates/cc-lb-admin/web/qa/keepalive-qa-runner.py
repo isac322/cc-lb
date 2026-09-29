@@ -726,8 +726,6 @@ def principal_rows(anchor_ms: int) -> list[dict[str, Any]]:
         )
     return rows
 
-LEGACY_MANAGED_KEY_KIND_COLUMNS = {"principal_kind", "upstream_kind"}
-
 
 def assert_sqlite_target(path: Path) -> sqlite3.Connection:
     resolved = path.expanduser().resolve()
@@ -757,17 +755,6 @@ def assert_sqlite_target(path: Path) -> sqlite3.Connection:
         connection.close()
         raise HarnessError(
             f"SQLite schema is not current; missing tables: {', '.join(missing)}"
-        )
-    managed_key_columns = {
-        row[1] for row in connection.execute("PRAGMA table_info(managed_keys_v1)")
-    }
-    legacy = sorted(LEGACY_MANAGED_KEY_KIND_COLUMNS & managed_key_columns)
-    if legacy:
-        connection.close()
-        raise HarnessError(
-            "SQLite schema still has removed managed_keys_v1 columns "
-            f"({', '.join(legacy)}); apply migration "
-            "0085_drop_managed_key_kind_columns"
         )
     return connection
 
@@ -838,7 +825,7 @@ def sqlite_seed(args: argparse.Namespace, sessions: Sequence[SessionRow], decisi
             (UPSTREAM_ID, "qa-loopback-upstream", "anthropic_api_key", args.fake_upstream_url, 1, 0, None, 1, now_s, now_s),
         )
         connection.executemany(
-            "INSERT INTO principals_v1 (id,name,kind,enabled,allowed_models,allowed_upstreams,default_limits,router_terminal_strategy,revision,created_at,updated_at,last_apply_error,last_apply_at,deleted_at,cache_keepalive_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?)",
+            "INSERT INTO principals_v1 (id,name,kind,enabled,allowed_models,allowed_upstreams,default_limits,router_terminal_strategy,revision,created_at,updated_at,deleted_at,cache_keepalive_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
             [
                 (
                     row["id"], row["name"], row["kind"], int(row["enabled"]),
@@ -920,19 +907,6 @@ def postgres_seed(args: argparse.Namespace, sessions: Sequence[SessionRow], deci
     ).stdout.strip()
     if table_check != "6":
         raise HarnessError("PostgreSQL schema must already have current cc-lb migrations")
-    legacy_check = pg_command(
-        container,
-        database,
-        "SELECT COUNT(*) FROM information_schema.columns "
-        "WHERE table_schema='public' "
-        "AND table_name='managed_api_keys_v1' "
-        "AND column_name IN ('principal_kind','upstream_kind');",
-    ).stdout.strip()
-    if legacy_check != "0":
-        raise HarnessError(
-            "PostgreSQL schema still has removed managed_api_keys_v1 columns; "
-            "apply migration 0117_drop_managed_key_kind_columns"
-        )
     ids = ",".join(pg_quote(value) + "::uuid" for value in PRINCIPALS.values())
     total_existing = pg_command(
         container,
@@ -969,13 +943,13 @@ def postgres_seed(args: argparse.Namespace, sessions: Sequence[SessionRow], deci
                     pg_quote(row["id"]) + "::uuid", pg_quote(row["name"]), pg_quote(row["kind"]),
                     pg_quote(json.dumps(row["allowed_models"], separators=(",", ":"))) + "::jsonb",
                     "ARRAY[" + pg_quote(UPSTREAM_ID) + "::uuid]", "'[]'::jsonb", pg_quote(row["enabled"]),
-                    "NULL", "NULL", "NULL", str(row["revision"]), pg_quote(now) + "::timestamptz",
+                    "NULL", str(row["revision"]), pg_quote(now) + "::timestamptz",
                     pg_quote(now) + "::timestamptz", pg_quote(row["router_terminal_strategy"]),
                     pg_quote(json.dumps(row["cache_keepalive"], separators=(",", ":"), sort_keys=True)) + "::jsonb",
                 ]
             ) + ")"
         )
-    statements.append("INSERT INTO principals_v1 (id,name,kind,allowed_models,allowed_upstreams,default_limits,enabled,last_apply_error,last_apply_at,deleted_at,revision,created_at,updated_at,router_terminal_strategy,cache_keepalive) VALUES " + ",".join(principal_values) + ";\n")
+    statements.append("INSERT INTO principals_v1 (id,name,kind,allowed_models,allowed_upstreams,default_limits,enabled,deleted_at,revision,created_at,updated_at,router_terminal_strategy,cache_keepalive) VALUES " + ",".join(principal_values) + ";\n")
     session_columns = list(SessionRow.__dataclass_fields__)
     decision_columns = list(DecisionRow.__dataclass_fields__)
     turn_columns = list(TurnRow.__dataclass_fields__)

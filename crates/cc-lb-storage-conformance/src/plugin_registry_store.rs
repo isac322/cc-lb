@@ -18,10 +18,6 @@ use uuid::Uuid;
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
 const BASE_TS: u64 = 1_900_000_000;
-const REFCOUNT_CONCURRENCY_PLUGIN_COUNT: usize = 5;
-const REFCOUNT_CONCURRENCY_INITIAL_CHAINS: usize = 3;
-const REFCOUNT_CONCURRENCY_TASKS: usize = 8;
-const REFCOUNT_CONCURRENCY_OPS_PER_TASK: usize = 16;
 
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
@@ -42,7 +38,6 @@ where
     persist_wasm_upload_idempotent_on_same_entry_input(storage).await?;
     persist_wasm_upload_rollback_on_registry_conflict(storage).await?;
     persist_wasm_upload_rejects_oversize(storage).await?;
-    persist_wasm_upload_records_parse_validated_at(storage).await?;
     get_blob_bytes_returns_persisted_blob(storage).await?;
     registry_list_paginates(storage).await?;
     get_registry_entry_by_sha_returns_entry(storage).await?;
@@ -64,7 +59,6 @@ where
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
     router_reorder_preserves_invariants_on_storage(storage).await?;
     shape_singleton_preserved_on_storage(storage).await?;
-    insert_chain_entry_allows_multi_for_observability_hook_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
     update_chain_entry_bumps_revision(storage).await?;
     update_chain_entry_stale_revision_conflicts(storage).await?;
@@ -264,16 +258,6 @@ pub async fn persist_wasm_upload_rejects_oversize<S: PluginRegistryStore>(
         ),
         "oversize should reject"
     );
-    Ok(())
-}
-
-pub async fn persist_wasm_upload_records_parse_validated_at<S: PluginRegistryStore>(
-    storage: &S,
-) -> Result<()> {
-    let (uploaded, _) = storage
-        .persist_wasm_upload(blob(6, b"valid".to_vec()), entry("plugin-validated"))
-        .await?;
-    ensure!(uploaded.uploaded_at_unix_secs > 0, "uploaded time recorded");
     Ok(())
 }
 
@@ -681,7 +665,7 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + Princi
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -689,15 +673,22 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + Princi
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
+        .list_chain_for_principal(principal, PluginSlotKind::Router)
         .await?;
-    ensure!(listed[0].order < listed[1].order, "chain list is ordered");
+    let custom_entries: Vec<_> = listed
+        .iter()
+        .filter(|entry| entry.wasm_registry_id == plugin.id)
+        .collect();
+    ensure!(
+        custom_entries[0].order < custom_entries[1].order,
+        "chain list is ordered"
+    );
     Ok(())
 }
 
@@ -708,7 +699,7 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -716,16 +707,26 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             sparse_order::STEP,
         ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
+        .list_chain_for_principal(principal, PluginSlotKind::Router)
         .await?;
-    ensure!(listed.len() == 2, "chain list includes both entries");
-    ensure!(listed[0].order < listed[1].order, "chain list is ordered");
+    let custom_entries: Vec<_> = listed
+        .iter()
+        .filter(|entry| entry.wasm_registry_id == plugin.id)
+        .collect();
+    ensure!(
+        custom_entries.len() == 2,
+        "chain list includes both entries"
+    );
+    ensure!(
+        custom_entries[0].order < custom_entries[1].order,
+        "chain list is ordered"
+    );
     Ok(())
 }
 
@@ -744,7 +745,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let first_late = storage
         .insert_chain_entry(chain_with_slot(
             first_principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             first_plugin.id,
             sparse_order::STEP * 2,
         ))
@@ -752,7 +753,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let first_early = storage
         .insert_chain_entry(chain_with_slot(
             first_principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             first_plugin.id,
             sparse_order::STEP,
         ))
@@ -777,7 +778,7 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
     let listed = storage
         .list_chains_for_principals(
             &[first_principal, second_principal],
-            &[PluginSlotKind::ObservabilityHook, PluginSlotKind::Router],
+            &[PluginSlotKind::Router],
         )
         .await?;
 
@@ -791,10 +792,16 @@ pub async fn list_chains_for_principals_returns_ordered_and_filtered<
                     .push(entry.id);
                 groups
             });
+    let first_custom_entries: Vec<_> = actual_groups
+        .get(&(first_principal, PluginSlotKind::Router))
+        .into_iter()
+        .flatten()
+        .copied()
+        .filter(|id| *id == first_early.id || *id == first_late.id)
+        .collect();
     ensure!(
-        actual_groups.get(&(first_principal, PluginSlotKind::ObservabilityHook))
-            == Some(&vec![first_early.id, first_late.id]),
-        "batched chain list orders observability entries"
+        first_custom_entries == vec![first_early.id, first_late.id],
+        "batched chain list orders router entries"
     );
     ensure!(
         actual_groups
@@ -1005,43 +1012,6 @@ async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
     Ok(())
 }
 
-plugin_registry_scenario!(
-    insert_chain_entry_allows_multi_for_observability_hook,
-    insert_chain_entry_allows_multi_for_observability_hook_on_storage
-);
-
-async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
-    storage: &S,
-) -> Result<()> {
-    let (principal, plugin) = principal_and_plugin(storage, 39, "plugin-hook-multi").await?;
-    storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlotKind::ObservabilityHook,
-            plugin.id,
-            sparse_order::STEP,
-        ))
-        .await?;
-    storage
-        .insert_chain_entry(chain_with_slot(
-            principal,
-            PluginSlotKind::ObservabilityHook,
-            plugin.id,
-            sparse_order::STEP * 2,
-        ))
-        .await?;
-    let listed = storage
-        .list_chain_for_principal(principal, PluginSlotKind::ObservabilityHook)
-        .await?;
-    ensure!(
-        listed.len() == 2,
-        "observability hook allows multiple entries"
-    );
-    Ok(())
-}
-
 pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
@@ -1060,146 +1030,6 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + Princip
     Ok(())
 }
 
-pub async fn refcount_under_concurrency<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: PluginRegistryStore + PrincipalStore,
-{
-    with_conformance_fixture(backend, |storage| async move {
-        refcount_under_concurrency_on_storage(storage).await
-    })
-    .await
-}
-
-async fn refcount_under_concurrency_on_storage<S>(storage: Arc<S>) -> Result<()>
-where
-    S: PluginRegistryStore + PrincipalStore + 'static,
-{
-    let mut registry_ids = Vec::with_capacity(REFCOUNT_CONCURRENCY_PLUGIN_COUNT);
-    let mut principal_ids =
-        Vec::with_capacity(REFCOUNT_CONCURRENCY_PLUGIN_COUNT + REFCOUNT_CONCURRENCY_TASKS);
-
-    for plugin_index in 0..REFCOUNT_CONCURRENCY_PLUGIN_COUNT {
-        let seed = 80 + plugin_index as u8;
-        let principal = PrincipalStore::create(
-            storage.as_ref(),
-            principal_create(seed),
-            BASE_TS + seed as u64,
-        )
-        .await?;
-        let (plugin, _) = storage
-            .persist_wasm_upload(
-                blob(seed, vec![seed]),
-                entry(&format!("plugin-ref-concurrent-{plugin_index}")),
-            )
-            .await?;
-
-        principal_ids.push(principal.id);
-        registry_ids.push(plugin.id);
-
-        for chain_index in 0..REFCOUNT_CONCURRENCY_INITIAL_CHAINS {
-            storage
-                .insert_chain_entry(chain_with_slot(
-                    principal.id,
-                    PluginSlotKind::ObservabilityHook,
-                    plugin.id,
-                    sparse_order::STEP * (chain_index as i64 + 1),
-                ))
-                .await?;
-        }
-    }
-
-    let task_principal_offset = principal_ids.len();
-    for task_index in 0..REFCOUNT_CONCURRENCY_TASKS {
-        let seed = 90 + task_index as u8;
-        let principal = PrincipalStore::create(
-            storage.as_ref(),
-            principal_create(seed),
-            BASE_TS + seed as u64,
-        )
-        .await?;
-        principal_ids.push(principal.id);
-    }
-
-    let mut handles = Vec::with_capacity(REFCOUNT_CONCURRENCY_TASKS);
-    for task_index in 0..REFCOUNT_CONCURRENCY_TASKS {
-        let task_storage = Arc::clone(&storage);
-        let task_registry_ids = registry_ids.clone();
-        let task_principal_id = principal_ids[task_principal_offset + task_index];
-        handles.push(tokio::spawn(async move {
-            for op_index in 0..REFCOUNT_CONCURRENCY_OPS_PER_TASK {
-                let plugin_index =
-                    pseudo_random_index(task_index, op_index, REFCOUNT_CONCURRENCY_PLUGIN_COUNT);
-                let order = sparse_order::STEP
-                    * (100 + (task_index * REFCOUNT_CONCURRENCY_OPS_PER_TASK + op_index) as i64);
-                let inserted = task_storage
-                    .insert_chain_entry(chain_with_slot(
-                        task_principal_id,
-                        PluginSlotKind::ObservabilityHook,
-                        task_registry_ids[plugin_index],
-                        order,
-                    ))
-                    .await?;
-                ensure!(
-                    task_storage
-                        .delete_chain_entry(inserted.id, inserted.revision)
-                        .await?
-                        .is_some(),
-                    "concurrent chain delete returns the just-inserted entry"
-                );
-            }
-            Ok::<(), anyhow::Error>(())
-        }));
-    }
-
-    for handle in handles {
-        handle.await??;
-    }
-
-    let listed = storage.list_registry(None, 100).await?;
-    for registry_id in registry_ids {
-        let reported = listed
-            .iter()
-            .find(|entry| entry.id == registry_id)
-            .map(|entry| entry.refcount);
-        let expected =
-            control_refcount_from_chains(storage.as_ref(), &principal_ids, registry_id).await?;
-        ensure!(
-            reported == Some(expected),
-            "registry refcount should match chain reference count for {registry_id}: reported={reported:?}, expected={expected}"
-        );
-    }
-
-    Ok(())
-}
-
-fn pseudo_random_index(task_index: usize, op_index: usize, len: usize) -> usize {
-    (task_index.wrapping_mul(17) + op_index.wrapping_mul(31) + 7) % len
-}
-
-async fn control_refcount_from_chains<S: PluginRegistryStore>(
-    storage: &S,
-    principal_ids: &[Uuid],
-    registry_id: Uuid,
-) -> Result<i64> {
-    let mut refcount = 0;
-    for principal_id in principal_ids {
-        for slot in [
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ] {
-            refcount += storage
-                .list_chain_for_principal(*principal_id, slot)
-                .await?
-                .into_iter()
-                .filter(|entry| entry.wasm_registry_id == registry_id)
-                .count() as i64;
-        }
-    }
-    Ok(refcount)
-}
-
 pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
@@ -1210,7 +1040,6 @@ pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + Principa
             created.revision,
             PluginChainEntryUpdate {
                 config: Some(json!({"x": 1})),
-                ..Default::default()
             },
         )
         .await?
@@ -1230,8 +1059,7 @@ pub async fn update_chain_entry_stale_revision_conflicts<
             created.id,
             created.revision + 1,
             PluginChainEntryUpdate {
-                sse_per_event: Some(true),
-                ..PluginChainEntryUpdate::default()
+                config: Some(json!({"x": 1})),
             },
         )
         .await
@@ -1670,7 +1498,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             100,
         ))
@@ -1678,7 +1506,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let second = storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             200,
         ))
@@ -1686,7 +1514,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     storage
         .insert_chain_entry(chain_with_slot(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             plugin.id,
             300,
         ))
@@ -1695,7 +1523,7 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
     let err = storage
         .reorder_chain(
             principal,
-            PluginSlotKind::ObservabilityHook,
+            PluginSlotKind::Router,
             vec![(second.id, first.order - 1, second.revision)],
         )
         .await
@@ -1829,7 +1657,7 @@ async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
         if let Some(postgres) = (storage as &dyn std::any::Any)
             .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
-            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, NOW(), NOW()) ON CONFLICT (sha256) DO NOTHING")
+            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (sha256) DO NOTHING")
                 .bind(blob.sha256.as_slice())
                 .bind(blob.bytes.as_slice())
                 .bind(i64::try_from(blob.size_bytes)?)
@@ -1939,13 +1767,11 @@ fn blob(seed: u8, bytes: Vec<u8>) -> WasmBlob {
         sha256: [seed; 32],
         size_bytes: bytes.len() as u64,
         bytes,
-        parse_validated_at_unix_secs: 1_800_000_000 + seed as u64,
     }
 }
 
 fn entry(name: &str) -> WasmRegistryEntryInput {
     WasmRegistryEntryInput {
-        schema_hash: None,
         name: name.to_owned(),
         version: None,
         original_filename: format!("{name}.wasm"),
@@ -1980,9 +1806,6 @@ fn chain_with_slot(
         order,
         wasm_registry_id,
         config: json!({}),
-        sse_per_event: false,
-        batched_events_per_flush: 1,
-        batched_flush_ms: 100,
     }
 }
 
@@ -2007,7 +1830,7 @@ fn filter_hook_metadata() -> BTreeMap<String, HookMetadata> {
             wire_version: default_wire_version(),
             description: "filter hook".to_owned(),
             usage: "called by router".to_owned(),
-            mode: Default::default(),
+            mode: cc_lb_plugin_wire::metadata::HookMode::Active,
         },
     )])
 }

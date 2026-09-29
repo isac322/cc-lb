@@ -14,8 +14,8 @@ use cc_lb_upstream::SignedRequest;
 use http::StatusCode;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState,
-    collect_body, lifecycle_with_parts, messages_request,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
+    lifecycle_with_parts, messages_request,
 };
 
 const FIRST_ATTEMPT_DELAY_MS: u64 = 8;
@@ -50,7 +50,6 @@ impl UpstreamDispatch for TimedDispatch {
 #[tokio::test]
 async fn unauthorized_refresh_retries_once_then_succeeds() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(32);
     let dispatcher = MockDispatch {
@@ -62,9 +61,6 @@ async fn unauthorized_refresh_retries_once_then_succeeds() {
     };
     let lifecycle = lifecycle_with_parts(
         TestAuthn::new(state.clone()),
-        Arc::new(TestRouter {
-            base_url: url::Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         Arc::new(TimedDispatch {
             inner: dispatcher,
             attempts: Arc::new(Mutex::new(VecDeque::from([
@@ -72,7 +68,6 @@ async fn unauthorized_refresh_retries_once_then_succeeds() {
                 Duration::ZERO,
             ]))),
         }),
-        vec![hook],
         LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc());

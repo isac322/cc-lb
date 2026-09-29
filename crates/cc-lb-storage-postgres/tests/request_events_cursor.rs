@@ -9,15 +9,15 @@ use chrono::{DateTime, Utc};
 use anyhow::{Context, Result, ensure};
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind,
-    RequestEventListQuery, RequestEventStore, RequestEventStreamFilters, RequestEventUpstream,
+    MetaStore, RequestEvent, RequestEventHistogramQuery, RequestEventKind, RequestEventListQuery,
+    RequestEventStore, RequestEventStreamFilters,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-const FALLBACK_TS_SECS: u64 = 1_800_000_000;
-const TIED_TS_SECS: u64 = FALLBACK_TS_SECS + 1;
+const BASE_TS_SECS: u64 = 1_800_000_000;
+const TIED_TS_SECS: u64 = BASE_TS_SECS + 1;
 const TIED_TS_MS: u64 = TIED_TS_SECS * 1_000 + 777;
 const CURRENT_REQUEST_EVENT_CURSOR_SQL: &str =
     include_str!("../src/adapter/current_request_event_cursor.sql");
@@ -102,64 +102,58 @@ const UUID_PRINCIPAL_COST_PLAN_SQL: &str =
     include_str!("../src/adapter/request_event_principal_cost_uuid.sql");
 const FILTERED_UUID_PRINCIPAL_COST_PLAN_SQL: &str =
     include_str!("../src/adapter/request_event_principal_cost_uuid_filtered.sql");
-const NORMALIZED_PRINCIPAL_COST_PLAN_SQL: &str =
-    include_str!("../src/adapter/request_event_principal_cost_normalized.sql");
-const FILTERED_NORMALIZED_PRINCIPAL_COST_PLAN_SQL: &str =
-    include_str!("../src/adapter/request_event_principal_cost_normalized_filtered.sql");
+const NULL_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_null.sql");
+const FILTERED_NULL_PRINCIPAL_COST_PLAN_SQL: &str =
+    include_str!("../src/adapter/request_event_principal_cost_null_filtered.sql");
 
 async fn explain_principal_cost_shape(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     sql: &'static str,
     range_start_ms: i64,
     range_end_ms: i64,
-    principal_keys: &Vec<String>,
+    upstream_id: Option<Uuid>,
+    principal_keys: Option<&Vec<String>>,
 ) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+    let mut query = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
         "EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF, SUMMARY OFF) {sql}"
     )))
     .bind(range_start_ms)
     .bind(60_000_i64)
-    .bind(range_end_ms)
-    .bind(principal_keys)
-    .fetch_all(&mut **tx)
-    .await?)
-}
-
-async fn explain_filtered_principal_cost_shape(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    sql: &'static str,
-    range_start_ms: i64,
-    range_end_ms: i64,
-    upstream_id: Uuid,
-    principal_keys: &Vec<String>,
-) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
-        "EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF, TIMING OFF, SUMMARY OFF) {sql}"
-    )))
-    .bind(range_start_ms)
-    .bind(60_000_i64)
-    .bind(range_end_ms)
-    .bind(upstream_id)
-    .bind(principal_keys)
-    .fetch_all(&mut **tx)
-    .await?)
+    .bind(range_end_ms);
+    if let Some(upstream_id) = upstream_id {
+        query = query.bind(upstream_id);
+    }
+    if let Some(principal_keys) = principal_keys {
+        query = query.bind(principal_keys);
+    }
+    Ok(query.fetch_all(&mut **tx).await?)
 }
 
 async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let upstream_id = Uuid::from_u128(0x51);
     let uuid_principal = upstream_id.to_string();
+    let other_uuid_principal = Uuid::from_u128(0x52).to_string();
+    // Interleave a second canonical principal with the selected one, as
+    // production traffic does. With only the selected UUID and NULL rows,
+    // principal_id correlation is 1.0 and a heap-fetching scan of
+    // request_events_v1_principal_key_ts_idx outcosts the covering index
+    // whenever a concurrent snapshot keeps VACUUM from setting all-visible.
     for index in 0..128_u64 {
-        for (suffix, principal_id) in [("uuid", uuid_principal.as_str()), ("normalized", "team A")]
-        {
+        for (suffix, principal_id) in [
+            ("uuid", Some(uuid_principal.as_str())),
+            ("other-uuid", Some(other_uuid_principal.as_str())),
+            ("null", None),
+        ] {
             storage
                 .append_request_event(&RequestEvent {
-                    ts: FALLBACK_TS_SECS + index % 120,
+                    ts: BASE_TS_SECS + index % 120,
+                    ts_ms: Some((BASE_TS_SECS + index % 120) * 1_000),
                     request_id: format!("principal-plan-{suffix}-request-{index}"),
                     event_id: Some(format!("principal-plan-{suffix}-event-{index}")),
-                    principal_id: Some(principal_id.to_owned()),
-                    upstream: Some(RequestEventUpstream::AnthropicDirect),
+                    principal_id: principal_id.map(ToOwned::to_owned),
                     upstream_id: Some(upstream_id),
                     status: 200,
                     cost_usd_micros: Some(11),
@@ -174,10 +168,9 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
         .execute(pool)
         .await?;
 
-    let range_start_ms = (FALLBACK_TS_SECS * 1_000) as i64;
-    let range_end_ms = ((FALLBACK_TS_SECS + 120) * 1_000) as i64;
+    let range_start_ms = (BASE_TS_SECS * 1_000) as i64;
+    let range_end_ms = ((BASE_TS_SECS + 120) * 1_000) as i64;
     let uuid_keys = vec![uuid_principal];
-    let normalized_keys = vec!["team_A".to_owned()];
     let mut tx = pool.begin().await?;
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *tx)
@@ -197,7 +190,8 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
                 UUID_PRINCIPAL_COST_PLAN_SQL,
                 range_start_ms,
                 range_end_ms,
-                &uuid_keys,
+                None,
+                Some(&uuid_keys),
             )
             .await?,
             &[
@@ -207,47 +201,45 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
         ),
         (
             "filtered UUID",
-            explain_filtered_principal_cost_shape(
+            explain_principal_cost_shape(
                 &mut tx,
                 FILTERED_UUID_PRINCIPAL_COST_PLAN_SQL,
                 range_start_ms,
                 range_end_ms,
-                upstream_id,
-                &uuid_keys,
+                Some(upstream_id),
+                Some(&uuid_keys),
             )
             .await?,
             &["request_events_v1_upstream_id_idx"][..],
         ),
         (
-            "unfiltered normalized",
+            "unfiltered NULL principal",
             explain_principal_cost_shape(
                 &mut tx,
-                NORMALIZED_PRINCIPAL_COST_PLAN_SQL,
+                NULL_PRINCIPAL_COST_PLAN_SQL,
                 range_start_ms,
                 range_end_ms,
-                &normalized_keys,
+                None,
+                None,
             )
             .await?,
             &[
-                "request_events_v1_normalized_non_uuid_principal_cost_idx",
+                "request_events_v1_principal_list_order_idx",
                 "request_events_v1_upstream_id_idx",
             ][..],
         ),
         (
-            "filtered normalized",
-            explain_filtered_principal_cost_shape(
+            "filtered NULL principal",
+            explain_principal_cost_shape(
                 &mut tx,
-                FILTERED_NORMALIZED_PRINCIPAL_COST_PLAN_SQL,
+                FILTERED_NULL_PRINCIPAL_COST_PLAN_SQL,
                 range_start_ms,
                 range_end_ms,
-                upstream_id,
-                &normalized_keys,
+                Some(upstream_id),
+                None,
             )
             .await?,
-            &[
-                "request_events_v1_normalized_non_uuid_principal_cost_idx",
-                "request_events_v1_upstream_id_idx",
-            ][..],
+            &["request_events_v1_upstream_id_idx"][..],
         ),
     ];
     tx.rollback().await?;
@@ -269,19 +261,15 @@ async fn assert_principal_cost_shapes_use_covering_indexes(pool: &PgPool) -> Res
 
 async fn run_regression(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     assert_materialized_schema(pool).await?;
-    let (expected_keys, fallback_event_key) = append_events_and_assert_columns(&storage).await?;
+    let expected_keys = append_events_and_assert_columns(&storage).await?;
     assert_cursor_pages(&storage, &expected_keys).await?;
     assert_raw_payload_list_semantics(&storage).await?;
     assert_order_index_is_usable(pool).await?;
     assert_histogram_matches_list(&storage).await?;
 
-    ensure!(
-        fallback_event_key.starts_with("1800000000-legacy-live-"),
-        "generated storage event ID was not used as the fallback list key: {fallback_event_key}"
-    );
     Ok(())
 }
 
@@ -300,7 +288,6 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
     let expected_columns = [
         ("list_ts_ms", "bigint", "NO", true),
         ("list_event_key", "text", "NO", true),
-        ("list_upstream", "text", "YES", false),
         ("list_status", "integer", "YES", false),
         ("event_kind", "text", "YES", false),
     ];
@@ -344,9 +331,7 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn append_events_and_assert_columns(
-    storage: &PostgresStorage,
-) -> Result<(Vec<String>, String)> {
+async fn append_events_and_assert_columns(storage: &PostgresStorage) -> Result<Vec<String>> {
     let upstream_id = Uuid::from_u128(7);
     let mut tied_keys = Vec::new();
     for index in 0..5u16 {
@@ -358,7 +343,6 @@ async fn append_events_and_assert_columns(
                 request_id: format!("cursor-request-{index:02}"),
                 event_id: Some(event_id.clone()),
                 principal_id: Some("cursor-principal".to_owned()),
-                upstream: Some(RequestEventUpstream::AnthropicDirect),
                 upstream_id: Some(upstream_id),
                 model: Some("cursor-model".to_owned()),
                 status: 200 + index,
@@ -369,23 +353,8 @@ async fn append_events_and_assert_columns(
         tied_keys.push(event_id);
     }
 
-    let fallback_request_id = "cursor-request-fallback";
-    storage
-        .append_request_event(&RequestEvent {
-            ts: FALLBACK_TS_SECS,
-            request_id: fallback_request_id.to_owned(),
-            principal_id: Some("cursor-principal".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
-            upstream_id: Some(upstream_id),
-            model: Some("cursor-model".to_owned()),
-            status: 503,
-            duration_ms: 99,
-            ..Default::default()
-        })
-        .await?;
-
-    let tied_row = sqlx::query_as::<_, (i64, String, Option<String>, Option<i32>)>(
-        "SELECT list_ts_ms, list_event_key, list_upstream, list_status \
+    let tied_row = sqlx::query_as::<_, (i64, String, Option<i32>)>(
+        "SELECT list_ts_ms, list_event_key, list_status \
          FROM request_events_v1 WHERE event_id = $1",
     )
     .bind(&tied_keys[0])
@@ -400,41 +369,12 @@ async fn append_events_and_assert_columns(
         "new write did not store its event key"
     );
     ensure!(
-        tied_row.2.as_deref() == Some("anthropic_direct"),
-        "new write did not store canonical upstream: {:?}",
-        tied_row.2
-    );
-    ensure!(
-        tied_row.3 == Some(200),
+        tied_row.2 == Some(200),
         "new write did not store integer status"
     );
 
-    let fallback_row = sqlx::query_as::<_, (String, i64, String, Option<String>, Option<i32>)>(
-        "SELECT event_id, list_ts_ms, list_event_key, list_upstream, list_status \
-         FROM request_events_v1 \
-         WHERE convert_from(payload, 'UTF8')::jsonb ->> 'request_id' = $1",
-    )
-    .bind(fallback_request_id)
-    .fetch_one(storage.pool())
-    .await?;
-    ensure!(
-        fallback_row.1 == (FALLBACK_TS_SECS * 1_000) as i64,
-        "new write did not fall back from seconds for list_ts_ms"
-    );
-    ensure!(
-        fallback_row.2 == fallback_row.0,
-        "list_event_key must equal the stored event_id, got event_id={} list_event_key={}",
-        fallback_row.0,
-        fallback_row.2
-    );
-    ensure!(
-        fallback_row.3.as_deref() == Some("anthropic_direct") && fallback_row.4 == Some(503),
-        "fallback write did not populate upstream/status materialization"
-    );
-
     tied_keys.sort_by(|left, right| right.cmp(left));
-    tied_keys.push(fallback_row.0.clone());
-    Ok((tied_keys, fallback_row.0))
+    Ok(tied_keys)
 }
 
 async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<()> {
@@ -448,7 +388,6 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             event_id: Some(event_id.to_owned()),
             source_kind: Some("proxy".to_owned()),
             principal_id: Some(principal_id.to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             status: 206,
             duration_ms: 41,
             auth_ms: Some(42),
@@ -634,7 +573,7 @@ async fn assert_cursor_pages(storage: &PostgresStorage, expected_keys: &[String]
     loop {
         let page = storage
             .list_request_events(&RequestEventListQuery {
-                since_unix_secs: FALLBACK_TS_SECS,
+                since_unix_secs: BASE_TS_SECS,
                 until_unix_secs: TIED_TS_SECS + 1,
                 until_ts_ms: cursor_ts_ms,
                 until_event_id: cursor_event_key.clone(),
@@ -691,7 +630,7 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *tx)
         .await?;
-    let since = DateTime::<Utc>::from_timestamp(FALLBACK_TS_SECS as i64, 0)
+    let since = DateTime::<Utc>::from_timestamp(BASE_TS_SECS as i64, 0)
         .context("invalid timestamp seconds")?;
     let plan = sqlx::query_scalar::<_, String>(
         "EXPLAIN (COSTS OFF) \
@@ -763,7 +702,7 @@ async fn assert_order_index_is_usable(pool: &PgPool) -> Result<()> {
 /// the rows the list returns for the same window, keep 4xx out of the error
 /// lane, and zero-fill a continuous axis.
 async fn assert_histogram_matches_list(storage: &PostgresStorage) -> Result<()> {
-    let base = FALLBACK_TS_SECS + 10_000;
+    let base = BASE_TS_SECS + 10_000;
     let rows: [(u64, u16, Option<&str>, Option<&str>); 6] = [
         (base, 200, None, None),
         (base + 10, 429, None, None),
@@ -881,9 +820,9 @@ async fn assert_histogram_matches_list(storage: &PostgresStorage) -> Result<()> 
 /// are never backfilled.
 async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
-    let base = FALLBACK_TS_SECS + 20_000;
+    let base = BASE_TS_SECS + 20_000;
     let principal = "principal-pg-event-kind";
     let rows: [(&str, Option<RequestEventKind>, Option<&str>); 5] = [
         ("ek-messages", Some(RequestEventKind::Messages), None),
@@ -1093,10 +1032,17 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
 
     // Payload reads surface the raw kind: stored on new writes, absent on
     // historical rows, never synthesized.
-    let events = storage.query_request_events(base, base + 4, 100).await?;
+    let events = storage
+        .query_request_events_between_cursors(
+            0,
+            until_cursor,
+            500,
+            &RequestEventStreamFilters::default(),
+        )
+        .await?;
     let kinds = events
         .into_iter()
-        .map(|event| (event.request_id.clone(), event.event_kind))
+        .map(|(_, event)| (event.request_id.clone(), event.event_kind))
         .collect::<BTreeMap<_, _>>();
     ensure!(
         kinds.get("ek-messages") == Some(&Some(RequestEventKind::Messages)),

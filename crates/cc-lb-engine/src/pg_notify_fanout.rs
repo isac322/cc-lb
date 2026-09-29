@@ -18,7 +18,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::event_bus::{InMemoryBus, RequestEventBus, RequestEventUpdate};
+    use cc_lb_control::event_bus::{InMemoryBus, RequestEventBus, RequestEventUpdate};
 
     #[tokio::test]
     async fn pg_notify_fanout_drops_when_notifier_queue_full_without_blocking() {

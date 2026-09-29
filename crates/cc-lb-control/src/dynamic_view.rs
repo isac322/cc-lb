@@ -4,8 +4,6 @@ use arc_swap::ArcSwap;
 #[doc(hidden)]
 pub use cc_lb_domain::PlanInfo;
 use cc_lb_domain::RateLimitObservation;
-use cc_lb_observability::ObservabilityHook;
-use cc_lb_routing::RouterPlugin;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, UpstreamRateLimitObservationRecord, UpstreamRecord,
 };
@@ -15,23 +13,20 @@ use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::traits::{
-    NoopSubscriptionQuotaCache, PromptCacheObservationSinkLike, PromptCacheThreadUsageTrackerLike,
+    NoopPromptCacheObservationSink, NoopSubscriptionQuotaCache, PromptCacheObservationSinkLike,
     SubscriptionQuotaCacheLike,
 };
 #[non_exhaustive]
 pub struct DynamicView {
     pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-    pub global_router: Arc<dyn RouterPlugin>,
-    pub global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub prompt_cache_observation_store: Option<Arc<dyn PromptCacheObservationStore>>,
-    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub prompt_cache_grace_margin_secs: u64,
-    pub prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
     pub plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
@@ -47,18 +42,6 @@ impl DynamicView {
     ) -> Option<&Arc<dyn PromptCacheObservationStore>> {
         self.prompt_cache_observation_store.as_ref()
     }
-
-    pub fn prompt_cache_thread_usage_opt(
-        &self,
-    ) -> Option<&Arc<dyn PromptCacheThreadUsageTrackerLike>> {
-        self.prompt_cache_thread_usage.as_ref()
-    }
-
-    pub fn prompt_cache_observation_sink_opt(
-        &self,
-    ) -> Option<&Arc<dyn PromptCacheObservationSinkLike>> {
-        self.prompt_cache_observation_sink.as_ref()
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -68,21 +51,6 @@ pub struct UpstreamRateLimitCache {
 }
 
 impl UpstreamRateLimitCache {
-    pub fn from_records(
-        records: impl IntoIterator<Item = UpstreamRateLimitObservationRecord>,
-        updated_at_unix_secs: u64,
-    ) -> Self {
-        let mut cache = Self {
-            snapshots: HashMap::new(),
-            updated_at_unix_secs,
-        };
-        for record in records {
-            cache.upsert_record(record);
-        }
-        cache.updated_at_unix_secs = updated_at_unix_secs;
-        cache
-    }
-
     pub fn upsert_record(&mut self, record: UpstreamRateLimitObservationRecord) {
         let upstream_id = record.upstream_id;
         let observed_at_unix_secs = record.observed_at_unix_secs;
@@ -179,8 +147,6 @@ pub enum ApplyStatus {
 pub struct DynamicViewBuilder {
     previous_generation: u64,
     signer_factory: Option<Arc<dyn ApiKeyAwareSignerFactory>>,
-    global_router: Option<Arc<dyn RouterPlugin>>,
-    global_observability_hooks: Option<Arc<[Arc<dyn ObservabilityHook>]>>,
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
@@ -189,7 +155,6 @@ pub struct DynamicViewBuilder {
     prompt_cache_observation_store: Option<Arc<dyn PromptCacheObservationStore>>,
     prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     prompt_cache_grace_margin_secs: Option<u64>,
-    prompt_cache_thread_usage: Option<Arc<dyn PromptCacheThreadUsageTrackerLike>>,
     plan_info_by_upstream: HashMap<Uuid, PlanInfo>,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -199,8 +164,6 @@ impl DynamicViewBuilder {
         Self {
             previous_generation,
             signer_factory: None,
-            global_router: None,
-            global_observability_hooks: None,
             principal_view: None,
             upstream_status_snapshot: None,
             upstream_rate_limit_cache: None,
@@ -209,7 +172,6 @@ impl DynamicViewBuilder {
             prompt_cache_observation_store: None,
             prompt_cache_observation_sink: None,
             prompt_cache_grace_margin_secs: None,
-            prompt_cache_thread_usage: None,
             plan_info_by_upstream: HashMap::new(),
             upstream_records: Vec::new(),
         }
@@ -219,8 +181,6 @@ impl DynamicViewBuilder {
         Self {
             previous_generation: view.generation,
             signer_factory: Some(Arc::clone(&view.signer_factory)),
-            global_router: Some(Arc::clone(&view.global_router)),
-            global_observability_hooks: Some(Arc::clone(&view.global_observability_hooks)),
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
             upstream_rate_limit_cache: Some(Arc::clone(&view.upstream_rate_limit_cache)),
@@ -229,9 +189,8 @@ impl DynamicViewBuilder {
                 view.subscription_quota_routing_max_staleness_secs,
             ),
             prompt_cache_observation_store: view.prompt_cache_observation_store.clone(),
-            prompt_cache_observation_sink: view.prompt_cache_observation_sink.clone(),
+            prompt_cache_observation_sink: Some(Arc::clone(&view.prompt_cache_observation_sink)),
             prompt_cache_grace_margin_secs: Some(view.prompt_cache_grace_margin_secs),
-            prompt_cache_thread_usage: view.prompt_cache_thread_usage.clone(),
             plan_info_by_upstream: view.plan_info_by_upstream.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
@@ -239,19 +198,6 @@ impl DynamicViewBuilder {
 
     pub fn signer_factory(mut self, signer_factory: Arc<dyn ApiKeyAwareSignerFactory>) -> Self {
         self.signer_factory = Some(signer_factory);
-        self
-    }
-
-    pub fn global_router(mut self, global_router: Arc<dyn RouterPlugin>) -> Self {
-        self.global_router = Some(global_router);
-        self
-    }
-
-    pub fn global_observability_hooks(
-        mut self,
-        global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
-    ) -> Self {
-        self.global_observability_hooks = Some(Arc::from(global_observability_hooks));
         self
     }
 
@@ -296,14 +242,6 @@ impl DynamicViewBuilder {
         self
     }
 
-    pub fn prompt_cache_thread_usage(
-        mut self,
-        tracker: Arc<dyn PromptCacheThreadUsageTrackerLike>,
-    ) -> Self {
-        self.prompt_cache_thread_usage = Some(tracker);
-        self
-    }
-
     pub fn prompt_cache_observation_sink(
         mut self,
         sink: Arc<dyn PromptCacheObservationSinkLike>,
@@ -327,12 +265,6 @@ impl DynamicViewBuilder {
             signer_factory: self
                 .signer_factory
                 .expect("DynamicViewBuilder requires signer_factory"),
-            global_router: self
-                .global_router
-                .expect("DynamicViewBuilder requires global_router"),
-            global_observability_hooks: self
-                .global_observability_hooks
-                .expect("DynamicViewBuilder requires global_observability_hooks"),
             principal_view: self
                 .principal_view
                 .expect("DynamicViewBuilder requires principal_view"),
@@ -347,9 +279,10 @@ impl DynamicViewBuilder {
                 .subscription_quota_routing_max_staleness_secs
                 .unwrap_or(0),
             prompt_cache_observation_store: self.prompt_cache_observation_store,
-            prompt_cache_observation_sink: self.prompt_cache_observation_sink,
+            prompt_cache_observation_sink: self
+                .prompt_cache_observation_sink
+                .unwrap_or_else(|| Arc::new(NoopPromptCacheObservationSink)),
             prompt_cache_grace_margin_secs: self.prompt_cache_grace_margin_secs.unwrap_or(0),
-            prompt_cache_thread_usage: self.prompt_cache_thread_usage,
             plan_info_by_upstream: self.plan_info_by_upstream,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
@@ -361,9 +294,7 @@ impl DynamicViewBuilder {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-    use cc_lb_observability::{ObservabilityError, ObserveEvent};
-    use cc_lb_routing::{RouteDecision, RouteError, RoutingContext};
+    use cc_lb_domain::Upstream;
     use cc_lb_upstream::{
         RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
         SigningCapability, UpstreamError,
@@ -404,29 +335,6 @@ mod tests {
         }
     }
 
-    struct TestRouter;
-
-    impl RouterPlugin for TestRouter {
-        fn route(
-            &self,
-            _ctx: &RoutingContext,
-            _principal: &Principal,
-            _candidates: &[UpstreamCandidate],
-        ) -> Result<RouteDecision, RouteError> {
-            Err(RouteError::NoRoute {
-                reason: "test router has no route".to_owned(),
-            })
-        }
-    }
-
-    struct TestHook;
-
-    impl ObservabilityHook for TestHook {
-        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
-            Ok(())
-        }
-    }
-
     fn test_view(previous_generation: u64) -> Arc<DynamicView> {
         let principal_view = Arc::new(PrincipalView::from_db(
             &[],
@@ -434,8 +342,6 @@ mod tests {
         ));
         DynamicViewBuilder::new(previous_generation)
             .signer_factory(Arc::new(TestSignerFactory))
-            .global_router(Arc::new(TestRouter))
-            .global_observability_hooks(vec![Arc::new(TestHook)])
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build()

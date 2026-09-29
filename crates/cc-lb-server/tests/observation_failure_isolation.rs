@@ -28,30 +28,27 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, TtlClass, Upstream, UpstreamCandidate};
-use cc_lb_engine::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_engine::api_keys::key_store::KeyStore;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_engine::api_keys::secret;
+use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_control::api_keys::key_store::KeyStore;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::secret;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::{TtlClass, Upstream};
 use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
-    LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_observability::{cache_observation_dropped_reason, cache_observation_store_kind};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin, RoutingContext};
 use cc_lb_server::prompt_cache_observation_sink::PromptCacheObservationSink;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
-    ApiKeyMutation, BackendKind, IssueParams, KeyStatus, ManagedKeyStore, MetaStore,
+    ApiKeyMutation, IssueParams, KeyStatus, ManagedKeyStore, MetaStore,
     PromptCacheObservationRecord, PromptCacheObservationStore, StorageError, StorageResult,
     StoredApiKeyRecord,
 };
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, ResponseTransformError, RetryDecision, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    SseEventTransformHook, TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
-    UpstreamError,
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, UpstreamError,
 };
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Method, Request, Response, StatusCode};
@@ -246,9 +243,8 @@ fn parse_write_failed_counter(rendered: &str, store: &str) -> Option<u64> {
 // through `Lifecycle::handle` untouched — streamed and buffered. These tests
 // wire the production `PromptCacheObservationSink` into a `DynamicView` and
 // drive actual requests; the fixtures below mirror the engine's
-// `tests/common` harness (in-memory managed key, passthrough dialect, canned
-// upstream dispatch) so the publish site under test is the real one in
-// `lifecycle.rs`, not the orphan `SseRelay` helper.
+// `tests/common` harness (in-memory managed key, canned upstream dispatch) so
+// the publish site under test is the real one in `lifecycle.rs`.
 // ---------------------------------------------------------------------------
 
 const FIXTURE_PRINCIPAL: &str = "principal-test";
@@ -404,80 +400,6 @@ impl Signer for FixtureSigner {
     }
 }
 
-/// Router returning the configured dialect; the resolved upstream id comes
-/// from the candidate set (the one `upstream_records` row).
-struct FixtureRouter {
-    dialect: Arc<dyn UpstreamDialect>,
-}
-
-impl RouterPlugin for FixtureRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Ok(RouteDecision {
-            upstream_id: None,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: self.dialect.clone(),
-        })
-    }
-}
-
-/// Passthrough dialect: forwards the downstream request to a fixed base URL.
-struct FixtureDialect;
-
-impl UpstreamDialect for FixtureDialect {
-    fn shape(
-        &self,
-        context: &DialectShapeContext,
-        _upstream: &Upstream,
-        _principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
-        url.set_path(context.path.trim_start_matches('/'));
-        url.set_query(context.query.as_deref());
-        Ok(builder.shaped_request(
-            url,
-            context.method.clone(),
-            context.downstream_headers.clone(),
-            context.body_bytes.clone(),
-        ))
-    }
-}
-
-/// Same passthrough shape as `FixtureDialect`, but advertises an SSE transform
-/// hook so the request exercises the compat SSE publish path in the stream
-/// loop. The hook passes every event through unchanged.
-struct FixtureTransformDialect;
-
-impl UpstreamDialect for FixtureTransformDialect {
-    fn shape(
-        &self,
-        context: &DialectShapeContext,
-        upstream: &Upstream,
-        principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        FixtureDialect.shape(context, upstream, principal, builder)
-    }
-
-    fn sse_event_transform_hook(&self) -> Option<&dyn SseEventTransformHook> {
-        Some(self)
-    }
-}
-
-impl SseEventTransformHook for FixtureTransformDialect {
-    fn transform_sse_event(
-        &self,
-        _request: TransformSseEventRequest,
-    ) -> Result<TransformSseEventResult, ResponseTransformError> {
-        Ok(TransformSseEventResult::Unchanged)
-    }
-}
-
 /// `UpstreamDispatch` answering each request with one canned response.
 struct CannedDispatch {
     response: Mutex<Option<Response<Body>>>,
@@ -576,26 +498,18 @@ fn fixture_upstream_record() -> UpstreamRecord {
 }
 
 /// Build a `Lifecycle` whose `DynamicView` publishes prompt-cache observations
-/// through the given production sink and routes through the given dialect.
+/// through the given production sink.
 fn lifecycle_with_sink(
     sink: PromptCacheObservationSink,
-    dialect: Arc<dyn UpstreamDialect>,
     dispatcher: Arc<dyn UpstreamDispatch>,
-) -> (
-    Lifecycle,
-    Arc<cc_lb_server::prompt_cache_thread_usage::PromptCacheThreadUsageTracker>,
-) {
-    let tracker =
-        Arc::new(cc_lb_server::prompt_cache_thread_usage::PromptCacheThreadUsageTracker::new(30));
+) -> Lifecycle {
     let key_store: Arc<dyn ManagedKeyStore> = Arc::new(FixtureKeyStore);
     let authn = Arc::new(BuiltinAuthn::new(
         Arc::new(KeyStore::new(key_store)),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     ));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(FixtureSignerChain))
-        .global_router(Arc::new(FixtureRouter { dialect }))
-        .global_observability_hooks(Vec::new())
         .principal_view(Arc::new(PrincipalView::for_tests(
             FIXTURE_PRINCIPAL,
             true,
@@ -605,17 +519,15 @@ fn lifecycle_with_sink(
         )))
         .upstream_records(vec![fixture_upstream_record()])
         .prompt_cache_observation_sink(Arc::new(sink))
-        .prompt_cache_thread_usage(tracker.clone())
         .build();
-    let lifecycle = Lifecycle::new_with_dynamic_view(
+    Lifecycle::new_with_dynamic_view(
         authn,
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
-    .with_event_bus(cc_lb_engine::new_in_memory_bus());
-    (lifecycle, tracker)
+    .with_event_bus(cc_lb_control::new_in_memory_bus())
 }
 
 /// `/v1/messages` request with one `cache_control` breakpoint whose prefix is
@@ -734,9 +646,8 @@ fn queue_full_case(mode: RequestMode) {
         sink.enqueue(record(1))
             .expect("second record fills the queue");
 
-        let (lifecycle, _) = lifecycle_with_sink(
+        let lifecycle = lifecycle_with_sink(
             sink.clone(),
-            Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
         let request = cacheable_request(mode);
@@ -798,9 +709,8 @@ fn queue_closed_case(mode: RequestMode) {
         writer.abort();
         let _ = writer.await;
 
-        let (lifecycle, _) = lifecycle_with_sink(
+        let lifecycle = lifecycle_with_sink(
             sink.clone(),
-            Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
         let request = cacheable_request(mode);
@@ -850,9 +760,8 @@ fn write_failure_case(mode: RequestMode) {
             cache_observation_store_kind::SQLITE,
         );
 
-        let (lifecycle, _) = lifecycle_with_sink(
+        let lifecycle = lifecycle_with_sink(
             sink.clone(),
-            Arc::new(FixtureDialect),
             Arc::new(CannedDispatch::new(upstream_response(mode))),
         );
         let request = cacheable_request(mode);
@@ -903,10 +812,9 @@ fn write_failure_case(mode: RequestMode) {
 
 /// Issue 825 B1/B2: the observation must be committed to the real store while
 /// the upstream stream is still gated before its final frame — the publish
-/// fires at `message_start`, not at stream end. `dialect` selects the fast
-/// path (`FixtureDialect`) or the compat SSE transform path
-/// (`FixtureTransformDialect`); both reach the same publish site.
-fn early_commit_case(dialect: Arc<dyn UpstreamDialect>) {
+/// fires at `message_start`, not at stream end.
+#[test]
+fn message_start_commits_observation_before_final_frame() {
     run_lifecycle_case(move || async move {
         // Real SQLite store behind the production sink: the commit assertion
         // observes a durable row, not an in-memory recording.
@@ -916,13 +824,10 @@ fn early_commit_case(dialect: Arc<dyn UpstreamDialect>) {
             dir.path().join("early-commit.sqlite").display()
         );
         let sqlite =
-            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+            cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
                 .await
                 .expect("sqlite opens");
-        sqlite
-            .initialize(BackendKind::Sqlite)
-            .await
-            .expect("sqlite migrates");
+        sqlite.initialize().await.expect("sqlite migrates");
         let store = Arc::new(CommitWatchStore {
             inner: Arc::new(sqlite),
             committed: Notify::new(),
@@ -934,9 +839,8 @@ fn early_commit_case(dialect: Arc<dyn UpstreamDialect>) {
         // The upstream holds `message_stop` until released, so anything
         // committed before the release provably happened mid-stream.
         let release_frames = Arc::new(Notify::new());
-        let (lifecycle, _) = lifecycle_with_sink(
+        let lifecycle = lifecycle_with_sink(
             sink.clone(),
-            dialect,
             Arc::new(CannedDispatch::new(gated_sse_response(
                 release_frames.clone(),
             ))),
@@ -992,16 +896,6 @@ fn early_commit_case(dialect: Arc<dyn UpstreamDialect>) {
 }
 
 #[test]
-fn message_start_commits_observation_before_final_frame() {
-    early_commit_case(Arc::new(FixtureDialect));
-}
-
-#[test]
-fn compat_sse_message_start_commits_observation_before_final_frame() {
-    early_commit_case(Arc::new(FixtureTransformDialect));
-}
-
-#[test]
 fn queue_full_streamed_response_still_completes() {
     queue_full_case(RequestMode::Streamed);
 }
@@ -1029,65 +923,4 @@ fn store_write_failure_streamed_response_still_completes() {
 #[test]
 fn store_write_failure_buffered_response_still_completes() {
     write_failure_case(RequestMode::Buffered);
-}
-
-#[test]
-fn completed_responses_preserve_thread_usage_diagnostics() {
-    for mode in [RequestMode::Buffered, RequestMode::Streamed] {
-        run_lifecycle_case(move || async move {
-            let store = Arc::new(FailingStore);
-            let (sink, writer) =
-                PromptCacheObservationSink::new(store, 4, cache_observation_store_kind::SQLITE);
-            let (lifecycle, tracker) = lifecycle_with_sink(
-                sink.clone(),
-                Arc::new(FixtureDialect),
-                Arc::new(CannedDispatch::new(upstream_response(mode))),
-            );
-            let upstream_id = fixture_upstream_record().id;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_secs();
-            assert!(
-                tracker
-                    .thread_usage_score(upstream_id, FIXTURE_MODEL, "lineage-session", now)
-                    .is_none()
-            );
-            let mut request = cacheable_request(mode);
-            request.headers_mut().insert(
-                "x-hermes-session-id",
-                HeaderValue::from_static("lineage-session"),
-            );
-            let auth = lifecycle
-                .authenticate(request.headers())
-                .await
-                .expect("test request authenticates");
-            let response = lifecycle
-                .handle(request, &auth)
-                .await
-                .expect("request succeeds");
-            assert_eq!(response.status(), StatusCode::OK);
-            response
-                .into_body()
-                .collect()
-                .await
-                .expect("response completes");
-            let score = tracker
-                .thread_usage_score(upstream_id, FIXTURE_MODEL, "lineage-session", now)
-                .expect("completed response retains diagnostic usage");
-            // Creation-only lineage retains the established 1:4 read equivalent.
-            assert_eq!(score.predicted_cache_read_tokens, 400);
-            assert!(
-                tracker
-                    .thread_usage_score(upstream_id, FIXTURE_MODEL, "different-session", now)
-                    .is_none()
-            );
-            drop(lifecycle);
-            drop(sink);
-            tokio::time::timeout(Duration::from_secs(5), writer)
-                .await
-                .expect("writer drains")
-                .expect("writer exits");
-        });
-    }
 }

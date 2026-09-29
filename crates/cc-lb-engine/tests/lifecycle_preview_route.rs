@@ -4,21 +4,18 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use http::HeaderMap;
 use url::Url;
 use uuid::Uuid;
 
-use common::{DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState};
+use common::{DispatchMode, MockDispatch, TestAuthn, TestState};
 
 const PRINCIPAL: &str = "principal-test";
 
@@ -152,7 +149,6 @@ fn build_lifecycle_from(
     upstream_records: Vec<UpstreamRecord>,
 ) -> Lifecycle {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
     let dispatcher: Arc<dyn cc_lb_engine::UpstreamDispatch> = Arc::new(MockDispatch {
         state,
@@ -160,8 +156,6 @@ fn build_lifecycle_from(
     });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(NoopRouter))
-        .global_observability_hooks(vec![hook])
         .principal_view(principal_view)
         .upstream_records(upstream_records)
         .build();
@@ -170,7 +164,7 @@ fn build_lifecycle_from(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -183,11 +177,7 @@ fn principal_view_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<Prin
     let mut chains = HashMap::new();
     chains.insert(
         PRINCIPAL.to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::for_tests(
         PRINCIPAL,
@@ -207,11 +197,7 @@ fn principal_view_with_broken_pipeline() -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
     chains.insert(
         PRINCIPAL.to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::for_tests(
         PRINCIPAL,
@@ -294,20 +280,5 @@ impl FilterPlugin for IndexKeepingFilter {
 
     fn plugin_name(&self) -> &str {
         self.name
-    }
-}
-
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "test router should not be called by preview_route".to_owned(),
-        })
     }
 }

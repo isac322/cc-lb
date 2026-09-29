@@ -68,7 +68,7 @@ Keep p95 `sse_storage_tail_lag_ms` below 1000 ms. If lag is high while storage C
 
 ## Metric Label Taxonomy
 
-The finite label vocabulary is documented in `docs/metrics-live-tail.md` and enforced in `crates/cc-lb-core/src/metrics_labels.rs`.
+The finite label vocabulary is documented in `docs/metrics-live-tail.md` and enforced in `crates/cc-lb-engine/src/metrics_labels.rs`.
 
 Operationally important labels:
 

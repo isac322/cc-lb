@@ -23,8 +23,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::lifecycle::SubscriptionQuotaCacheLike;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
+use cc_lb_control::SubscriptionQuotaCacheLike;
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_MAP_CAP: usize = 4096;
 pub const DEFAULT_SUBSCRIPTION_QUOTA_TTL: Duration = Duration::from_secs(300);

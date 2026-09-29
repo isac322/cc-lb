@@ -71,16 +71,15 @@ pub mod prelude;
 mod tests;
 
 use cc_lb_plugin_wire::{
-    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ObserveEvent,
-    ShapeRequest, ShapeResponse,
+    ArchivedFilterResponse, ArchivedShapeResponse, FilterRequest, FilterResponse, ShapeRequest,
+    ShapeResponse,
 };
 use cc_lb_runtime_wasmtime::{
-    HotEngineConfig, ModuleInspection, RuntimeSlotKey, SlotKind, WasmtimeRuntime, inspect_wasm,
+    HookKind, HotEngineConfig, ModuleInspection, RuntimeSlotKey, WasmtimeRuntime, admit_wasm,
+    inspect_wasm,
 };
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
-
-use crate::fixtures::observe_event_samples;
 
 /// Fluent builder pinning the wasm bytes + slot kind + engine budget.
 ///
@@ -97,17 +96,15 @@ pub struct ConformanceSuite<'a> {
 enum ConformanceKind {
     Filter,
     Shape,
-    Observe,
 }
 
 impl ConformanceKind {
-    const ALL: [Self; 3] = [Self::Filter, Self::Shape, Self::Observe];
+    const ALL: [Self; 2] = [Self::Filter, Self::Shape];
 
-    fn slot_kind(self) -> SlotKind {
+    fn slot_kind(self) -> HookKind {
         match self {
-            Self::Filter => SlotKind::Filter,
-            Self::Shape => SlotKind::Shape,
-            Self::Observe => SlotKind::Observe,
+            Self::Filter => HookKind::Filter,
+            Self::Shape => HookKind::Shape,
         }
     }
 
@@ -115,7 +112,6 @@ impl ConformanceKind {
         match self {
             Self::Filter => "filter",
             Self::Shape => "shape",
-            Self::Observe => "observe",
         }
     }
 }
@@ -129,11 +125,6 @@ impl<'a> ConformanceSuite<'a> {
     /// Build a suite for a Shape-slot plugin.
     pub fn for_shape(wasm: &'a [u8]) -> Self {
         Self::with_kind(wasm, ConformanceKind::Shape)
-    }
-
-    /// Build a suite for an Observe-slot plugin.
-    pub fn for_observe(wasm: &'a [u8]) -> Self {
-        Self::with_kind(wasm, ConformanceKind::Observe)
     }
 
     pub fn from_wasm(wasm: &'a [u8]) -> Self {
@@ -156,7 +147,7 @@ impl<'a> ConformanceSuite<'a> {
             wasm,
             kind,
             plugin_name: format!("conformance-{label}"),
-            engine_config: conformance_engine_config(),
+            engine_config: HotEngineConfig::default(),
         }
     }
 
@@ -168,22 +159,10 @@ impl<'a> ConformanceSuite<'a> {
     }
 
     /// Override the [`HotEngineConfig`] used by the suite. Defaults to
-    /// [`conformance_engine_config`] which mirrors production cc-lb
-    /// defaults (1024 pages / 1 MiB stack).
+    /// [`HotEngineConfig::default()`], the production cc-lb envelope.
     pub fn with_engine_config(mut self, cfg: HotEngineConfig) -> Self {
         self.engine_config = cfg;
         self
-    }
-
-    /// Optional standalone admission gate — parses the wasm through
-    /// [`inspect_wasm`] and panics on rejection. NOT called by
-    /// [`Self::run`] because [`Self::session`] already invokes
-    /// `inspect_wasm` transitively via `register_*`. Kept public so
-    /// authors can assert admission WITHOUT paying for full engine
-    /// setup (fast pre-flight in a `build.rs`, etc.).
-    pub fn assert_static_admission(&self) {
-        inspect_wasm(self.kind.slot_kind(), self.wasm)
-            .unwrap_or_else(|e| panic!("inspect_wasm rejected plugin: {e}"));
     }
 
     pub fn inspect(&self) -> ModuleInspection {
@@ -194,9 +173,14 @@ impl<'a> ConformanceSuite<'a> {
     pub fn assert_recognisable_by_current_host(&self) {
         let runtime = WasmtimeRuntime::new(self.engine_config.clone())
             .expect("wasmtime engine build must succeed");
-        runtime
-            .admit_wasm(self.kind.slot_kind(), self.wasm)
-            .unwrap_or_else(|e| panic!("admit_wasm rejected plugin: {e}"));
+        admit_wasm(
+            runtime.engine(),
+            runtime.linker(),
+            self.kind.slot_kind(),
+            self.wasm,
+            runtime.config(),
+        )
+        .unwrap_or_else(|e| panic!("admit_wasm rejected plugin: {e}"));
     }
 
     /// Build a fresh [`WasmtimeRuntime`], register the plugin under the
@@ -219,11 +203,6 @@ impl<'a> ConformanceSuite<'a> {
                     .register_shape(slot_key.clone(), self.plugin_name.clone(), self.wasm)
                     .expect("register_shape must accept a conforming plugin");
             }
-            ConformanceKind::Observe => {
-                runtime
-                    .register_observe(slot_key.clone(), self.plugin_name.clone(), self.wasm)
-                    .expect("register_observe must accept a conforming plugin");
-            }
         }
         PluginSession {
             runtime,
@@ -242,7 +221,6 @@ impl<'a> ConformanceSuite<'a> {
     /// Coverage:
     /// - `Filter` → canonical V1 request
     /// - `Shape` → `call_shape(sample_shape_request())`
-    /// - `Observe` → [`PluginSession::exercise_observe_variants`]
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
     /// (where hooks return one) must rkyv-decode as the expected type.
@@ -256,9 +234,6 @@ impl<'a> ConformanceSuite<'a> {
             }
             ConformanceKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
-            }
-            ConformanceKind::Observe => {
-                session.exercise_observe_variants();
             }
         }
     }
@@ -275,7 +250,7 @@ pub struct PluginSession {
 
 impl PluginSession {
     /// The slot kind this session was built for.
-    pub fn kind(&self) -> SlotKind {
+    pub fn kind(&self) -> HookKind {
         self.kind.slot_kind()
     }
 
@@ -285,8 +260,7 @@ impl PluginSession {
     }
 
     /// Underlying [`WasmtimeRuntime`] — escape hatch for advanced
-    /// tests that want to poke at hot-swap, pure vs stateful mode,
-    /// version bumps, etc.
+    /// tests that want to poke at hot-swap or slot eviction.
     pub fn runtime(&self) -> &WasmtimeRuntime {
         &self.runtime
     }
@@ -294,19 +268,15 @@ impl PluginSession {
     /// Round-trip a [`FilterRequest`] through the guest boundary.
     /// Panics if this session is not Filter-kind.
     pub fn call_filter(&self, request: FilterRequest) -> FilterResponse {
-        let input = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
-        self.call_filter_bytes(input.as_slice())
-    }
-
-    fn call_filter_bytes(&self, input: &[u8]) -> FilterResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Filter),
-            "call_filter requires SlotKind::Filter, got {:?}",
+            "call_filter requires HookKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
+        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
         let out_bytes = self
             .runtime
-            .call_filter(&self.slot_key, input)
+            .call_filter(&self.slot_key, in_bytes.as_slice())
             .expect("guest cc_lb_filter must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);
@@ -321,7 +291,7 @@ impl PluginSession {
     pub fn call_shape(&self, request: ShapeRequest) -> ShapeResponse {
         assert!(
             matches!(self.kind, ConformanceKind::Shape),
-            "call_shape requires SlotKind::Shape, got {:?}",
+            "call_shape requires HookKind::Shape, got {:?}",
             self.kind.slot_kind()
         );
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
@@ -335,45 +305,5 @@ impl PluginSession {
             .expect("rkyv access ShapeResponse");
         rkyv::deserialize::<ShapeResponse, RkyvError>(archived)
             .expect("rkyv deserialize ShapeResponse")
-    }
-
-    /// Send an [`ObserveEvent`] through the guest boundary. Observe
-    /// hooks are side-effect-only; return type is `()`. Panics if this
-    /// session is not Observe-kind.
-    pub fn call_observe(&self, event: ObserveEvent) {
-        assert!(
-            matches!(self.kind, ConformanceKind::Observe),
-            "call_observe requires SlotKind::Observe, got {:?}",
-            self.kind.slot_kind()
-        );
-        let in_bytes = rkyv::to_bytes::<RkyvError>(&event).expect("rkyv encode ObserveEvent");
-        self.runtime
-            .call_observe(&self.slot_key, in_bytes.as_slice())
-            .expect("guest cc_lb_observe must complete without trap");
-    }
-
-    /// Send one of every [`ObserveEvent`] variant, using
-    /// [`observe_event_samples`], and assert no variant traps. Cheap
-    /// coverage insurance for observe plugins because a missing match
-    /// arm in the guest would only surface when production emits that
-    /// specific event kind. Panics if this session is not Observe-kind.
-    pub fn exercise_observe_variants(&self) {
-        for event in observe_event_samples() {
-            self.call_observe(event);
-        }
-    }
-}
-
-/// Opinionated [`HotEngineConfig`] used by the conformance suite by
-/// default. Values match cc-lb's production `HotEngineConfig::default()`
-/// so tests exercise the same resource envelope real traffic sees, but
-/// stay pinned here regardless of future host default changes.
-pub fn conformance_engine_config() -> HotEngineConfig {
-    HotEngineConfig {
-        memory_max_pages: 1024,
-        max_wasm_stack: 1024 * 1024,
-        pool_total_memories: 64,
-        pool_total_core_instances: 64,
-        ..HotEngineConfig::default()
     }
 }

@@ -1,9 +1,34 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en" data-theme="system">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>cc-lb Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>cc-lb</title>
+    <meta name="color-scheme" content="dark light" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- First-frame ground (graphite night / pale graphite day) before the
+         CSS bundle loads; mirrors --color-bg in src/index.css. -->
+    <style>
+      html { background: #161719; }
+      html[data-theme="light"] { background: #e3e5e7; }
+      @media (prefers-color-scheme: light) {
+        html[data-theme="system"] { background: #e3e5e7; }
+      }
+    </style>
+    <!-- Pre-paint theme: mirrors readStoredTheme() in src/lib/theme.ts so the
+         first frame already uses the stored theme instead of flashing dark. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('cclb.theme');
+          if (t === 'dark' || t === 'light' || t === 'system') {
+            document.documentElement.setAttribute('data-theme', t);
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body class="antialiased">
     <div id="root"></div>

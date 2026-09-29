@@ -30,6 +30,7 @@ const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   ts: (1_000 - i) / 1_000,
   ts_ms: 1_000 - i,
   model: 'claude-3',
+  event_kind: 'messages',
   status: 200,
   tokens: 100,
   cost: 0.01,
@@ -100,7 +101,6 @@ vi.mock('../lib/queries', () => ({
   }),
   useUpstreams: () => ({ data: { upstreams: [] } }),
   usePrincipalNameMap: () => new Map(),
-  useUpstreamNameMap: () => new Map(),
   useRecentEventsPage: (
     filters: Record<string, string | undefined>,
     pageParam: TestPageParam,
@@ -258,10 +258,13 @@ describe('LogsPage', () => {
     ).toEqual(['target']);
   });
 
-  it('renders Session select with an enforced w-64 and Clear button with h-9', async () => {
+  it('shows applied filters as removable chips behind a collapsed panel', async () => {
     const queryClient = new QueryClient();
 
-    vi.spyOn(Route, 'useSearch').mockReturnValue({ session: '123' } as never);
+    vi.spyOn(Route, 'useSearch').mockReturnValue({
+      session: '123',
+      status: '4xx',
+    } as never);
 
     const LogsPage = Route.options.component;
     if (LogsPage === undefined) {
@@ -274,14 +277,22 @@ describe('LogsPage', () => {
       </QueryClientProvider>,
     );
 
-    const clearButton = await screen.findByRole('button', { name: /Clear/i });
+    const filtersButton = await screen.findByRole('button', {
+      name: /^Filters/,
+    });
+    expect(filtersButton.getAttribute('aria-expanded')).toBe('false');
+    expect(filtersButton.textContent).toContain('2');
 
-    expect(clearButton.className).not.toContain('h-7');
-    expect(clearButton.className).toContain('h-9');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Remove session filter' }),
+    );
+    expect(routerMocks.navigate).toHaveBeenCalledWith({
+      search: { session: undefined, status: '4xx' },
+      resetScroll: false,
+    });
 
-    const sessionSelect = screen.getByText('123').closest('button');
-    expect(sessionSelect).not.toBeNull();
-    expect(sessionSelect?.className).toContain('!w-64');
+    fireEvent.click(filtersButton);
+    expect(filtersButton.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('commits the model filter once typing settles', () => {
@@ -301,7 +312,8 @@ describe('LogsPage', () => {
         </QueryClientProvider>,
       );
 
-      const modelInput = screen.getByPlaceholderText('claude-sonnet-4-5');
+      fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
+      const modelInput = screen.getByRole('textbox', { name: 'Model' });
       for (const value of ['c', 'cl', 'claude ']) {
         fireEvent.change(modelInput, { target: { value } });
         act(() => {
@@ -405,7 +417,8 @@ describe('LogsPage', () => {
       expect(screen.getByText('Showing 1–50 of 50+')).toBeDefined(),
     );
     expect(getRowCount()).toBe(50);
-    expect(scroller.scrollTop).toBe(0);
+    // A filter change re-scopes the rows in place; the scroller stays.
+    expect(scroller.scrollTop).toBe(100);
   }, 30_000);
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
@@ -486,7 +499,7 @@ describe('LogsPage', () => {
 
     await waitFor(() =>
       expect(queryMocks.fetchRecentEventsPage).toHaveBeenCalledWith(
-        {},
+        { event_kind: 'messages' },
         {
           kind: 'cursor',
           limit: 50,

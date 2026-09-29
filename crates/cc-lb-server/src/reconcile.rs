@@ -3,9 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::DynamicViewHolder;
-use cc_lb_engine::clock::ClockHandle;
+use cc_lb_clock::ClockHandle;
+use cc_lb_control::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_storage_api::{PluginSlotKind, StorageResult};
 use tokio_util::sync::CancellationToken;
@@ -13,24 +12,21 @@ use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view};
-use crate::prompt_cache_thread_usage::PromptCacheThreadUsageTracker;
 use crate::revision_hash::compute_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
-use cc_lb_engine::PromptCacheObservationSinkLike;
+use cc_lb_control::PromptCacheObservationSinkLike;
 
 pub struct Reconciler {
     pub stores: Arc<Stores>,
     pub holder: Arc<DynamicViewHolder>,
-    pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub runtime: Arc<WasmtimeRuntime>,
     pub aead: Arc<AeadService>,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub cancel: CancellationToken,
     pub data_dir: PathBuf,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-    pub prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
     pub prompt_cache_grace_margin_secs: u64,
-    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+    pub prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
     pub clock: ClockHandle,
 }
@@ -40,30 +36,26 @@ impl Reconciler {
     pub fn new(
         stores: Arc<Stores>,
         holder: Arc<DynamicViewHolder>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
         runtime: Arc<WasmtimeRuntime>,
         aead: Arc<AeadService>,
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         cancel: CancellationToken,
         data_dir: PathBuf,
         subscription_quota_cache: Arc<SubscriptionQuotaCache>,
-        prompt_cache_thread_usage: Option<Arc<PromptCacheThreadUsageTracker>>,
         prompt_cache_grace_margin_secs: u64,
-        prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+        prompt_cache_observation_sink: Arc<dyn PromptCacheObservationSinkLike>,
         subscription_quota_routing_max_staleness_secs: u64,
         clock: ClockHandle,
     ) -> Self {
         Self {
             stores,
             holder,
-            oauth_cfg,
             runtime,
             aead,
             lazy_refresher,
             cancel,
             data_dir,
             subscription_quota_cache,
-            prompt_cache_thread_usage,
             prompt_cache_grace_margin_secs,
             prompt_cache_observation_sink,
             subscription_quota_routing_max_staleness_secs,
@@ -110,7 +102,6 @@ impl Reconciler {
         drop(current);
         match build_dynamic_view(
             &self.stores,
-            &self.oauth_cfg,
             self.aead.clone(),
             self.lazy_refresher.clone(),
             generation,
@@ -118,9 +109,6 @@ impl Reconciler {
             &self.data_dir,
             self.subscription_quota_cache.clone(),
             self.prompt_cache_grace_margin_secs,
-            self.prompt_cache_thread_usage.clone().map(|tracker| {
-                tracker as Arc<dyn cc_lb_engine::lifecycle::PromptCacheThreadUsageTrackerLike>
-            }),
             self.prompt_cache_observation_sink.clone(),
             self.subscription_quota_routing_max_staleness_secs,
             self.clock.clone(),
@@ -159,8 +147,7 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
         }
         after_upstream = page.last().map(|record| record.id);
         upstreams.extend(page.into_iter().map(|record| {
-            // Rotating the api-key credential bumps only
-            // `upstream_api_key_secret_v1.secret_revision`, not
+            // Rotating the api-key credential does not bump
             // `record.revision`; fold the ciphertext (fresh nonce per
             // encryption) into the hash so a secret-only rotation still
             // converges on peers that missed the NOTIFY.
@@ -200,9 +187,6 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
         offset += page.len();
         for principal in page {
             chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Router).await?);
-            chains.extend(
-                chain_revisions(stores, principal.id, PluginSlotKind::ObservabilityHook).await?,
-            );
             chains.extend(chain_revisions(stores, principal.id, PluginSlotKind::Shape).await?);
             principals.push((principal.id, principal.revision));
         }

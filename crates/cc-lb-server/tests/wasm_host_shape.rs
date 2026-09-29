@@ -75,7 +75,6 @@ fn shape_adapter_when_wasm_passthrough_then_shapes_and_strips_auth_header() {
     let principal = Principal {
         id: "tenant-shape".to_owned(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     let upstream = Upstream::AnthropicDirect {
         base_url: Some(url::Url::parse("https://example.test").expect("fixture URL")),

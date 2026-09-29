@@ -23,7 +23,6 @@ const JOB_TYPES: &[&str] = &[
     "adaptive:cache_keepalive",
     "cron:usage_rollup",
     "cron:usage_prune",
-    "cron:quota_gc",
     "cron:prompt_cache_purge",
     "cron:upstream_affinity_purge",
     "cron:price_catalog_refresh",
@@ -34,15 +33,7 @@ const JOB_TYPES: &[&str] = &[
     "cron:anthropic_compat_refresh",
 ];
 
-const JOB_STATUSES: &[&str] = &[
-    "started",
-    "done",
-    "retry",
-    "skip",
-    "panicked",
-    "duplicate_effect",
-    "noop",
-];
+const JOB_STATUSES: &[&str] = &["started", "done", "retry", "skip", "panicked", "noop"];
 
 static DESCRIBE: Once = Once::new();
 

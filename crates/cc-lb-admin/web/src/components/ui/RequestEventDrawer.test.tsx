@@ -161,7 +161,6 @@ describe('RequestEventDrawer', () => {
           route_ms: 5,
           upstream_ttfb_ms: 90,
           upstream_body_ms: 40,
-          observability_post_ms: 7,
           body_bytes: 2048,
         }),
       );
@@ -221,7 +220,7 @@ describe('RequestEventDrawer', () => {
     expect(keyRow?.textContent).not.toContain('—');
 
     expect(
-      screen.queryByRole('heading', { name: 'Upstream Failure' }),
+      screen.queryByRole('heading', { name: 'Upstream failure' }),
     ).toBeNull();
 
     const bodyRow = screen.getByText('Body bytes').parentElement;
@@ -312,13 +311,87 @@ describe('RequestEventDrawer', () => {
       />,
     );
 
-    expect(screen.getByText('Upstream Failure')).toBeDefined();
+    expect(screen.getByText('Upstream failure')).toBeDefined();
     expect(screen.getByText('rate_limit_error')).toBeDefined();
     expect(
       screen.getByText('forced fake rate limit response <markup>'),
     ).toBeDefined();
     expect(screen.getByText('upstream_4xx')).toBeDefined();
     expect(screen.getByText('429')).toBeDefined();
+  });
+
+  it('explains a known error code with a next step linking to the principal router', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const event = {
+      event_id: 'evt_route',
+      request_id: 'req_route',
+      principal_id: 'principal-7',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 503,
+      duration_ms: 3,
+      error_code: 'route_no_upstream_after_filter',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'The router’s filters removed every upstream, so none could serve the request.',
+      ),
+    ).toBeDefined();
+    const link = screen.getByRole('link', { name: 'Open principal router' });
+    expect(link.getAttribute('href')).toBe(
+      '/principals?selectedId=principal-7#principal-router',
+    );
+    expect(screen.getByTestId('request-error-code').textContent).toBe(
+      'route_no_upstream_after_filter',
+    );
+  });
+
+  it('keeps an unknown error code visible behind a generic sentence', () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const event = {
+      event_id: 'evt_unknown',
+      request_id: 'req_unknown',
+      ts: 1718553120,
+      ts_ms: 1718553120000,
+      status: 500,
+      duration_ms: 40,
+      error_code: 'brand_new_failure',
+      _phase: 'final',
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'The request ended with an error the dashboard has no description for.',
+      ),
+    ).toBeDefined();
+    expect(screen.getByTestId('request-error-code').textContent).toBe(
+      'brand_new_failure',
+    );
+    expect(screen.queryByRole('link')).toBeNull();
   });
 
   it('shows a final SSE error as the outcome while preserving HTTP 200', () => {
@@ -344,10 +417,10 @@ describe('RequestEventDrawer', () => {
     );
 
     expect(screen.getAllByText('overloaded_error').length).toBeGreaterThan(0);
-    expect(screen.getByText('HTTP Status')).toBeDefined();
+    expect(screen.getByText('HTTP status')).toBeDefined();
     expect(screen.getByText('200')).toBeDefined();
     expect(screen.getByText('upstream_stream_error')).toBeDefined();
-    expect(screen.getByText('Upstream Failure')).toBeDefined();
+    expect(screen.getByText('Upstream failure')).toBeDefined();
     expect(screen.getByText('Overloaded')).toBeDefined();
   });
 
@@ -370,7 +443,7 @@ describe('RequestEventDrawer', () => {
       />,
     );
 
-    expect(screen.queryByText('Upstream Failure')).toBeNull();
+    expect(screen.queryByText('Upstream failure')).toBeNull();
   });
 
   it('renders Claude session identity and explicit request kind', () => {
@@ -470,7 +543,7 @@ describe('RequestEventDrawer', () => {
       />,
     );
 
-    expect(screen.getByText('Upstream Failure')).toBeDefined();
+    expect(screen.getByText('Upstream failure')).toBeDefined();
     expect(screen.getByText('rate_limit_error')).toBeDefined();
     expect(screen.getByText('upstream_4xx')).toBeDefined();
   });
@@ -496,7 +569,7 @@ describe('RequestEventDrawer', () => {
       />,
     );
 
-    expect(screen.getByText('Upstream Failure')).toBeDefined();
+    expect(screen.getByText('Upstream failure')).toBeDefined();
     expect(screen.getByText('forced fake rate limit response')).toBeDefined();
     expect(screen.getByText('upstream_4xx')).toBeDefined();
   });

@@ -9,7 +9,6 @@ publish = false
 [dependencies]
 base64 = { workspace = true }
 chacha20poly1305 = { workspace = true }
-secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

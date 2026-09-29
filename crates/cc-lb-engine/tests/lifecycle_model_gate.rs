@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
-use cc_lb_engine::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_engine::api_keys::limit_engine::LimitEngine;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
-use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_control::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_storage_api::{KeyStatus, StoredApiKeyRecord};
 use http::StatusCode;
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, lifecycle_with,
     messages_request,
 };
 
@@ -29,7 +29,7 @@ fn engine_with_allowed_models(
     (
         LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(cc_lb_engine::SystemClock),
+            Arc::new(cc_lb_clock::SystemClock),
         ),
         view,
     )
@@ -46,7 +46,6 @@ fn active_record() -> StoredApiKeyRecord {
 #[tokio::test]
 async fn model_gate_rejects_disallowed_model_before_upstream() {
     let state = TestState::default();
-    let hook = Arc::new(RecordingHook::default());
     let (limit_engine, view) = engine_with_allowed_models(vec!["allowed-model".to_owned()]);
     let lifecycle = lifecycle_with(
         TestAuthn::with_principal_view(state.clone(), view),
@@ -54,7 +53,6 @@ async fn model_gate_rejects_disallowed_model_before_upstream() {
             state: state.clone(),
             mode: DispatchMode::StreamingOk,
         },
-        hook,
     )
     .with_static_limit_subject(
         limit_engine,

@@ -2,9 +2,8 @@ use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use cc_lb_storage_api::{
-    RequestEventListItem, RequestEventListQuery, RequestEventStore, RequestEventStreamFilters,
-    StatusClass,
-    types::{RequestEvent, RequestEventUpstream},
+    RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
+    RequestEventStreamFilters, StatusClass,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -24,10 +23,10 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
 
         let legacy = RequestEvent {
             ts: 2,
+            ts_ms: Some(2_000),
             request_id: "req-a".to_owned(),
             event_id: Some("event-a".to_owned()),
             principal_id: Some("principal-a".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             upstream_id: Some(upstream_id),
             upstream_name: Some("upstream-a".to_owned()),
             thread_id: Some("thread-a".to_owned()),
@@ -47,8 +46,6 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
         wrong_upstream_id.upstream_id = Some(other_upstream_id);
         let mut wrong_thread = decoy(&matching, "decoy-thread", 9_300);
         wrong_thread.thread_id = Some("thread-b".to_owned());
-        let mut wrong_upstream = decoy(&matching, "decoy-upstream", 9_200);
-        wrong_upstream.upstream = None;
         let mut wrong_status = decoy(&matching, "decoy-status", 9_100);
         wrong_status.status = 500;
 
@@ -60,7 +57,6 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             &wrong_model,
             &wrong_upstream_id,
             &wrong_thread,
-            &wrong_upstream,
             &wrong_status,
         ] {
             storage.append_request_event(event).await?;
@@ -70,10 +66,10 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             principal_id: Some("principal-a".to_owned()),
             thread_id: Some("thread-a".to_owned()),
             model: Some("claude-sonnet-4-5".to_owned()),
-            upstream: Some(RequestEventUpstream::AnthropicDirect),
             upstream_id: Some(upstream_id),
             event_kind: None,
             status_class: Some(StatusClass::TwoXx),
+            errors_only: false,
         };
 
         let default_page = storage
@@ -135,6 +131,56 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
             .await?
             .expect("stored request event detail");
         assert_eq!(serde_json::to_vec(&detail)?, serde_json::to_vec(&matching)?);
+
+        for index in 0..60 {
+            let mut event = request_event(
+                &format!("sparse-{index}"),
+                &format!("req-sparse-{index}"),
+                20_000 + index * 1_000,
+                200,
+                "principal-sparse",
+                upstream_id,
+            );
+            event.error_code = None;
+            if index == 0 {
+                event.status = 429;
+            } else if index == 1 {
+                event.error_code = Some("stream_error".to_owned());
+            } else if index == 2 {
+                event.status = 500;
+            }
+            storage.append_request_event(&event).await?;
+        }
+
+        let errors = RequestEventStreamFilters {
+            principal_id: Some("principal-sparse".to_owned()),
+            errors_only: true,
+            ..Default::default()
+        };
+        let first = storage
+            .list_request_events(&list_query(errors.clone(), None, 2, None, None))
+            .await?;
+        assert_event_ids(&first, &["sparse-2", "sparse-1"]);
+        let second = storage
+            .list_request_events(&list_query(
+                errors.clone(),
+                None,
+                2,
+                first[1].ts_ms,
+                first[1].event_id.clone(),
+            ))
+            .await?;
+        assert_event_ids(&second, &["sparse-0"]);
+        let third = storage
+            .list_request_events(&list_query(
+                errors,
+                None,
+                2,
+                second[0].ts_ms,
+                second[0].event_id.clone(),
+            ))
+            .await?;
+        assert!(third.is_empty());
 
         Ok(())
     })
@@ -248,7 +294,6 @@ fn request_event(
         event_id: Some(event_id.to_owned()),
         source_kind: Some("proxy".to_owned()),
         principal_id: Some(principal_id.to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
         upstream_id: Some(upstream_id),
         upstream_name: Some("upstream-a".to_owned()),
         thread_id: Some("thread-a".to_owned()),
@@ -293,8 +338,6 @@ fn request_event(
         dns_ms: Some(9),
         connect_ms: Some(10),
         connection_reused: Some(true),
-        limit_reconcile_ms: Some(11),
-        observability_post_ms: Some(12),
         proxy_setup_ms: Some(13),
         shape_ms: Some(14),
         sign_ms: Some(15),
@@ -397,7 +440,6 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         source_kind: event.source_kind.clone(),
         event_kind: event.event_kind,
         principal_id: event.principal_id.clone(),
-        upstream: event.upstream,
         upstream_id: event.upstream_id,
         upstream_name: event.upstream_name.clone(),
         thread_id: event.thread_id.clone(),
@@ -444,8 +486,6 @@ fn list_projection(event: &RequestEvent) -> RequestEventListItem {
         dns_ms: event.dns_ms,
         connect_ms: event.connect_ms,
         connection_reused: event.connection_reused,
-        limit_reconcile_ms: event.limit_reconcile_ms,
-        observability_post_ms: event.observability_post_ms,
         proxy_setup_ms: event.proxy_setup_ms,
         shape_ms: event.shape_ms,
         sign_ms: event.sign_ms,

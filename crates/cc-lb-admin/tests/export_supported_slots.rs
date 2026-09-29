@@ -16,10 +16,8 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 sha256: [42; 32],
                 bytes: vec![42; 42],
                 size_bytes: 42,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: "plugin-slots".to_owned(),
                 version: None,
                 original_filename: "plugin-slots.wasm".to_owned(),
@@ -29,11 +27,7 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
                 description: "slot fixture".to_owned(),
                 usage: "test fixture".to_owned(),
                 hook_metadata: Default::default(),
-                supported_slots: vec![
-                    PluginSlotKind::Router,
-                    PluginSlotKind::Shape,
-                    PluginSlotKind::ObservabilityHook,
-                ],
+                supported_slots: vec![PluginSlotKind::Router, PluginSlotKind::Shape],
             },
         )
         .await
@@ -54,8 +48,5 @@ async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() 
         .iter()
         .find(|entry| entry["name"] == "plugin-slots")
         .expect("uploaded plugin is included in export registry");
-    assert_eq!(
-        plugin["supported_slots"],
-        json!(["router", "shape", "observability_hook"])
-    );
+    assert_eq!(plugin["supported_slots"], json!(["router", "shape"]));
 }

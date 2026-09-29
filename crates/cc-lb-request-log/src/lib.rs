@@ -11,7 +11,7 @@ mod storage_tail;
 
 pub use cache::{
     RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheLookbackPrefix,
-    RequestCacheState, RequestEventUpstream,
+    RequestCacheState,
 };
 pub use event_kind::{ParseRequestEventKindError, RequestEventKind};
 pub use header_snapshot::{CostBreakdown, HeaderSnapshot};

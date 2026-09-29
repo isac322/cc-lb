@@ -104,7 +104,7 @@ fn v11_trace_contains_distinct_winner_and_loser_pressure() {
 
     assert_eq!(
         result.trace.formula_version.as_deref(),
-        Some("cost-first-v1")
+        Some("cost-first-v2")
     );
     assert_ne!(winner.quota_urgency_combined, loser.quota_urgency_combined);
     for base in [winner, loser, partial] {
@@ -168,7 +168,6 @@ fn oauth_candidate(name: &str, seed: u8, quota: BaseQuota) -> UpstreamCandidate 
         upstream_id: upstream_id(seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quota_snapshots(quota),
         observed_at_unix_secs: T0_SECS,
         cache_score: None,
@@ -212,7 +211,9 @@ fn quota_snapshots(quota: BaseQuota) -> Vec<SubscriptionQuotaCandidateSnapshot> 
             quota.utilization,
             T0_SECS + quota.five_hour_reset_offset_secs,
         ),
-        quota_snapshot(WINDOW_SEVEN_DAY, quota.utilization, T0_SECS + 604_800),
+        // An untouched weekly quota a full week before reset stays behind
+        // linear pace, so the weekly pace gate keeps the 5h pressure under test.
+        quota_snapshot(WINDOW_SEVEN_DAY, 0.0, T0_SECS + 604_800),
     ]
 }
 
@@ -295,7 +296,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 

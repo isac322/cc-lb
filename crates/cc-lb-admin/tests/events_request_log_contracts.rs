@@ -93,10 +93,7 @@ async fn events_stream_orders_parse_auth_route_enrichment_before_one_final() {
     assert_eq!(final_event["response_body_process_ms"], 0.0);
     assert_eq!(final_event["response_body_downstream_poll_gap_ms"], 0.75);
     assert_eq!(final_event["retry_overhead_ms"], 1.25);
-    let rows = storage
-        .query_request_events(0, u64::MAX, 10)
-        .await
-        .expect("persisted stream contract row");
+    let rows = stored_request_events(storage.as_ref()).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].event_id.as_deref(), Some(EVENT_ID));
 }
@@ -110,7 +107,7 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     let (status, _, four_xx, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=3&status_class=4xx",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=3&status_class=4xx",
         None,
     )
     .await;
@@ -139,10 +136,23 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     assert_eq!(broad["error_code"], "upstream_4xx");
     assert_no_fabricated_diagnostics(broad);
 
+    let (status, _, errors, _) = authed_json(
+        app(state.clone()),
+        "GET",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&status_class=errors",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(errors["count"], 4);
+    assert!(errors["events"].as_array().unwrap().iter().all(|event| {
+        event["status"].as_u64().unwrap_or_default() >= 400 || !event["error_code"].is_null()
+    }));
+
     let (status, _, five_xx, _) = authed_json(
         app(state),
         "GET",
-        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=1&status_class=5xx",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=1&status_class=5xx",
         None,
     )
     .await;
@@ -155,10 +165,30 @@ async fn events_recent_returns_structured_429_and_distinct_499_without_control_f
     assert_eq!(dropped["error_code"], "terminal_dropped");
     assert_no_fabricated_diagnostics(dropped);
 
-    let rows = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10)
-        .await
-        .expect("all request-log contract rows persist");
+    let rows = stored_request_events(storage.as_ref()).await;
     assert_eq!(rows.len(), 4);
+}
+
+/// Reads every persisted request event in append order through the cursor API.
+async fn stored_request_events(
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
+) -> Vec<cc_lb_storage_api::RequestEvent> {
+    let cursor = storage
+        .current_request_event_cursor()
+        .await
+        .expect("current request event cursor");
+    storage
+        .query_request_events_between_cursors(
+            0,
+            cursor,
+            500,
+            &cc_lb_storage_api::RequestEventStreamFilters::default(),
+        )
+        .await
+        .expect("persisted request events")
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect()
 }
 
 #[tokio::test]
@@ -170,7 +200,7 @@ async fn events_recent_excludes_renewal_by_default_and_includes_when_requested()
     let (status, _, default_resp, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10",
         None,
     )
     .await;
@@ -182,7 +212,7 @@ async fn events_recent_excludes_renewal_by_default_and_includes_when_requested()
     let (status, _, all_resp, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=all",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=all",
         None,
     )
     .await;
@@ -195,7 +225,7 @@ async fn events_recent_excludes_renewal_by_default_and_includes_when_requested()
     let (status, _, renewal_resp, _) = authed_json(
         app(state),
         "GET",
-        "/admin/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=renewal",
+        "/admin/v1/events/recent?since_unix_secs=1700000000&until_unix_secs=1900000000&limit=10&source_kind=renewal",
         None,
     )
     .await;
@@ -214,7 +244,7 @@ async fn events_delta_applies_event_kind_filter_consistently() {
     let (status, _, renewal_resp, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/delta?since_cursor=0&event_kind=renewal",
+        "/admin/v1/events/delta?since_cursor=0&event_kind=renewal",
         None,
     )
     .await;
@@ -226,7 +256,7 @@ async fn events_delta_applies_event_kind_filter_consistently() {
     let (status, _, unclassified_resp, _) = authed_json(
         app(state.clone()),
         "GET",
-        "/admin/events/delta?since_cursor=0&event_kind=unclassified",
+        "/admin/v1/events/delta?since_cursor=0&event_kind=unclassified",
         None,
     )
     .await;
@@ -239,7 +269,7 @@ async fn events_delta_applies_event_kind_filter_consistently() {
     let (status, _, default_resp, _) = authed_json(
         app(state),
         "GET",
-        "/admin/events/delta?since_cursor=0",
+        "/admin/v1/events/delta?since_cursor=0",
         None,
     )
     .await;
@@ -255,9 +285,6 @@ async fn events_endpoints_reject_unknown_event_kind_consistently() {
     let state = test_state(Config::default(), Some(Arc::clone(&storage)));
 
     for uri in [
-        "/admin/events/recent?event_kind=bogus",
-        "/admin/events/delta?since_cursor=0&event_kind=bogus",
-        "/admin/events/stream?event_kind=bogus",
         "/admin/v1/events/recent?event_kind=bogus",
         "/admin/v1/events/histogram?since_unix_secs=1&until_unix_secs=2&bucket_ms=1000&event_kind=bogus",
         "/admin/v1/events/delta?since_cursor=0&event_kind=bogus",

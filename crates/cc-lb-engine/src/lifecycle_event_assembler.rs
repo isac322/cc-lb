@@ -11,7 +11,7 @@ use cc_lb_lifecycle::{
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
-    RequestEventKind, RequestEventPartial, RequestEventUpdate, RequestEventUpstream,
+    RequestEventKind, RequestEventPartial, RequestEventUpdate,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
@@ -179,8 +179,6 @@ struct Partial {
     upstream_body_ms: Option<u64>,
     finalize_ms: Option<u64>,
     first_body_chunk_ms: Option<u64>,
-    limit_reconcile_ms: Option<u64>,
-    observability_post_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     internal_errors: Vec<InternalError>,
 
@@ -246,19 +244,18 @@ impl Partial {
                 )
             })
             .unwrap_or((None, None, None));
-        let (upstream_id, upstream_name, upstream, route_ms, route_matched_v3_cache_key) = self
+        let (upstream_id, upstream_name, route_ms, route_matched_v3_cache_key) = self
             .route
             .as_ref()
             .map(|route| {
                 (
                     Some(route.upstream_id),
                     Some(route.upstream_name.clone()),
-                    Some(RequestEventUpstream::AnthropicDirect),
                     route.route_ms,
                     route.matched_v3_cache_key.clone(),
                 )
             })
-            .unwrap_or((None, None, None, None, None));
+            .unwrap_or((None, None, None, None));
         let cost = self.cost_options();
         let ts_ms = self.ts_ms;
 
@@ -283,7 +280,6 @@ impl Partial {
             principal_id,
             principal_kind,
             key_id,
-            upstream,
             upstream_id,
             upstream_name,
             model: self.model().map(str::to_owned),
@@ -429,7 +425,7 @@ impl Partial {
     // at termination). Must never set `self.cost`: that feeds billing/limit
     // reconciliation, which must stay driven solely by the real `Priced` event.
     fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
-        self.estimated_cost_options_with(|model, usage, upstream_kind| {
+        self.estimated_cost_options_with(|model, usage| {
             cc_lb_pricing::virtual_cost_micros_full(
                 model,
                 usage.input_tokens,
@@ -437,7 +433,6 @@ impl Partial {
                 usage.cache_creation_input_tokens_5m,
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
-                upstream_kind,
                 usage.service_tier.as_deref(),
             )
             .into()
@@ -446,30 +441,13 @@ impl Partial {
 
     fn estimated_cost_options_with(
         &self,
-        estimate: impl FnOnce(
-            &str,
-            &UsageSnapshot,
-            Option<cc_lb_pricing::UpstreamKind>,
-        ) -> LifecycleCostBreakdown,
+        estimate: impl FnOnce(&str, &UsageSnapshot) -> LifecycleCostBreakdown,
     ) -> Option<CostBreakdownOptions> {
         if !self.usage_seen {
             return None;
         }
         let model = self.model()?;
-        let upstream_kind = self
-            .route
-            .as_ref()
-            .and_then(|route| route.upstream_kind.as_deref())
-            .and_then(|label| match label {
-                "anthropic_key" => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
-                "anthropic_oauth" => Some(cc_lb_pricing::UpstreamKind::AnthropicOAuth),
-                _ => None,
-            });
-        Some(CostBreakdownOptions::from(estimate(
-            model,
-            &self.usage,
-            upstream_kind,
-        )))
+        Some(CostBreakdownOptions::from(estimate(model, &self.usage)))
     }
 
     fn usage_partial_due_at(&self, now: Instant) -> bool {
@@ -916,8 +894,6 @@ async fn handle_event(
         request_body_read_ms,
         request_body_bytes,
         finalize_ms,
-        limit_reconcile_ms,
-        observability_post_ms,
         proxy_setup_ms,
         setup_timings,
         upstream_body_ms,
@@ -943,8 +919,6 @@ async fn handle_event(
             partial.request_body_read_ms = *request_body_read_ms;
             partial.request_body_bytes = *request_body_bytes;
             partial.finalize_ms = *finalize_ms;
-            partial.limit_reconcile_ms = *limit_reconcile_ms;
-            partial.observability_post_ms = *observability_post_ms;
             partial.proxy_setup_ms = *proxy_setup_ms;
             apply_setup_timings(&mut partial, setup_timings);
             partial.upstream_body_ms = *upstream_body_ms;
@@ -979,8 +953,6 @@ async fn handle_event(
         partial.request_body_read_ms = partial.request_body_read_ms.or(*request_body_read_ms);
         partial.request_body_bytes = partial.request_body_bytes.or(*request_body_bytes);
         partial.finalize_ms = partial.finalize_ms.or(*finalize_ms);
-        partial.limit_reconcile_ms = partial.limit_reconcile_ms.or(*limit_reconcile_ms);
-        partial.observability_post_ms = partial.observability_post_ms.or(*observability_post_ms);
         partial.proxy_setup_ms = partial.proxy_setup_ms.or(*proxy_setup_ms);
         apply_setup_timings(&mut partial, setup_timings);
         partial.upstream_body_ms = partial.upstream_body_ms.or(*upstream_body_ms);
@@ -1302,7 +1274,6 @@ fn finalize_base(
     let (
         upstream_id,
         upstream_name,
-        upstream,
         route_model,
         route_ms,
         route_routing_trace,
@@ -1317,8 +1288,6 @@ fn finalize_base(
         cache_value_micros,
         formula_winner_upstream_id,
         kept_upstream_id,
-        lineage_would_have_predicted_read_tokens,
-        lineage_would_have_picked_upstream_id,
     ) = partial
         .route
         .as_ref()
@@ -1326,7 +1295,6 @@ fn finalize_base(
             (
                 Some(r.upstream_id),
                 Some(r.upstream_name.clone()),
-                Some(RequestEventUpstream::AnthropicDirect),
                 r.model.clone(),
                 r.route_ms,
                 r.routing_trace.clone(),
@@ -1341,13 +1309,11 @@ fn finalize_base(
                 r.cache_value_micros,
                 r.formula_winner_upstream_id,
                 r.kept_upstream_id,
-                r.lineage_would_have_predicted_read_tokens.map(u64::from),
-                r.lineage_would_have_picked_upstream_id,
             )
         })
         .unwrap_or((
             None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None, None,
+            None, None,
         ));
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
@@ -1382,7 +1348,6 @@ fn finalize_base(
         principal_id,
         key_id,
         principal_kind,
-        upstream,
         upstream_id,
         upstream_name,
         model,
@@ -1441,8 +1406,6 @@ fn finalize_base(
             .route
             .as_ref()
             .and_then(|route| route.quota_warning_multiplier),
-        lineage_would_have_predicted_read_tokens,
-        lineage_would_have_picked_upstream_id,
         cost_usd_micros: cost.total,
         cost_input_micros: cost.input,
         cost_output_micros: cost.output,
@@ -1498,8 +1461,6 @@ fn finalize_base(
         dns_ms: partial.dns_ms,
         connect_ms: partial.connect_ms,
         connection_reused: partial.connection_reused,
-        limit_reconcile_ms: partial.limit_reconcile_ms,
-        observability_post_ms: partial.observability_post_ms,
         proxy_setup_ms: partial.proxy_setup_ms,
         shape_ms: partial.shape_ms,
         sign_ms: partial.sign_ms,
@@ -1628,7 +1589,6 @@ async fn evict_oldest(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_control::BusReceiver;
     use cc_lb_domain::{
         CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
         TerminalDecision, TerminalStrategy,
@@ -1671,15 +1631,6 @@ mod tests {
             }
             self.rows.lock().unwrap().push(event.clone());
             Ok(self.cursor.fetch_add(1, Ordering::Relaxed) + 1)
-        }
-
-        async fn query_request_events(
-            &self,
-            _since: u64,
-            _until: u64,
-            _limit: usize,
-        ) -> StorageResult<Vec<RequestEvent>> {
-            Ok(Vec::new())
         }
     }
 
@@ -1785,12 +1736,11 @@ mod tests {
 
         partial.usage_seen = true;
         let estimated = partial
-            .estimated_cost_options_with(|model, usage, upstream_kind| {
+            .estimated_cost_options_with(|model, usage| {
                 assert_eq!(model, "claude-sonnet-4-5-20250929");
 
                 assert_eq!(usage.input_tokens, 1000);
                 assert_eq!(usage.output_tokens, 500);
-                assert_eq!(upstream_kind, None);
                 CostBreakdown {
                     total_micros: Some(31337),
                     input_micros: Some(1000),
@@ -1907,8 +1857,6 @@ mod tests {
                 connect_ms: None,
                 connection_reused: None,
                 internal_errors: Vec::new(),
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -1952,8 +1900,6 @@ mod tests {
                 request_body_read_ms: Some(0),
                 request_body_bytes: Some(917_567),
                 finalize_ms: Some(4),
-                limit_reconcile_ms: Some(5),
-                observability_post_ms: Some(6),
                 proxy_setup_ms: Some(0),
                 setup_timings: cc_lb_lifecycle::RequestSetupTimings {
                     json_parse_ms: Some(0.0),
@@ -2002,8 +1948,6 @@ mod tests {
                 request_body_read_ms: None,
                 request_body_bytes: None,
                 finalize_ms: None,
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -2033,8 +1977,6 @@ mod tests {
         assert_eq!(row.request_body_read_ms, Some(0));
         assert_eq!(row.request_body_bytes, Some(917_567));
         assert_eq!(row.finalize_ms, Some(4));
-        assert_eq!(row.limit_reconcile_ms, Some(5));
-        assert_eq!(row.observability_post_ms, Some(6));
         assert_eq!(row.proxy_setup_ms, Some(0));
         assert_eq!(row.json_parse_ms, Some(0.0));
         assert_eq!(row.cache_structure_ms, Some(1.0));
@@ -2098,8 +2040,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2153,8 +2093,6 @@ mod tests {
                 request_body_read_ms: None,
                 request_body_bytes: None,
                 finalize_ms: None,
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: Some(4),
                 setup_timings: cc_lb_lifecycle::RequestSetupTimings {
                     json_parse_ms: Some(0.125),
@@ -2221,8 +2159,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2271,8 +2207,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2321,8 +2255,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2345,9 +2277,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn terminated_event_kind_classifies_orphan_shadow_row() {
+    async fn terminated_event_kind_classifies_orphan_row() {
         // When `RequestStarted` is dropped on the writer channel, the
-        // terminal event's classification must still categorize the shadow
+        // terminal event's classification must still categorize the orphan
         // row instead of leaving it unclassified.
         let (tx, rx) = mpsc::channel(4);
         let store = Arc::new(CapturingStore::default());
@@ -2361,8 +2293,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2391,7 +2321,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn terminated_without_event_kind_leaves_orphan_unclassified() {
         // A terminal event from a producer that never classified the request
-        // must not invent a classification for the shadow row.
+        // must not invent a classification for the orphan row.
         let (tx, rx) = mpsc::channel(4);
         let store = Arc::new(CapturingStore::default());
         let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
@@ -2404,8 +2334,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2451,8 +2379,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2502,8 +2428,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2564,8 +2488,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2619,8 +2541,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2683,8 +2603,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2721,8 +2639,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2774,8 +2690,6 @@ mod tests {
                 kind: cc_lb_domain::InternalErrorKind::Unavailable,
                 message: Some("connection refused".to_owned()),
             }],
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2852,8 +2766,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -2897,8 +2809,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: Some(1),
-            observability_post_ms: Some(2),
             proxy_setup_ms: Some(3),
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3197,8 +3107,6 @@ mod tests {
                 connect_ms: None,
                 connection_reused: None,
                 internal_errors: Vec::new(),
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -3231,14 +3139,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn finalized_row_write_republishes_to_bus_for_admin_sse() {
-        use crate::event_bus::InMemoryBus;
-        use cc_lb_control::BusReceiver;
+        use cc_lb_control::event_bus::InMemoryBus;
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let handle = spawn_request_event_assembler(
             rx,
             store.clone(),
@@ -3270,8 +3175,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3302,16 +3205,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn request_started_then_route_publishes_ordered_enrichment_baseline() {
-        use crate::event_bus::InMemoryBus;
-        use cc_lb_control::BusReceiver;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         // Given an assembler with an in-memory subscriber.
         let (tx, rx) = mpsc::channel(4);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let event_id = eid("request-started-route-baseline");
         let handle = spawn_request_event_assembler(
             rx,
@@ -3356,8 +3256,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         })
@@ -3388,7 +3286,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn thinking_budget_tokens_preserve_partial_and_final_parity() {
-        use crate::event_bus::InMemoryBus;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         // Given request fixtures with and without enabled thinking budgets.
         let cases = [
@@ -3408,9 +3306,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let handle = spawn_request_event_assembler(
             rx,
             store,
@@ -3476,8 +3372,6 @@ mod tests {
                 connect_ms: None,
                 connection_reused: None,
                 internal_errors: Vec::new(),
-                limit_reconcile_ms: None,
-                observability_post_ms: None,
                 proxy_setup_ms: None,
                 setup_timings: Default::default(),
                 io_timings: Default::default(),
@@ -3527,14 +3421,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn classification_fields_preserve_partial_and_final_parity() {
-        use crate::event_bus::InMemoryBus;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         let (tx, rx) = mpsc::channel(8);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let handle = spawn_request_event_assembler(
             rx,
             store,
@@ -3584,8 +3476,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -3665,15 +3555,12 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn full_lifecycle_publishes_throttled_partials_and_one_final() {
-        use crate::event_bus::InMemoryBus;
-        use cc_lb_control::BusReceiver;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let event_id = eid("01978c00-0000-7000-8000-000000000002");
         let handle = spawn_request_event_assembler(
             rx,
@@ -3742,8 +3629,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         })
@@ -3820,8 +3705,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: RequestIoTimings {
@@ -3961,16 +3844,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parse_and_auth_failures_emit_no_enrichment_partials_and_finalize_once() {
-        use crate::event_bus::InMemoryBus;
-        use cc_lb_control::BusReceiver;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         // Given an assembler subscribed before a request begins.
         let (tx, rx) = mpsc::channel(8);
         let store = Arc::new(CapturingStore::default());
         let bus = Arc::new(InMemoryBus::new());
-        let BusReceiver::InMemory(mut broadcast_rx) = bus.subscribe() else {
-            panic!("expected InMemory receiver");
-        };
+        let mut broadcast_rx = bus.subscribe();
         let event_id = eid("parse-auth-failure-control");
         let handle = spawn_request_event_assembler(
             rx,
@@ -4014,8 +3894,6 @@ mod tests {
             request_body_read_ms: None,
             request_body_bytes: None,
             finalize_ms: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),
@@ -4046,7 +3924,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn delayed_pricing_subscriber_does_not_affect_finalized_row() {
-        use crate::event_bus::InMemoryBus;
+        use cc_lb_control::event_bus::InMemoryBus;
 
         let bus = Arc::new(InMemoryBus::new());
         let rx = bus.attach_lifecycle_assembler(16);
@@ -4113,8 +3991,6 @@ mod tests {
                 quota_urgency_7d: None,
                 quota_urgency_combined: None,
                 quota_warning_multiplier: None,
-                lineage_would_have_predicted_read_tokens: None,
-                lineage_would_have_picked_upstream_id: None,
             }),
             routing_trace: None,
         });
@@ -4142,8 +4018,6 @@ mod tests {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             setup_timings: Default::default(),
             io_timings: Default::default(),

@@ -1,6 +1,5 @@
 // Visual presentation for the limit-reset ("coupon") nudge: a ticket-shaped
-// header button (real notches + dashed count compartment) plus a
-// non-interactive badge inside the sidebar upstream row.
+// header button (real notches + dashed count compartment).
 // All decisions come from lib/couponNudge.deriveCouponNudge; these components
 // only render the result and never consume or mutate coupon state. Quota
 // stays the single source of truth for usage numbers.
@@ -22,7 +21,6 @@ import {
   loadPendingLimitResetOp,
   useLimitResets,
 } from '../../lib/limitResets';
-import type { Upstream } from '../../lib/queries';
 import type { PolledDataResult } from '../../lib/usePolledData';
 import { cx, Spinner } from '../ui/primitives';
 
@@ -33,7 +31,6 @@ const TONE: Record<
   CouponNudgeKind,
   {
     icon: string;
-    text: string;
     divider: string;
     fill: string;
     stroke: string;
@@ -41,24 +38,23 @@ const TONE: Record<
 > = {
   quiet: {
     icon: 'text-text-faint',
-    text: 'text-text-faint',
     divider: 'border-[color:var(--color-border)]',
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[var(--color-border)]',
   },
   expiry: {
     icon: 'text-[color:var(--color-warn-text)]',
-    text: 'text-[color:var(--color-warn-text)]',
     divider: 'border-[color:var(--color-warn)]/40',
     fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
     stroke: 'stroke-[color-mix(in_oklab,var(--color-warn)_50%,transparent)]',
   },
+  // A usable reset is news, not a warning: ink and the strong line, no
+  // accent (it is reserved for focus, the switch and the one primary action).
   limit: {
-    icon: 'text-accent',
-    text: 'text-accent',
-    divider: 'border-accent/40',
-    fill: 'fill-[var(--color-accent-dim)] group-hover/coupon:fill-[var(--color-hover-bg)]',
-    stroke: 'stroke-[color-mix(in_oklab,var(--color-accent)_50%,transparent)]',
+    icon: 'text-text',
+    divider: 'border-[color:var(--color-border-strong)]',
+    fill: 'fill-[var(--color-panel-strong)] group-hover/coupon:fill-[var(--color-hover-bg)]',
+    stroke: 'stroke-[var(--color-border-strong)]',
   },
 };
 
@@ -119,9 +115,9 @@ export function useCouponNudge(
 }
 
 const ACTION_BASE =
-  'inline-flex h-8 items-center rounded-sm border text-xs font-medium transition-colors select-none ' +
-  'disabled:cursor-not-allowed disabled:opacity-50 ' +
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2';
+  'inline-flex h-8 max-md:h-10 items-center rounded-sm border text-xs font-medium transition-colors select-none ' +
+  'disabled:control-disabled ' +
+  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2';
 
 /** Ticket-outline path for the header button: rounded corners plus a
  *  semicircular notch cut into the top and bottom edges at the count
@@ -193,6 +189,9 @@ export function CouponActionButton({
   const tone = TONE[kind];
   const isDisabled = Boolean(disabled || loading);
   const wrapped = Boolean(isDisabled && disabledReason);
+  // Disabled (not in-flight): the ticket reads inert — no fill, a dashed
+  // disabled line and disabled ink. A loading claim keeps its normal look.
+  const inert = isDisabled && !loading;
   const [reasonOpen, setReasonOpen] = useState(false);
   const suppressFocusOpen = useRef(false);
 
@@ -240,8 +239,10 @@ export function CouponActionButton({
       onClick={onClick}
       className={cx(
         ACTION_BASE,
-        'group/coupon relative items-stretch p-0 border-transparent',
-        'text-text',
+        // The SVG ticket is the outline; keep the native border out of it
+        // (`control-disabled` would add a dashed rectangle on top).
+        'group/coupon relative items-stretch p-0 border-transparent disabled:border-transparent!',
+        inert ? 'text-text-disabled' : 'text-text',
         wrapped && 'pointer-events-none',
       )}
     >
@@ -254,7 +255,12 @@ export function CouponActionButton({
         >
           <path
             d={ticketOutlinePath(geo.w, geo.h, geo.x)}
-            className={cx(tone.fill, tone.stroke)}
+            className={
+              inert
+                ? 'fill-transparent stroke-[var(--color-border-disabled)]'
+                : cx(tone.fill, tone.stroke)
+            }
+            strokeDasharray={inert ? '3 3' : undefined}
             strokeWidth={1}
           />
         </svg>
@@ -263,7 +269,12 @@ export function CouponActionButton({
         {loading ? (
           <Spinner className={cx('h-3.5 w-3.5 shrink-0', tone.icon)} />
         ) : (
-          <Ticket className={cx('h-3.5 w-3.5 shrink-0', tone.icon)} />
+          <Ticket
+            className={cx(
+              'h-3.5 w-3.5 shrink-0',
+              inert ? 'text-text-disabled' : tone.icon,
+            )}
+          />
         )}
         {children}
       </span>
@@ -272,8 +283,9 @@ export function CouponActionButton({
           ref={setDividerNode}
           className={cx(
             'relative inline-flex items-center border-l border-dashed px-2 tabular-nums',
-            tone.divider,
-            tone.icon,
+            inert
+              ? 'border-border-disabled text-text-disabled'
+              : cx(tone.divider, tone.icon),
           )}
         >
           {count}
@@ -311,7 +323,7 @@ export function CouponActionButton({
           <span
             className={cx(
               'inline-flex cursor-not-allowed rounded-sm',
-              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-[color:var(--color-accent)] focus-visible:outline-offset-2',
+              'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
             )}
           />
         }
@@ -326,7 +338,7 @@ export function CouponActionButton({
           sideOffset={6}
           collisionPadding={8}
         >
-          <BasePopover.Popup className="max-w-[240px] rounded-sm border border-subtle-strong bg-bg-sub px-2.5 py-1.5 text-[11px] leading-snug text-text shadow-lg">
+          <BasePopover.Popup className="max-w-[240px] rounded-md glass-strong px-2.5 py-1.5 text-caption text-text">
             <BasePopover.Description>{disabledReason}</BasePopover.Description>
           </BasePopover.Popup>
         </BasePopover.Positioner>
@@ -338,60 +350,9 @@ export function CouponActionButton({
   return (
     <span className="inline-flex items-center gap-2">
       {action}
-      <span className="shrink-0 whitespace-nowrap text-[11px] text-[color:var(--color-warn-text)]">
+      <span className="shrink-0 whitespace-nowrap text-caption text-warn-text">
         {expiryLabel}
       </span>
     </span>
-  );
-}
-
-/** Compact expiry for the sidebar badge: "<1m" / "45m" / "2h" / "3d". */
-function formatExpiryShort(ms: number): string {
-  if (ms < 60_000) return '<1m';
-  const mins = Math.round(ms / 60_000);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.round(mins / 60);
-  if (hours < 48) return `${hours}h`;
-  return `${Math.round(hours / 24)}d`;
-}
-
-/** Non-interactive badge inside a sidebar upstream row (the row itself is the
- *  button — this must never be or contain a button). Rendered only when there
- *  is something to say; a soon expiry is shown even when the limit hint is
- *  also active. */
-export function SidebarCouponNudge({
-  upstream,
-  windows,
-}: {
-  upstream: Upstream;
-  windows: readonly NudgeQuotaWindow[];
-}) {
-  const isOauth = upstream.kind === 'anthropic_oauth';
-  const { nudge, nowMs } = useCouponNudge(
-    isOauth ? upstream.id : null,
-    windows,
-  );
-  const expiryMs =
-    nudge?.expiresSoonAt != null ? nudge.expiresSoonAt - nowMs : null;
-  if (!nudge || (nudge.kind === 'quiet' && expiryMs == null)) return null;
-  const tone = TONE[nudge.kind];
-  return (
-    <div
-      className={cx(
-        'flex items-center gap-1.5 text-[10px] font-mono',
-        tone.text,
-      )}
-    >
-      <Ticket className="h-3 w-3 shrink-0" />
-      {nudge.label ? <span className="truncate">{nudge.label}</span> : null}
-      {nudge.activeCount > 0 ? (
-        <span className="shrink-0 tabular-nums">×{nudge.activeCount}</span>
-      ) : null}
-      {expiryMs != null ? (
-        <span className="shrink-0 whitespace-nowrap text-[color:var(--color-warn-text)]">
-          · exp {formatExpiryShort(expiryMs)}
-        </span>
-      ) : null}
-    </div>
   );
 }

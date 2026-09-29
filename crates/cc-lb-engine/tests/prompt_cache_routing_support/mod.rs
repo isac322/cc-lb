@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use cc_lb_control::SubscriptionQuotaCacheLike;
 use cc_lb_domain::{
     Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
     WarmCacheEntry,
 };
-use cc_lb_engine::{SubscriptionQuotaCacheLike, lifecycle::HASH_SCHEMA_VERSION};
+use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
@@ -21,7 +22,6 @@ pub fn plugin_principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 
@@ -57,8 +57,6 @@ pub fn principal_record(name: &str) -> PrincipalRecord {
         allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,

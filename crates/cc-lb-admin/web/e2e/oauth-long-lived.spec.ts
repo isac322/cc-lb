@@ -71,9 +71,6 @@ async function installAppFixtures(
 
   await page.addInitScript(() => {
     window.localStorage.setItem('cc-lb-admin-token', 'mock-token');
-    // The wizard opens the Anthropic authorize page in a new tab; keep the
-    // test on the modal instead of following a real popup.
-    window.open = () => null;
   });
 
   await page.route('**/admin/**', async (route) => {
@@ -139,7 +136,7 @@ async function installAppFixtures(
         upstreams: upstreams.map((upstream) => ({ id: upstream.id, name: upstream.name, status: upstream.enabled ? 'active' : 'disabled', last_apply_at_unix_secs: null, last_apply_error: null })),
       });
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       return json(200, {
         range: url.searchParams.get('range') ?? '24h',
         step: url.searchParams.get('step') ?? 'hour',
@@ -150,7 +147,7 @@ async function installAppFixtures(
         series: [],
       });
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     if (pathname === '/admin/v1/subscription-quotas/latest') {
@@ -162,9 +159,6 @@ async function installAppFixtures(
     }
     if (pathname === '/admin/v1/subscription-quotas/series') {
       return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
-    }
-    if (pathname === '/admin/v1/subscription-quotas/analysis') {
-      return json(200, { since_unix_secs: 0, until_unix_secs: 0, now_unix_secs: 0, max_staleness_secs: 300, upstreams: [] });
     }
     return json(200, {});
   });
@@ -287,7 +281,7 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(refreshExpiry).toContainText('expires');
   });
 
-  test('Scenario: create wizard starts the OAuth flow without a credential-mode choice', async ({
+  test('Scenario: create dialog starts the OAuth flow without a credential-mode choice', async ({
     page,
   }) => {
     const draftStartRequests: unknown[] = [];
@@ -304,12 +298,25 @@ test.describe('OAuth long-lived credential display', () => {
     await expect(dialog).toBeVisible();
     await dialog.getByRole('button', { name: 'Continue' }).click();
 
-    // Authorizing posts an empty body to the draft-start endpoint: cc-lb
-    // always requests the long-lived grant and decides the outcome itself.
-    await dialog
-      .getByRole('button', { name: 'Authorize with Anthropic' })
-      .click();
-    await expect(dialog.getByPlaceholder('paste code...')).toBeVisible();
+    // Choosing the Claude path posts an empty body to the draft-start endpoint
+    // when the sign-in step mounts: cc-lb always requests the long-lived grant
+    // and decides the outcome itself.
+    const signIn = dialog.getByRole('link', { name: 'Sign in with Claude' });
+    await expect(signIn).toHaveAttribute(
+      'href',
+      'https://claude.ai/oauth/authorize?mock=1',
+    );
     expect(draftStartRequests).toEqual([{}]);
+
+    // The code comes back on the paste step; the dialog never shows the raw
+    // authorize URL or the state token.
+    await dialog
+      .getByRole('button', { name: 'I already have a code' })
+      .click();
+    await expect(
+      dialog.getByRole('textbox', { name: 'Authorization code' }),
+    ).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Connect' })).toBeVisible();
+    await expect(dialog.getByText('mock-state-token')).toHaveCount(0);
   });
 });

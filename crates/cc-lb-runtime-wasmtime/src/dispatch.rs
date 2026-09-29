@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use crate::cache::{call_filter_hook, call_observe_hook, call_shape_hook};
-use crate::{PluginCell, RuntimeSlotKey, SlotKind, WasmtimeRuntime, WasmtimeRuntimeError};
+use crate::cache::{call_filter_hook, call_shape_hook};
+use crate::{HookKind, PluginCell, RuntimeSlotKey, WasmtimeRuntime, WasmtimeRuntimeError};
 
 impl WasmtimeRuntime {
     fn dispatch<F>(
         &self,
         slot_key: &RuntimeSlotKey,
-        expected_kind: SlotKind,
+        expected_kind: HookKind,
         run: F,
     ) -> Result<Vec<u8>, WasmtimeRuntimeError>
     where
@@ -35,7 +35,7 @@ impl WasmtimeRuntime {
         slot_key: &RuntimeSlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Filter, |cell| {
+        self.dispatch(slot_key, HookKind::Filter, |cell| {
             call_filter_hook(cell, input)
         })
     }
@@ -45,18 +45,8 @@ impl WasmtimeRuntime {
         slot_key: &RuntimeSlotKey,
         input: &[u8],
     ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Shape, |cell| {
+        self.dispatch(slot_key, HookKind::Shape, |cell| {
             call_shape_hook(cell, input)
-        })
-    }
-
-    pub fn call_observe(
-        &self,
-        slot_key: &RuntimeSlotKey,
-        input: &[u8],
-    ) -> Result<Vec<u8>, WasmtimeRuntimeError> {
-        self.dispatch(slot_key, SlotKind::Observe, |cell| {
-            call_observe_hook(cell, input)
         })
     }
 }

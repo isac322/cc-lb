@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use cc_lb_request_log::RequestEventKind;
 use cc_lb_storage_api::{
     RequestEvent, RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventListItem,
-    RequestEventListQuery, RequestEventStreamFilters, RequestEventUpstream, StatusClass, Storage,
-    StorageError, model_filter_matches,
+    RequestEventListQuery, RequestEventStreamFilters, StatusClass, Storage, StorageError,
+    model_filter_matches,
 };
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -36,8 +36,8 @@ pub struct RecentEventsParams {
     pub thread_id: Option<String>,
     pub model: Option<String>,
     pub upstream_id: Option<Uuid>,
-    pub upstream: Option<RequestEventUpstream>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     pub source_kind: Option<String>,
     pub event_kind: Option<RequestEventKind>,
 }
@@ -56,9 +56,9 @@ pub struct StreamFilters {
     pub principal_id: Option<String>,
     pub thread_id: Option<String>,
     pub model: Option<String>,
-    pub upstream: Option<RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     pub source_kind: Option<String>,
     pub event_kind: Option<RequestEventKind>,
 }
@@ -106,7 +106,6 @@ pub enum EventsError {
     InvalidLimit,
     LimitTooLarge,
     InvalidUpstreamId,
-    InvalidUpstream,
     InvalidStatusClass,
     InvalidEventKind,
     Storage(StorageError),
@@ -163,8 +162,8 @@ pub fn parse_recent_params(
         thread_id: filters.thread_id,
         model: filters.model,
         upstream_id: filters.upstream_id,
-        upstream: filters.upstream,
         status_class: filters.status_class,
+        errors_only: filters.errors_only,
         source_kind: filters.source_kind,
         event_kind: filters.event_kind,
     })
@@ -298,10 +297,6 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
-        upstream: match map.get("upstream") {
-            Some(value) => Some(parse_upstream(value)?),
-            None => None,
-        },
         upstream_id: match map.get("upstream_id") {
             Some(value) => {
                 Some(Uuid::parse_str(value).map_err(|_| EventsError::InvalidUpstreamId)?)
@@ -309,9 +304,13 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
             None => None,
         },
         status_class: match map.get("status_class") {
+            Some(value) if value == "errors" => None,
             Some(value) => Some(parse_status_class(value)?),
             None => None,
         },
+        errors_only: map
+            .get("status_class")
+            .is_some_and(|value| value == "errors"),
         source_kind: map.get("source_kind").cloned(),
         event_kind: match map.get("event_kind") {
             Some(value) => Some(
@@ -340,11 +339,6 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     {
         return false;
     }
-    if let Some(upstream) = filters.upstream
-        && event.upstream != Some(upstream)
-    {
-        return false;
-    }
     if let Some(upstream_id) = filters.upstream_id
         && event.upstream_id != Some(upstream_id)
     {
@@ -353,6 +347,9 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     if let Some(status_class) = filters.status_class
         && !status_class.matches(event.status)
     {
+        return false;
+    }
+    if filters.errors_only && event.status < 400 && event.error_code.is_none() {
         return false;
     }
     if let Some(event_kind) = filters.event_kind
@@ -412,9 +409,9 @@ impl RecentEventsParams {
             principal_id: self.principal_id.clone(),
             thread_id: self.thread_id.clone(),
             model: self.model.clone(),
-            upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+            errors_only: self.errors_only,
             source_kind: self.source_kind.clone(),
             event_kind: self.event_kind,
         }
@@ -452,9 +449,9 @@ impl StreamFilters {
             principal_id: self.principal_id.clone(),
             thread_id: self.thread_id.clone(),
             model: self.model.clone(),
-            upstream: self.upstream,
             upstream_id: self.upstream_id,
             status_class: self.status_class,
+            errors_only: self.errors_only,
             event_kind: self.event_kind,
         }
     }
@@ -473,7 +470,6 @@ impl EventsError {
             Self::InvalidLimit => "invalid_limit",
             Self::LimitTooLarge => "limit_too_large",
             Self::InvalidUpstreamId => "invalid_upstream_id",
-            Self::InvalidUpstream => "invalid_upstream",
             Self::InvalidStatusClass => "invalid_status_class",
             Self::InvalidEventKind => "invalid_event_kind",
             Self::Storage(_) => "storage_error",
@@ -484,13 +480,6 @@ impl EventsError {
 impl From<StorageError> for EventsError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
-    }
-}
-
-fn parse_upstream(value: &str) -> Result<RequestEventUpstream, EventsError> {
-    match value {
-        "anthropic_direct" => Ok(RequestEventUpstream::AnthropicDirect),
-        _ => Err(EventsError::InvalidUpstream),
     }
 }
 

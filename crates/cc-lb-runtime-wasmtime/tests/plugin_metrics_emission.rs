@@ -12,7 +12,7 @@
 //! `PLUGIN_CALL_DURATION_BUCKETS`) but was never emitted. This test
 //! pins the emission contract:
 //!
-//!   * A single successful pure-mode call emits ≥ 1 duration sample with
+//!   * A single successful call emits ≥ 1 duration sample with
 //!     `plugin=<name>` + `hook=<kind>` labels.
 //!   * A hook that traps increments `cc_lb_plugin_trap_total` with the
 //!     matching `phase=<hook>` label.

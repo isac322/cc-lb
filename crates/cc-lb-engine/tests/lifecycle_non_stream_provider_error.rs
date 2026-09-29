@@ -3,18 +3,17 @@ use crate::common;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_engine::event_bus::{BusReceiver, RequestEventBus, RequestEventUpdate};
-use cc_lb_observability::ObserveEvent;
-use cc_lb_storage_api::types::RequestEvent;
-use cc_lb_storage_api::{BackendKind, MetaStore, Storage as StorageTrait};
+use cc_lb_control::event_bus::{RequestEventBus, RequestEventUpdate};
+use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{MetaStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use tokio::time::{Duration, timeout};
 
 use common::{
-    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestLifecycleBus, TestState,
-    collect_body, lifecycle_with, messages_request,
+    DispatchMode, MockDispatch, TestAuthn, TestLifecycleBus, TestState, collect_body,
+    lifecycle_with, messages_request,
 };
 
 const CANONICAL_RATE_LIMIT_BODY: &[u8] = br#"{"type":"error","error":{"type":"rate_limit_error","message":"forced fake rate limit response"}}"#;
@@ -36,7 +35,6 @@ async fn non_stream_429_preserves_client_status_and_body_bytes() {
                 body: upstream_body.clone(),
             },
         },
-        Arc::new(RecordingHook::default()),
     );
 
     // When
@@ -207,30 +205,6 @@ async fn canonical_non_stream_429_preserves_usage_and_body_metrics()
 }
 
 #[tokio::test]
-async fn canonical_non_stream_429_exposes_only_broad_error_to_observe_plugin()
--> Result<(), Box<dyn std::error::Error>> {
-    // Given / When
-    let observed = observe_non_stream_429(Bytes::from_static(CANONICAL_RATE_LIMIT_BODY)).await?;
-
-    // Then
-    let errors = observed
-        .observe_events
-        .iter()
-        .filter_map(|event| match event {
-            ObserveEvent::Error {
-                code,
-                message,
-                source,
-            } => Some((code.as_str(), message.as_str(), source.as_str())),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(errors.len(), 1, "canonical text reached observe plugin");
-    assert_eq!(errors[0], ("upstream_4xx", "429", "upstream"));
-    Ok(())
-}
-
-#[tokio::test]
 async fn noncanonical_stream_429_extracts_message_without_type()
 -> Result<(), Box<dyn std::error::Error>> {
     // Given — a valid `error` object carrying only `message`: the streaming
@@ -257,7 +231,6 @@ struct ObservedErrorResponse {
     status: StatusCode,
     body: Bytes,
     event: RequestEvent,
-    observe_events: Vec<ObserveEvent>,
 }
 
 async fn observe_non_stream_429(
@@ -272,11 +245,8 @@ async fn observe_429(
 ) -> Result<ObservedErrorResponse, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir).await?);
-    let hook = Arc::new(RecordingHook::default());
     let test_bus = TestLifecycleBus::new().with_assembler(storage.clone() as Arc<dyn StorageTrait>);
-    let BusReceiver::InMemory(mut event_updates) = test_bus.bus.subscribe() else {
-        panic!("expected in-memory request-event receiver");
-    };
+    let mut event_updates = test_bus.bus.subscribe();
     let state = TestState::default();
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -290,7 +260,6 @@ async fn observe_429(
                 body: upstream_body,
             },
         },
-        hook.clone(),
     )
     .with_event_bus(test_bus.bus_arc());
     let request_body = if client_stream {
@@ -319,20 +288,10 @@ async fn observe_429(
     })
     .await
     .expect("final request event arrives");
-    timeout(
-        Duration::from_secs(1),
-        hook.wait_for_event(
-            |event| matches!(event, ObserveEvent::Error { code, .. } if code == "upstream_4xx"),
-        ),
-    )
-    .await
-    .expect("broad provider error reaches observe plugin");
-    let observe_events = hook.events.lock().expect("observe events lock").clone();
     Ok(ObservedErrorResponse {
         status,
         body,
         event,
-        observe_events,
     })
 }
 
@@ -344,8 +303,8 @@ async fn sqlite_storage(
         dir.path().join("provider-error.sqlite").display()
     );
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

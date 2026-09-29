@@ -1,4 +1,4 @@
-#![allow(dead_code, deprecated)]
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,13 +14,9 @@ use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
     principal_view::PrincipalView,
 };
-use cc_lb_control::{
-    DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin, RoutingContext,
-    UpstreamStatusSnapshot,
-};
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_observability::ObservabilityHook;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
+use cc_lb_domain::Upstream;
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
@@ -61,7 +57,7 @@ async fn open_storage(dir: &Path, filename: &str, clock: ClockHandle) -> Arc<Sql
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock)
         .await
         .unwrap();
-    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    storage.initialize().await.unwrap();
     Arc::new(storage)
 }
 
@@ -132,7 +128,6 @@ pub fn test_state_with_clock(
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -152,8 +147,6 @@ fn dynamic_view_holder(principal_view: Arc<PrincipalView>) -> Arc<DynamicViewHol
     Arc::new(DynamicViewHolder::new(
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
-            .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -176,21 +169,6 @@ impl SignerFactory for NoopSignerFactory {
     ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
         Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
-        })
-    }
-}
-
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "noop test router".to_owned(),
         })
     }
 }
@@ -274,8 +252,4 @@ pub fn assert_private(body: &[u8]) {
 
 pub fn put_body(draft: Value, expected_revision: u64) -> Value {
     json!({ "draft": draft, "expected_revision": expected_revision })
-}
-
-pub fn expected_revision_body(expected_revision: u64) -> Value {
-    json!({ "expected_revision": expected_revision })
 }

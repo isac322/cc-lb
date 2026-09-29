@@ -4,6 +4,80 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- The admin endpoint `GET /admin/v1/subscription-quotas/analysis` (and its unversioned alias `/admin/subscription-quotas/analysis`) has been removed, along with its burn-rate, projected-burn, deficit, and ETA estimates. The admin dashboard no longer calls it. Scripts that queried it now receive 404; use `/admin/v1/subscription-quotas/series` for quota history and `/admin/v1/subscription-quotas/aggregate` for current pool state.
+- The Wasm observability plugin slot has been removed. `slot_kind=observe` uploads and `ObservabilityHook` plugin-chain slots are now rejected as unknown, existing observability-hook chain entries are deleted on migration, and the unused `sse_per_event`, `batched_events_per_flush`, and `batched_flush_ms` plugin-chain fields are gone. Plugins can target only the `filter` and `shape` slots; the `cc_lb_observe` export, `ObserveEvent`, and `HookKind::Observe` no longer exist in the plugin wire, PDK, runtime, and conformance crates.
+- Request events no longer carry `observability_post_ms`, which measured the removed observability-hook fan-out and has always been empty since that fan-out moved off the response path. The field is gone from the admin request-event APIs, and SQLite drops the `request_events_v1.list_observability_post_ms` column on migration.
+- Unversioned admin API aliases have been removed. Use the `/admin/v1/…` path instead of `/admin/audit`, `/admin/usage`, `/admin/dashboard/summary`, `/admin/dashboard/usage`, `/admin/events/{recent,stream,delta,histogram}` and `/admin/subscription-quotas/{latest,series,aggregate,pool-history}`. The principal usage and limits endpoints (`/admin/principals/{id}/{usage,limits}` and their `/admin/v1` forms) are gone; nothing in the dashboard called them. The unversioned per-key routes under `/admin/principals/{id}/keys/{key_id}` (get, `revoke`, `disable`, `enable`, `usage`) are gone as well; list, issue and revoke keys through `/admin/v1/principals/{id}/keys`.
+- Managed API keys can no longer be disabled; only active and revoked remain. The migration (SQLite 0095, PostgreSQL 0132) revokes any key still marked disabled, so such a key now gets 401 instead of 403, and `GET /admin/v1/principals/{id}/keys?status=disabled` returns 400.
+- Admin API inputs no longer accept legacy spellings: Wasm uploads ignore the removed `slot_kind` and `name` form fields (slots come from the module's exports), plugin-chain `slot` values must be snake_case (`router`, `shape`), warmup-attempt lists filter by `status` only (the `outcome` alias is gone), and principal cache-keepalive cursors without a horizon tag are rejected with 400.
+- `cc-lb config validate` no longer takes `--data-dir`, and config editor responses no longer include `restart_required`.
+- Request events no longer carry `upstream`, `limit_reconcile_ms`, `lineage_would_have_predicted_read_tokens` or `lineage_would_have_picked_upstream_id`. The `upstream` query parameter on the admin events list, histogram, stream and delta endpoints is ignored instead of filtering, and request details no longer show the provider label ("Anthropic") next to the upstream name. Latency views show a single Finalize stage, and token views read `cache_creation_input_tokens_5m`/`_1h` directly.
+- These metrics are no longer registered: `cclb_price_catalog_refresh_failures_total`, `cclb_price_catalog_validation_failures_total`, `cclb_usage_writer_dropped_total`, `cclb_limit_state_writer_dropped_total`, `cclb_streaming_usage_missing_total`, `cc_lb_quota_active_principals_total`, `cc_lb_quota_rejected_total` and `cc_lb_cache_keepalive_llm_latency_seconds`. Keep-alive cancellations report only `user_turn_detected` and `snapshot_too_large`.
+- Data written in pre-cutover formats is no longer read: API-key upstream secrets encrypted before #848, SSE frames that only parse line by line, OMP session markers without JSON metadata, and scheduler jobs queued under the `o_auth_*` names or the retired `quota_gc` cron (queued rows are purged on migration). Per-principal cost views count UUID principals and events without a principal (as `unknown`); request events whose `principal_id` is some other string, which current builds never write, are no longer normalized into those views.
+
+### Removed
+
+- Legacy compatibility code, fallbacks and dead code left behind by earlier cutovers: the unused router-plugin slot (`RouterPlugin`, `global_router`), the unused `cc-lb-dialect-anthropic` crate, the plugin blob repository, redb-era storage record formats and contract-version checks, the warmup-loop helpers, and the Bedrock/Vertex and Extism leftovers.
+- Plugin SDK aliases and helpers the host no longer uses: the `SlotKind` alias (use `HookKind`), `#[derive(WireSchema)]` (hook wire types get their fingerprints from `cc-lb-plugin-wire`), `WasmtimeRuntime::admit_wasm(kind, bytes)`, and `ConformanceSuite::assert_static_admission`. The published plugin crates take a major version bump at the next release; see their changelogs.
+- Schema that no current code reads or writes. PostgreSQL migration 0130 drops `killswitch_v1`, `quotas_by_principal_v1`, `principal_limit_states_v1`, `plugin_registry*` and 26 insert-only `request_events_v1` columns (their values stay in the payload JSON), plus stale columns, indexes and the cost-component compatibility trigger. SQLite migration 0093 does the same for its schema. Scheduler migration 0010 drops `anthropic_compat_etags.etag`.
+- Schema follow-ups: SQLite migration 0094 adds `principals_v1_name_idx` so the name-ordered principal list uses an index instead of sorting the table, and PostgreSQL migration 0131 drops `upstream_spec_v1_name_idx`, which no query used.
+
+### Upgrade notes
+
+- Stop every running replica before the first upgraded one starts. The migrations drop columns and tables that earlier builds still write, so an old replica running next to a migrated database fails its request-event, audit and config-history writes. With the Helm chart, a PostgreSQL deployment defaults to `RollingUpdate`; set `updateStrategy.type: Recreate` for this upgrade or scale to zero first. Rolling back needs a database backup taken before the upgrade.
+- On SQLite, migration 0093 rebuilds `request_events_v1` once to drop its dead columns. With about a million request events (5 GB) the first start took about 2.5 minutes in a rehearsal and needed free disk for a second copy of the table plus its WAL; the file keeps that space until `VACUUM`. With the Helm chart, raise `probes.startup.failureThreshold` for this upgrade so the startup probe does not restart the pod mid-migration. PostgreSQL migrations 0129–0132 took under 3 seconds on the same volume.
+
+### Added
+
+- A brand asset kit now lives in `assets/brand/`: the let-gate mark as SVG originals (dark, light, mono and currentColor variants plus a 16px-snapped small-size version), app-icon and maskable tiles with PNG renders, wordmark and lockup compositions, a README hero, a social preview image, and the favicon set (`favicon.svg`, `favicon.ico`, `apple-touch-icon.png`) now wired into the admin dashboard.
+
+### Changed
+
+- The admin dashboard brand mark is now the let-gate — two squared bracket "c" shapes forming a gate with one accent lane through it — replacing the old 240° dial in the sidebar, the top bar and the sign-in frame.
+- The admin dashboard uses a new neutral graphite colour scheme in both Night and Day. Colour now comes from data (charts, meters, session and request-kind chips). Controls such as the primary button, the on switch and the focus ring are neutral silver (Night) or ink (Day), and session chips cycle through nine hues instead of seven.
+- The Docs link at the foot of the dashboard sidebar has been removed until a dedicated documentation page exists.
+
+### Fixed
+
+- Dragging across the Logs histogram to pick a time range no longer leaves trailing afterimages or flickers. The selection, its handles and the time hint now move together with the pointer.
+- Releasing a drag on the Logs histogram no longer blanks the bars for a moment, which left the selection alone on an empty strip. The histogram now keeps its data when a range is selected instead of refetching it.
+
+## [0.8.1] - 2026-09-26
+
+### Fixed
+
+- Subscription routing no longer treats an approaching five-hour reset as a reason to pull traffic toward an account that is already at or ahead of its weekly pace. Previously the five-hour window was scored as an independent use-it-or-lose-it deadline, so near every five-hour reset such accounts took new requests from accounts that could still lose unused weekly quota, and prompt-cache affinity then kept those conversations there. Five-hour pressure now counts only while leaving the current window unused could actually forfeit weekly quota. If the five-hour or shared weekly quota data is stale or missing, routing behaves as before; a model-specific weekly window can keep the pressure but never removes it on its own. ([#878](https://github.com/isac322/cc-lb/pull/878), [ADR 0013](https://github.com/isac322/cc-lb/blob/master/docs/adr/0013-weekly-pace-gate-for-five-hour-pressure.md))
+
+### Changed
+
+- Routing traces now report the within-tier selection formula as `cost-first-v2` (previously `cost-first-v1`). Among candidates with equal effective urgency, the raw five-hour pressure is used as the next tiebreak, so refill-order spreading between otherwise equal accounts is preserved. Dashboards or alerts that match on the formula version string should be updated; the bundled `deploy/alerts/routing-anomaly.yml` already is.
+
+### Upgrade notes
+
+- Upgrading from 0.8.0 requires only a restart: no new configuration keys and no database migrations. Rolling back to 0.8.0 is safe.
+
+## [0.8.0] - 2026-09-26
+
+### Changed
+
+- Adding an upstream and connecting a Claude account now share one step-by-step dialog in the admin dashboard. "New upstream" starts by choosing a Claude subscription or an Anthropic API key and continues in the same window. Connect and Reconnect on an OAuth upstream open that dialog at the sign-in step, from the detail page, the reconnect notice, the Overview summary, and `?action=` deep links. The previous separate create and reconnect windows are gone. ([#867](https://github.com/isac322/cc-lb/pull/867))
+- The Claude sign-in button is now a plain link prepared in advance, so browsers no longer block it as a popup. The code field accepts the value Claude shows (`code#state`), the bare code, or the whole callback address. It flags a code copied from an older sign-in and submits as soon as a valid value is pasted. A countdown shows the 15-minute sign-in window, with a one-click new link once it expires, and the internal state token is no longer displayed.
+- Reconnect shows which Claude account to sign in with, then reports whether the same account came back. If a different account was connected, the dialog shows the before and after accounts. The message after a fallback to a renewing credential now explains that the connection works and renews itself.
+- Claude sign-in failures are shown in the dialog next to the code field instead of in a separate error toast.
+- The compatibility store now tracks the Claude Code `stable` and `latest` release channels independently. Usage polling and its account-identity lookup identify as `latest`, falling back to `2.1.282` until the first refresh; other metadata requests and coupon claims keep using `stable`. ([#866](https://github.com/isac322/cc-lb/pull/866))
+- The daily compatibility job refreshes both channels concurrently from the official Claude Code release endpoint, falling back to the matching npm dist-tag. A channel whose refresh fails keeps its last successful value without affecting the other.
+
+### Fixed
+
+- The Admin Logs `errors` filter now paginates over matching requests: HTTP statuses of 400 or higher and abnormally completed requests with an `error_code` are selected before the page limit, so older errors are no longer hidden behind pages of successful requests and the row range stays valid. The live tail still applies this filter in the browser, so a request whose upstream status is corrected by a retry (for example 401 followed by 200) leaves the list immediately. ([#862](https://github.com/isac322/cc-lb/issues/862), [#864](https://github.com/isac322/cc-lb/pull/864))
+
+### Upgrade notes
+
+- Upgrading from 0.7.0 requires only a restart: no new configuration keys and no database migrations. The `latest` channel value is stored in the existing compatibility table and appears after the next daily compatibility refresh; until then usage polling uses the `2.1.282` fallback.
+- Rollback caution: compatibility-refresh jobs queued by 0.8.0 cover all channels in one payload, which 0.7.0 and older workers cannot decode. Jobs queued by earlier releases remain readable by 0.8.0.
+
 ## [0.7.0] - 2026-09-25
 
 ### Added
@@ -249,5 +323,7 @@ All notable changes to this project will be documented in this file.
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.1...HEAD
+[0.8.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...cc-lb-v0.8.1
+[0.8.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...cc-lb-v0.8.0
 [0.7.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.6.0...cc-lb-v0.7.0

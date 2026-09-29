@@ -226,7 +226,6 @@ fn shaped_request_from_snapshot(
     let principal = Principal {
         id: snapshot.upstream_id.to_string(),
         kind: PrincipalKind::ApiKey,
-        claims: serde_json::Map::new(),
     };
     shape_request(&dialect, &context, upstream, &principal).map_err(|source| source.to_string())
 }

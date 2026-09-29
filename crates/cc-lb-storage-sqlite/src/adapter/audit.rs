@@ -26,38 +26,6 @@ impl AuditStore for SqliteStorage {
         Ok(())
     }
 
-    async fn query_audit(
-        &self,
-        principal_id: Option<&str>,
-        since: u64,
-        until: u64,
-        limit: usize,
-    ) -> StorageResult<Vec<AuditEntry>> {
-        if limit == 0 || until < since {
-            return Ok(Vec::new());
-        }
-
-        let rows = sqlx::query(
-            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
-             output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
-             limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, \
-             actor_email, kind, payload \
-             FROM audit_log_v1 \
-             WHERE ts >= ? AND ts <= ? AND (? IS NULL OR principal_id = ?) \
-             ORDER BY id ASC LIMIT ?",
-        )
-        .bind(u64_to_i64(since, "audit since")?)
-        .bind(u64_to_i64_upper(until))
-        .bind(principal_id)
-        .bind(principal_id)
-        .bind(u64_to_i64(limit as u64, "audit limit")?)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_audit_entry).collect()
-    }
-
     async fn query_audit_by_actor(
         &self,
         authority: &str,
@@ -74,7 +42,7 @@ impl AuditStore for SqliteStorage {
             "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
              output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
              limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, \
-             actor_email, kind, payload \
+             actor_email, payload \
              FROM audit_log_v1 \
              WHERE ts >= ? AND ts <= ? AND actor_authority = ? AND actor_subject = ? \
              ORDER BY id ASC LIMIT ?",
@@ -111,7 +79,7 @@ impl AuditStore for SqliteStorage {
             "SELECT ts, request_id, principal_id, route, upstream, model, status, \
              input_tokens, output_tokens, duration_ms, agent_label, api_key_id, \
              cost_usd_micros, limit_violation, admin_action, actor, actor_authority, \
-             actor_subject, actor_kind, actor_email, kind, payload \
+             actor_subject, actor_kind, actor_email, payload \
              FROM audit_log_v1 \
              WHERE ts >= ",
         );
@@ -130,7 +98,7 @@ impl AuditStore for SqliteStorage {
             }
         }
         if admin_only {
-            query.push(" AND (admin_action IS NOT NULL OR kind IS NOT NULL)");
+            query.push(" AND admin_action IS NOT NULL");
         }
         query
             .push(" ORDER BY ts DESC, id DESC LIMIT ")
@@ -143,16 +111,6 @@ impl AuditStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
 
         rows.into_iter().map(row_to_audit_entry).collect()
-    }
-
-    async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM audit_log_v1 WHERE ts < ?")
-            .bind(u64_to_i64(older_than, "audit prune cutoff")?)
-            .execute(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-
-        Ok(result.rows_affected())
     }
 
     async fn prune_audit_before(
@@ -202,8 +160,8 @@ where
          (ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
           output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
           limit_violation, admin_action, actor, actor_authority, actor_subject, actor_kind, \
-          actor_email, kind, payload) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          actor_email, payload) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(u64_to_i64(entry.ts, "audit ts")?)
     .bind(&entry.request_id)
@@ -231,7 +189,6 @@ where
     .bind(entry.actor_subject.as_deref())
     .bind(entry.actor_kind.as_deref())
     .bind(entry.actor_email.as_deref())
-    .bind(entry.kind.as_deref())
     .bind(payload.as_deref())
     .execute(executor)
     .await
@@ -286,7 +243,6 @@ fn row_to_audit_entry(row: SqliteRow) -> StorageResult<AuditEntry> {
         actor_subject: row.try_get("actor_subject").map_err(map_sqlx_error)?,
         actor_kind: row.try_get("actor_kind").map_err(map_sqlx_error)?,
         actor_email: row.try_get("actor_email").map_err(map_sqlx_error)?,
-        kind: row.try_get("kind").map_err(map_sqlx_error)?,
         payload,
     })
 }

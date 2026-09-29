@@ -23,9 +23,9 @@ pub struct RequestEventStreamFilters {
     pub principal_id: Option<String>,
     pub thread_id: Option<String>,
     pub model: Option<String>,
-    pub upstream: Option<cc_lb_request_log::RequestEventUpstream>,
     pub upstream_id: Option<Uuid>,
     pub status_class: Option<StatusClass>,
+    pub errors_only: bool,
     /// Endpoint classification filter. `Some(kind)` matches rows whose
     /// effective kind (renewal via `source_kind` precedence, else stored
     /// `event_kind`, else `unclassified` for historical NULLs) equals `kind`.
@@ -82,23 +82,6 @@ impl StatusClass {
             Self::ThreeXx => (300..=399).contains(&status),
             Self::FourXx => (400..=499).contains(&status),
             Self::FiveXx => (500..=599).contains(&status),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum BucketKind {
-    Requests,
-    InputTokens,
-    OutputTokens,
-}
-
-impl BucketKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requests => "requests",
-            Self::InputTokens => "input_tokens",
-            Self::OutputTokens => "output_tokens",
         }
     }
 }
@@ -217,16 +200,6 @@ impl UsageRollupResolution {
             Self::Hour => "hour",
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct UsageRollupKey {
-    pub resolution: UsageRollupResolution,
-    pub bucket_start: u64,
-    pub principal: String,
-    pub upstream_id: Uuid,
-    pub upstream_name: String,
-    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -223,7 +223,6 @@ fn oauth_candidate(
             .expect("generated upstream id must be a valid UUID"),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
         observed_at_unix_secs: T0_SECS,
         cache_score: None,
@@ -315,6 +314,5 @@ fn make_principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: Default::default(),
     }
 }

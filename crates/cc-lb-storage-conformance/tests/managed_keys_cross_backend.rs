@@ -2,8 +2,8 @@
 
 use std::{str::FromStr, sync::Arc};
 
-use cc_lb_engine::{ClockHandle, SystemClock};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_clock::{ClockHandle, SystemClock};
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
 use cc_lb_storage_sqlite::open_sqlite;
@@ -38,7 +38,7 @@ async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
     let sqlite_url = format!("sqlite://{}", sqlite_path.display());
     let clock = system_clock();
     let sqlite_store = open_sqlite(&sqlite_url, Arc::clone(&clock)).await?;
-    sqlite_store.initialize(BackendKind::Sqlite).await?;
+    sqlite_store.initialize().await?;
 
     let fixture = create_postgres_fixture(url).await?;
     let postgres_store = PostgresManagedKeyStore::new(
@@ -72,7 +72,7 @@ async fn create_postgres_fixture(url: String) -> anyhow::Result<PostgresFixture>
         .connect_with(PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]))
         .await?;
     PostgresStorage::new(pool.clone(), system_clock())
-        .initialize(BackendKind::Postgres)
+        .initialize()
         .await?;
 
     Ok(PostgresFixture { url, schema, pool })

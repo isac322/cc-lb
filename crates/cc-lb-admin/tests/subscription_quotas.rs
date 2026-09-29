@@ -8,7 +8,7 @@ use cc_lb_storage_api::{
     PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent, RequestEventStore,
     SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaStore, UsageRollupResolution, UsageRollupStore,
+    UpstreamSubscriptionQuotaStore, UsageRollupStore,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -36,7 +36,7 @@ fn pool_history_record(snapshot_at_unix_secs: i64, utilization: f64) -> PoolQuot
 }
 
 #[tokio::test]
-async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
+async fn subscription_quota_latest_lists_registered_upstreams() {
     let server = admin_test_common::spawn_admin_server().await;
     let (status, _, body) = server
         .client
@@ -48,15 +48,13 @@ async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
     assert_eq!(status, StatusCode::CREATED);
     let upstream_id = body["id"].as_str().unwrap();
 
-    for path in [
-        "/admin/v1/subscription-quotas/latest",
-        "/admin/subscription-quotas/latest",
-    ] {
-        let (status, _, body) = server.client.get(path).await;
-        assert_eq!(status, StatusCode::OK, "{path}");
-        assert_eq!(body["upstreams"][0]["upstream_id"], upstream_id);
-        assert_eq!(body["upstreams"][0]["upstream_name"], "quota-upstream");
-    }
+    let (status, _, body) = server
+        .client
+        .get("/admin/v1/subscription-quotas/latest")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["upstreams"][0]["upstream_id"], upstream_id);
+    assert_eq!(body["upstreams"][0]["upstream_name"], "quota-upstream");
 }
 
 #[tokio::test]
@@ -98,7 +96,7 @@ async fn subscription_quota_series_defaults_exclude_stored_fable_window() {
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
         .await
         .unwrap();
 
@@ -132,7 +130,7 @@ async fn subscription_quota_series_explicit_fable_window_includes_stored_series(
     fable.window = SubscriptionQuotaWindow::SevenDayFable;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(fable))
+        .put_subscription_quota_checkpoints(&[checkpoint_record(fable)])
         .await
         .unwrap();
 
@@ -255,182 +253,6 @@ async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() 
 }
 
 #[tokio::test]
-async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
-    let server = admin_test_common::spawn_admin_server().await;
-
-    let (status, _, _) = server
-        .client
-        .get("/admin/v1/subscription-quotas/analysis?since_unix_secs=1&until_unix_secs=120")
-        .await;
-
-    assert_eq!(status, StatusCode::OK);
-}
-
-#[tokio::test]
-async fn subscription_quota_analysis_enforces_bucket_range_guardrail() {
-    const MAX_ANALYSIS_RANGE_SECS: u64 = 60 * 10_000 * 2;
-
-    let server = admin_test_common::spawn_admin_server().await;
-
-    for range_secs in [3_600, 21_600, 86_400, 604_800, MAX_ANALYSIS_RANGE_SECS] {
-        let (status, _, _) = server
-            .client
-            .get(&format!(
-                "/admin/v1/subscription-quotas/analysis?since_unix_secs=1&until_unix_secs={}",
-                1 + range_secs
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK, "range_secs={range_secs}");
-    }
-
-    for path in [
-        "/admin/v1/subscription-quotas/analysis",
-        "/admin/subscription-quotas/analysis",
-    ] {
-        let (status, _, body) = server
-            .client
-            .get(&format!(
-                "{path}?since_unix_secs=1&until_unix_secs={}",
-                2 + MAX_ANALYSIS_RANGE_SECS
-            ))
-            .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
-        assert_eq!(body["error"], "bucket_range_too_large");
-        assert_eq!(
-            body["detail"],
-            "narrow the requested time range; analysis supports at most 20000 one-minute buckets"
-        );
-    }
-}
-
-#[tokio::test]
-async fn subscription_quota_analysis_excludes_unrequested_usage_rollups_and_refreshes() {
-    let server = admin_test_common::spawn_admin_server().await;
-    let selected_upstream_id = create_oauth_upstream(&server, "analysis-selected").await;
-    let excluded_upstream_id = create_oauth_upstream(&server, "analysis-excluded").await;
-    server
-        .storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint_record(quota_observation(
-                selected_upstream_id,
-                60,
-                40,
-                SubscriptionQuotaSource::Header,
-                0.20,
-                Some(SubscriptionQuotaStatus::Allowed),
-            )),
-            checkpoint_record(quota_observation(
-                selected_upstream_id,
-                660,
-                41,
-                SubscriptionQuotaSource::Header,
-                0.50,
-                Some(SubscriptionQuotaStatus::AllowedWarning),
-            )),
-        ])
-        .await
-        .unwrap();
-    server
-        .storage
-        .append_request_event(&usage_event(
-            120,
-            "analysis-selected-initial",
-            selected_upstream_id,
-            "analysis-selected",
-            300,
-        ))
-        .await
-        .unwrap();
-    server
-        .storage
-        .append_request_event(&usage_event(
-            840,
-            "analysis-excluded",
-            excluded_upstream_id,
-            "analysis-excluded",
-            9_000,
-        ))
-        .await
-        .unwrap();
-    server.storage.rollup_usage_once().await.unwrap();
-
-    let all_rollups = server
-        .storage
-        .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, 900)
-        .await
-        .unwrap();
-    assert!(
-        all_rollups
-            .iter()
-            .any(|rollup| rollup.upstream_id == excluded_upstream_id),
-        "fixture must contain an unrequested upstream rollup"
-    );
-    let selected_rollups = server
-        .storage
-        .query_usage_rollups_for_upstreams_in_range(
-            &[selected_upstream_id],
-            UsageRollupResolution::Minute,
-            0,
-            900,
-        )
-        .await
-        .unwrap();
-    assert!(!selected_rollups.is_empty());
-    assert!(
-        selected_rollups
-            .iter()
-            .all(|rollup| rollup.upstream_id == selected_upstream_id)
-    );
-
-    let path = format!(
-        "/admin/v1/subscription-quotas/analysis?upstream_ids={selected_upstream_id}&windows=5h&source=header&since_unix_secs=0&until_unix_secs=900"
-    );
-    let (status, _, initial_body) = server.client.get(&path).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        initial_body["upstreams"]
-            .as_array()
-            .expect("analysis upstreams")
-            .len(),
-        1
-    );
-    let initial = analysis_window_for(&initial_body, selected_upstream_id);
-    assert_close(
-        initial["proxy_projected_burn"]["proxy_tokens_per_hour"].as_f64(),
-        1_200.0,
-    );
-    assert_close(
-        initial["proxy_projected_burn"]["effective_limit_tokens_estimate"].as_f64(),
-        1_000.0,
-    );
-
-    server
-        .storage
-        .append_request_event(&usage_event(
-            780,
-            "analysis-selected-refresh",
-            selected_upstream_id,
-            "analysis-selected",
-            300,
-        ))
-        .await
-        .unwrap();
-    server.storage.rollup_usage_once().await.unwrap();
-
-    let (status, _, refreshed_body) = server.client.get(&path).await;
-    assert_eq!(status, StatusCode::OK);
-    let refreshed = analysis_window_for(&refreshed_body, selected_upstream_id);
-    assert_close(
-        refreshed["proxy_projected_burn"]["proxy_tokens_per_hour"].as_f64(),
-        2_400.0,
-    );
-    assert_close(
-        refreshed["proxy_projected_burn"]["effective_limit_tokens_estimate"].as_f64(),
-        1_000.0,
-    );
-}
-
-#[tokio::test]
 async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes() {
     let server = admin_test_common::spawn_admin_server().await;
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;
@@ -490,14 +312,14 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
     let no_anchor_upstream_id = create_oauth_upstream(&server, "checkpoint-series-no-anchor").await;
     server
         .storage
-        .put_subscription_quota_checkpoint(&checkpoint_record(quota_observation(
+        .put_subscription_quota_checkpoints(&[checkpoint_record(quota_observation(
             no_anchor_upstream_id,
             180,
             4,
             SubscriptionQuotaSource::Header,
             0.80,
             Some(SubscriptionQuotaStatus::Allowed),
-        )))
+        ))])
         .await
         .unwrap();
 
@@ -514,100 +336,6 @@ async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_l
             .as_array()
             .expect("no-anchor response has series array")
             .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn subscription_quota_checkpoint_analysis_uses_exact_checkpoint_intervals() {
-    let server = admin_test_common::spawn_admin_server().await;
-    let flat_upstream_id = create_oauth_upstream(&server, "checkpoint-analysis-flat").await;
-    let rising_upstream_id = create_oauth_upstream(&server, "checkpoint-analysis-rising").await;
-    let latest_only_upstream_id =
-        create_oauth_upstream(&server, "checkpoint-analysis-latest").await;
-    server
-        .storage
-        .put_subscription_quota_checkpoints(&[
-            checkpoint_record(quota_observation(
-                flat_upstream_id,
-                60,
-                11,
-                SubscriptionQuotaSource::Header,
-                0.20,
-                Some(SubscriptionQuotaStatus::Allowed),
-            )),
-            checkpoint_record(quota_observation(
-                flat_upstream_id,
-                660,
-                12,
-                SubscriptionQuotaSource::Header,
-                0.20,
-                Some(SubscriptionQuotaStatus::AllowedWarning),
-            )),
-            checkpoint_record(quota_observation(
-                rising_upstream_id,
-                60,
-                13,
-                SubscriptionQuotaSource::Header,
-                0.20,
-                Some(SubscriptionQuotaStatus::Allowed),
-            )),
-            checkpoint_record(quota_observation(
-                rising_upstream_id,
-                660,
-                14,
-                SubscriptionQuotaSource::Header,
-                0.50,
-                Some(SubscriptionQuotaStatus::Allowed),
-            )),
-        ])
-        .await
-        .unwrap();
-    server
-        .storage
-        .record_subscription_quota_sample(&quota_observation(
-            latest_only_upstream_id,
-            2_000,
-            15,
-            SubscriptionQuotaSource::Header,
-            0.90,
-            Some(SubscriptionQuotaStatus::Allowed),
-        ))
-        .await
-        .unwrap();
-
-    let (status, _, body) = server
-        .client
-        .get(&format!(
-            "/admin/v1/subscription-quotas/analysis?upstream_ids={flat_upstream_id},{rising_upstream_id},{latest_only_upstream_id}&windows=5h&source=header&since_unix_secs=0&until_unix_secs=900"
-        ))
-        .await;
-
-    assert_eq!(status, StatusCode::OK);
-    let flat = analysis_window_for(&body, flat_upstream_id);
-    let rising = analysis_window_for(&body, rising_upstream_id);
-    assert_eq!(flat["actual_account_burn"]["utilization_per_hour"], 0.0);
-    assert_eq!(flat["actual_account_burn"]["interval_count"], 1);
-    assert!(flat["actual_account_burn"].get("sample_count").is_none());
-    assert!(
-        rising["actual_account_burn"]["utilization_per_hour"]
-            .as_f64()
-            .expect("rising burn is numeric")
-            > 0.0
-    );
-    assert_eq!(rising["actual_account_burn"]["interval_count"], 1);
-
-    let latest_only = body["upstreams"]
-        .as_array()
-        .expect("analysis upstreams")
-        .iter()
-        .find(|upstream| upstream["upstream_id"] == latest_only_upstream_id.to_string())
-        .expect("latest-only upstream is present");
-    assert_eq!(
-        latest_only["windows"]
-            .as_array()
-            .expect("latest-only windows")
-            .len(),
-        0
     );
 }
 
@@ -898,15 +626,6 @@ fn quota_observation_with_status_and_reset(
     }
 }
 
-fn analysis_window_for(body: &serde_json::Value, upstream_id: Uuid) -> &serde_json::Value {
-    &body["upstreams"]
-        .as_array()
-        .expect("analysis upstreams")
-        .iter()
-        .find(|upstream| upstream["upstream_id"] == upstream_id.to_string())
-        .expect("analysis upstream exists")["windows"][0]
-}
-
 fn bucket_starts(buckets: &[serde_json::Value]) -> Vec<u64> {
     buckets
         .iter()
@@ -931,6 +650,7 @@ fn usage_event(
 ) -> RequestEvent {
     RequestEvent {
         ts_ms: Some(ts.saturating_mul(1_000)),
+        event_id: Some(format!("event-{request_id}")),
         request_id: request_id.to_owned(),
         principal_id: Some("principal-a".to_owned()),
         key_id: Some("test-key".to_owned()),

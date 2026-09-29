@@ -227,17 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_joined_multiline_rejects_legacy_observer_fallback() {
-        let raw = b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"encrypted_content\":\"opaque-a\"}]}}\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"encrypted_content\":\"opaque-b\"}]}}\n\n";
-        let event = crate::usage_parser::parse_sse_event(raw);
-
-        assert_eq!(
-            extract_anthropic_web_search_affinity_keys_from_sse_event(&event, "principal-sse"),
-            Err(UpstreamAffinityExtractionError::InvalidSseData)
-        );
-    }
-
-    #[test]
     fn parses_cr_only_sse_events() {
         let raw = b"event: content_block_start\rdata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"encrypted_content\":\"opaque-cr\"}]}}\r\r";
 

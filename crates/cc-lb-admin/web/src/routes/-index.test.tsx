@@ -5,7 +5,9 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ComponentType, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -17,14 +19,14 @@ import type {
   Upstream,
   UsageBucket,
 } from '../lib/api';
+import { getWindowColor } from '../lib/colors';
 import * as queries from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import * as liveEvents from '../lib/useLiveEventStream';
 import {
-  PoolQuotaLegend,
   Route,
   type TopPrincipal,
-  TopPrincipalsCard,
+  TopPrincipalsSection,
   ValueTile,
 } from './index';
 
@@ -37,7 +39,6 @@ vi.mock('../lib/queries', async () => {
     useSubscriptionQuotaAggregate: vi.fn(),
     useSubscriptionQuotaPoolHistory: vi.fn(),
     useSummary: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
     useUsage: vi.fn(),
     useUpstreams: vi.fn(),
   };
@@ -47,9 +48,85 @@ vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: vi.fn(),
 }));
 
+// The upstream strip's grid and its data hook belong to the Upstreams page;
+// the Overview only decides where the strip goes and what an empty pool says.
+vi.mock('../components/upstreams/UpstreamUsageTable', () => ({
+  useUpstreamUsageData: () => ({
+    rows: [],
+    isLoading: false,
+    quotaPending: false,
+    statusPending: false,
+    usagePending: false,
+    quotaError: false,
+    reconnectCount: 0,
+  }),
+  UpstreamUsageTable: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
+}));
+
+// The Overview links to other routes and keeps its range in the URL; render
+// router links as plain anchors and back the search params with a tiny store
+// so the page can mount without a RouterProvider.
+const routerMock = vi.hoisted(() => ({
+  search: { range: '24h' } as Record<string, unknown>,
+  listeners: new Set<() => void>(),
+  navigate: undefined as unknown as ReturnType<typeof vi.fn>,
+}));
+
+vi.mock('@tanstack/react-router', async () => {
+  const actual = await vi.importActual<Record<string, unknown>>(
+    '@tanstack/react-router',
+  );
+  const { useSyncExternalStore } =
+    await vi.importActual<typeof import('react')>('react');
+  const subscribe = (listener: () => void) => {
+    routerMock.listeners.add(listener);
+    return () => routerMock.listeners.delete(listener);
+  };
+  routerMock.navigate = vi.fn(
+    ({
+      search,
+    }: {
+      search:
+        | Record<string, unknown>
+        | ((prev: Record<string, unknown>) => Record<string, unknown>);
+    }) => {
+      routerMock.search =
+        typeof search === 'function' ? search(routerMock.search) : search;
+      for (const listener of routerMock.listeners) listener();
+    },
+  );
+  return {
+    ...actual,
+    useNavigate: () => routerMock.navigate,
+    useSearch: () => useSyncExternalStore(subscribe, () => routerMock.search),
+    Link: ({
+      to,
+      search,
+      children,
+      ...rest
+    }: {
+      to: string;
+      search?: Record<string, string>;
+      children?: ReactNode;
+    }) => (
+      <a
+        href={search ? `${to}?${new URLSearchParams(search).toString()}` : to}
+        {...rest}
+      >
+        {children}
+      </a>
+    ),
+  };
+});
+
 const rechartsMock = vi.hoisted(() => ({
   areaChartRenderCount: 0,
   data: [] as readonly Record<string, unknown>[],
+  /** When set, the Tooltip mock renders its `content` with this hover. */
+  tooltip: null as null | {
+    label: number;
+    payload: readonly Record<string, unknown>[];
+  },
 }));
 
 vi.mock('recharts', () => ({
@@ -70,14 +147,34 @@ vi.mock('recharts', () => ({
       </svg>
     );
   },
-  Area: ({ dataKey }: { dataKey: string }) => {
+  Area: ({
+    dataKey,
+    stroke,
+    strokeDasharray,
+    fill,
+  }: {
+    dataKey: string;
+    stroke?: string;
+    strokeDasharray?: string;
+    fill?: string;
+  }) => {
     const path = rechartsMock.data
       .map(
         (row) =>
           `${String(row.unix)}:${String(row[dataKey] === null ? '' : row[dataKey])}`,
       )
       .join('|');
-    return <path d={path} data-testid={`pool-quota-area-${dataKey}`} />;
+    // A fill-only area (no stroke) is the pool chart's fill pass.
+    const role = stroke === 'none' ? 'fill' : 'area';
+    return (
+      <path
+        d={path}
+        data-testid={`pool-quota-${role}-${dataKey}`}
+        fill={fill}
+        stroke={stroke}
+        strokeDasharray={strokeDasharray}
+      />
+    );
   },
   XAxis: ({ domain }: { domain: readonly number[] }) => (
     <g data-domain={JSON.stringify(domain)} data-testid="pool-quota-x-axis" />
@@ -86,7 +183,16 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => null,
   ReferenceArea: () => null,
   ReferenceLine: () => null,
-  Tooltip: () => null,
+  Tooltip: ({
+    content,
+  }: {
+    content?: (props: Record<string, unknown>) => ReactNode;
+  }) =>
+    rechartsMock.tooltip && content ? (
+      <foreignObject data-testid="pool-quota-tooltip">
+        {content({ active: true, ...rechartsMock.tooltip })}
+      </foreignObject>
+    ) : null,
   YAxis: () => null,
 }));
 
@@ -116,8 +222,15 @@ function kpiTooltipTimestamp(timestamp: number): string {
 
 function tooltipRows(testId: string): string[] {
   return Array.from(
-    screen.getByTestId(testId).querySelectorAll('span'),
+    screen.getByTestId(testId).children,
     (row) => row.textContent ?? '',
+  );
+}
+
+function rangeOption(group: string, name: string): HTMLElement {
+  return within(screen.getByRole('radiogroup', { name: group })).getByRole(
+    'radio',
+    { name },
   );
 }
 
@@ -136,16 +249,6 @@ function usageBucket(
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
-    proxy_setup_ms_sum: 0,
-    proxy_setup_ms_count: 0,
-    shape_ms_sum: 0,
-    shape_ms_count: 0,
-    sign_ms_sum: 0,
-    sign_ms_count: 0,
-    upstream_ttfb_ms_sum: 0,
-    upstream_ttfb_ms_count: 0,
-    upstream_body_ms_sum: 0,
-    upstream_body_ms_count: 0,
     ...overrides,
   };
 }
@@ -197,11 +300,6 @@ const SUMMARY_FIXTURE: DashboardSummaryResponse = {
     error_rate: 24 / 540,
     virtual_cost_micros: 7_500_000,
     avg_latency_ms: 200,
-    avg_proxy_setup_ms: 0,
-    avg_shape_ms: 0,
-    avg_sign_ms: 0,
-    avg_upstream_ttfb_ms: 0,
-    avg_upstream_body_ms: 0,
   },
   sparkline: { buckets: SUMMARY_BUCKETS },
   observed: true,
@@ -376,7 +474,6 @@ function mockPendingOverviewQueries() {
     isLoading: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(new Map());
   vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
     data: undefined,
     isPending: true,
@@ -470,9 +567,46 @@ function mockResolvedKpiQueries({
   );
 }
 
+/**
+ * 30 principals with requests plus 3 known principals without any: cost
+ * falls from Team 01 to Team 30, requests rise, tokens peak at Team 15.
+ */
+function mockManyPrincipals() {
+  mockResolvedKpiQueries();
+  const ids = Array.from(
+    { length: 30 },
+    (_, index) => `${String(index + 1).padStart(2, '0')}`,
+  );
+  const series = ids.map((id, index) => ({
+    key: `principal-${id}`,
+    buckets: [
+      usageBucket(KPI_TIMESTAMPS[0], {
+        request_count: index + 1,
+        input_tokens: 1_000 - Math.abs(index - 14) * 10,
+        virtual_cost_micros: (30 - index) * 100_000,
+      }),
+    ],
+  }));
+  vi.mocked(queries.useUsage).mockReturnValue({
+    data: { ...PRINCIPAL_USAGE_FIXTURE, series },
+    isPending: false,
+    isPlaceholderData: false,
+  } as never);
+  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
+    new Map([
+      ...ids.map((id) => [`principal-${id}`, `Team ${id}`] as const),
+      ['idle-1', 'Idle one'],
+      ['idle-2', 'Idle two'],
+      ['idle-3', 'Idle three'],
+    ]),
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  routerMock.search = { range: '24h' };
   rechartsMock.areaChartRenderCount = 0;
+  rechartsMock.tooltip = null;
   // OAuthReconnectSummary polls upstreams itself; default to a resolved
   // empty list so no OAuth status queries spin up. Tests that need an
   // OAuth upstream override this.
@@ -487,23 +621,167 @@ afterEach(() => {
   cleanup();
 });
 
-describe('PoolQuotaLegend', () => {
-  it('renders Fable only when the selected range has Fable data', () => {
-    const { rerender } = render(
-      <PoolQuotaLegend
-        latest={{ '5h': 20, '7d': 40, '7d_fable': null }}
-        showFable={false}
-      />,
-    );
-    expect(screen.queryByText(/Fable/)).toBeNull();
+describe('Overview pool quota usage', () => {
+  it('leads with the pool chart, legend reads used with its reset, captions qualify it', () => {
+    const base = aggregateResponse(POOL_HISTORY_NOW, 60);
+    const used: Record<string, number> = { '5h': 12, '7d': 83, '7d_fable': 97 };
+    const aggregate: AggregateResponse = {
+      ...base,
+      windows: base.windows.map((entry) => ({
+        ...entry,
+        utilization_percent: used[entry.window] ?? null,
+        missing_capacity_upstreams: entry.window === '7d' ? 2 : 0,
+        provider_lots: entry.provider_lots.map((lot) => ({
+          ...lot,
+          state: 'stale',
+        })),
+      })),
+    };
+    const history = poolHistoryResponse(POOL_HISTORY_NOW, 12);
+    history.windows = history.windows.map((entry) => ({
+      ...entry,
+      latest: entry.latest
+        ? { ...entry.latest, utilization_percent: used[entry.window] ?? null }
+        : null,
+    }));
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
+      data: aggregate,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: history,
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
 
-    rerender(
-      <PoolQuotaLegend
-        latest={{ '5h': 20, '7d': 40, '7d_fable': 28 }}
-        showFable
-      />,
+    render(<OverviewPage />);
+
+    // Usage first: the range-scoped group leads, and the sections it does
+    // not govern follow it.
+    expect(
+      screen
+        .getAllByRole('heading', { level: 2 })
+        .map((heading) => heading.textContent),
+    ).toEqual(['Usage', 'Upstreams', 'Latest requests (any time)']);
+    const group = screen.getByRole('region', { name: 'Usage' });
+    expect(
+      within(group)
+        .getAllByRole('heading', { level: 3 })
+        .map((heading) => heading.textContent),
+    ).toEqual(['Pool quota usage', 'Traffic', 'Top principals']);
+
+    const slots = screen.getAllByTestId('pool-quota-legend-slot');
+    expect(slots.map((slot) => slot.textContent)).toEqual([
+      '5h · 12% used · resets in 1h',
+      '7d · 83% used · resets in 1h',
+      '7d (Fable) · 97% used · resets in 1h',
+    ]);
+    const value = (index: number) =>
+      within(slots[index]!).getByText(/% used$/).className;
+    expect(value(0)).toContain('text-text');
+    expect(value(1)).toContain('text-warn-text');
+    expect(value(2)).toContain('text-danger-text');
+
+    const captions = screen.getByTestId('pool-quota-captions');
+    expect(captions.textContent).toContain('Plan-weighted across upstreams');
+    expect(captions.textContent).toContain('Capacity unknown for 2 upstreams');
+    expect(captions.textContent).toContain('Stale reading');
+    expect(screen.getByTestId('pool-quota-card').textContent).not.toMatch(
+      /left|headroom/i,
     );
-    expect(screen.getByText(/Fable/).textContent).toBe('Fable · 28%');
+  });
+
+  it('fills each window in its window color and paints every stroke above every fill', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: poolHistoryResponse(POOL_HISTORY_NOW, 12),
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const slot = screen.getByTestId('pool-quota-chart-slot');
+    const paths = Array.from(slot.querySelectorAll('path'));
+    const fills = paths.filter((path) =>
+      path.getAttribute('data-testid')?.startsWith('pool-quota-fill-'),
+    );
+    const strokes = paths.filter((path) =>
+      path.getAttribute('data-testid')?.startsWith('pool-quota-area-'),
+    );
+    expect(fills).toHaveLength(3);
+    expect(strokes).toHaveLength(3);
+    // No fill may cover a stroke: the fill pass paints first.
+    expect(paths.indexOf(fills.at(-1)!)).toBeLessThan(
+      paths.indexOf(strokes[0]!),
+    );
+    for (const window of ['5h', '7d', '7d_fable']) {
+      const stroke = within(slot).getByTestId(`pool-quota-area-${window}`);
+      expect(stroke.getAttribute('stroke')).toBe(getWindowColor(window).stroke);
+      expect(stroke.getAttribute('stroke-dasharray')).toBeNull();
+      expect(stroke.getAttribute('fill')).toBe('none');
+      const fill = within(slot)
+        .getByTestId(`pool-quota-fill-${window}`)
+        .getAttribute('fill');
+      const gradientId = /^url\(#(.+)\)$/.exec(fill ?? '')?.[1];
+      expect(gradientId).toBeDefined();
+      expect(
+        slot.querySelector(`linearGradient[id="${gradientId}"]`),
+      ).not.toBeNull();
+    }
+  });
+
+  it('lists each window once in the hover tooltip, in legend order', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSubscriptionQuotaPoolHistory).mockReturnValue({
+      data: poolHistoryResponse(POOL_HISTORY_NOW, 12),
+      isPending: false,
+      isPlaceholderData: false,
+    } as never);
+    // What Recharts hands custom content: an entry for every Area in paint
+    // order, the fill pass (`tooltipType="none"`) included.
+    const values: Record<string, number> = {
+      '7d': 66,
+      '7d_fable': 62,
+      '5h': 14,
+    };
+    rechartsMock.tooltip = {
+      label: POOL_HISTORY_NOW - 60,
+      payload: [
+        ...Object.entries(values).map(([dataKey, value]) => ({
+          dataKey,
+          value,
+          type: 'none',
+        })),
+        ...Object.entries(values).map(([dataKey, value]) => ({
+          dataKey,
+          value,
+        })),
+      ],
+    };
+
+    render(<OverviewPage />);
+
+    const rows = within(screen.getByTestId('pool-quota-tooltip')).getAllByText(
+      /% used$/,
+    );
+    expect(rows.map((row) => row.parentElement?.textContent)).toEqual([
+      '5h window14% used',
+      '7d window66% used',
+      '7d (Fable) window62% used',
+    ]);
+  });
+
+  it('links to the upstreams page from the upstreams table section', () => {
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
+    expect(
+      screen
+        .getByRole('link', { name: 'Manage upstreams' })
+        .getAttribute('href'),
+    ).toBe('/upstreams');
   });
 });
 
@@ -513,10 +791,8 @@ describe('Overview loading geometry', () => {
       <ValueTile
         chartId="request-rate"
         chartLabel="Req/s"
-        icon={<span />}
         label="requests"
         loading
-        size="sm"
         spark={[]}
         sub="12 / 24h"
         value="12"
@@ -542,7 +818,7 @@ describe('Overview loading geometry', () => {
     expect(
       container.querySelector('[data-slot="sparkline"] .skeleton'),
     ).not.toBeNull();
-    expect(valueClassName).toContain('h-5');
+    expect(valueClassName).toContain('h-9');
     expect(subClassName).toContain('h-4');
     expect(sparklineClassName).toContain('h-8');
     expect(screen.queryByText('12')).toBeNull();
@@ -552,10 +828,8 @@ describe('Overview loading geometry', () => {
       <ValueTile
         chartId="request-rate"
         chartLabel="Req/s"
-        icon={<span />}
         label="requests"
         loading={false}
-        size="sm"
         spark={[]}
         sub="12 / 24h"
         value="12"
@@ -579,87 +853,196 @@ describe('Overview loading geometry', () => {
     expect(screen.getByText('12 / 24h')).toBeDefined();
   });
 
-  it('renders an isolated secondary value as a visible point', () => {
+  it('draws a second series as a dashed line with gaps and reads both figures with units', () => {
     render(
       <ValueTile
-        chartId="isolated-secondary"
-        chartLabel="Primary"
-        icon={<span />}
-        label="isolated secondary"
+        activeIndex={1}
+        chartId="two-series"
+        formatChartValue={(value) => `${value} tokens`}
+        label="two series"
         secondary={{
-          color: '#8b5cf6',
-          format: String,
-          label: 'Secondary',
-          testId: 'overview-kpi-secondary-isolated',
+          color: 'var(--color-series-cache-create-5m)',
+          format: (value) => `${value ?? '—'}% cache miss`,
         }}
         spark={[
-          {
-            secondaryValue: null,
-            timestamp: KPI_TIMESTAMPS[0],
-            value: 1,
-          },
-          {
-            secondaryValue: 50,
-            timestamp: KPI_TIMESTAMPS[1],
-            value: 2,
-          },
-          {
-            secondaryValue: null,
-            timestamp: KPI_TIMESTAMPS[2],
-            value: 3,
-          },
+          { secondaryValue: null, timestamp: KPI_TIMESTAMPS[0], value: 100 },
+          { secondaryValue: 7, timestamp: KPI_TIMESTAMPS[1], value: 200 },
         ]}
-        value="2"
+        sparkColor="var(--color-text-muted)"
+        value="312"
       />,
     );
 
-    const secondary = screen.getByTestId('overview-kpi-secondary-isolated');
-    const marker = secondary.querySelector('path[data-slot="secondary-point"]');
-    expect(secondary.querySelectorAll('path')).toHaveLength(1);
-    expect(marker?.getAttribute('d')).toBe('M 50.00,50.00 h 0.01');
+    const primary = screen.getByTestId('pool-quota-area-value');
+    const secondary = screen.getByTestId('pool-quota-area-secondary');
+    expect(primary.getAttribute('stroke')).toBe('var(--color-text-muted)');
+    expect(primary.getAttribute('stroke-dasharray')).toBeNull();
+    expect(secondary.getAttribute('stroke')).toBe(
+      'var(--color-series-cache-create-5m)',
+    );
+    expect(secondary.getAttribute('stroke-dasharray')).not.toBeNull();
+    // A bucket without a ratio is a gap, not a zero.
+    expect(secondary.getAttribute('d')).toBe('undefined:|undefined:7');
+    expect(tooltipRows('overview-kpi-tooltip-two-series').slice(1)).toEqual([
+      '200 tokens',
+      '7% cache miss',
+    ]);
   });
 
-  it('keeps the principal card shell stable across loading, empty, and loaded states', () => {
-    const { container, rerender } = render(
-      <TopPrincipalsCard loading principals={[]} range="24h" />,
+  // Mounts the whole page with 30 rows of meters and popovers: slow in jsdom.
+  it('ranks the top ten by cost and expands in place to every principal with a name filter', {
+    timeout: 30_000,
+  }, () => {
+    mockManyPrincipals();
+
+    render(<OverviewPage />);
+
+    const group = screen.getByRole('region', { name: 'Top principals' });
+    let rows = within(group).getAllByTestId('top-principal-row');
+    expect(rows).toHaveLength(10);
+    expect(rows[0]?.textContent).toContain('Team 01');
+    expect(rows[9]?.textContent).toContain('Team 10');
+    // $3.00 of the pool's $46.50.
+    expect(within(rows[0]!).getByText('6.5%')).toBeDefined();
+    expect(
+      within(rows[0]!)
+        .getByRole('link', { name: 'Team 01' })
+        .getAttribute('href'),
+    ).toBe('/principals?selectedId=principal-01');
+    expect(within(group).queryByText(/others/)).toBeNull();
+    expect(
+      within(group).getByText('3 principals had no requests in the last 24h'),
+    ).toBeDefined();
+    expect(
+      within(group).queryByRole('searchbox', {
+        name: 'Filter principals by name',
+      }),
+    ).toBeNull();
+    expect(
+      within(group)
+        .getByRole('link', { name: 'View all principals' })
+        .getAttribute('href'),
+    ).toBe('/principals?sort=active');
+
+    const showAll = within(group).getByRole('button', {
+      name: 'Show all 30 principals',
+    });
+    expect(showAll.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(showAll);
+
+    rows = within(group).getAllByTestId('top-principal-row');
+    expect(rows).toHaveLength(30);
+    expect(rows[29]?.textContent).toContain('Team 30');
+    const filter = within(group).getByRole('searchbox', {
+      name: 'Filter principals by name',
+    });
+    fireEvent.change(filter, { target: { value: 'team 2' } });
+    expect(
+      within(group)
+        .getAllByTestId('top-principal-row')
+        .map((row) => within(row).getByRole('link').textContent),
+    ).toEqual([
+      'Team 20',
+      'Team 21',
+      'Team 22',
+      'Team 23',
+      'Team 24',
+      'Team 25',
+      'Team 26',
+      'Team 27',
+      'Team 28',
+      'Team 29',
+    ]);
+    fireEvent.change(filter, { target: { value: 'zzz' } });
+    expect(within(group).queryAllByTestId('top-principal-row')).toHaveLength(0);
+    expect(within(group).getByText('No principals match "zzz"')).toBeDefined();
+
+    const showTop = within(group).getByRole('button', { name: 'Show top 10' });
+    expect(showTop.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(showTop);
+    expect(within(group).getAllByTestId('top-principal-row')).toHaveLength(10);
+    expect(
+      within(group).queryByRole('searchbox', {
+        name: 'Filter principals by name',
+      }),
+    ).toBeNull();
+  });
+
+  // Mounts the whole page with 30 rows of meters and popovers: slow in jsdom.
+  it('sorts principals from the Requests, Tokens and Cost headers', {
+    timeout: 30_000,
+  }, () => {
+    mockManyPrincipals();
+
+    render(<OverviewPage />);
+
+    const group = screen.getByRole('region', { name: 'Top principals' });
+    const header = (name: string) =>
+      within(group).getByRole('button', { name }).closest('th')!;
+    const firstRow = () =>
+      within(within(group).getAllByTestId('top-principal-row')[0]!).getByRole(
+        'link',
+      ).textContent;
+
+    expect(header('Cost').getAttribute('aria-sort')).toBe('descending');
+    expect(header('Requests').getAttribute('aria-sort')).toBe('none');
+    expect(header('Tokens').getAttribute('aria-sort')).toBe('none');
+    expect(firstRow()).toBe('Team 01');
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Requests' }));
+    expect(header('Requests').getAttribute('aria-sort')).toBe('descending');
+    expect(header('Cost').getAttribute('aria-sort')).toBe('none');
+    expect(firstRow()).toBe('Team 30');
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Requests' }));
+    expect(header('Requests').getAttribute('aria-sort')).toBe('ascending');
+    expect(firstRow()).toBe('Team 01');
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Tokens' }));
+    expect(header('Tokens').getAttribute('aria-sort')).toBe('descending');
+    expect(header('Requests').getAttribute('aria-sort')).toBe('none');
+    expect(firstRow()).toBe('Team 15');
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Cost' }));
+    expect(header('Cost').getAttribute('aria-sort')).toBe('descending');
+    expect(firstRow()).toBe('Team 01');
+  });
+
+  it('lists only principals with requests and needs no expander for a short list', () => {
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
+
+    const group = screen.getByRole('region', { name: 'Top principals' });
+    expect(within(group).getAllByTestId('top-principal-row')).toHaveLength(1);
+    expect(within(group).queryByRole('button', { name: /^Show / })).toBeNull();
+    expect(within(group).queryByText(/had no requests/)).toBeNull();
+  });
+
+  it('keeps the principal section mounted across loading, empty and loaded states', () => {
+    const { rerender } = render(
+      <TopPrincipalsSection loading principals={[]} rangeWords="last 24h" />,
     );
 
-    const cardClassName = screen
-      .getByText('Top principals')
-      .closest('.glass')?.className;
-    const listClassName = container.querySelector(
-      '[data-slot="principal-list"]',
-    )?.className;
-    const skeletonRows = screen.getAllByTestId('top-principal-skeleton-row');
-
-    expect(skeletonRows).toHaveLength(5);
-    for (const row of skeletonRows) {
-      const skeletons = row.querySelectorAll('.skeleton');
-      expect(row.className).toContain('min-h-[66px]');
-      expect(row.className).toContain('px-3');
-      expect(row.className).toContain('py-2');
-      expect(skeletons).toHaveLength(5);
-      expect(skeletons[0]?.className).toContain('h-5');
-      expect(skeletons[1]?.className).toContain('h-3');
-      expect(skeletons[2]?.className).toContain('h-1.5');
-      expect(skeletons[3]?.className).toContain('h-5');
-      expect(skeletons[4]?.className).toContain('h-3');
-    }
-    expect(listClassName).toContain('min-h-80');
-    expect(screen.queryByText('Loading top principals…')).toBeNull();
-
-    rerender(<TopPrincipalsCard loading={false} principals={[]} range="24h" />);
-
-    expect(
-      screen.getByText('Top principals').closest('.glass')?.className,
-    ).toBe(cardClassName);
-    expect(
-      container.querySelector('[data-slot="principal-list"]')?.className,
-    ).toBe(listClassName);
-    expect(screen.getByText('No usage data')).toBeDefined();
+    const section = screen.getByRole('region', { name: 'Top principals' });
+    expect(screen.getAllByTestId('top-principal-skeleton-row')).toHaveLength(5);
+    expect(screen.queryByText(/Loading/)).toBeNull();
+    expect(screen.getByText('Ranked by virtual cost · last 24h')).toBeDefined();
 
     rerender(
-      <TopPrincipalsCard
+      <TopPrincipalsSection
+        loading={false}
+        principals={[]}
+        rangeWords="last 24h"
+      />,
+    );
+
+    expect(screen.getByRole('region', { name: 'Top principals' })).toBe(
+      section,
+    );
+    expect(screen.getByText('No usage in the last 24h')).toBeDefined();
+
+    rerender(
+      <TopPrincipalsSection
         loading={false}
         principals={[
           {
@@ -667,25 +1050,21 @@ describe('Overview loading geometry', () => {
             cost_components_micros: null,
             cost_micros: 1_250_000,
             id: 'principal-1',
-            max_cost_micros: 1_250_000,
             name: 'Primary principal',
             requests: 12,
             share_pct: 100,
             tokens: 345,
           },
         ]}
-        range="24h"
+        rangeWords="last 24h"
       />,
     );
 
-    expect(
-      screen.getByText('Top principals').closest('.glass')?.className,
-    ).toBe(cardClassName);
-    expect(
-      container.querySelector('[data-slot="principal-list"]')?.className,
-    ).toBe(listClassName);
-    expect(screen.getByTestId('top-principal-row').className).toContain(
-      'min-h-[66px]',
+    expect(screen.getByRole('region', { name: 'Top principals' })).toBe(
+      section,
+    );
+    expect(screen.queryAllByTestId('top-principal-skeleton-row')).toHaveLength(
+      0,
     );
     expect(screen.getByText('Primary principal')).toBeDefined();
   });
@@ -696,13 +1075,15 @@ describe('Overview loading geometry', () => {
     render(<OverviewPage />);
 
     for (const label of [
-      'avg req/s',
-      'tokens',
-      'equiv $',
+      'Requests/s',
+      'Tokens',
+      'Cost at list price',
       'Avg latency',
-      'err rate',
+      'Error rate',
     ]) {
-      const tile = screen.getByText(label).closest('.glass');
+      const tile = within(screen.getByTestId('overview-kpi-strip'))
+        .getByText(label)
+        .closest('[data-slot="kpi-tile"]');
       expect(tile?.textContent).toBe(label);
       expect(
         tile?.querySelector('[data-slot="value"] .skeleton'),
@@ -720,7 +1101,7 @@ describe('Overview loading geometry', () => {
     ['aggregate', true, false],
     ['history', false, true],
   ])(
-    'keeps Pool quota structured while the %s query is pending',
+    'keeps the pool chart structured while the %s query is pending',
     (_queryName, aggregatePending, historyPending) => {
       mockPendingOverviewQueries();
       vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
@@ -738,70 +1119,47 @@ describe('Overview loading geometry', () => {
 
       const card = screen.getByTestId('pool-quota-card');
       expect(card.getAttribute('aria-busy')).toBe('true');
-      expect(card.textContent).not.toContain('no data');
+      // Pending is not "no reading": nothing claims the pool is empty.
+      expect(card.textContent).not.toContain('No reading');
       expect(card.textContent).not.toContain('No timeline data yet');
-
-      const snapshotSlots = card.querySelectorAll(
-        '[data-testid="pool-quota-snapshot-slot"]',
-      );
-      expect(snapshotSlots).toHaveLength(3);
-      expect(
-        Array.from(snapshotSlots, (slot) => slot.textContent?.trim()),
-      ).toEqual(['5h pool', '7d pool', '7d (Fable) pool']);
-      for (const slot of snapshotSlots) {
-        expect(slot.className).toContain('min-h-[56px]');
-        expect(slot.querySelectorAll('.skeleton')).toHaveLength(2);
-      }
-
       const legendSlots = card.querySelectorAll(
         '[data-testid="pool-quota-legend-slot"]',
       );
-      expect(legendSlots).toHaveLength(3);
       expect(
         Array.from(legendSlots, (slot) => slot.textContent?.trim()),
-      ).toEqual(['5h', '7d', 'Fable']);
+      ).toEqual(['5h', '7d', '7d (Fable)']);
       for (const slot of legendSlots) {
         expect(slot.querySelector('.skeleton')).not.toBeNull();
       }
 
       const chartSlot = screen.getByTestId('pool-quota-chart-slot');
-      expect(chartSlot.className).toContain('min-h-64');
+      expect(chartSlot.className).toContain('lg:h-[320px]');
       expect(chartSlot.querySelector('.skeleton')).not.toBeNull();
-      const chartHeader = chartSlot.previousElementSibling;
-      expect(chartHeader?.className).toContain('flex-col');
-      expect(chartHeader?.className).toContain('sm:flex-row');
     },
   );
 
-  it('keeps all three Pool quota slots mounted when pending resolves to legitimate no-data', () => {
+  it('keeps the pool chart mounted when pending resolves to legitimate no-data', () => {
     mockPendingOverviewQueries();
 
     const { rerender } = render(<OverviewPage />);
     const pendingCard = screen.getByTestId('pool-quota-card');
-    const pendingSnapshotSlots = Array.from(
-      pendingCard.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
-    );
     const pendingChartSlot = screen.getByTestId('pool-quota-chart-slot');
 
     mockResolvedEmptyQuotaQueries();
     rerender(<OverviewPage />);
 
     const resolvedCard = screen.getByTestId('pool-quota-card');
-    const resolvedSnapshotSlots = Array.from(
-      resolvedCard.querySelectorAll('[data-testid="pool-quota-snapshot-slot"]'),
-    );
     expect(resolvedCard).toBe(pendingCard);
     expect(resolvedCard.getAttribute('aria-busy')).toBe('false');
-    for (let index = 0; index < resolvedSnapshotSlots.length; index += 1) {
-      expect(resolvedSnapshotSlots[index]).toBe(pendingSnapshotSlots[index]);
+    const legendSlots = resolvedCard.querySelectorAll(
+      '[data-testid="pool-quota-legend-slot"]',
+    );
+    expect(legendSlots).toHaveLength(3);
+    for (const slot of legendSlots) {
+      expect(slot.textContent).toContain('No reading');
     }
-    expect(resolvedSnapshotSlots).toHaveLength(3);
-    expect(
-      resolvedCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]'),
-    ).toHaveLength(3);
     expect(screen.getByTestId('pool-quota-chart-slot')).toBe(pendingChartSlot);
     expect(resolvedCard.querySelectorAll('.skeleton')).toHaveLength(0);
-    expect(resolvedCard.textContent?.match(/no data/g)).toHaveLength(3);
     expect(resolvedCard.textContent).toContain(
       'No timeline data yet for this range',
     );
@@ -840,12 +1198,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 20%');
-      expect(
-        quotaCard.querySelectorAll(
-          '[data-testid="pool-quota-snapshot-slot"]',
-        )[0]?.textContent,
-      ).toContain('20.0%');
+      ).toBe('5h · 20% used · resets in 1h');
       expect(principalRow.textContent).toContain('Principal Alpha');
       expect(principalRow.textContent).toContain('$3.00');
 
@@ -879,7 +1232,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 20%');
+      ).toBe('5h · 20% used · resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(screen.queryByTestId('top-principal-skeleton-row')).toBeNull();
       expect(principalRow.textContent).toContain('$3.00');
@@ -916,12 +1269,7 @@ describe('Overview loading geometry', () => {
       expect(
         quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
           ?.textContent,
-      ).toBe('5h · 55%');
-      expect(
-        quotaCard.querySelectorAll(
-          '[data-testid="pool-quota-snapshot-slot"]',
-        )[0]?.textContent,
-      ).toContain('55.0%');
+      ).toBe('5h · 55% used · resets in 1h');
       expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
       expect(principalRow.textContent).toContain('$9.00');
     } finally {
@@ -929,7 +1277,7 @@ describe('Overview loading geometry', () => {
     }
   });
 
-  it('keeps the successful pool plot context while 1h expands to 7d', () => {
+  it('drives every usage query from one range and keeps the pool plot context while 1h expands to 7d', () => {
     const initialAggregate = aggregateResponse(POOL_HISTORY_NOW, 20);
     const initialHistory = poolHistoryResponse(
       POOL_HISTORY_NOW,
@@ -971,8 +1319,33 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    fireEvent.click(screen.getByText('1h'));
-    expect(screen.getByText('Trend · 24h')).toBeDefined();
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(1);
+    fireEvent.click(rangeOption('Usage range', '1h'));
+    // The one control drives every usage query, in the URL, and keeps the
+    // reader's place: the router must not reset the scroll to the top.
+    expect(routerMock.navigate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ replace: true, resetScroll: false }),
+    );
+    expect(routerMock.search).toEqual({ range: '1h' });
+    expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('1h');
+    expect(vi.mocked(queries.useUsage)).toHaveBeenLastCalledWith(
+      '1h',
+      'minute',
+      'principal',
+      undefined,
+      'totals',
+    );
+    expect(
+      vi.mocked(queries.useSubscriptionQuotaPoolHistory),
+    ).toHaveBeenLastCalledWith(expect.objectContaining({ rangeSecs: 3600 }));
+    // Every inner subtitle ends with the control's words.
+    for (const subtitle of [
+      'Used per window across the pool · last 1h',
+      'Requests, tokens, cost, latency and errors · last 1h',
+      'Ranked by virtual cost · last 1h',
+    ]) {
+      expect(screen.getByText(subtitle)).toBeDefined();
+    }
 
     const oneHourHistory = poolHistoryResponse(
       POOL_HISTORY_NOW + 60,
@@ -997,7 +1370,9 @@ describe('Overview loading geometry', () => {
     } as never);
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Trend · 1h')).toBeDefined();
+    expect(
+      screen.getByText('Used per window across the pool · last 1h'),
+    ).toBeDefined();
     const oneHourDomain = screen
       .getByTestId('pool-quota-x-axis')
       .getAttribute('data-domain');
@@ -1027,12 +1402,14 @@ describe('Overview loading geometry', () => {
       isPlaceholderData: true,
     } as never);
 
-    const sevenDayButton = screen.getByRole('button', { name: '7d' });
-    fireEvent.click(sevenDayButton);
+    const sevenDayOption = rangeOption('Usage range', '7d');
+    fireEvent.click(sevenDayOption);
 
-    expect(sevenDayButton.hasAttribute('data-pressed')).toBe(true);
-    expect(screen.getByText('Trend · 1h')).toBeDefined();
-    expect(screen.getByText('by virtual cost · 7d')).toBeDefined();
+    expect(sevenDayOption.getAttribute('aria-checked')).toBe('true');
+    expect(
+      screen.getByText('Used per window across the pool · last 7d'),
+    ).toBeDefined();
+    expect(screen.getByText('Ranked by virtual cost · last 7d')).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1067,7 +1444,9 @@ describe('Overview loading geometry', () => {
 
     rerender(<OverviewPage />);
 
-    expect(screen.getByText('Trend · 7d')).toBeDefined();
+    expect(
+      screen.getByText('Used per window across the pool · last 7d'),
+    ).toBeDefined();
     expect(chartSlot.firstElementChild).toBe(chartInstance);
     expect(
       screen.getByTestId('pool-quota-x-axis').getAttribute('data-domain'),
@@ -1083,55 +1462,64 @@ describe('Overview loading geometry', () => {
     expect(
       quotaCard.querySelectorAll('[data-testid="pool-quota-legend-slot"]')[0]
         ?.textContent,
-    ).toBe('5h · 55%');
+    ).toBe('5h · 55% used · resets in 1h');
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
-  it('keeps the Recent Requests scroll box height fixed while data resolves', () => {
+  it('previews the ten newest requests at their natural height with a link to Logs', () => {
     mockPendingOverviewQueries();
-    vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
-      data: undefined,
-      fetchNextPage: vi.fn(),
-      hasNextPage: false,
-      isFetchingNextPage: false,
-      isLoading: true,
-    } as never);
-
-    const { container, rerender } = render(<OverviewPage />);
-    const loadingScrollBox = container.querySelector('.scroll-fade-right');
-
-    expect(loadingScrollBox?.className).toContain('h-[50vh]');
-    expect(loadingScrollBox?.className).not.toContain('max-h-[50vh]');
-
     vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
       data: {
         pages: [
           {
-            events: [
-              {
-                duration_ms: 10,
-                event_kind: 'messages',
-                model: 'test-model',
-                request_id: 'request-1',
-                status: 200,
-                ts: 1,
-              },
-            ],
+            events: Array.from({ length: 12 }, (_, index) => ({
+              duration_ms: 10,
+              event_kind: 'messages',
+              model: 'test-model',
+              request_id: `request-${index + 1}`,
+              status: 200,
+              ts: index + 1,
+            })),
           },
         ],
       },
       fetchNextPage: vi.fn(),
-      hasNextPage: false,
+      hasNextPage: true,
       isFetchingNextPage: false,
       isLoading: false,
     } as never);
 
-    rerender(<OverviewPage />);
+    render(<OverviewPage />);
 
-    expect(container.querySelector('.scroll-fade-right')?.className).toBe(
-      loadingScrollBox?.className,
+    const rows = screen.getAllByLabelText(/^View request request-/);
+    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual(
+      Array.from(
+        { length: 10 },
+        (_, index) => `View request request-${12 - index}`,
+      ),
     );
-    expect(screen.getByText('test-model')).toBeDefined();
+    // A preview has no infinite-scroll footer; the full history is on Logs.
+    expect(screen.queryByText('No more entries')).toBeNull();
+    expect(
+      screen.getByRole('link', { name: 'Open logs' }).getAttribute('href'),
+    ).toBe('/logs');
+  });
+
+  it('collapses the traffic strip to one line when the range has no requests', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(queries.useSummary).mockReturnValue({
+      data: {
+        ...SUMMARY_FIXTURE,
+        totals: { ...SUMMARY_FIXTURE.totals, request_count: 0 },
+      },
+      isPending: false,
+    } as never);
+
+    render(<OverviewPage />);
+
+    const strip = screen.getByTestId('overview-kpi-strip');
+    expect(strip.textContent).toBe('No requests in the last 24h');
+    expect(strip.querySelector('[data-slot="kpi-tile"]')).toBeNull();
   });
 
   it('requests only messages events and shows no other categories from mixed data', () => {
@@ -1242,8 +1630,12 @@ describe('Overview loading geometry', () => {
 
   it('flashes the newest live row after the twentieth insertion', () => {
     mockResolvedKpiQueries();
+    // live-1 is inserted first but carries the newest timestamp, so it stays
+    // inside the ten-row preview while it ages out of the flash window.
+    const firstEvent = { ...finalLiveEvent(1), ts: 100 };
     const eventsMap: LiveEventMap = new Map();
-    for (let index = 1; index <= 20; index += 1) {
+    eventsMap.set('live-1', { phase: 'final', event: firstEvent });
+    for (let index = 2; index <= 20; index += 1) {
       eventsMap.set(`live-${index}`, {
         phase: 'final',
         event: finalLiveEvent(index),
@@ -1271,7 +1663,7 @@ describe('Overview loading geometry', () => {
 
     eventsMap.set('live-1', {
       phase: 'final',
-      event: { ...finalLiveEvent(1), status: 201 },
+      event: { ...firstEvent, status: 201 },
     });
     mockLiveStream(eventsMap, 22);
     rerender(<OverviewPage />);
@@ -1290,19 +1682,22 @@ describe('Overview KPI details', () => {
     mockResolvedKpiQueries();
     render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '83.3% cache hit',
+    // Tokens is the total of every token kind; cache miss is the range's
+    // (fresh input + cache writes) / prompt tokens: 800 / 1,800.
+    const tokensTile = screen.getByTestId('overview-kpi-tokens');
+    // The tile reads compact (`2.0k`, same unit as the token tables); the
+    // exact figure rides along for screen readers and hover.
+    const tokensValue = tokensTile.querySelector(
+      '[data-slot="value"] > span',
+    ) as HTMLElement;
+    expect(tokensValue.textContent).toContain('2.0k');
+    expect(tokensValue.title).toBe('1,980 tokens');
+    expect(tokensValue.textContent).toContain('1,980 tokens');
+    expect(screen.getByTestId('overview-kpi-tokens-legend').textContent).toBe(
+      'Tokens 2.0kCache miss 44.4%',
     );
-    const secondary = screen.getByTestId('overview-kpi-secondary-tokens');
-    const secondaryPaths = Array.from(secondary.querySelectorAll('path'));
-    expect(secondaryPaths).toHaveLength(1);
-    expect(secondaryPaths[0]?.getAttribute('data-slot')).toBe(
-      'secondary-segment',
-    );
-    expect(secondaryPaths[0]?.getAttribute('d')).toBe(
-      'M 0.00,59.20 L 50.00,50.00',
-    );
+    // The legend carries the cache-miss figure; no second line repeats it.
+    expect(tokensTile.querySelector('[data-slot="sub"]')).toBeNull();
     expect(screen.queryAllByTestId(/^overview-kpi-tooltip-/)).toHaveLength(0);
 
     const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
@@ -1349,14 +1744,15 @@ describe('Overview KPI details', () => {
       tooltipTimestamp,
       'Req/s 3',
     ]);
+    // Bucket 1: 300 + 100 + 100 + 400 tokens; (300 + 100) / 800 missed.
     expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
       tooltipTimestamp,
-      'Tokens 900',
-      'Cache miss 50.0%',
+      '900 tokens',
+      '50.0% cache miss',
     ]);
     expect(tooltipRows('overview-kpi-tooltip-cost')).toEqual([
       tooltipTimestamp,
-      'Equiv $ $2.50',
+      'Cost $2.50',
     ]);
     expect(tooltipRows('overview-kpi-tooltip-latency')).toEqual([
       tooltipTimestamp,
@@ -1364,7 +1760,7 @@ describe('Overview KPI details', () => {
     ]);
     expect(tooltipRows('overview-kpi-tooltip-error-rate')).toEqual([
       tooltipTimestamp,
-      'Err rate 10.00%',
+      'Error rate 10.00%',
     ]);
 
     fireEvent.mouseLeave(requestChart);
@@ -1375,10 +1771,9 @@ describe('Overview KPI details', () => {
     mockResolvedKpiQueries();
     const { rerender } = render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '83.3% cache hit',
-    );
+    const legend = () =>
+      screen.getByTestId('overview-kpi-tokens-legend').textContent;
+    expect(legend()).toContain('Cache miss 44.4%');
 
     const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
     vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
@@ -1394,7 +1789,7 @@ describe('Overview KPI details', () => {
     });
     fireEvent.mouseMove(requestChart, { clientX: 110, clientY: 26 });
     expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
-      'Cache miss 50.0%',
+      '50.0% cache miss',
     );
 
     const updatedSummary: DashboardSummaryResponse = {
@@ -1438,27 +1833,22 @@ describe('Overview KPI details', () => {
 
     rerender(<OverviewPage />);
 
-    expect(screen.queryByText('Avg cache miss 44.4%')).toBeNull();
-    expect(screen.getByText('Avg cache miss 30.0%')).toBeDefined();
-    expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
-      '83.3% cache hit',
-    );
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '70.0% cache hit',
-    );
-    expect(tooltipRows('overview-kpi-tooltip-tokens')).toContain(
-      'Cache miss 20.0%',
-    );
+    // 600 / 2,000 over the range; bucket 1 is (100 + 100) / 1,000.
+    expect(legend()).toContain('Cache miss 30.0%');
+    expect(legend()).not.toContain('44.4%');
+    expect(tooltipRows('overview-kpi-tooltip-tokens').slice(1)).toEqual([
+      '1.1k tokens',
+      '20.0% cache miss',
+    ]);
   });
 
   it('renders dashes when cache ratios have a zero prompt denominator', () => {
     mockResolvedKpiQueries({ zeroPromptDenominator: true });
     render(<OverviewPage />);
 
-    expect(screen.getByText('Avg cache miss —')).toBeDefined();
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '— cache hit',
-    );
+    expect(
+      screen.getByTestId('overview-kpi-tokens-legend').textContent,
+    ).toContain('Cache miss —');
 
     const requestChart = screen.getByTestId('overview-kpi-chart-request-rate');
     vi.spyOn(requestChart, 'getBoundingClientRect').mockReturnValue({
@@ -1476,8 +1866,8 @@ describe('Overview KPI details', () => {
 
     expect(tooltipRows('overview-kpi-tooltip-tokens')).toEqual([
       kpiTooltipTimestamp(KPI_TIMESTAMPS[1]),
-      'Tokens 100',
-      'Cache miss —',
+      '100 tokens',
+      '— cache miss',
     ]);
   });
 });
@@ -1513,24 +1903,16 @@ describe('Overview OAuth reconnect summary', () => {
     // jsdom cannot reach the status endpoint, so the real nudge query errors
     // and the summary must surface that rather than rendering nothing.
     expect(await screen.findByText('OAuth status check failed')).toBeDefined();
-    expect(screen.getByText('Avg cache miss 44.4%')).toBeDefined();
+    expect(
+      screen.getByTestId('overview-kpi-tokens-legend').textContent,
+    ).toContain('Cache miss 44.4%');
   });
 });
-
-/** Request-log slice colors as jsdom serializes them. */
-const CATEGORY_COLOR = {
-  input: 'rgb(56, 189, 248)',
-  output: 'rgb(167, 139, 250)',
-  cache_create_5m: 'rgb(251, 191, 36)',
-  cache_create_1h: 'rgb(180, 83, 9)',
-  cache_read: 'rgb(52, 211, 153)',
-  unattributed: 'rgb(107, 114, 128)',
-} as const;
 
 const COST_NOTE = 'Per-category cost not recorded for this window';
 
 const COMPLETE_PRINCIPAL: TopPrincipal = {
-  cache_hit_ratio: 0.5,
+  cache_hit_ratio: 0.875,
   cost_components_micros: {
     input: 400_000,
     output: 300_000,
@@ -1540,7 +1922,6 @@ const COMPLETE_PRINCIPAL: TopPrincipal = {
   },
   cost_micros: 1_000_000,
   id: 'principal-complete',
-  max_cost_micros: 1_000_000,
   name: 'Complete principal',
   requests: 12,
   share_pct: 62.5,
@@ -1564,41 +1945,23 @@ const PARTIAL_PRINCIPAL: TopPrincipal = {
 
 const UNRECORDED_PRINCIPAL: TopPrincipal = {
   ...COMPLETE_PRINCIPAL,
-  cache_hit_ratio: null,
   cost_components_micros: null,
   cost_micros: 500_000,
   id: 'principal-unrecorded',
   name: 'Unrecorded principal',
 };
 
-function costMeters(): HTMLElement[] {
-  return screen.getAllByTestId('top-principal-cost-meter');
+function costTrigger(name: string): HTMLButtonElement {
+  return screen.getByRole<HTMLButtonElement>('button', {
+    name: new RegExp(`^${name} cost .*, show breakdown$`),
+  });
 }
 
-function costTriggers(): HTMLButtonElement[] {
-  return screen.getAllByTestId<HTMLButtonElement>('top-principal-cost-trigger');
-}
-
-function meterFill(meter: HTMLElement): HTMLElement {
-  const fill = meter.querySelector<HTMLElement>(
-    '[data-slot="cost-meter-fill"]',
-  );
-  if (!fill) throw new Error('cost meter has no fill');
-  return fill;
-}
-
-function costSegments(
-  meter: HTMLElement,
-): { category: string; color: string; width: string }[] {
+/** The cost bar's drawn segments as `color width` pairs, in paint order. */
+function costBar(trigger: HTMLElement): string[] {
   return Array.from(
-    meter.querySelectorAll<HTMLElement>(
-      '[data-testid="top-principal-cost-segment"]',
-    ),
-    (segment) => ({
-      category: segment.dataset.category ?? '',
-      color: segment.style.backgroundColor,
-      width: segment.style.width,
-    }),
+    trigger.querySelectorAll<HTMLElement>('[data-cell-bar] span'),
+    (segment) => `${segment.style.backgroundColor} ${segment.style.width}`,
   );
 }
 
@@ -1612,108 +1975,75 @@ function costDetailValues(): string[] {
 
 function renderPrincipals(principals: readonly TopPrincipal[]) {
   return render(
-    <TopPrincipalsCard loading={false} principals={principals} range="24h" />,
+    <TopPrincipalsSection
+      loading={false}
+      principals={principals}
+      rangeWords="last 24h"
+    />,
   );
 }
 
-describe('Top principal cost meter', () => {
-  it('reads requests, tokens and cache hit with no primary-model placeholder', () => {
-    const { container } = renderPrincipals([COMPLETE_PRINCIPAL]);
-
-    expect(
-      container.querySelector('[data-slot="principal-meta"]')?.textContent,
-    ).toBe('12 req · 345 tok · 50.0% cache hit');
-    expect(screen.getByTestId('top-principal-row').textContent).not.toContain(
-      '—',
-    );
-    expect(screen.getByTestId('top-principal-row').className).toContain(
-      'min-h-[66px]',
-    );
-    expect(meterFill(costMeters()[0]).parentElement?.className).toContain(
-      'h-1.5',
-    );
-  });
-
-  it('subdivides the filled meter in request-log order, colors and widths', () => {
+describe('Top principal cost breakdown and cache hit', () => {
+  it('reads requests, tokens, cache hit, cost and share in one row', () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
-    const meter = costMeters()[0];
 
-    expect(meter.dataset.costComponents).toBe('complete');
-    expect(meterFill(meter).style.width).toBe('100%');
-    expect(meterFill(meter).className).not.toContain('var(--color-accent)');
-    expect(costSegments(meter)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '40%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '30%' },
-      {
-        category: 'cache_create_5m',
-        color: CATEGORY_COLOR.cache_create_5m,
-        width: '10%',
-      },
-      {
-        category: 'cache_create_1h',
-        color: CATEGORY_COLOR.cache_create_1h,
-        width: '10%',
-      },
-      {
-        category: 'cache_read',
-        color: CATEGORY_COLOR.cache_read,
-        width: '10%',
-      },
+    const cells = within(screen.getByTestId('top-principal-row')).getAllByRole(
+      'cell',
+    );
+    expect(within(cells[0]!).getByRole('link').textContent).toBe(
+      'Complete principal',
+    );
+    expect(cells.slice(1).map((cell) => cell.textContent)).toEqual([
+      '12',
+      '345',
+      '87%',
+      '$1.00',
+      '62.5%',
     ]);
   });
 
-  it('names the meter and carries the whole breakdown in its value text', () => {
+  it('draws the cost bar in the request table categories, order and colors', () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
-    const meter = costMeters()[0];
 
-    expect(meter.getAttribute('role')).toBe('meter');
-    expect(meter.getAttribute('aria-label')).toBe('Complete principal cost');
-    expect(meter.getAttribute('aria-valuenow')).toBe('1000000');
-    expect(meter.getAttribute('aria-valuemax')).toBe('1000000');
-    expect(meter.getAttribute('aria-valuetext')).toBe(
-      'Total $1.0000; 100.0% of the largest principal; Input $0.4000, Output $0.3000, Cache create 5m $0.1000, Cache create 1h $0.1000, Cache read $0.1000',
-    );
+    expect(costBar(costTrigger('Complete principal'))).toEqual([
+      'var(--color-series-cache-read) 10%',
+      'var(--color-series-cache-create-5m) 10%',
+      'var(--color-series-cache-create-1h) 10%',
+      'var(--color-series-input) 40%',
+      'var(--color-series-output) 30%',
+    ]);
   });
 
-  it('shows exact values and keeps keyboard focus on the breakdown trigger', () => {
+  it('opens the exact breakdown from the keyboard', async () => {
+    const user = userEvent.setup();
     renderPrincipals([COMPLETE_PRINCIPAL]);
-    const trigger = costTriggers()[0];
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Complete principal');
 
+    expect(trigger.getAttribute('aria-label')).toBe(
+      'Complete principal cost $1.00, show breakdown',
+    );
     expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
-    act(() => trigger.focus());
+    trigger.focus();
+    await user.keyboard('{Enter}');
 
-    expect(document.activeElement).toBe(trigger);
     expect(costDetailValues()).toEqual([
-      'Input',
-      '$0.4000',
-      '40%',
-      'Output',
-      '$0.3000',
-      '30%',
+      'Cache read',
+      '$0.1000',
+      '10%',
       'Cache create 5m',
       '$0.1000',
       '10%',
       'Cache create 1h',
       '$0.1000',
       '10%',
-      'Cache read',
-      '$0.1000',
-      '10%',
+      'Input',
+      '$0.4000',
+      '40%',
+      'Output',
+      '$0.3000',
+      '30%',
       'Total',
       '$1.0000',
-    ]);
-    expect(costTriggers()[0]).toBe(trigger);
-    expect(document.activeElement).toBe(trigger);
-    expect(costMeters()[0]).toBe(meter);
-    expect(meter.getAttribute('role')).toBe('meter');
-    expect(meter.getAttribute('aria-valuetext')).toContain('Input $0.4000');
-    expect(costSegments(meter).map((segment) => segment.category)).toEqual([
-      'input',
-      'output',
-      'cache_create_5m',
-      'cache_create_1h',
-      'cache_read',
     ]);
   });
 
@@ -1721,7 +2051,7 @@ describe('Top principal cost meter', () => {
     vi.useFakeTimers();
     try {
       renderPrincipals([COMPLETE_PRINCIPAL]);
-      fireEvent.pointerEnter(costTriggers()[0]);
+      fireEvent.pointerEnter(costTrigger('Complete principal'));
 
       act(() => vi.advanceTimersByTime(199));
       expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
@@ -1734,33 +2064,19 @@ describe('Top principal cost meter', () => {
     }
   });
 
-  it('appends a neutral unattributed tail when the total outruns the categories', () => {
+  it('draws and lists an unattributed remainder when the total outruns the categories', () => {
     renderPrincipals([PARTIAL_PRINCIPAL]);
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Partial principal');
 
-    expect(meter.dataset.costComponents).toBe('partial');
-    expect(meterFill(meter).style.width).toBe('80%');
-    expect(costSegments(meter)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '25%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '25%' },
-      {
-        category: 'cache_read',
-        color: CATEGORY_COLOR.cache_read,
-        width: '25%',
-      },
-      {
-        category: 'unattributed',
-        color: CATEGORY_COLOR.unattributed,
-        width: '25%',
-      },
+    expect(costBar(trigger)).toEqual([
+      'var(--color-series-cache-read) 25%',
+      'var(--color-series-input) 25%',
+      'var(--color-series-output) 25%',
+      'var(--color-neutral) 25%',
     ]);
-
-    fireEvent.focus(costTriggers()[0]);
+    fireEvent.click(trigger);
     expect(costDetailValues()).toEqual([
-      'Input',
-      '$0.2000',
-      '25%',
-      'Output',
+      'Cache read',
       '$0.2000',
       '25%',
       'Cache create 5m',
@@ -1769,7 +2085,10 @@ describe('Top principal cost meter', () => {
       'Cache create 1h',
       '$0.0000',
       '—',
-      'Cache read',
+      'Input',
+      '$0.2000',
+      '25%',
+      'Output',
       '$0.2000',
       '25%',
       'Unattributed',
@@ -1780,95 +2099,96 @@ describe('Top principal cost meter', () => {
     ]);
   });
 
-  it('keeps a solid accent bar and says so when no category cost was recorded', () => {
+  it('leaves bare track and says so when no category cost was recorded', () => {
     renderPrincipals([UNRECORDED_PRINCIPAL]);
-    const meter = costMeters()[0];
+    const trigger = costTrigger('Unrecorded principal');
 
-    expect(meter.dataset.costComponents).toBe('unavailable');
-    expect(costSegments(meter)).toEqual([]);
-    expect(meterFill(meter).className).toContain(
-      'bg-[color:var(--color-accent)]',
-    );
-    expect(meter.getAttribute('aria-valuetext')).toBe(
-      `Total $0.5000; 50.0% of the largest principal; ${COST_NOTE}`,
-    );
-
-    fireEvent.focus(costTriggers()[0]);
+    expect(costBar(trigger)).toEqual([]);
+    fireEvent.click(trigger);
     expect(screen.getByText(COST_NOTE)).toBeDefined();
     expect(costDetailValues()).toEqual(['Total', '$0.5000']);
   });
 
-  it('scales every meter against the largest principal below one dollar', () => {
+  it('rounds the cache hit down and shows a dash without prompt tokens', () => {
     renderPrincipals([
+      { ...COMPLETE_PRINCIPAL, cache_hit_ratio: 0.999 },
       {
-        ...COMPLETE_PRINCIPAL,
-        cost_components_micros: {
-          input: 250_000,
-          output: 250_000,
-          cache_create_5m: 0,
-          cache_create_1h: 0,
-          cache_read: 0,
-        },
-        cost_micros: 500_000,
-        id: 'principal-top',
-        max_cost_micros: 500_000,
-        name: 'Top principal',
-        share_pct: 80,
-      },
-      {
-        ...UNRECORDED_PRINCIPAL,
-        cost_micros: 125_000,
-        max_cost_micros: 500_000,
-        share_pct: 20,
+        ...PARTIAL_PRINCIPAL,
+        cache_hit_ratio: null,
       },
     ]);
-    const [top, tail] = costMeters();
+    const [cached, uncached] = screen.getAllByTestId('top-principal-row');
 
-    expect(meterFill(top).style.width).toBe('100%');
-    expect(meterFill(tail).style.width).toBe('25%');
-    expect(costSegments(top)).toEqual([
-      { category: 'input', color: CATEGORY_COLOR.input, width: '50%' },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '50%' },
-    ]);
-    expect(screen.getAllByTestId('top-principal-row')[0].textContent).toContain(
-      '$0.50',
+    // A partial hit never reads as a full one.
+    expect(within(cached!).getAllByRole('cell')[3]!.textContent).toBe('99%');
+    expect(within(uncached!).getAllByRole('cell')[3]!.textContent).toBe(
+      '—No prompt tokens',
     );
+    // Phones fold the figure into the name cell's second line.
+    expect(
+      cached!.querySelector('[data-slot="principal-cache-hit"]')!.textContent,
+    ).toBe('99% cache hit');
+    expect(
+      uncached!.querySelector('[data-slot="principal-cache-hit"]')!.textContent,
+    ).toBe('No prompt tokens');
   });
 
-  it('aggregates bucket components and follows refreshed usage data', () => {
+  it('sorts by cache hit with principals that sent no prompt tokens last either way', () => {
+    renderPrincipals([
+      { ...COMPLETE_PRINCIPAL, id: 'a', name: 'Low', cache_hit_ratio: 0.2 },
+      { ...COMPLETE_PRINCIPAL, id: 'b', name: 'None', cache_hit_ratio: null },
+      { ...COMPLETE_PRINCIPAL, id: 'c', name: 'High', cache_hit_ratio: 0.9 },
+    ]);
+    const order = () =>
+      screen
+        .getAllByTestId('top-principal-row')
+        .map((row) => within(row).getByRole('link').textContent);
+    const header = () =>
+      screen.getByRole('button', { name: 'Cache hit' }).closest('th')!;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cache hit' }));
+    expect(header().getAttribute('aria-sort')).toBe('descending');
+    expect(order()).toEqual(['High', 'Low', 'None']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cache hit' }));
+    expect(header().getAttribute('aria-sort')).toBe('ascending');
+    expect(order()).toEqual(['Low', 'High', 'None']);
+  });
+
+  it('aggregates bucket components and prompt tokens and follows refreshed usage data', () => {
     mockResolvedKpiQueries();
     const { rerender } = render(<OverviewPage />);
-    const meter = costMeters()[0];
+    const row = screen.getByTestId('top-principal-row');
 
+    // Cache read 2,000 of 2,400 prompt tokens over the two buckets.
+    expect(within(row).getAllByRole('cell')[3]!.textContent).toBe('83%');
     // $1.00 of the window's $3.00 carries components; the pre-upgrade bucket's
     // $2.00 stays unattributed instead of being spread over the categories.
-    expect(meter.dataset.costComponents).toBe('partial');
-    fireEvent.focus(costTriggers()[0]);
+    fireEvent.click(costTrigger('Principal Alpha'));
     expect(costDetailValues()).toEqual([
-      'Input',
-      '$0.3000',
-      '10%',
-      'Output',
-      '$0.4000',
-      '13%',
+      'Cache read',
+      '$0.1500',
+      '5%',
       'Cache create 5m',
       '$0.1500',
       '5%',
       'Cache create 1h',
       '$0.0000',
       '—',
-      'Cache read',
-      '$0.1500',
-      '5%',
+      'Input',
+      '$0.3000',
+      '10%',
+      'Output',
+      '$0.4000',
+      '13%',
       'Unattributed',
       '$2.0000',
       '67%',
       'Total',
       '$3.0000',
     ]);
-    expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '83.3% cache hit',
-    );
+    // 1,100 + 1,500 tokens over the two buckets.
+    expect(row.textContent).toContain('2.6k');
 
     // Same window, same total, same tokens: only the recorded split moves.
     const refreshed: DashboardUsageResponse = {
@@ -1899,52 +2219,29 @@ describe('Top principal cost meter', () => {
 
     // The breakdown was never closed or re-opened: it re-rendered in place.
     expect(costDetailValues()).toEqual([
-      'Input',
-      '$0.5000',
-      '17%',
-      'Output',
-      '$0.3000',
-      '10%',
+      'Cache read',
+      '$0.0000',
+      '—',
       'Cache create 5m',
       '$0.1000',
       '3%',
       'Cache create 1h',
       '$0.1000',
       '3%',
-      'Cache read',
-      '$0.0000',
-      '—',
+      'Input',
+      '$0.5000',
+      '17%',
+      'Output',
+      '$0.3000',
+      '10%',
       'Unattributed',
       '$2.0000',
       '67%',
       'Total',
       '$3.0000',
     ]);
-    expect(costSegments(costMeters()[0])).toEqual([
-      {
-        category: 'input',
-        color: CATEGORY_COLOR.input,
-        width: '16.666666666666664%',
-      },
-      { category: 'output', color: CATEGORY_COLOR.output, width: '10%' },
-      {
-        category: 'cache_create_5m',
-        color: CATEGORY_COLOR.cache_create_5m,
-        width: '3.3333333333333335%',
-      },
-      {
-        category: 'cache_create_1h',
-        color: CATEGORY_COLOR.cache_create_1h,
-        width: '3.3333333333333335%',
-      },
-      {
-        category: 'unattributed',
-        color: CATEGORY_COLOR.unattributed,
-        width: '66.66666666666666%',
-      },
-    ]);
     expect(screen.getByTestId('top-principal-row').textContent).toContain(
-      '83.3% cache hit',
+      '2.6k',
     );
   });
 });

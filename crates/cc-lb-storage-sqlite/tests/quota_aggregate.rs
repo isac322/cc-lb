@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, SubscriptionQuotaCheckpointRangeQuery,
-    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaProviderLot,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSemanticFingerprint, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
+    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
+    SubscriptionQuotaProviderLot, SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSlimCheckpoint, SubscriptionQuotaSource,
     SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus, SubscriptionQuotaWindow,
     UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageTokenInterval,
     UsageTokenIntervalStore, UsageTokenIntervalSum,
@@ -21,10 +20,7 @@ async fn quota_storage(database_name: &str) -> (TempDir, SqliteStorage) {
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("open quota sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize quota sqlite");
+    storage.initialize().await.expect("initialize quota sqlite");
     (temp_dir, storage)
 }
 
@@ -35,21 +31,18 @@ fn quota_checkpoint(
     utilization: f64,
     resets_at_unix_secs: Option<u64>,
 ) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord {
+    SubscriptionQuotaCheckpointRecord::from(&SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,
-        changed_at_unix_millis,
-        semantic_fingerprint: SubscriptionQuotaSemanticFingerprint::from_bytes(
-            [u8::try_from(sample_id).expect("sample id fits fixture fingerprint"); 32],
-        ),
         sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis: changed_at_unix_millis,
         sample_id: Uuid::from_u128(sample_id),
-        representative_claim: None,
         utilization: Some(utilization),
         status: Some(SubscriptionQuotaStatus::Allowed),
         resets_at_unix_secs,
         surpassed_threshold: None,
+        representative_claim: None,
         fallback_percentage: None,
         fallback_available: None,
         overage_in_use: None,
@@ -60,7 +53,7 @@ fn quota_checkpoint(
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
         ingested_at_unix_millis: changed_at_unix_millis,
-    }
+    })
 }
 
 fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimCheckpoint {
@@ -77,7 +70,7 @@ fn slim(checkpoint: SubscriptionQuotaCheckpointRecord) -> SubscriptionQuotaSlimC
 }
 
 #[tokio::test]
-async fn quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
+async fn quota_slim_checkpoints_return_left_anchor_and_inclusive_range_with_sample_ties() {
     let (_temp_dir, storage) = quota_storage("slim-parity.sqlite").await;
     let upstream_id = Uuid::from_u128(0x100);
     let records = vec![
@@ -99,15 +92,9 @@ async fn quota_slim_checkpoints_match_old_ranges_with_anchor_and_sample_ties() {
         until_unix_millis: 3_000,
     };
 
-    let old_ranges = storage
-        .list_subscription_quota_checkpoint_ranges(query.clone())
-        .await
-        .expect("read old quota ranges");
-    let mut expected = Vec::new();
-    for range in old_ranges {
-        expected.extend(range.left_anchor.map(slim));
-        expected.extend(range.checkpoints.into_iter().map(slim));
-    }
+    // Left anchor: the greatest-sample_id checkpoint before `since`; then every
+    // checkpoint inside the inclusive `[since, until]` range in sample order.
+    let expected = records[1..].iter().cloned().map(slim).collect::<Vec<_>>();
     let actual = storage
         .list_subscription_quota_slim_checkpoints(query)
         .await

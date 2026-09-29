@@ -6,8 +6,6 @@
 //! every replica to exactly one queued job per tick, so no external leader
 //! election is required. See `docs/scheduler.md` section 5 for details.
 
-use std::sync::Arc;
-
 use apalis_core::backend::pipe::{Pipe, PipeExt};
 use apalis_core::backend::{TaskSink, TaskSinkError};
 use apalis_core::task::builder::TaskBuilder;
@@ -37,12 +35,6 @@ pub trait IntoJobFactory<Job>: Clone + Send + 'static {
     fn call(&self, tick_unix_secs: u64) -> Job;
 }
 
-impl<Job: 'static> IntoJobFactory<Job> for Arc<dyn Fn(u64) -> Job + Send + Sync + 'static> {
-    fn call(&self, tick_unix_secs: u64) -> Job {
-        (self)(tick_unix_secs)
-    }
-}
-
 impl<Job: 'static> IntoJobFactory<Job> for fn(u64) -> Job {
     fn call(&self, tick_unix_secs: u64) -> Job {
         (self)(tick_unix_secs)
@@ -57,12 +49,7 @@ pub enum CronError {
     Enqueue { message: String },
 }
 
-pub struct WorkerBuilder<
-    Job,
-    S,
-    Storage,
-    JobFactory = Arc<dyn Fn(u64) -> Job + Send + Sync + 'static>,
-> {
+pub struct WorkerBuilder<Job, S, Storage, JobFactory> {
     schedule: S,
     storage: Storage,
     job_factory: JobFactory,
@@ -70,35 +57,8 @@ pub struct WorkerBuilder<
     _job: std::marker::PhantomData<fn() -> Job>,
 }
 
-impl<Job, S, Storage>
-    WorkerBuilder<Job, S, Storage, Arc<dyn Fn(u64) -> Job + Send + Sync + 'static>>
-{
-    pub fn singleton_queue(
-        _queue: impl Into<String>,
-        schedule: S,
-        storage: Storage,
-        job: Job,
-    ) -> Self
-    where
-        Job: Clone + Send + Sync + 'static,
-    {
-        Self {
-            schedule,
-            storage,
-            job_factory: Arc::new(move |_| job.clone()),
-            max_ticks: None,
-            _job: std::marker::PhantomData,
-        }
-    }
-}
-
 impl<Job, S, Storage, JobFactory> WorkerBuilder<Job, S, Storage, JobFactory> {
-    pub fn singleton_queue_factory(
-        _queue: impl Into<String>,
-        schedule: S,
-        storage: Storage,
-        job_factory: JobFactory,
-    ) -> Self {
+    pub fn singleton_queue_factory(schedule: S, storage: Storage, job_factory: JobFactory) -> Self {
         Self {
             schedule,
             storage,

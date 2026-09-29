@@ -4,20 +4,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::DynamicViewHolder;
+use cc_lb_control::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, BackendKind, BackfillApplyOutcome, CompatibilityKvRecord,
-    MetaStore, MetadataTierMappingOverrideRecord, OrganizationMetadataRecord,
-    OrganizationMetadataStore, PlanTierRatioRecord, PlanTierStore, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind,
-    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    PromptCacheObservationStore, StorageResult, SubscriptionQuotaCheckpointRange,
-    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
-    SubscriptionQuotaSample, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, UpstreamCreate,
+    AnthropicCompatibilityKvStore, CompatibilityKvRecord, MetaStore,
+    MetadataTierMappingOverrideRecord, OrganizationMetadataRecord, OrganizationMetadataStore,
+    PlanTierRatioRecord, PlanTierStore, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlotKind, PrincipalCreate, PrincipalKind,
+    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
+    SubscriptionQuotaCheckpointRecord, SubscriptionQuotaSample, UpstreamCreate,
     UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
     UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
     UpstreamSubscriptionMetadataStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
@@ -51,11 +48,11 @@ async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
     let storage = Arc::new(
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await
             .expect("storage"),
     );
-    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    storage.initialize().await.unwrap();
     (dir, storage)
 }
 
@@ -122,10 +119,8 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
                 sha256: [seed; 32],
                 bytes: vec![seed; seed as usize],
                 size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),
@@ -150,7 +145,6 @@ async fn initial_holder(
 ) -> Arc<DynamicViewHolder> {
     let view = build_dynamic_view(
         stores,
-        &AnthropicOAuthConfig::default(),
         Arc::new(AeadService::from_master_key([25; 32])),
         None,
         0,
@@ -158,10 +152,9 @@ async fn initial_holder(
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("initial dynamic view");
@@ -178,18 +171,16 @@ fn reconciler(
     Arc::new(Reconciler::new(
         stores,
         holder,
-        Arc::new(AnthropicOAuthConfig::default()),
         runtime,
         Arc::new(AeadService::from_master_key([25; 32])),
         None,
         cancel,
         data_dir.to_path_buf(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
-        None,
         30,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     ))
 }
 
@@ -516,32 +507,11 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         Ok(Vec::new())
     }
 
-    async fn list_subscription_quota_series(
-        &self,
-        _query: SubscriptionQuotaSeriesQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaSeries>> {
-        Ok(Vec::new())
-    }
-
     async fn put_subscription_quota_checkpoints(
         &self,
         _records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize> {
         Ok(0)
-    }
-
-    async fn list_latest_subscription_quota_checkpoints_for_upstreams(
-        &self,
-        _upstream_ids: &[Uuid],
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRecord>> {
-        Ok(Vec::new())
-    }
-
-    async fn list_subscription_quota_checkpoint_ranges(
-        &self,
-        _query: SubscriptionQuotaCheckpointRangeQuery,
-    ) -> StorageResult<Vec<SubscriptionQuotaCheckpointRange>> {
-        Ok(Vec::new())
     }
 }
 
@@ -593,16 +563,6 @@ impl PlanTierStore for EmptyPlanTierStore {
         _record: &UpstreamPlanTierRecord,
     ) -> StorageResult<()> {
         Ok(())
-    }
-
-    async fn backfill_upstream_plan_tier_intervals(
-        &self,
-        _upstream_id: Uuid,
-        _intervals: &[UpstreamPlanTierRecord],
-        _terminal_cap_unix_millis: i64,
-        _provenance: &str,
-    ) -> StorageResult<BackfillApplyOutcome> {
-        Ok(BackfillApplyOutcome::Skipped)
     }
 
     async fn list_current_upstream_plan_tiers(&self) -> StorageResult<Vec<UpstreamPlanTierRecord>> {
@@ -754,14 +714,6 @@ impl PrincipalStore for EmptyPrincipalStore {
     async fn hard_delete(&self, _id: Uuid) -> StorageResult<bool> {
         unimplemented!()
     }
-    async fn set_last_apply_error(
-        &self,
-        _id: Uuid,
-        _error: Option<String>,
-        _applied_at_unix_secs: u64,
-    ) -> StorageResult<Option<PrincipalRecord>> {
-        unimplemented!()
-    }
 }
 
 struct EmptyPluginRegistryStore;
@@ -841,13 +793,6 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         _label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry> {
         unimplemented!()
-    }
-    async fn update_supported_slots(
-        &self,
-        _id: Uuid,
-        _supported_slots: Vec<PluginSlotKind>,
-    ) -> StorageResult<()> {
-        Ok(())
     }
     async fn delete_registry_entry(
         &self,

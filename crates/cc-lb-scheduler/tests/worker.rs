@@ -56,8 +56,8 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
         tokio::spawn(worker.run_until_cancelled(cancel.clone()));
 
     // Completion-driven teardown (issue #267): wait until the worker has driven each
-    // distinct entity job to Ok(JobOutcome::Done), then stop it. The former run_for(5s)
-    // wall-clock budget raced job completion and flaked under load.
+    // distinct entity job to Ok(JobOutcome::Done), then stop it; a fixed wall-clock
+    // budget races job completion and flakes under load.
     let mut dispatched = BTreeSet::new();
     while dispatched.len() < 4 {
         let kind = timeout(COMPLETION_TIMEOUT, dispatch_rx.recv())

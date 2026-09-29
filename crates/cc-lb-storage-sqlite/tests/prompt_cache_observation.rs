@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_domain::TtlClass;
-use cc_lb_storage_api::{
-    BackendKind, MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore,
-};
+use cc_lb_storage_api::{MetaStore, PromptCacheObservationRecord, PromptCacheObservationStore};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -24,10 +22,7 @@ async fn prompt_cache_v3_observation_roundtrips_and_filters_by_key() {
     // round-trips it, so the value is arbitrary and deliberately not tied to the engine's
     // HASH_SCHEMA_VERSION (which would drag cc-lb-engine into this crate's dev graph).
     const FIXTURE_SCHEMA_VERSION: u8 = 5;
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     let upstream_id = Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
     let record = PromptCacheObservationRecord {
         upstream_id,
@@ -81,10 +76,7 @@ async fn prompt_cache_v3_stale_upsert_does_not_regress_fresh_row() {
             .await
             .expect("open sqlite");
     const FIXTURE_SCHEMA_VERSION: u8 = 5;
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("initialize sqlite");
+    storage.initialize().await.expect("initialize sqlite");
     let upstream_id = Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
     let fresh = PromptCacheObservationRecord {
         upstream_id,

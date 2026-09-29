@@ -106,9 +106,7 @@ struct ExportRegistryEntry {
 struct ExportPrincipalChains {
     #[serde(rename = "Router")]
     router: Vec<ExportChainEntry>,
-    #[serde(rename = "ObservabilityHook")]
-    observability_hook: Vec<ExportChainEntry>,
-    #[serde(rename = "Shape", skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(rename = "Shape", skip_serializing_if = "Vec::is_empty")]
     shape: Vec<ExportChainEntry>,
 }
 
@@ -117,9 +115,6 @@ struct ExportChainEntry {
     wasm_registry_name: String,
     order: i64,
     config: Value,
-    sse_per_event: bool,
-    batched_events_per_flush: u32,
-    batched_flush_ms: u64,
 }
 
 pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::Response {
@@ -308,20 +303,16 @@ async fn export_chains(
         let router = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Router)
             .await?;
-        let observability_hook = storage
-            .list_chain_for_principal(principal.id, PluginSlotKind::ObservabilityHook)
-            .await?;
         let shape = storage
             .list_chain_for_principal(principal.id, PluginSlotKind::Shape)
             .await?;
-        if router.is_empty() && observability_hook.is_empty() && shape.is_empty() {
+        if router.is_empty() && shape.is_empty() {
             continue;
         }
         chains.insert(
             principal.name.clone(),
             ExportPrincipalChains {
                 router: export_chain_entries(router, registry_by_id),
-                observability_hook: export_chain_entries(observability_hook, registry_by_id),
                 shape: export_chain_entries(shape, registry_by_id),
             },
         );
@@ -342,9 +333,6 @@ fn export_chain_entries(
                 .unwrap_or_default(),
             order: entry.order,
             config: normalize_json(entry.config),
-            sse_per_event: entry.sse_per_event,
-            batched_events_per_flush: entry.batched_events_per_flush,
-            batched_flush_ms: entry.batched_flush_ms,
         })
         .collect::<Vec<_>>();
     exported.sort_by_key(|entry| entry.order);

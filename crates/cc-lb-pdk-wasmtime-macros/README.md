@@ -45,28 +45,10 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
 }
 ```
 
-Supported hook kinds are `filter`, `shape`, and `observe`, plus the shape-owned
+Supported hook kinds are `filter` and `shape`, plus the shape-owned
 response-transform hooks. The PDK accepts `wire = 1` for every hook. Add `view`
 when the handler wants an archived zero-copy request reference instead of an
 owned request.
-
-## `#[derive(WireSchema)]`
-
-Derive `WireSchema` for wire structs and enums:
-
-```rust
-use cc_lb_pdk_wasmtime::WireSchema;
-
-#[derive(WireSchema)]
-pub struct RuleMatch {
-    pub key: Box<str>,
-    pub value: Box<[u8]>,
-}
-```
-
-The derive macro produces a canonical descriptor and a BLAKE3 layout
-fingerprint. The host compares those embedded fingerprints with its own current
-wire expectations during admission.
 
 ## Minimal Complete Example
 

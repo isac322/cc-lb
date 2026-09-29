@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- Remove the `WireSchema` derive re-export. Hook wire types get their fingerprints from `cc-lb-plugin-wire`.
+
 ## [0.1.2](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-v0.1.1...cc-lb-pdk-wasmtime-v0.1.2) - 2026-07-15
 
 ### Added

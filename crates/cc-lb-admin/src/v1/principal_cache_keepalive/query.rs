@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use cc_lb_storage_api::{
     CacheKeepaliveSessionCursor, CacheKeepaliveSessionFilter, CacheKeepaliveSessionListQuery,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::RawCacheKeepaliveQuery;
 
@@ -44,26 +44,9 @@ pub(super) struct CacheKeepaliveQuery {
     pub(super) storage: CacheKeepaliveSessionListQuery,
 }
 
-#[derive(Default)]
-enum CursorHorizonField {
-    #[default]
-    Missing,
-    Present(CacheKeepaliveHorizon),
-}
-
-impl<'de> Deserialize<'de> for CursorHorizonField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        CacheKeepaliveHorizon::deserialize(deserializer).map(Self::Present)
-    }
-}
-
 #[derive(Deserialize)]
 struct DecodedCursor {
-    #[serde(default)]
-    horizon: CursorHorizonField,
+    horizon: CacheKeepaliveHorizon,
     #[serde(flatten)]
     storage: CacheKeepaliveSessionCursor,
 }
@@ -108,22 +91,20 @@ pub(super) fn parse_query(
 ) -> Result<CacheKeepaliveQuery, QueryError> {
     let limit = parse_limit(raw.limit.as_deref())?;
     let requested_horizon = parse_horizon(raw.horizon.as_deref())?;
-    let requested_horizon_start_ms = requested_horizon.start_ms(now_ms);
     let filter = parse_filter(raw.status.as_deref(), raw.error.as_deref())?;
     let decoded_cursor = raw.cursor.as_deref().map(decode_cursor).transpose()?;
     let (horizon_start_ms, cursor) = match decoded_cursor {
-        Some(decoded) => match decoded.horizon {
-            CursorHorizonField::Present(cursor_horizon) => {
-                if cursor_horizon != requested_horizon
-                    || !cursor_horizon.matches_start(decoded.storage.horizon_start_ms)
-                {
-                    return Err(QueryError::CursorMismatch);
-                }
-                (decoded.storage.horizon_start_ms, Some(decoded.storage))
+        Some(decoded) => {
+            if decoded.horizon != requested_horizon
+                || !decoded
+                    .horizon
+                    .matches_start(decoded.storage.horizon_start_ms)
+            {
+                return Err(QueryError::CursorMismatch);
             }
-            CursorHorizonField::Missing => (requested_horizon_start_ms, Some(decoded.storage)),
-        },
-        None => (requested_horizon_start_ms, None),
+            (decoded.storage.horizon_start_ms, Some(decoded.storage))
+        }
+        None => (requested_horizon.start_ms(now_ms), None),
     };
     Ok(CacheKeepaliveQuery {
         horizon: requested_horizon,
@@ -265,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cursor_keeps_same_cutoff_validation_while_tagged_cursor_survives_advance() {
+    fn untagged_cursor_is_rejected_as_invalid() {
         let first = parse(raw_query(Some("7d"), None), "principal-a", NOW_MS);
         let storage_cursor = CacheKeepaliveSessionCursor {
             principal_id: "principal-a".to_owned(),
@@ -274,32 +255,18 @@ mod tests {
             last_message_at_ms: NOW_MS - 1_000,
             entry_id: "session:cursor-row".to_owned(),
         };
-        let legacy_cursor = URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&storage_cursor).expect("legacy cursor JSON should encode"));
-        let same_cutoff = parse(
-            raw_query(Some("7d"), Some(legacy_cursor.clone())),
+        let untagged_cursor = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&storage_cursor).expect("cursor JSON should encode"));
+
+        let result = parse_query(
+            raw_query(Some("7d"), Some(untagged_cursor)),
             "principal-a",
             NOW_MS,
         );
-        assert!(same_cutoff.storage.validate_cursor().is_ok());
 
-        let moved_legacy = parse(
-            raw_query(Some("7d"), Some(legacy_cursor)),
-            "principal-a",
-            NOW_MS + 60 * 60 * 1_000,
-        );
-        assert!(moved_legacy.storage.validate_cursor().is_err());
-
-        let tagged_cursor = encode(&storage_cursor, first.horizon);
-        let moved_tagged = parse(
-            raw_query(Some("7d"), Some(tagged_cursor)),
-            "principal-a",
-            NOW_MS + 60 * 60 * 1_000,
-        );
-        assert!(moved_tagged.storage.validate_cursor().is_ok());
-        assert_eq!(
-            moved_tagged.storage.horizon_start_ms,
-            first.storage.horizon_start_ms
-        );
+        assert!(matches!(
+            result,
+            Err(QueryError::Invalid("invalid_cache_keepalive_cursor"))
+        ));
     }
 }

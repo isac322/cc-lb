@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
+use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_engine::{api_keys::limit_engine::LimitEngine, cache_keepalive::RenewalFinalization};
+use cc_lb_engine::cache_keepalive::RenewalFinalization;
 use cc_lb_lifecycle::LifecycleEvent;
 use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
-    global_catalog, virtual_cost_micros_full,
+    CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog,
+    virtual_cost_micros_full,
 };
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveSessionRecord, CacheKeepaliveTurnRow, RequestEvent,
@@ -39,7 +40,6 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
         input.finalization.usage.cache_creation_input_tokens_5m,
         input.finalization.usage.cache_creation_input_tokens_1h,
         input.finalization.usage.cache_read_input_tokens,
-        Some(PricingUpstreamKind::AnthropicOAuth),
         None,
     );
     let event = renewal_event(&event_id, &source_ref_id, &input, cost.total_micros);

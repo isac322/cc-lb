@@ -2,11 +2,9 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use cc_lb_aead::AeadService;
+use cc_lb_clock::ClockHandle;
 use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
-use cc_lb_engine::{ClockHandle, LifecycleConfig};
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlotKind, PrincipalRecord, StorageError as ApiStorageError,
     UpstreamRecord, WasmRegistryEntry,
@@ -59,11 +57,8 @@ pub enum PreflightError {
 
 pub async fn run_preflight(
     stores: &Stores,
-    lifecycle_config: &LifecycleConfig,
     data_dir: &Path,
-    _clock: ClockHandle,
 ) -> Result<PreflightReport, PreflightError> {
-    let _replica_identity = lifecycle_config.replica_identity.as_ref();
     let mut report = PreflightReport::default();
 
     let upstreams = list_upstreams(stores).await?;
@@ -130,15 +125,14 @@ async fn run_inner(
         let key_name = &cfg.aead.key_env;
         let key_hex =
             env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
-        let key = decode_master_key(key_name, &key_hex)?;
+        decode_master_key(key_name, &key_hex)?;
         match &cfg.storage {
             StorageConfig::Postgres { url, .. } => storage_factory::probe_postgres_connection(url)
                 .await
                 .map_err(|error| PreflightError::Storage(error.to_string()))?,
             StorageConfig::Sqlite { path } => validate_sqlite_path(path)?,
         }
-        let aead = Arc::new(AeadService::from_master_key(key));
-        let _storage = storage_factory::open_storage(&cfg.storage, aead, key, clock)
+        storage_factory::open_storage(&cfg.storage, clock)
             .await
             .map_err(|error| PreflightError::Storage(error.to_string()))?;
     }
@@ -198,11 +192,7 @@ async fn list_plugin_chain_entries(
 ) -> Result<Vec<PluginChainEntry>, PreflightError> {
     let mut entries = Vec::new();
     for principal in principals {
-        for slot in [
-            PluginSlotKind::Router,
-            PluginSlotKind::ObservabilityHook,
-            PluginSlotKind::Shape,
-        ] {
+        for slot in [PluginSlotKind::Router, PluginSlotKind::Shape] {
             entries.extend(
                 stores
                     .plugin_registry
@@ -296,9 +286,7 @@ fn registry_entry_unsupported_slot(
     registry_entry: &WasmRegistryEntry,
     slot: PluginSlotKind,
 ) -> bool {
-    !registry_entry.is_builtin
-        && !registry_entry.supported_slots.is_empty()
-        && !registry_entry.supported_slots.contains(&slot)
+    !registry_entry.is_builtin && !registry_entry.supported_slots.contains(&slot)
 }
 
 fn supported_slot_names(registry_entry: &WasmRegistryEntry) -> Vec<&'static str> {

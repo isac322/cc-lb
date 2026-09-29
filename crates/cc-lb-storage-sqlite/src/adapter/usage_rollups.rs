@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    OverviewExcludedErrorBucket, RequestEvent, RequestEventUpstream, StorageError, StorageResult,
-    UsageRollup, UsageRollupResolution, UsageRollupRun, UsageRollupStore, UsageTokenInterval,
+    OverviewExcludedErrorBucket, RequestEvent, StorageError, StorageResult, UsageRollup,
+    UsageRollupResolution, UsageRollupRun, UsageRollupStore, UsageTokenInterval,
     UsageTokenIntervalStore, UsageTokenIntervalSum, normalize_usage_rollup_dimension,
 };
-use sqlx::{AssertSqlSafe, QueryBuilder, Row, Sqlite, Transaction, sqlite::SqliteRow};
+use sqlx::{AssertSqlSafe, Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -112,24 +112,6 @@ impl UsageRollupStore for SqliteStorage {
         rollup_usage_once_inner(self).await
     }
 
-    async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>> {
-        let rows = sqlx::query(
-            "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
-              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
-              cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
-              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
-              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
-              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
-              upstream_body_ms_sum, virtual_cost_micros \
-              FROM usage_rollups_v2 ORDER BY bucket_start_unix_secs ASC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_usage_rollup).collect()
-    }
-
     async fn query_usage_rollups_in_range(
         &self,
         resolution: UsageRollupResolution,
@@ -162,52 +144,6 @@ impl UsageRollupStore for SqliteStorage {
         rows.into_iter().map(row_to_usage_rollup).collect()
     }
 
-    async fn query_usage_rollups_for_upstreams_in_range(
-        &self,
-        upstream_ids: &[Uuid],
-        resolution: UsageRollupResolution,
-        window_start_unix_secs: u64,
-        window_end_unix_secs: u64,
-    ) -> StorageResult<Vec<UsageRollup>> {
-        if upstream_ids.is_empty() || window_end_unix_secs < window_start_unix_secs {
-            return Ok(Vec::new());
-        }
-
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT resolution, bucket_start_unix_secs, principal_id, upstream_id, upstream_name, model, \
-              request_count, input_tokens, output_tokens, cache_creation_input_tokens, \
-              cache_read_input_tokens, error_count, latency_count, latency_ms_sum, \
-              latency_ms_min, latency_ms_max, proxy_setup_ms_count, proxy_setup_ms_sum, \
-              shape_ms_count, shape_ms_sum, sign_ms_count, sign_ms_sum, \
-              upstream_ttfb_ms_count, upstream_ttfb_ms_sum, upstream_body_ms_count, \
-              upstream_body_ms_sum, virtual_cost_micros \
-              FROM usage_rollups_v2 WHERE upstream_id IN (",
-        );
-        let mut upstreams = query.separated(", ");
-        for upstream_id in upstream_ids {
-            upstreams.push_bind(upstream_id.to_string());
-        }
-        upstreams.push_unseparated(")");
-        query
-            .push(" AND resolution = ")
-            .push_bind(resolution.as_str())
-            .push(" AND bucket_start_unix_secs >= ")
-            .push_bind(u64_to_i64(
-                window_start_unix_secs,
-                "usage rollup range start",
-            )?)
-            .push(" AND bucket_start_unix_secs < ")
-            .push_bind(u64_to_i64(window_end_unix_secs, "usage rollup range end")?)
-            .push(" ORDER BY upstream_id ASC, bucket_start_unix_secs ASC");
-
-        let rows = query
-            .build()
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
-
-        rows.into_iter().map(row_to_usage_rollup).collect()
-    }
     async fn query_overview_excluded_error_buckets_in_range(
         &self,
         resolution: UsageRollupResolution,
@@ -248,13 +184,6 @@ impl UsageRollupStore for SqliteStorage {
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
         read_checkpoint(self.pool()).await
-    }
-
-    async fn advance_rollup_checkpoint_and_persist(
-        &self,
-        _run: &UsageRollupRun,
-    ) -> StorageResult<()> {
-        rollup_usage_once_inner(self).await.map(|_| ())
     }
 }
 
@@ -773,15 +702,7 @@ fn event_upstream_name(event: &RequestEvent) -> String {
         .upstream_name
         .as_deref()
         .map(ToOwned::to_owned)
-        .or_else(|| event.upstream.map(upstream_dimension))
         .unwrap_or_else(|| normalize_usage_rollup_dimension(None))
-}
-
-fn upstream_dimension(upstream: RequestEventUpstream) -> String {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-    }
-    .to_owned()
 }
 
 fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i64>> {

@@ -2,15 +2,13 @@ macro_rules! define_request_event_quota_sqlite_tests {
     () => {
         use cc_lb_storage_api::RequestEventStore as _;
 
-        type SqliteQuotaRow = (
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-            Option<f64>,
-        );
+        type SqliteQuotaRow = (Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 
-        const SQLITE_QUOTA_SELECT: &str = "SELECT quota_urgency_5h, quota_urgency_7d, \
-            quota_urgency_combined, quota_warning_multiplier \
+        const SQLITE_QUOTA_SELECT: &str = "SELECT \
+            json_extract(payload, '$.quota_urgency_5h'), \
+            json_extract(payload, '$.quota_urgency_7d'), \
+            json_extract(payload, '$.quota_urgency_combined'), \
+            json_extract(payload, '$.quota_warning_multiplier') \
             FROM request_events_v1 WHERE event_id = ?";
 
         #[test]
@@ -28,15 +26,12 @@ macro_rules! define_request_event_quota_sqlite_tests {
                     // When the selected winner values are persisted through RequestEventStore.
                     storage.append_request_event(&event).await?;
 
-                    // Then payload reads and dedicated columns both retain the selected values.
-                    let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(read_back.len(), 1);
-                    request_event_quota_support::assert_populated_event(&read_back[0]);
-                    let recent = storage
-                        .query_recent_request_events(0, u64::MAX, 10)
-                        .await?;
-                    assert_eq!(recent.len(), 1);
-                    request_event_quota_support::assert_populated_event(&recent[0]);
+                    // Then payload reads and the stored payload JSON both retain the selected values.
+                    let read_back = storage
+                        .get_request_event(request_event_quota_support::SELECTED_EVENT_ID)
+                        .await?
+                        .expect("persisted request event");
+                    request_event_quota_support::assert_populated_event(&read_back);
                     let cursor = storage.current_request_event_cursor().await?;
                     let cursor_rows = storage
                         .query_request_events_between_cursors(
@@ -86,11 +81,10 @@ macro_rules! define_request_event_quota_sqlite_tests {
                     let historical_payload = serde_json::to_string(&historical)?;
                     sqlx::query(
                         "INSERT INTO request_events_v1 \
-                         (request_id, ts, event_type, payload, event_id) VALUES (?, ?, ?, ?, ?)",
+                         (request_id, ts, payload, event_id) VALUES (?, ?, ?, ?)",
                     )
                     .bind(&historical.request_id)
                     .bind(i64::try_from(historical.ts)?)
-                    .bind("request")
                     .bind(historical_payload)
                     .bind(request_event_quota_support::HISTORICAL_EVENT_ID)
                     .execute(storage.pool())
@@ -106,7 +100,7 @@ macro_rules! define_request_event_quota_sqlite_tests {
                         .fetch_one(storage.pool())
                         .await?;
 
-                    // Then all dedicated quota columns stay NULL.
+                    // Then the stored payloads carry no quota values.
                     let null_row: SqliteQuotaRow = (None, None, None, None);
                     assert_eq!(mismatch_row, null_row);
                     assert_eq!(historical_row, null_row);

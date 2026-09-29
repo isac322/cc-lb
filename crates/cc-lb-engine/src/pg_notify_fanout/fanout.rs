@@ -1,11 +1,9 @@
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use super::metrics::record_notify_dropped;
-use crate::event_bus::{
-    BusError, BusReceiver, EventFanout, InMemoryBus, LifecycleBusReceiver, RequestEventBus,
-    RequestEventUpdate,
-};
 use crate::metrics_labels::NotifyDropReason;
+use cc_lb_control::event_bus::{InMemoryBus, RequestEventBus, RequestEventUpdate};
+use cc_lb_lifecycle::LifecycleEvent;
 
 #[derive(Clone)]
 pub struct PgNotifyFanout {
@@ -22,18 +20,6 @@ impl PgNotifyFanout {
     }
 }
 
-#[async_trait::async_trait]
-impl EventFanout for PgNotifyFanout {
-    async fn publish_partial(&self, update: RequestEventUpdate) -> Result<(), BusError> {
-        publish_partial_nonblocking(&self.local_bus, &self.notifier_tx, update);
-        Ok(())
-    }
-
-    fn subscribe(&self) -> BusReceiver {
-        self.local_bus.subscribe()
-    }
-}
-
 impl RequestEventBus for PgNotifyFanout {
     fn publish(&self, update: RequestEventUpdate) {
         match update {
@@ -44,15 +30,15 @@ impl RequestEventBus for PgNotifyFanout {
         }
     }
 
-    fn subscribe(&self) -> BusReceiver {
+    fn subscribe(&self) -> broadcast::Receiver<RequestEventUpdate> {
         self.local_bus.subscribe()
     }
 
-    fn publish_lifecycle(&self, event: cc_lb_lifecycle::LifecycleEvent) {
+    fn publish_lifecycle(&self, event: LifecycleEvent) {
         self.local_bus.publish_lifecycle(event);
     }
 
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
+    fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent> {
         self.local_bus.subscribe_lifecycle()
     }
 

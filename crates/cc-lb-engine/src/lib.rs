@@ -2,20 +2,9 @@
 //! cc-lb data-plane engine for request routing, dispatch, lifecycle production, and runtime subscribers.
 
 #[cfg(not(loom))]
-pub mod anthropic_compat {
-    pub use cc_lb_control::anthropic_compat::*;
-}
-#[cfg(not(loom))]
-pub mod anthropic_metadata {
-    pub use cc_lb_control::anthropic_metadata::*;
-}
-#[cfg(not(loom))]
 pub mod attempt_rail;
 #[cfg(not(loom))]
 pub mod authn_rail;
-pub mod api_keys {
-    pub use cc_lb_control::api_keys::*;
-}
 #[cfg(not(loom))]
 mod body_io_timing;
 #[cfg(not(loom))]
@@ -27,8 +16,6 @@ pub mod cache_keepalive;
 #[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]
-pub mod clock;
-#[cfg(not(loom))]
 mod completion_observer;
 #[cfg(not(loom))]
 mod dns_cache;
@@ -38,13 +25,6 @@ mod downstream_stream_drop_guard;
 mod drain;
 #[cfg(not(loom))]
 mod error_format;
-#[cfg(not(loom))]
-mod error_normalizer;
-#[cfg(not(loom))]
-pub mod event_bus {
-    pub use cc_lb_control::event_bus::*;
-    pub use cc_lb_request_log::{RequestEventPhase, RequestEventUpdate};
-}
 #[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
@@ -71,12 +51,8 @@ pub mod metrics_labels;
 pub mod model_resolution;
 #[cfg(not(loom))]
 pub mod pg_notify_fanout;
-#[doc(hidden)]
-pub use cc_lb_quota::plan_capacity;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;
-#[doc(hidden)]
-pub use cc_lb_quota::rate_limit_headers;
 #[cfg(not(loom))]
 mod request_classification;
 pub mod request_context;
@@ -87,13 +63,7 @@ pub(crate) mod response_transform;
 #[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]
-mod sse_relay;
-#[cfg(not(loom))]
 pub mod storage_tail_poller;
-#[cfg(not(loom))]
-pub mod subscription_metadata_hook {
-    pub use cc_lb_control::subscription_metadata_hook::*;
-}
 #[cfg(not(loom))]
 pub mod subscription_quota_events;
 #[cfg(not(loom))]
@@ -109,10 +79,7 @@ pub mod usage_decoder;
 #[cfg(not(loom))]
 mod usage_parser;
 #[cfg(not(loom))]
-#[cfg(not(loom))]
 pub mod warmup_attempts;
-#[cfg(not(loom))]
-pub use anthropic_metadata::make_metadata_http_client;
 #[cfg(not(loom))]
 pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated};
 #[cfg(not(loom))]
@@ -120,29 +87,6 @@ pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
     ExecuteError, make_default_dispatcher,
 };
-pub use cc_lb_control::audit_payload::AuditPayload;
-#[cfg(not(loom))]
-pub use cc_lb_control::audit_writer::{
-    AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer,
-};
-#[cfg(not(loom))]
-pub use cc_lb_control::dynamic_view::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
-    UpstreamStatusEntry, UpstreamStatusSnapshot,
-};
-#[cfg(not(loom))]
-pub use cc_lb_control::{
-    NoopSubscriptionQuotaCache, PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike,
-    PromptCacheThreadUsageTrackerLike, SubscriptionQuotaCacheLike,
-};
-#[cfg(not(loom))]
-pub use cc_lb_domain::ReplicaIdentity;
-pub use cc_lb_quota::rate_limit_headers::{
-    UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
-    percent_to_utilization_fraction,
-};
-#[doc(hidden)]
-pub use cc_lb_quota::{build_subscription_quota_samples, unified_observation_to_sample};
 #[cfg(not(loom))]
 pub use cc_lb_upstream::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]
@@ -150,8 +94,6 @@ pub use circuit_breaker::{
     BreakerError, BreakerRegistry, BreakerRuntimeConfig, BreakerState, CircuitBreaker,
     CircuitBreakerDispatch, Permit,
 };
-#[cfg(not(loom))]
-pub use clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
 #[doc(hidden)]
 #[cfg(not(loom))]
 pub use dns_cache::make_resolver_with_factory;
@@ -164,14 +106,6 @@ pub use dns_cache::{
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};
-#[cfg(not(loom))]
-pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
-#[cfg(not(loom))]
-pub use event_bus::{
-    BusError, DEFAULT_BROADCAST_CAPACITY, DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
-    DEFAULT_LIFECYCLE_PRICING_CAPACITY, DEFAULT_LIFECYCLE_WRITER_CAPACITY, EventFanout,
-    InMemoryBus, InMemoryFanout, new_in_memory_bus, record_dashboard_sse_lagged,
-};
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
@@ -223,17 +157,7 @@ pub use pg_notify_fanout::{
     PgNotifier, PgNotifyFanout,
 };
 #[cfg(not(loom))]
-pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
-#[cfg(not(loom))]
-pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
-#[cfg(not(loom))]
 pub use storage_tail_poller::StorageTailPoller;
-#[cfg(not(loom))]
-pub use subscription_metadata_hook::{
-    MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,
-    MetadataRefreshError, MetadataRefreshRecords, fetch_metadata_only, run_metadata_refresh,
-    start_subscription_metadata_hook,
-};
 #[cfg(not(loom))]
 pub use subscription_quota_events::{
     SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,

@@ -17,21 +17,14 @@ impl AnthropicCompatEtagsStore<Postgres> {
         row.map(row_to_compat).transpose()
     }
 
-    pub async fn upsert_value(
-        &self,
-        key: &str,
-        etag: Option<&str>,
-        hash: &str,
-        now_unix_secs: u64,
-    ) -> Result<()> {
+    pub async fn upsert_value(&self, key: &str, hash: &str, now_unix_secs: u64) -> Result<()> {
         sqlx::query(
-            "INSERT INTO anthropic_compat_etags (key, etag, last_applied_at_unix_secs, last_value_hash) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT(key) DO UPDATE SET \
-             etag = EXCLUDED.etag, last_applied_at_unix_secs = EXCLUDED.last_applied_at_unix_secs, \
+            "INSERT INTO anthropic_compat_etags (key, last_applied_at_unix_secs, last_value_hash) \
+             VALUES ($1, $2, $3) ON CONFLICT(key) DO UPDATE SET \
+             last_applied_at_unix_secs = EXCLUDED.last_applied_at_unix_secs, \
              last_value_hash = EXCLUDED.last_value_hash",
         )
         .bind(key)
-        .bind(etag)
         .bind(u64_to_i64(now_unix_secs, "last_applied_at_unix_secs")?)
         .bind(hash)
         .execute(&self.pool)
@@ -72,7 +65,6 @@ impl PriceCatalogVersionsStore<Postgres> {
 fn row_to_compat(row: PgRow) -> Result<AnthropicCompatEtag> {
     Ok(AnthropicCompatEtag {
         key: row.try_get("key")?,
-        etag: row.try_get("etag")?,
         last_applied_at_unix_secs: i64_to_u64(
             row.try_get("last_applied_at_unix_secs")?,
             "last_applied_at_unix_secs",

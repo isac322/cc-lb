@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-07-07
-- Supersedes: ADR 0004/0005's assumption that exact-prefix observations plus thread memory are sufficient long-term cache-locality signals.
+- Supersedes: the retired cache-weighted and thread-keyed WRH subscription-preference assumption that exact-prefix observations plus thread memory are sufficient long-term cache-locality signals.
 - Related incident data: `.omo/ulw-research/20260707-171508/full-post-v10-snapshot.json` captured 129 post-v10 request rows, 126 cache-positive rows, and 129/129 `request_id`-keyed routing decisions.
 
 ## Context

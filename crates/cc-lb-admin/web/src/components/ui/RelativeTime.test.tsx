@@ -1,10 +1,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import {
-  RelativeOffsetTime,
-  RelativeTime,
-  ResetCountdown,
-} from './RelativeTime';
+import { RelativeTime, ResetCountdown } from './RelativeTime';
 
 describe('RelativeTime', () => {
   beforeEach(() => {
@@ -78,18 +74,6 @@ describe('RelativeTime', () => {
     expect(screen.getByText('—')).toBeDefined();
     expect(container.querySelector('[title="Invalid Date"]')).toBeNull();
   });
-
-  test('turns a relative offset into a stable live timestamp', () => {
-    render(<RelativeOffsetTime offsetSeconds={5} />);
-
-    expect(screen.getByText('in 5 seconds').textContent).toBe('in 5 seconds');
-
-    act(() => {
-      vi.advanceTimersByTime(1_000);
-    });
-
-    expect(screen.getByText('in 4 seconds').textContent).toBe('in 4 seconds');
-  });
 });
 
 describe('RelativeTime under ko-KR locale', () => {
@@ -111,12 +95,6 @@ describe('RelativeTime under ko-KR locale', () => {
     render(<RelativeTime compact ts={eventTime} />);
 
     expect(screen.getByText('5분 전').textContent).toBe('5분 전');
-  });
-
-  test('renders compact future offset labels in Korean', () => {
-    render(<RelativeOffsetTime compact offsetSeconds={300} />);
-
-    expect(screen.getByText('5분 후').textContent).toBe('5분 후');
   });
 
   test('renders default reset countdown future label in Korean', () => {

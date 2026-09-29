@@ -8,9 +8,8 @@ use crate::{
 
 /// Application-generated unique identifier for a single request lifecycle.
 ///
-/// Same value the `LifecycleContext` (successor of `TerminalObserver`)
-/// generates as a UUID v7 string. Used as the DB row uniqueness key and
-/// for cross-subscriber correlation.
+/// Same value the `LifecycleContext` generates as a UUID v7 string. Used as
+/// the DB row uniqueness key and for cross-subscriber correlation.
 pub type EventId = String;
 
 /// Optional request-scoped setup timings. `serde(flatten)` keeps the eight
@@ -169,10 +168,6 @@ pub enum LifecycleEvent {
         request_body_read_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_body_bytes: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit_reconcile_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        observability_post_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proxy_setup_ms: Option<u64>,
         #[serde(default, flatten)]

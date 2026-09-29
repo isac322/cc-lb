@@ -105,11 +105,14 @@ export function useLimitResets(upstreamId: string | null) {
           { signal },
         ),
       enabled: Boolean(upstreamId),
-      // A 404 means this backend does not serve limit resets at all; retrying
-      // cannot change that, so surface "unsupported" immediately.
+      // A 404 means this backend does not serve limit resets at all and a 400
+      // that this upstream cannot have them; retrying cannot change either,
+      // so surface the state immediately.
       retry: (failureCount, error) =>
-        !(error instanceof ApiError && error.status === 404) &&
-        failureCount < 3,
+        !(
+          error instanceof ApiError &&
+          (error.status === 400 || error.status === 404)
+        ) && failureCount < 3,
     },
     LIMIT_RESET_POLL_MS,
   );
@@ -131,7 +134,7 @@ export function useClaimLimitReset() {
         body,
       ),
     // Whatever the outcome, the quota picture may have moved: refetch the real
-    // latest/series/analysis data (never optimistic zeros) plus the sidebar
+    // latest/series data (never optimistic zeros) plus the sidebar
     // sources so a consumed reset is visible everywhere.
     onSettled: (_data, _error, vars) => {
       qc.invalidateQueries({

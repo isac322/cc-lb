@@ -109,8 +109,6 @@ where
         .increment(api_key_usage_compaction.folded_rows);
     tracing::info!(
         request_events_removed = result.request_events_removed,
-        usage_rollups_removed = result.usage_rollups_removed,
-        principal_limit_states_removed = result.principal_limit_states_removed,
         audit_log_removed = result.audit_log_removed,
         api_key_usage_buckets_folded = api_key_usage_compaction.folded_rows,
         api_key_usage_buckets_pruned = api_key_usage_compaction.pruned_rows,

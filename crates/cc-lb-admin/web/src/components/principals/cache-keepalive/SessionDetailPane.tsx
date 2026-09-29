@@ -1,7 +1,7 @@
-import { AlertTriangle, ChevronRight, Lock } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Lock } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useCacheKeepaliveSessionDetail } from '../../../lib/queries';
-import { Badge, cx, Skeleton } from '../../ui/primitives';
+import { Badge, Button, cx, Skeleton } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 
 interface Props {
@@ -58,16 +58,23 @@ function SessionDetailFrame({
 function SessionDetailHeader({ onClose }: Pick<Props, 'onClose'>) {
   return (
     <div className="flex items-start justify-between gap-2 sticky top-0 bg-bg-sub -m-3 mb-0 px-3 py-2 border-b border-subtle z-10">
-      <h4 className="text-sm font-medium text-text">Session detail</h4>
-      <button
-        type="button"
+      <h3 className="text-title-card text-text">Session detail</h3>
+      <Button
+        variant="ghost"
+        size="sm"
         onClick={onClose}
         aria-label="Back to sessions"
-        className="text-text-faint hover:text-text text-xs inline-flex items-center gap-1"
+        className="-my-0.5"
       >
-        <span className="max-[960px]:hidden">Close ▶</span>
-        <span className="hidden max-[960px]:inline">◀ Back</span>
-      </button>
+        <span className="inline-flex items-center gap-1 max-[960px]:hidden">
+          Close
+          <ChevronRight strokeWidth={1.75} aria-hidden="true" />
+        </span>
+        <span className="hidden items-center gap-1 max-[960px]:inline-flex">
+          <ChevronLeft strokeWidth={1.75} aria-hidden="true" />
+          Back
+        </span>
+      </Button>
     </div>
   );
 }
@@ -81,14 +88,12 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
       contentTestId="session-detail-loading-content"
     >
       <div
-        className="bg-overlay-1 border border-subtle rounded-sm p-3 flex flex-col gap-3"
+        className="flex flex-col gap-3"
         data-testid="session-detail-overview-skeleton"
       >
         <div className="flex justify-between items-start">
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-text-faint tracking-wider">
-              Net P&amp;L
-            </span>
+            <span className="text-label text-text-muted">Net P&amp;L</span>
             <div className="w-28" aria-hidden="true">
               <Skeleton className="h-8" />
             </div>
@@ -99,15 +104,15 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
         </div>
         <Skeleton className="h-4" />
 
-        <div className="h-px bg-subtle w-full my-1"></div>
+        <div className="h-px bg-row w-full my-1"></div>
 
         <dl
-          className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]"
+          className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm"
           data-testid="session-detail-metadata-skeleton"
         >
           {METADATA_SKELETON_ROWS.map(([label, valueClassName]) => (
             <div key={label ?? 'state-time'} className="contents">
-              <dt className="text-text-faint">
+              <dt className="text-text-muted">
                 {label ?? (
                   <span className="block w-14" aria-hidden="true">
                     <Skeleton className="h-3" />
@@ -123,25 +128,15 @@ function SessionDetailSkeleton({ onClose }: Pick<Props, 'onClose'>) {
       </div>
 
       <div className="mt-2" data-testid="session-detail-turns-skeleton">
-        <h4 className="text-sm font-medium text-text mb-3">
-          Message-by-message
-        </h4>
-        <div className="flex flex-col gap-2">
+        <h4 className="text-title-card text-text mb-2">Message-by-message</h4>
+        <div className="flex flex-col divide-y divide-row">
           {Array.from({ length: 3 }).map((_, index) => (
             <div
               key={index}
-              className={cx(
-                'rounded-sm border border-subtle bg-overlay-1 px-3',
-                index === 0 ? 'py-2.5 relative' : 'py-2 opacity-70',
-              )}
+              className="py-2.5"
               data-testid="session-detail-turn-skeleton"
               aria-hidden="true"
             >
-              {index === 0 && (
-                <div className="absolute -top-2.5 right-2 w-20">
-                  <Skeleton className="h-4" />
-                </div>
-              )}
               <div className="flex items-center justify-between mb-1.5">
                 <div className="w-32">
                   <Skeleton className="h-3" />
@@ -218,9 +213,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   let netPnlFormatted = '0.00';
   if (session.state !== 'not_tracked') {
     netPnlColor =
-      session.net_pnl >= 0
-        ? 'text-[var(--color-ok)]'
-        : 'text-[var(--color-danger)]';
+      session.net_pnl >= 0 ? 'text-success-text' : 'text-danger-text';
     netPnlSign = session.net_pnl >= 0 ? '+' : '−';
     const abs = Math.abs(session.net_pnl);
     const str = abs.toFixed(4);
@@ -230,26 +223,18 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const isActiveSession =
     session.state === 'renewed' || session.state === 'scheduled';
   const latestTagLabel = isActiveSession ? 'Current turn · Live' : 'Final turn';
-  const latestCardCls = isActiveSession
-    ? 'border-accent/40 bg-accent/5'
-    : session.state === 'expired'
-      ? 'border-[var(--color-warn)]/40 bg-[var(--color-warn)]/5'
-      : 'border-text-faint/30 bg-overlay-2';
-  const latestTagCls = isActiveSession
-    ? 'border-accent/40 text-accent'
-    : session.state === 'expired'
-      ? 'border-[var(--color-warn)]/40 text-[var(--color-warn)]'
-      : 'border-text-faint/40 text-text-muted';
+  const latestTagTone: 'neutral' | 'warn' =
+    session.state === 'expired' ? 'warn' : 'neutral';
 
   const STATE_TONE: Record<
     string,
-    'ok' | 'warn' | 'danger' | 'neutral' | 'accent' | 'mono'
+    'ok' | 'warn' | 'danger' | 'neutral' | 'accent'
   > = {
     renewed: 'ok',
     scheduled: 'accent',
     capped: 'neutral',
     expired: 'warn',
-    not_tracked: 'mono',
+    not_tracked: 'neutral',
   };
 
   const STATE_LABEL: Record<string, string> = {
@@ -263,25 +248,21 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   return (
     <SessionDetailFrame onClose={onClose} testId="session-detail-content">
       {isError && (
-        <div className="border border-[var(--color-danger)]/30 bg-red-500/10 text-[var(--color-danger)] rounded-sm px-2 py-1.5 flex items-start gap-2 mb-3">
+        <div className="rounded-sm bg-danger/8 text-danger-text px-3 py-2 flex items-start gap-2 mb-3">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span className="text-sm leading-snug">
+          <span className="text-body leading-snug">
             {session.error} ·{' '}
             <RelativeTime ts={session.last_message_at_ms} compact />
           </span>
         </div>
       )}
 
-      {/* Overview Section */}
-      <div className="bg-overlay-1 border border-subtle rounded-sm p-3 flex flex-col gap-3">
+      {/* Overview: readout, state and metadata on the pane ground. */}
+      <div className="flex flex-col gap-3">
         <div className="flex justify-between items-start">
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase text-text-faint tracking-wider">
-              Net P&L
-            </span>
-            <div
-              className={cx('text-2xl font-medium tabular-nums', netPnlColor)}
-            >
+            <span className="text-label text-text-muted">Net P&L</span>
+            <div className={cx('text-display tabular-nums', netPnlColor)}>
               {netPnlSign}${netPnlFormatted}
             </div>
           </div>
@@ -289,28 +270,26 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
             {STATE_LABEL[session.state]}
           </Badge>
         </div>
-        <p className="text-[11px] text-text-muted leading-relaxed">
-          {pnlBreakdown}
-        </p>
+        <p className="text-caption text-text-muted">{pnlBreakdown}</p>
 
-        <div className="h-px bg-subtle w-full my-1"></div>
+        <div className="h-px bg-row w-full my-1"></div>
 
-        <dl className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
-          <dt className="text-text-faint">Session ID</dt>
-          <dd className="text-text font-mono break-all">{session.id}</dd>
-
-          <dt className="text-text-faint">Upstream</dt>
-          <dd className="text-text font-mono break-all">
-            {session.upstream ?? '-'}
+        <dl className="grid grid-cols-[100px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm">
+          <dt className="text-text-muted">Session ID</dt>
+          <dd className="text-text font-mono text-data break-all">
+            {session.id}
           </dd>
 
-          <dt className="text-text-faint">TTL</dt>
-          <dd className="text-text">{session.ttl ?? '-'}</dd>
+          <dt className="text-text-muted">Upstream</dt>
+          <dd className="text-text break-all">{session.upstream ?? '—'}</dd>
 
-          <dt className="text-text-faint">Generation</dt>
-          <dd className="text-text">{session.generation}</dd>
+          <dt className="text-text-muted">TTL</dt>
+          <dd className="text-text">{session.ttl ?? '—'}</dd>
 
-          <dt className="text-text-faint">First seen</dt>
+          <dt className="text-text-muted">Generation</dt>
+          <dd className="text-text tabular-nums">{session.generation}</dd>
+
+          <dt className="text-text-muted">First seen</dt>
           <dd className="text-text">
             {session.turns.length > 0 ? (
               <RelativeTime
@@ -321,7 +300,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
             )}
           </dd>
 
-          <dt className="text-text-faint">
+          <dt className="text-text-muted">
             {session.state === 'not_tracked'
               ? 'Last seen'
               : session.state === 'expired' || session.state === 'capped'
@@ -332,21 +311,19 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
             <RelativeTime ts={session.last_message_at_ms} />
           </dd>
 
-          <dt className="text-text-faint">Total renewals</dt>
-          <dd className="text-text">{session.total_renewals}</dd>
+          <dt className="text-text-muted">Total renewals</dt>
+          <dd className="text-text tabular-nums">{session.total_renewals}</dd>
         </dl>
       </div>
 
-      {/* Turns Section */}
+      {/* Turns: flat rows on the ground, one 1px line between. */}
       <div className="mt-2">
-        <h4 className="text-sm font-medium text-text mb-3">
-          Message-by-message
-        </h4>
-        <div className="flex flex-col gap-2">
+        <h4 className="text-title-card text-text mb-2">Message-by-message</h4>
+        <div className="flex flex-col divide-y divide-row">
           {session.turns.length === 0 ? (
-            <div className="rounded-sm border border-subtle bg-overlay-1 px-3 py-2 opacity-70">
+            <div className="py-2.5">
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-medium text-text flex items-center gap-1.5">
+                <span className="text-body-sm font-medium text-text flex items-center gap-1.5">
                   <Lock className="w-3 h-3 text-text-faint" />
                   <span className="text-text-muted font-normal">
                     · no renewals
@@ -355,14 +332,14 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               </div>
               <div className="flex justify-between items-end mt-2">
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-[11px] text-text-muted">
+                  <span className="text-caption text-text-muted">
                     Renewals: <span className="text-text">-</span>
                   </span>
-                  <span className="text-[11px] text-text-muted">
+                  <span className="text-caption text-text-muted">
                     Status: <span className="text-text">-</span>
                   </span>
                 </div>
-                <div className="text-xs font-medium tabular-nums">
+                <div className="text-body-sm font-medium tabular-nums">
                   <span className="text-text-muted">-</span>
                 </div>
               </div>
@@ -375,7 +352,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
               let turnPnlHtml: ReactNode;
               if (turn.pending) {
                 turnPnlHtml = (
-                  <span className="text-amber-400">
+                  <span className="text-warn-text">
                     −${Math.abs(turn.pnl ?? 0).toFixed(3)} pending
                   </span>
                 );
@@ -383,13 +360,13 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                 turnPnlHtml = <span className="text-text-muted">-</span>;
               } else if (turn.pnl >= 0) {
                 turnPnlHtml = (
-                  <span className="text-[var(--color-ok)]">
+                  <span className="text-success-text">
                     +${turn.pnl.toFixed(3)}
                   </span>
                 );
               } else {
                 turnPnlHtml = (
-                  <span className="text-[var(--color-danger)]">
+                  <span className="text-danger-text">
                     −${Math.abs(turn.pnl).toFixed(3)}
                   </span>
                 );
@@ -404,82 +381,39 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
                 followUpText = 'no follow-up (loss)';
               }
 
-              if (isNewest) {
-                return (
-                  <div
-                    key={turnNum}
-                    className={cx(
-                      'rounded-sm border px-3 py-2.5 relative',
-                      latestCardCls,
-                    )}
-                  >
-                    <div
-                      className={cx(
-                        'absolute -top-2.5 right-2 bg-bg-sub border text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-sm font-medium',
-                        latestTagCls,
+              return (
+                <div key={turnNum} className="py-2.5">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <span className="text-body-sm font-medium text-text flex items-center gap-1.5 min-w-0">
+                      {isNewest ? null : (
+                        <Lock className="w-3 h-3 shrink-0 text-text-faint" />
                       )}
-                    >
-                      {latestTagLabel}
-                    </div>
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-medium text-text">
+                      <span className="truncate">
                         Turn {turnNum}{' '}
                         <span className="text-text-muted font-normal">
                           · {turn.label}
                         </span>
                       </span>
-                      <span className="text-[11px] font-mono text-text-muted">
-                        <RelativeTime ts={turn.time_ms} compact />
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-end mt-2">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-[11px] text-text-muted">
-                          Renewals:{' '}
-                          <span className="text-text">{turn.renewals}</span>
-                        </span>
-                        <span className="text-[11px] text-text-muted">
-                          Status:{' '}
-                          <span className="text-text">{followUpText}</span>
-                        </span>
-                      </div>
-                      <div className="text-sm font-medium tabular-nums">
-                        {turnPnlHtml}
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-
-              return (
-                <div
-                  key={turnNum}
-                  className="rounded-sm border border-subtle bg-overlay-1 px-3 py-2 opacity-70"
-                >
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs font-medium text-text flex items-center gap-1.5">
-                      <Lock className="w-3 h-3 text-text-faint" />
-                      Turn {turnNum}{' '}
-                      <span className="text-text-muted font-normal">
-                        · {turn.label}
-                      </span>
+                      {isNewest ? (
+                        <Badge tone={latestTagTone}>{latestTagLabel}</Badge>
+                      ) : null}
                     </span>
-                    <span className="text-[11px] font-mono text-text-muted">
+                    <span className="shrink-0 text-caption tabular-nums text-text-muted">
                       <RelativeTime ts={turn.time_ms} compact />
                     </span>
                   </div>
                   <div className="flex justify-between items-end mt-2">
                     <div className="flex flex-col gap-0.5">
-                      <span className="text-[11px] text-text-muted">
+                      <span className="text-caption text-text-muted">
                         Renewals:{' '}
                         <span className="text-text">{turn.renewals}</span>
                       </span>
-                      <span className="text-[11px] text-text-muted">
+                      <span className="text-caption text-text-muted">
                         Status:{' '}
                         <span className="text-text">{followUpText}</span>
                       </span>
                     </div>
-                    <div className="text-xs font-medium tabular-nums">
+                    <div className="text-body-sm font-medium tabular-nums">
                       {turnPnlHtml}
                     </div>
                   </div>
@@ -494,7 +428,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
         <button
           type="button"
           onClick={() => setShowConfig(!showConfig)}
-          className="text-[11px] text-text-faint hover:text-text inline-flex items-center gap-1"
+          className="text-caption text-text-muted hover:text-text inline-flex items-center gap-1"
         >
           <ChevronRight
             className={cx(
@@ -505,33 +439,33 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           Config in effect at schedule time
         </button>
         {showConfig && session.config_snapshot && (
-          <div className="mt-1 bg-bg border border-subtle rounded-sm p-2">
-            <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[11px]">
-              <dt className="text-text-faint">lead 5m</dt>
-              <dd className="text-text font-mono">
+          <div className="mt-2 pl-4">
+            <dl className="grid grid-cols-[110px_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-body-sm">
+              <dt className="text-text-muted">Lead time · 5m</dt>
+              <dd className="text-text tabular-nums">
                 {session.config_snapshot.lead_5m}s
               </dd>
-              <dt className="text-text-faint">lead 1h</dt>
-              <dd className="text-text font-mono">
+              <dt className="text-text-muted">Lead time · 1h</dt>
+              <dd className="text-text tabular-nums">
                 {session.config_snapshot.lead_1h}s
               </dd>
-              <dt className="text-text-faint">max renewals</dt>
-              <dd className="text-text font-mono">
+              <dt className="text-text-muted">Max renewals</dt>
+              <dd className="text-text tabular-nums">
                 {session.config_snapshot.max_renewals}
               </dd>
-              <dt className="text-text-faint">max duration</dt>
-              <dd className="text-text font-mono">
+              <dt className="text-text-muted">Max duration</dt>
+              <dd className="text-text tabular-nums">
                 {session.config_snapshot.max_duration}s
               </dd>
-              <dt className="text-text-faint">snapshot</dt>
-              <dd className="text-text font-mono">
+              <dt className="text-text-muted">Snapshot</dt>
+              <dd className="text-text tabular-nums">
                 {session.config_snapshot.snapshot_bytes} bytes
               </dd>
             </dl>
           </div>
         )}
         {showConfig && !session.config_snapshot && (
-          <div className="mt-1 bg-bg border border-subtle rounded-sm p-2 text-[11px] text-text-muted">
+          <div className="mt-2 pl-4 text-body-sm text-text-muted">
             No config snapshot available for this session.
           </div>
         )}
@@ -541,7 +475,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
         <button
           type="button"
           onClick={() => setShowRaw(!showRaw)}
-          className="text-[11px] text-text-faint hover:text-text inline-flex items-center gap-1"
+          className="text-caption text-text-muted hover:text-text inline-flex items-center gap-1"
         >
           <ChevronRight
             className={cx(
@@ -552,7 +486,7 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
           Raw session record
         </button>
         {showRaw && (
-          <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap break-all bg-bg border border-subtle rounded-sm p-2 max-h-72 overflow-y-auto">
+          <pre className="well mt-1.5 p-3 font-mono text-data whitespace-pre-wrap break-all max-h-72 overflow-y-auto">
             {JSON.stringify(session.raw_record, null, 2)}
           </pre>
         )}

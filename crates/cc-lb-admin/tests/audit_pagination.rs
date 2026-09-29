@@ -32,7 +32,6 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         runtime: None,
         data_dir: None,
         warmup_dialect_dispatcher: None,
-        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
@@ -67,7 +66,7 @@ async fn test_audit_pagination() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?principal_id=alice&limit=5")
+        .uri("/admin/v1/audit?principal_id=alice&limit=5")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -84,7 +83,7 @@ async fn test_audit_pagination() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?principal_id=alice&since=1002&until=1005")
+        .uri("/admin/v1/audit?principal_id=alice&since=1002&until=1005")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -101,7 +100,7 @@ async fn test_audit_pagination() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/audit?principal_id=alice&after=1005&limit=2")
+        .uri("/admin/v1/audit?principal_id=alice&after=1005&limit=2")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -118,7 +117,7 @@ async fn test_audit_pagination() {
 }
 
 #[tokio::test]
-async fn audit_http_aliases_return_the_most_recent_200_matching_entries() {
+async fn audit_returns_the_most_recent_200_matching_entries() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = admin_test_common::sqlite_storage(temp_dir.path(), "recent.sqlite").await;
 
@@ -139,24 +138,22 @@ async fn audit_http_aliases_return_the_most_recent_200_matching_entries() {
     }
 
     let app = router(test_state(storage));
-    for path in ["/admin/audit", "/admin/v1/audit"] {
-        let request = Request::builder()
-            .method("GET")
-            .uri(format!("{path}?until=10262&limit=200"))
-            .header("Authorization", "Bearer test-token")
-            .body(Body::empty())
-            .unwrap();
+    let request = Request::builder()
+        .method("GET")
+        .uri("/admin/v1/audit?until=10262&limit=200")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
 
-        let response = app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let entries = json["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 200);
-        assert_eq!(entries.first().unwrap()["request_id"], "bulk-262");
-        assert_eq!(entries.last().unwrap()["request_id"], "bulk-63");
-    }
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 200);
+    assert_eq!(entries.first().unwrap()["request_id"], "bulk-262");
+    assert_eq!(entries.last().unwrap()["request_id"], "bulk-63");
 }
 
 #[tokio::test]
@@ -198,7 +195,7 @@ async fn audit_admin_only_keeps_older_admin_actions_visible() {
 
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/audit?principal_id=qa-safety-principal&admin_only=true&limit=200")
+        .uri("/admin/v1/audit?principal_id=qa-safety-principal&admin_only=true&limit=200")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -213,16 +210,12 @@ async fn audit_admin_only_keeps_older_admin_actions_visible() {
             .any(|entry| entry["request_id"] == "older-admin-action"),
         "admin_only must surface the older admin action past newer non-admin rows"
     );
-    assert!(
-        entries
-            .iter()
-            .all(|entry| { !entry["admin_action"].is_null() || !entry["kind"].is_null() })
-    );
+    assert!(entries.iter().all(|entry| !entry["admin_action"].is_null()));
 
     // The default query keeps returning non-admin rows.
     let request = Request::builder()
         .method("GET")
-        .uri("/admin/audit?principal_id=qa-safety-principal&limit=200")
+        .uri("/admin/v1/audit?principal_id=qa-safety-principal&limit=200")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();
@@ -232,9 +225,5 @@ async fn audit_admin_only_keeps_older_admin_actions_visible() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let entries = json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 200);
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry["admin_action"].is_null() && entry["kind"].is_null())
-    );
+    assert!(entries.iter().all(|entry| entry["admin_action"].is_null()));
 }

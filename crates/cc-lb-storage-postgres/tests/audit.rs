@@ -2,7 +2,7 @@ use std::{str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result};
 use cc_lb_clock::TestClock;
-use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, BackendKind, MetaStore};
+use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, MetaStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, PgPool,
@@ -66,7 +66,7 @@ fn query_recent_audit_orders_before_limit_and_filters_exactly() {
 
 async fn run_contract(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(TestClock::new_at_secs(NOW)));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let entries = [
         audit_entry("other-subject-older", NOW, AUTHORITY, "bob"),
         audit_entry(
@@ -105,7 +105,7 @@ async fn run_contract(pool: &PgPool) -> Result<()> {
 
 async fn run_recent_contract(pool: &PgPool) -> Result<()> {
     let storage = PostgresStorage::new(pool.clone(), Arc::new(TestClock::new_at_secs(NOW)));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
     let mut entries = [
         recent_audit_entry("matching-old", NOW, "target-principal", AUTHORITY, SUBJECT),
         recent_audit_entry(
@@ -166,7 +166,7 @@ async fn run_recent_contract(pool: &PgPool) -> Result<()> {
         ),
     ];
     entries[7].admin_action = Some("principal_update".to_owned());
-    entries[8].kind = Some("admin".to_owned());
+    entries[8].admin_action = Some("config_apply".to_owned());
     for entry in &entries {
         storage.append_audit(entry).await?;
     }

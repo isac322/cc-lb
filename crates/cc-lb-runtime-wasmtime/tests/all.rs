@@ -8,16 +8,14 @@ mod conformance;
 mod filter_service_tier_round_trip;
 #[path = "malicious_plugin.rs"]
 mod malicious_plugin;
-#[path = "observe_drain.rs"]
-mod observe_drain;
+#[path = "no_state_leak.rs"]
+mod no_state_leak;
 #[path = "on_demand_memory_limit.rs"]
 mod on_demand_memory_limit;
 #[path = "plugin_metrics_emission.rs"]
 mod plugin_metrics_emission;
 #[path = "pool_saturation.rs"]
 mod pool_saturation;
-#[path = "pure_no_state_leak.rs"]
-mod pure_no_state_leak;
 #[path = "register_unchanged_short_circuit.rs"]
 mod register_unchanged_short_circuit;
 #[path = "scoped_dispatch.rs"]

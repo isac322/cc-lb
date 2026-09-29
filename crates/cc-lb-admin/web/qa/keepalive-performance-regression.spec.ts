@@ -1522,7 +1522,6 @@ test('UI-05 preserves row ID, state, error, P&L, and attempt semantics', async (
   await expect(errorRow).toContainText('Error');
   await expect(errorRow).toContainText('/12');
   await expect(errorRow).toContainText('$');
-  await expect(errorRow.getByRole('button')).toHaveClass(/border-l-red-500/);
   const direct = await directRequest(
     'UI-05',
     'GET',

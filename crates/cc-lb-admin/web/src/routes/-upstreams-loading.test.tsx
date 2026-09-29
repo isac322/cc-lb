@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,11 +9,13 @@ import {
 } from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import * as api from '../lib/api';
+import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
 import { Route } from './upstreams';
 
-let searchState: { selectedId?: string } = {};
+let searchState: { selectedId?: string; action?: 'new' | 'reconnect' } = {};
 const navigateMock = vi.fn();
 
 vi.mock('@tanstack/react-router', async () => {
@@ -40,16 +43,25 @@ vi.mock('../lib/queries', async () => {
     useRecentEvents: vi.fn(),
     useStartOauthDraft: vi.fn(),
     useStatus: vi.fn(),
-    useSubscriptionQuotaAnalysis: vi.fn(),
     useSubscriptionQuotaLatest: vi.fn(),
     useSubscriptionQuotaSeries: vi.fn(),
     useTriggerSubscriptionMetadataRefresh: vi.fn(),
     useUpdateUpstreamWarmupSettings: vi.fn(),
-    useUpstreamNameMap: vi.fn(),
     useUpstreamOAuthStatus: vi.fn(),
     useUpstreamSubscriptionMetadata: vi.fn(),
     useUpstreams: vi.fn(),
     useUsage: vi.fn(),
+  };
+});
+
+// The connect dialog's reconnect path calls the metadata-refresh endpoint
+// through this raw API function (not a hook) to learn which Claude account
+// came back.
+vi.mock('../lib/api', async () => {
+  const actual = (await vi.importActual('../lib/api')) as typeof api;
+  return {
+    ...actual,
+    triggerSubscriptionMetadataRefresh: vi.fn(),
   };
 });
 
@@ -195,52 +207,6 @@ function quotaSeriesData(
   };
 }
 
-function quotaAnalysisData(target: Upstream, utilization: number) {
-  const burn = {
-    utilization_per_second: 0.0001,
-    utilization_per_hour: 0.36,
-    eta_to_limit_secs: 3_600,
-    resets_before_limit: false,
-    confidence: 'high',
-    sample_count: 2,
-    reason: null,
-  };
-  return {
-    since_unix_secs: NOW_UNIX_SECS - 604_800,
-    until_unix_secs: NOW_UNIX_SECS,
-    now_unix_secs: NOW_UNIX_SECS,
-    max_staleness_secs: 300,
-    upstreams: [
-      {
-        upstream_id: target.id,
-        upstream_name: target.name,
-        windows: [
-          {
-            window: '5h',
-            current_utilization: utilization,
-            resets_at_unix_secs: NOW_UNIX_SECS + 3_600,
-            data_state: 'fresh',
-            actual_account_burn: burn,
-            proxy_projected_burn: {
-              proxy_tokens_per_second: 10,
-              proxy_tokens_per_hour: 36_000,
-              effective_limit_tokens_estimate: 100_000,
-              utilization_per_hour: 0.36,
-              eta_to_limit_secs: 3_600,
-              resets_before_limit: false,
-              confidence: 'high',
-              sample_count: 2,
-              reason: null,
-            },
-            deficit: null,
-            caveats: [],
-          },
-        ],
-      },
-    ],
-  };
-}
-
 function metadataData(target: Upstream, plan: string, accountEmail: string) {
   return {
     upstream_id: target.id,
@@ -300,16 +266,6 @@ function usageData(key: string, bucketTokens: number, costMicros: number) {
             virtual_cost_micros: costMicros,
             latency_ms_sum: 100,
             latency_count: 1,
-            proxy_setup_ms_sum: 0,
-            proxy_setup_ms_count: 0,
-            shape_ms_sum: 0,
-            shape_ms_count: 0,
-            sign_ms_sum: 0,
-            sign_ms_count: 0,
-            upstream_ttfb_ms_sum: 0,
-            upstream_ttfb_ms_count: 0,
-            upstream_body_ms_sum: 0,
-            upstream_body_ms_count: 0,
           },
         ],
       },
@@ -317,7 +273,7 @@ function usageData(key: string, bucketTokens: number, costMicros: number) {
   };
 }
 
-function recentData(target: Upstream, model: string) {
+function recentData(model: string) {
   return {
     events: [
       {
@@ -325,7 +281,6 @@ function recentData(target: Upstream, model: string) {
         request_id: `request-${model}`,
         ts: NOW_UNIX_SECS - 30,
         ts_ms: (NOW_UNIX_SECS - 30) * 1_000,
-        upstream: target.id,
         event_kind: 'messages',
         model,
         status: 200,
@@ -336,13 +291,14 @@ function recentData(target: Upstream, model: string) {
 }
 
 function mutationResult() {
+  const mutateAsync = vi.fn();
   return {
     mutate: vi.fn(),
+    mutateAsync,
     isPending: false,
     reset: vi.fn(),
   };
 }
-
 function routeElement() {
   Object.assign(Route, { useSearch: () => searchState });
   return (
@@ -354,6 +310,94 @@ function routeElement() {
 
 function renderRoute() {
   return render(routeElement());
+}
+
+const OAUTH_AUTHORIZE_URL =
+  'https://claude.ai/oauth/authorize?state=draft-oauth-state';
+const OAUTH_STATE_TOKEN = 'draft-state-token';
+// Paste-relevant code: URL-safe and comfortably above the parser's minimum.
+const OAUTH_CODE = 'oauthcode-1234567890abcdef';
+
+/** A mutation promise that never settles, keeping the submitted state live. */
+function inFlight<T>(): Promise<T> {
+  return Promise.withResolvers<T>().promise;
+}
+
+function draftCompleteResult(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    state_token: OAUTH_STATE_TOKEN,
+    suggested_name: 'OAuth Account',
+    subscription_metadata: null,
+    organization_metadata: null,
+    mode: 'long_lived_365d',
+    long_lived_fallback: false,
+    fallback_reason: null,
+    granted_expires_in_secs: 365 * 86_400,
+    ...overrides,
+  };
+}
+
+function subscriptionMetadataResponse(
+  target: Upstream,
+  account: { email: string; uuid: string; name?: string },
+) {
+  return {
+    upstream_id: target.id,
+    subscription_metadata: {
+      upstream_id: target.id,
+      organization_uuid: `org-${account.uuid}`,
+      organization_role: 'member',
+      workspace_role: 'user',
+      observed_at_unix_millis: NOW_UNIX_SECS * 1_000,
+      last_error: null,
+      raw_roles: null,
+      raw_bootstrap: null,
+    },
+    organization_metadata: {
+      organization_uuid: `org-${account.uuid}`,
+      organization_name: `${account.name ?? target.name} Org`,
+      organization_type: 'claude_max',
+      rate_limit_tier: 'tier-1',
+      has_extra_usage_enabled: false,
+      billing_type: 'invoice',
+      subscription_created_at_unix_secs: null,
+      account_email: account.email,
+      account_display_name: account.name ?? target.name,
+      account_uuid: account.uuid,
+      overage_credit_amount_minor_units: null,
+      overage_credit_currency: null,
+      overage_credit_granted: null,
+      overage_credit_eligible: null,
+      observed_at_unix_millis: NOW_UNIX_SECS * 1_000,
+      last_error: null,
+      raw_profile: null,
+      raw_overage_grant: null,
+    },
+  };
+}
+
+// The dialog pre-fetches the authorize URL so "Sign in with Claude" is a plain
+// link, then waits for the pasted code on the next step.
+async function openCreateToSignIn() {
+  fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
+  const dialog = screen.getByRole('dialog', { name: 'New upstream' });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
+  // The 'Link valid for' timer only renders once the draft session is ready.
+  await within(dialog).findByText(/Link valid for/);
+  return dialog;
+}
+
+function pasteStep(dialog: HTMLElement) {
+  fireEvent.click(
+    within(dialog).getByRole('button', { name: 'I already have a code' }),
+  );
+  const input = within(dialog).getByRole('textbox', {
+    name: 'Authorization code',
+  });
+  fireEvent.change(input, { target: { value: OAUTH_CODE } });
+  fireEvent.keyDown(input, { key: 'Enter' });
 }
 
 beforeEach(() => {
@@ -378,12 +422,6 @@ beforeEach(() => {
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue({
-    data: undefined,
-    isLoading: true,
-    isPending: true,
-    isPlaceholderData: false,
-  } as never);
-  vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
     data: undefined,
     isLoading: true,
     isPending: true,
@@ -420,12 +458,6 @@ beforeEach(() => {
     isPlaceholderData: false,
   } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
-  vi.mocked(queries.useUpstreamNameMap).mockReturnValue(
-    new Map([
-      [upstream.id, upstream.name],
-      [apiKeyUpstream.id, apiKeyUpstream.name],
-    ]),
-  );
 
   vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue(
     mutationResult() as never,
@@ -452,6 +484,11 @@ beforeEach(() => {
   vi.mocked(queries.useCreateFromOauthDraft).mockReturnValue(
     mutationResult() as never,
   );
+  vi.mocked(api.triggerSubscriptionMetadataRefresh).mockResolvedValue({
+    upstream_id: upstream.id,
+    subscription_metadata: null,
+    organization_metadata: null,
+  });
 });
 
 afterEach(() => {
@@ -461,15 +498,12 @@ afterEach(() => {
 });
 
 describe('/upstreams quota request cadence', () => {
-  test('keeps stable series and analysis range identities across wall-clock ticks', () => {
+  test('keeps a stable series range identity across wall-clock ticks', () => {
     vi.setSystemTime(new Date('2026-06-18T00:00:01.000Z'));
     renderRoute();
 
     const firstSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
-      .mock.calls.at(-1)?.[0];
-    const firstAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
       .mock.calls.at(-1)?.[0];
 
     cleanup();
@@ -480,36 +514,27 @@ describe('/upstreams quota request cadence', () => {
     const secondSeriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
       .mock.calls.at(-1)?.[0];
-    const secondAnalysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
-      .mock.calls.at(-1)?.[0];
 
     expect(firstSeriesParams).toMatchObject({
       rangeSecs: 604800,
       bucketSecs: 1800,
     });
-    expect(firstAnalysisParams).toMatchObject({ rangeSecs: 604800 });
     expect(secondSeriesParams).toEqual(firstSeriesParams);
-    expect(secondAnalysisParams).toEqual(firstAnalysisParams);
   });
 
-  test('updates both stable range identities when the visible range changes', () => {
+  test('updates the series range identity when the visible range changes', () => {
     renderRoute();
 
-    fireEvent.click(screen.getByRole('button', { name: '1h' }));
+    fireEvent.click(screen.getByRole('radio', { name: '1h' }));
 
     const seriesParams = vi
       .mocked(queries.useSubscriptionQuotaSeries)
-      .mock.calls.at(-1)?.[0];
-    const analysisParams = vi
-      .mocked(queries.useSubscriptionQuotaAnalysis)
       .mock.calls.at(-1)?.[0];
 
     expect(seriesParams).toMatchObject({
       rangeSecs: 3600,
       bucketSecs: 60,
     });
-    expect(analysisParams).toMatchObject({ rangeSecs: 3600 });
   });
 });
 
@@ -526,7 +551,6 @@ describe('/upstreams cold-load geometry', () => {
     renderRoute();
 
     const shell = screen.getByTestId('upstream-detail-loading-shell');
-    expect(shell.className).toContain('contents');
     expect(
       within(shell).getByTestId('upstream-detail-loading-metadata').className,
     ).toContain('min-h-9');
@@ -534,15 +558,17 @@ describe('/upstreams cold-load geometry', () => {
       within(shell).getByTestId('quota-history-legend-slot').className,
     ).toContain('min-h-5');
     expect(
-      within(shell).getByTestId('quota-snapshot-grid').className,
-    ).toContain('min-h-[203px]');
+      within(within(shell).getByTestId('quota-snapshot-grid')).getAllByTestId(
+        'quota-snapshot-skeleton-card',
+      ),
+    ).toHaveLength(3);
     const rangeControl = within(shell).getByTestId(
       'quota-history-range-control',
     );
     expect(rangeControl.className).toContain('p-0.5');
     expect(rangeControl.children).toHaveLength(4);
     for (const rangeItem of rangeControl.children) {
-      expect(rangeItem.className).toContain('h-7');
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
     expect(within(shell).queryByText('Timestamp')).toBeNull();
     expect(
@@ -550,7 +576,7 @@ describe('/upstreams cold-load geometry', () => {
     ).toBeNull();
     expect(within(shell).queryByTestId('warmup-card')).toBeNull();
     expect(within(shell).queryByTestId('oauth-status-card-body')).toBeNull();
-    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(3);
+    expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(4);
     expect(screen.queryByText('Select an upstream')).toBeNull();
   });
 
@@ -562,25 +588,22 @@ describe('/upstreams cold-load geometry', () => {
     const metadataLoading = within(metadata).getByTestId(
       'upstream-metadata-loading',
     );
-    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(5);
+    expect(metadataLoading.querySelectorAll('.skeleton')).toHaveLength(8);
 
     const legend = screen.getByTestId('quota-history-legend-slot');
     expect(legend.className).toContain('min-h-5');
     expect(legend.querySelectorAll('.skeleton')).toHaveLength(2);
 
     const snapshotGrid = screen.getByTestId('quota-snapshot-grid');
-    expect(snapshotGrid.className).toContain('min-h-[203px]');
     expect(
       within(snapshotGrid).getAllByTestId('quota-snapshot-skeleton-card'),
     ).toHaveLength(3);
     expect(screen.queryByText(/No subscription quota data/)).toBeNull();
 
     const oauthBody = screen.getByTestId('oauth-status-card-body');
-    expect(oauthBody.className).toContain('min-h-28');
     const oauthGrid = within(oauthBody).getByTestId(
       'oauth-status-loading-grid',
     );
-    expect(oauthGrid.className).toContain('min-h-20');
     expect(oauthGrid.className).toContain('space-y-3');
 
     const requestSlot = screen.getByTestId('recent-requests-table-slot');
@@ -589,18 +612,19 @@ describe('/upstreams cold-load geometry', () => {
     expect(requestSlot.querySelectorAll('tbody tr')).toHaveLength(5);
     expect(screen.queryByText(/Loading/)).toBeNull();
     expect(screen.queryByText('—%')).toBeNull();
+    // Pending quota reserves the row's usage figures; an API-key row has
+    // no subscription quota to wait for and reads as its kind at once.
     const oauthListRow = screen.getByRole('button', {
       name: /OAuth Primary/,
     });
     expect(
       oauthListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(5);
+    ).toBeGreaterThanOrEqual(2);
     const apiKeyListRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(
-      apiKeyListRow.querySelectorAll('.skeleton').length,
-    ).toBeGreaterThanOrEqual(2);
+    expect(apiKeyListRow.querySelectorAll('.skeleton')).toHaveLength(0);
+    expect(within(apiKeyListRow).getByText('API key')).toBeDefined();
   });
 
   test('retains the reserved slots after empty and loaded queries resolve', () => {
@@ -616,12 +640,6 @@ describe('/upstreams cold-load geometry', () => {
     } as never);
     vi.mocked(queries.useSubscriptionQuotaSeries).mockReturnValue({
       data: { series: [] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockReturnValue({
-      data: { upstreams: [] },
       isLoading: false,
       isPending: false,
       isPlaceholderData: false,
@@ -668,24 +686,53 @@ describe('/upstreams cold-load geometry', () => {
     expect(screen.getByTestId('quota-history-legend-slot').className).toContain(
       'min-h-5',
     );
-    expect(screen.getByTestId('quota-snapshot-grid').className).toContain(
-      'min-h-[203px]',
-    );
     const rangeControl = screen.getByTestId('quota-history-range-control');
-    expect(rangeControl.className).toContain('p-0.5');
-    expect(rangeControl.querySelectorAll('button')).toHaveLength(4);
-    for (const rangeItem of rangeControl.querySelectorAll('button')) {
-      expect(rangeItem.className).toContain('h-7');
+    const rangeItems = within(rangeControl).getAllByRole('radio');
+    expect(rangeItems).toHaveLength(4);
+    for (const rangeItem of rangeItems) {
+      expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
-    expect(screen.getByTestId('oauth-status-card-body').className).toContain(
-      'min-h-28',
-    );
     const loadedOauthGrid = screen.getByTestId('oauth-status-loaded-grid');
-    expect(loadedOauthGrid.className).toContain('min-h-20');
     expect(loadedOauthGrid.className).toContain('space-y-3');
     expect(
       screen.getByTestId('recent-requests-table-slot').className,
     ).toContain('min-h-48');
+  });
+});
+
+describe('/upstreams desktop auto-select', () => {
+  test('waits for quota before picking the first row of the usage-ranked list', () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockReturnValue({ matches: true }),
+    });
+    try {
+      searchState = {};
+      vi.mocked(queries.useStatus).mockReturnValue(
+        queryResult({ upstreams: [] }),
+      );
+
+      const view = renderRoute();
+      // Quota still loading: the ranking is not final, so nothing is picked.
+      expect(navigateMock).not.toHaveBeenCalled();
+
+      vi.mocked(queries.useSubscriptionQuotaLatest).mockReturnValue(
+        queryResult(quotaLatestData(upstream, 0.42)),
+      );
+      view.rerender(routeElement());
+
+      expect(navigateMock).toHaveBeenCalledTimes(1);
+      const { search } = navigateMock.mock.calls[0][0] as {
+        search: (previous: object) => { selectedId?: string };
+      };
+      expect(search({}).selectedId).toBe(upstream.id);
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        value: originalMatchMedia,
+      });
+    }
   });
 });
 
@@ -742,11 +789,6 @@ describe('/upstreams refresh retention', () => {
         { isPlaceholderData },
       ),
     );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(() =>
-      queryResult(quotaAnalysisData(upstream, phaseData[phase].utilization), {
-        isPlaceholderData,
-      }),
-    );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(() =>
       queryResult(
         metadataData(
@@ -763,7 +805,7 @@ describe('/upstreams refresh retention', () => {
       }),
     );
     vi.mocked(queries.useRecentEvents).mockImplementation(() =>
-      queryResult(recentData(upstream, phaseData[phase].requestModel), {
+      queryResult(recentData(phaseData[phase].requestModel), {
         isPlaceholderData,
       }),
     );
@@ -774,7 +816,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     const oauthSidebarRow = screen.getByRole('button', {
       name: /OAuth Primary/,
@@ -785,15 +827,15 @@ describe('/upstreams refresh retention', () => {
     ).toContain('5h');
 
     isPlaceholderData = true;
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     expect(screen.getByText(/old@example\.com/)).toBeDefined();
     expect(screen.getByText('old-scope')).toBeDefined();
     expect(screen.getByText('old-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '42.0%',
+      '42%',
     );
     expect(
       screen.getByTestId('quota-history-legend-slot').textContent,
@@ -834,11 +876,11 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('new-scope')).toBeDefined();
     expect(screen.getByText('new-quota-model')).toBeDefined();
     expect(screen.getByTestId('quota-snapshot-grid').textContent).toContain(
-      '68.0%',
+      '68%',
     );
   });
 
-  test('keeps API usage, sidebar totals, and recent rows during placeholder refresh', () => {
+  test('keeps API usage, the list row, and recent rows during placeholder refresh', () => {
     searchState = { selectedId: apiKeyUpstream.id };
     let phase: 'old' | 'new' = 'old';
     let isPlaceholderData = false;
@@ -884,10 +926,7 @@ describe('/upstreams refresh retention', () => {
     });
     vi.mocked(queries.useRecentEvents).mockImplementation(() =>
       queryResult(
-        recentData(
-          apiKeyUpstream,
-          phase === 'old' ? 'old-request-model' : 'new-request-model',
-        ),
+        recentData(phase === 'old' ? 'old-request-model' : 'new-request-model'),
         { isPlaceholderData },
       ),
     );
@@ -899,14 +938,12 @@ describe('/upstreams refresh retention', () => {
     const apiSidebarRow = screen.getByRole('button', {
       name: /API Key Backup/,
     });
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
 
     isPlaceholderData = true;
-    fireEvent.click(screen.getByRole('button', { name: '7d' }));
+    fireEvent.click(screen.getByRole('radio', { name: '7d' }));
 
     expect(screen.getByText('old-usage-model')).toBeDefined();
     expect(screen.getByText('old-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$1.50 · 100 tok');
     expect(
       screen.getByTestId('api-usage-card').querySelectorAll('.skeleton'),
     ).toHaveLength(0);
@@ -925,7 +962,6 @@ describe('/upstreams refresh retention', () => {
     expect(screen.queryByText('old-request-model')).toBeNull();
     expect(screen.getByText('new-usage-model')).toBeDefined();
     expect(screen.getByText('new-request-model')).toBeDefined();
-    expect(apiSidebarRow.textContent).toContain('$2.50 · 200 tok');
   });
 
   test('resets detail-local state and never renders the previous OAuth identity after selection changes', () => {
@@ -957,12 +993,6 @@ describe('/upstreams refresh retention', () => {
           ? queryResult(quotaSeriesData(upstream, 0.42))
           : queryResult(undefined, { isLoading: true, isPending: true }),
     );
-    vi.mocked(queries.useSubscriptionQuotaAnalysis).mockImplementation(
-      (options) =>
-        options.upstreamIds === upstream.id
-          ? queryResult(quotaAnalysisData(upstream, 0.42))
-          : queryResult(undefined, { isLoading: true, isPending: true }),
-    );
     vi.mocked(queries.useUpstreamSubscriptionMetadata).mockImplementation(
       (upstreamId) =>
         upstreamId === upstream.id
@@ -983,7 +1013,7 @@ describe('/upstreams refresh retention', () => {
     );
     vi.mocked(queries.useRecentEvents).mockImplementation((options) =>
       options.upstream_id === upstream.id
-        ? queryResult(recentData(upstream, 'identity-old-model'))
+        ? queryResult(recentData('identity-old-model'))
         : queryResult(undefined, { isLoading: true, isPending: true }),
     );
 
@@ -992,9 +1022,9 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('identity-old-scope')).toBeDefined();
     expect(screen.getByText('identity-old-model')).toBeDefined();
 
-    const oneHourRange = screen.getByRole('button', { name: '1h' });
+    const oneHourRange = screen.getByRole('radio', { name: '1h' });
     fireEvent.click(oneHourRange);
-    expect(oneHourRange.getAttribute('aria-pressed')).toBe('true');
+    expect(oneHourRange.getAttribute('aria-checked')).toBe('true');
 
     searchState = { selectedId: secondOauthUpstream.id };
     view.rerender(routeElement());
@@ -1002,18 +1032,20 @@ describe('/upstreams refresh retention', () => {
     const resetRangeControl = screen.getByTestId('quota-history-range-control');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '7d' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '7d' })
+        .getAttribute('aria-checked'),
     ).toBe('true');
     expect(
       within(resetRangeControl)
-        .getByRole('button', { name: '1h' })
-        .getAttribute('aria-pressed'),
+        .getByRole('radio', { name: '1h' })
+        .getAttribute('aria-checked'),
     ).toBe('false');
     expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
     expect(screen.queryByText('identity-old-scope')).toBeNull();
     expect(screen.queryByText('identity-old-model')).toBeNull();
-    expect(screen.queryByText('42.0%')).toBeNull();
+    expect(
+      screen.queryByTestId('quota-snapshot-grid')?.textContent ?? '',
+    ).not.toContain('42%');
     expect(screen.getByTestId('upstream-metadata-loading')).toBeDefined();
     expect(
       screen
@@ -1036,32 +1068,41 @@ describe('/upstreams refresh retention', () => {
 
 describe('/upstreams mutation pending UX', () => {
   test('create pending locks resubmission and modal dismissal while showing progress', () => {
-    const mutate = vi.fn();
+    const create = vi.fn().mockReturnValue(inFlight());
     vi.mocked(queries.useCreateUpstream).mockReturnValue({
-      mutate,
+      mutate: vi.fn(),
+      mutateAsync: create,
       isPending: false,
       reset: vi.fn(),
     } as never);
 
     const view = renderRoute();
-    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
 
     let dialog = screen.getByRole('dialog', { name: 'New upstream' });
     fireEvent.click(
-      within(dialog).getByRole('radio', { name: /Anthropic API Key/ }),
+      within(dialog).getByRole('radio', { name: /Anthropic API key/ }),
     );
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
     fireEvent.change(within(dialog).getByPlaceholderText('anthropic-prod'), {
       target: { value: 'api-key-primary' },
     });
-    fireEvent.change(within(dialog).getByPlaceholderText('sk-ant-...'), {
+    fireEvent.change(within(dialog).getByPlaceholderText(/sk-ant-/), {
       target: { value: 'sk-ant-test' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
-    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledWith({
+      name: 'api-key-primary',
+      kind: 'anthropic_api_key',
+      base_url: DEFAULT_ANTHROPIC_BASE_URL,
+      api_key_value: 'sk-ant-test',
+      api_key_env: null,
+    });
 
     vi.mocked(queries.useCreateUpstream).mockReturnValue({
-      mutate,
+      mutate: vi.fn(),
+      mutateAsync: create,
       isPending: true,
       reset: vi.fn(),
     } as never);
@@ -1069,7 +1110,7 @@ describe('/upstreams mutation pending UX', () => {
 
     dialog = screen.getByRole('dialog', { name: 'New upstream' });
     const creating = within(dialog).getByRole('button', {
-      name: 'Creating...',
+      name: 'Creating…',
     });
     expect(creating.hasAttribute('disabled')).toBe(true);
     expect(creating.getAttribute('aria-busy')).toBe('true');
@@ -1081,14 +1122,19 @@ describe('/upstreams mutation pending UX', () => {
     ).toBe(true);
     expect(
       within(dialog)
+        .getByRole('button', { name: 'Cancel' })
+        .hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      within(dialog)
         .getByRole('button', { name: 'Close dialog' })
         .hasAttribute('disabled'),
     ).toBe(true);
     for (const control of [
       ...within(dialog).getAllByRole('textbox'),
-      within(dialog).getByPlaceholderText('sk-ant-...'),
+      within(dialog).getByPlaceholderText(/sk-ant-/),
       within(dialog).getByRole('button', {
-        name: 'Use environment variable instead',
+        name: 'Read the key from a server environment variable instead',
       }),
     ]) {
       expect(control.hasAttribute('disabled')).toBe(true);
@@ -1096,142 +1142,125 @@ describe('/upstreams mutation pending UX', () => {
 
     fireEvent.click(creating);
     fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
-    expect(mutate).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
   });
 
-  test('OAuth final save retains its account context and submits once while pending', () => {
-    vi.spyOn(window, 'open').mockImplementation(() => null);
-    const startDraft = vi.fn(
-      (
-        _vars: undefined,
-        options?: {
-          onSuccess?: (result: {
-            authorize_url: string;
-            state_token: string;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          authorize_url: 'https://example.com/authorize',
-          state_token: 'draft-state-token',
-        });
-      },
+  test('OAuth final save retains its account context and submits once while pending', async () => {
+    const startDraft = vi.fn().mockResolvedValue({
+      authorize_url: OAUTH_AUTHORIZE_URL,
+      state_token: OAUTH_STATE_TOKEN,
+    });
+    const completeDraft = vi.fn().mockResolvedValue(
+      draftCompleteResult({
+        organization_metadata: subscriptionMetadataResponse(upstream, {
+          email: 'alice@example.com',
+          uuid: 'acct-a',
+        }).organization_metadata,
+      }),
     );
-    const completeDraft = vi.fn(
-      (
-        _body: unknown,
-        options?: {
-          onSuccess?: (result: {
-            state_token: string;
-            suggested_name: string;
-            subscription_metadata: null;
-            organization_metadata: null;
-            mode: string;
-            long_lived_fallback: boolean;
-            fallback_reason: 'rejected' | 'clamped' | null;
-            granted_expires_in_secs: number | null;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          state_token: 'draft-state-token',
-          suggested_name: 'OAuth Account',
-          subscription_metadata: null,
-          organization_metadata: null,
-          mode: 'long_lived_365d',
-          long_lived_fallback: false,
-          fallback_reason: null,
-          granted_expires_in_secs: null,
-        });
-      },
-    );
-    const createFromDraft = vi.fn();
+    const createFromDraft = vi.fn().mockReturnValue(inFlight());
     vi.mocked(queries.useStartOauthDraft).mockReturnValue({
-      mutate: startDraft,
+      mutate: vi.fn(),
+      mutateAsync: startDraft,
       isPending: false,
       reset: vi.fn(),
     } as never);
     vi.mocked(queries.useCompleteOauthDraft).mockReturnValue({
-      mutate: completeDraft,
+      mutate: vi.fn(),
+      mutateAsync: completeDraft,
       isPending: false,
       reset: vi.fn(),
     } as never);
     vi.mocked(queries.useCreateFromOauthDraft).mockReturnValue({
-      mutate: createFromDraft,
+      mutate: vi.fn(),
+      mutateAsync: createFromDraft,
       isPending: false,
       reset: vi.fn(),
     } as never);
 
     const view = renderRoute();
-    fireEvent.click(screen.getByRole('button', { name: 'New' }));
+    const dialog = await openCreateToSignIn();
 
-    let dialog = screen.getByRole('dialog', { name: 'New upstream' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    fireEvent.click(
-      within(dialog).getByRole('button', {
-        name: 'Authorize with Anthropic',
-      }),
-    );
-    fireEvent.change(within(dialog).getByPlaceholderText('paste code...'), {
-      target: { value: 'oauth-code' },
+    // The authorize URL is the sign-in link's target — never rendered as raw
+    // text — and the draft's state token stays internal.
+    const signIn = within(dialog).getByRole('link', {
+      name: 'Sign in with Claude',
     });
+    expect(signIn.getAttribute('href')).toBe(OAUTH_AUTHORIZE_URL);
+    expect(within(dialog).queryByText(OAUTH_AUTHORIZE_URL)).toBeNull();
+    expect(within(dialog).queryByText(OAUTH_STATE_TOKEN)).toBeNull();
+
+    // A pasted code that parses cleanly submits without pressing Connect.
     fireEvent.click(
-      within(dialog).getByRole('button', {
-        name: 'Verify and fetch account',
-      }),
+      within(dialog).getByRole('button', { name: 'I already have a code' }),
     );
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    const input = within(dialog).getByRole('textbox', {
+      name: 'Authorization code',
+    });
+    fireEvent.paste(input, {
+      clipboardData: { getData: () => OAUTH_CODE },
+    });
+    await within(dialog).findByText('Signed in');
 
     expect(startDraft).toHaveBeenCalledTimes(1);
-    // The draft-start request carries no mode: cc-lb always requests the
-    // long-lived grant and decides the outcome itself.
-    const draftVars = startDraft.mock.calls[0]?.[0] as unknown;
-    expect(draftVars).toBeUndefined();
+    expect(startDraft).toHaveBeenCalledWith();
     expect(completeDraft).toHaveBeenCalledTimes(1);
-    expect(createFromDraft).toHaveBeenCalledTimes(1);
-    expect(createFromDraft).toHaveBeenCalledWith(
-      {
-        state_token: 'draft-state-token',
-        name: 'OAuth Account',
-      },
-      expect.anything(),
+    expect(completeDraft).toHaveBeenCalledWith({
+      state_token: OAUTH_STATE_TOKEN,
+      code: OAUTH_CODE,
+    });
+
+    // The finish step keeps the exchanged account visible alongside the name.
+    expect(within(dialog).getByText('alice@example.com')).toBeDefined();
+    const nameInput = within(dialog).getByRole('textbox', {
+      name: /Upstream name/,
+    }) as HTMLInputElement;
+    expect(nameInput.value).toBe('OAuth Account');
+    fireEvent.change(nameInput, { target: { value: 'Renamed OAuth' } });
+
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Add upstream' }),
     );
+    expect(createFromDraft).toHaveBeenCalledTimes(1);
+    // The edited name wins over the suggested one; the draft token travels.
+    expect(createFromDraft).toHaveBeenCalledWith({
+      state_token: OAUTH_STATE_TOKEN,
+      name: 'Renamed OAuth',
+    });
 
     vi.mocked(queries.useCreateFromOauthDraft).mockReturnValue({
-      mutate: createFromDraft,
+      mutate: vi.fn(),
+      mutateAsync: createFromDraft,
       isPending: true,
       reset: vi.fn(),
     } as never);
     view.rerender(routeElement());
 
-    dialog = screen.getByRole('dialog', { name: 'New upstream' });
-    expect(within(dialog).getByText('Account Preview')).toBeDefined();
-    const saving = within(dialog).getByRole('button', { name: 'Saving...' });
-    expect(saving.hasAttribute('disabled')).toBe(true);
-    expect(saving.getAttribute('aria-busy')).toBe('true');
-    expect(saving.querySelector('svg.animate-spin')).not.toBeNull();
-    expect(
-      within(dialog)
-        .getByRole('button', { name: 'Back' })
-        .hasAttribute('disabled'),
-    ).toBe(true);
+    // The account card stays rendered while the save is in flight.
+    expect(within(dialog).getByText('alice@example.com')).toBeDefined();
+    const adding = within(dialog).getByRole('button', { name: 'Adding…' });
+    expect(adding.hasAttribute('disabled')).toBe(true);
+    expect(adding.getAttribute('aria-busy')).toBe('true');
+    expect(adding.querySelector('svg.animate-spin')).not.toBeNull();
     expect(
       within(dialog)
         .getByRole('button', { name: 'Close dialog' })
         .hasAttribute('disabled'),
     ).toBe(true);
-    expect(within(dialog).getByRole('textbox').hasAttribute('disabled')).toBe(
-      true,
-    );
+    expect(
+      within(dialog)
+        .getByRole('textbox', { name: /Upstream name/ })
+        .hasAttribute('disabled'),
+    ).toBe(true);
 
-    fireEvent.click(saving);
+    fireEvent.click(adding);
     fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
     expect(createFromDraft).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
   });
 
-  test('toggle pending shows the requested progress and prevents a second change', () => {
+  test('toggle asks for confirmation, then shows progress and prevents a second change', () => {
     const mutate = vi.fn();
     vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue({
       mutate,
@@ -1243,6 +1272,16 @@ describe('/upstreams mutation pending UX', () => {
     const view = renderRoute();
     const toggle = screen.getByRole('switch', { name: 'Enabled' });
     fireEvent.click(toggle);
+
+    // The switch alone never changes the pool: it opens a confirmation that
+    // names the impact, including the warm-up side effect.
+    expect(mutate).not.toHaveBeenCalled();
+    const confirm = screen.getByRole('alertdialog', {
+      name: 'Disable upstream?',
+    });
+    expect(confirm.textContent).toContain('will stop receiving requests.');
+    expect(confirm.textContent).toContain('Warm-up is turned off too.');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Disable' }));
 
     expect(mutate).toHaveBeenCalledTimes(1);
     expect(mutate).toHaveBeenCalledWith(
@@ -1264,7 +1303,7 @@ describe('/upstreams mutation pending UX', () => {
 
     const pendingToggle = screen.getByRole('switch', { name: 'Enabled' });
     expect(pendingToggle.hasAttribute('disabled')).toBe(true);
-    const status = screen.getByTestId('upstream-enabled-pending');
+    const status = screen.getByTestId('detail-enabled-pending');
     expect(status.getAttribute('role')).toBe('status');
     expect(status.textContent).toContain('Disabling...');
     expect(status.querySelector('svg.animate-spin')).not.toBeNull();
@@ -1273,7 +1312,7 @@ describe('/upstreams mutation pending UX', () => {
     expect(mutate).toHaveBeenCalledTimes(1);
   });
 
-  test('OAuth start shows progress and completion locks the authorization modal', () => {
+  test('OAuth start shows progress and completion locks the authorization modal', async () => {
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
       data: {
         upstream_id: upstream.id,
@@ -1291,20 +1330,38 @@ describe('/upstreams mutation pending UX', () => {
       isPending: false,
       isPlaceholderData: false,
     } as never);
-    const start = vi.fn();
-    const complete = vi.fn();
+    // The session auto-starts when the dialog opens, so deferred promises let
+    // the test observe the in-flight phases deterministically.
+    const startResolution = Promise.withResolvers<{
+      authorize_url: string;
+      state_token: string;
+      revision: number;
+    }>();
+    const completeResolution = Promise.withResolvers<{
+      upstream_id: string;
+      expires_at_unix_secs: number;
+      access_token_fingerprint: string;
+      mode: string;
+      long_lived_fallback: boolean;
+      fallback_reason: null;
+      granted_expires_in_secs: null;
+    }>();
+    const start = vi.fn().mockReturnValue(startResolution.promise);
+    const complete = vi.fn().mockReturnValue(completeResolution.promise);
     vi.mocked(queries.useOAuthStart).mockReturnValue({
-      mutate: start,
+      mutate: vi.fn(),
+      mutateAsync: start,
       isPending: false,
       reset: vi.fn(),
     } as never);
     vi.mocked(queries.useOAuthComplete).mockReturnValue({
-      mutate: complete,
+      mutate: vi.fn(),
+      mutateAsync: complete,
       isPending: false,
       reset: vi.fn(),
     } as never);
 
-    const view = renderRoute();
+    renderRoute();
 
     // The reconnect notice is the prominent entry point; the OAuth card keeps
     // its own Connect button, so scope the click to the notice's status role.
@@ -1316,122 +1373,99 @@ describe('/upstreams mutation pending UX', () => {
       within(reconnectNotice).getByRole('button', { name: 'Connect' }),
     );
 
-    // Connect only opens the modal; the start mutation fires from the
-    // Generate button, so its pending state lives there.
-    let dialog = screen.getByRole('dialog', {
-      name: 'OAuth Authorization',
+    // First connection for this upstream, so the dialog says Connect.
+    const dialog = screen.getByRole('dialog', {
+      name: 'Connect OAuth Primary',
     });
-    expect(
-      within(dialog).getByRole('button', {
-        name: 'Generate authorization URL',
-      }),
-    ).toBeDefined();
-    expect(start).not.toHaveBeenCalled();
-
-    vi.mocked(queries.useOAuthStart).mockReturnValue({
-      mutate: start,
-      isPending: true,
-      reset: vi.fn(),
-    } as never);
-    view.rerender(routeElement());
-
-    const starting = within(dialog).getByRole('button', {
-      name: 'Starting...',
-    });
-    expect(starting.hasAttribute('disabled')).toBe(true);
-    expect(starting.getAttribute('aria-busy')).toBe('true');
-    expect(starting.querySelector('svg.animate-spin')).not.toBeNull();
-    expect(start).not.toHaveBeenCalled();
-
-    const startResolved = vi.fn(
-      (
-        _vars: { id: string },
-        options?: {
-          onSuccess?: (result: {
-            authorize_url: string;
-            state_token: string;
-            revision: number;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          authorize_url: 'https://example.com/authorize',
-          state_token: 'oauth-state-token',
-          revision: 2,
-        });
-      },
-    );
-    vi.mocked(queries.useOAuthStart).mockReturnValue({
-      mutate: startResolved,
-      isPending: false,
-      reset: vi.fn(),
-    } as never);
-    view.rerender(routeElement());
-    fireEvent.click(
-      within(dialog).getByRole('button', {
-        name: 'Generate authorization URL',
-      }),
-    );
-    expect(startResolved).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
     // The start request carries no mode: cc-lb always requests the
     // long-lived grant and decides the outcome itself.
-    expect(startResolved).toHaveBeenCalledWith(
-      { id: upstream.id },
-      expect.anything(),
-    );
-    expect(
-      within(dialog).getByText('https://example.com/authorize'),
-    ).toBeDefined();
+    expect(start).toHaveBeenCalledWith({ id: upstream.id });
 
-    fireEvent.change(within(dialog).getByPlaceholderText(/paste code/), {
-      target: { value: 'oauth-code' },
+    // While the draft is in flight the sign-in control shows progress and
+    // stays inert.
+    const preparing = within(dialog).getByText('Preparing sign-in…');
+    expect(preparing.querySelector('svg.animate-spin')).not.toBeNull();
+    expect(preparing.closest('a')).toBeNull();
+    expect(
+      within(dialog).queryByRole('link', { name: 'Sign in with Claude' }),
+    ).toBeNull();
+
+    await act(async () => {
+      startResolution.resolve({
+        authorize_url: OAUTH_AUTHORIZE_URL,
+        state_token: OAUTH_STATE_TOKEN,
+        revision: 2,
+      });
     });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+
+    const signIn = within(dialog).getByRole('link', {
+      name: 'Sign in with Claude',
+    });
+    expect(signIn.getAttribute('href')).toBe(OAUTH_AUTHORIZE_URL);
+    expect(signIn.getAttribute('target')).toBe('_blank');
+    expect(within(dialog).queryByText(OAUTH_AUTHORIZE_URL)).toBeNull();
+    expect(within(dialog).queryByText(OAUTH_STATE_TOKEN)).toBeNull();
+
+    // Typing a code (not pasting) waits for the Connect click.
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'I already have a code' }),
+    );
+    const codeInput = within(dialog).getByRole('textbox', {
+      name: 'Authorization code',
+    });
+    fireEvent.change(codeInput, { target: { value: OAUTH_CODE } });
+    expect(complete).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Connect' }));
     expect(complete).toHaveBeenCalledTimes(1);
-    expect(complete).toHaveBeenCalledWith(
-      {
-        id: upstream.id,
-        state_token: 'oauth-state-token',
-        code: 'oauth-code',
-      },
-      expect.anything(),
-    );
-
-    vi.mocked(queries.useOAuthComplete).mockReturnValue({
-      mutate: complete,
-      isPending: true,
-      reset: vi.fn(),
-    } as never);
-    view.rerender(routeElement());
-
-    dialog = screen.getByRole('dialog', { name: 'OAuth Authorization' });
-    const completing = within(dialog).getByRole('button', {
-      name: 'Completing...',
+    expect(complete).toHaveBeenCalledWith({
+      id: upstream.id,
+      state_token: OAUTH_STATE_TOKEN,
+      code: OAUTH_CODE,
     });
-    expect(completing.hasAttribute('disabled')).toBe(true);
-    expect(completing.getAttribute('aria-busy')).toBe('true');
-    expect(completing.querySelector('svg.animate-spin')).not.toBeNull();
-    expect(
-      within(dialog)
-        .getByRole('button', { name: 'Cancel' })
-        .hasAttribute('disabled'),
-    ).toBe(true);
-    expect(
-      within(dialog)
-        .getByRole('button', { name: 'Close dialog' })
-        .hasAttribute('disabled'),
-    ).toBe(true);
-    expect(within(dialog).getByRole('textbox').hasAttribute('disabled')).toBe(
-      true,
-    );
 
-    fireEvent.click(completing);
+    // While the exchange is in flight the dialog locks: input, Connect, Back
+    // and Cancel all stay disabled and dismissal is blocked.
+    const connecting = within(dialog).getByRole('button', {
+      name: 'Connecting…',
+    });
+    expect(connecting.hasAttribute('disabled')).toBe(true);
+    expect(connecting.getAttribute('aria-busy')).toBe('true');
+    expect(connecting.querySelector('svg.animate-spin')).not.toBeNull();
+    for (const control of [
+      within(dialog).getByRole('textbox', { name: 'Authorization code' }),
+      within(dialog).getByRole('button', { name: 'Back' }),
+      within(dialog).getByRole('button', { name: 'Cancel' }),
+      within(dialog).getByRole('button', { name: 'Close dialog' }),
+    ]) {
+      expect(control.hasAttribute('disabled')).toBe(true);
+    }
+
+    fireEvent.click(connecting);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
     expect(complete).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole('dialog', { name: 'OAuth Authorization' }),
+      screen.getByRole('dialog', { name: 'Connect OAuth Primary' }),
     ).toBeDefined();
+
+    // A successful exchange keeps the dialog open on its success step.
+    await act(async () => {
+      completeResolution.resolve({
+        upstream_id: upstream.id,
+        expires_at_unix_secs: NOW_UNIX_SECS + 3_600,
+        access_token_fingerprint: 'fp',
+        mode: 'long_lived_365d',
+        long_lived_fallback: false,
+        fallback_reason: null,
+        granted_expires_in_secs: null,
+      });
+    });
+    await within(dialog).findByText('Connected');
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDefined();
+    expect(api.triggerSubscriptionMetadataRefresh).toHaveBeenCalledWith(
+      upstream.id,
+    );
   });
 
   test('delete confirmation remains open and locked until deletion succeeds', () => {
@@ -1512,7 +1546,7 @@ describe('/upstreams OAuth card', () => {
     renderRoute();
 
     const expiry = screen.getByTestId('oauth-refresh-token-expiry');
-    expect(expiry.textContent).toContain('expires');
+    expect(expiry.textContent).toContain('Expires');
     expect(expiry.textContent).toMatch(/in \d+ (weeks?|months?|days?)/);
   });
 
@@ -1593,7 +1627,7 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(screen.queryByTestId('oauth-refresh-token-expiry')).toBeNull();
     const refreshRow = screen.getByText('Refresh token')
       .parentElement as HTMLElement;
-    expect(within(refreshRow).getByText('stored, unused')).toBeDefined();
+    expect(within(refreshRow).getByText('Stored, unused')).toBeDefined();
   });
 
   test('keeps the healthy Long-lived badge when the stored refresh-token clock has lapsed', () => {
@@ -1647,113 +1681,74 @@ describe('/upstreams long-lived OAuth credential', () => {
     ).toBeDefined();
   });
 
-  test('shows the fallback notice only when the long-lived exchange fell back', () => {
-    vi.spyOn(window, 'open').mockImplementation(() => null);
-    let fallbackReason: 'rejected' | 'clamped' | null = null;
-    let grantedExpiresInSecs: number | null = null;
-    const startDraft = vi.fn(
-      (
-        _vars: undefined,
-        options?: {
-          onSuccess?: (result: {
-            authorize_url: string;
-            state_token: string;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          authorize_url: 'https://example.com/authorize',
-          state_token: 'draft-state-token',
-        });
-      },
-    );
-    const completeDraft = vi.fn(
-      (
-        _body: unknown,
-        options?: {
-          onSuccess?: (result: {
-            state_token: string;
-            suggested_name: string;
-            subscription_metadata: null;
-            organization_metadata: null;
-            mode: string;
-            long_lived_fallback: boolean;
-            fallback_reason: 'rejected' | 'clamped' | null;
-            granted_expires_in_secs: number | null;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          state_token: 'draft-state-token',
-          suggested_name: 'OAuth Account',
-          subscription_metadata: null,
-          organization_metadata: null,
-          mode: fallbackReason ? 'refreshing' : 'long_lived_365d',
+  test('shows the fallback notice only when the long-lived exchange fell back', async () => {
+    let fallbackReason: 'rejected' | 'clamped' | 'scope_rejected' | null = null;
+    const startDraft = vi.fn().mockResolvedValue({
+      authorize_url: OAUTH_AUTHORIZE_URL,
+      state_token: OAUTH_STATE_TOKEN,
+    });
+    const completeDraft = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        draftCompleteResult({
+          mode: fallbackReason === null ? 'long_lived_365d' : 'refreshing',
           long_lived_fallback: fallbackReason !== null,
           fallback_reason: fallbackReason,
-          granted_expires_in_secs: grantedExpiresInSecs,
-        });
-      },
+        }),
+      ),
     );
     vi.mocked(queries.useStartOauthDraft).mockReturnValue({
-      mutate: startDraft,
+      mutate: vi.fn(),
+      mutateAsync: startDraft,
       isPending: false,
       reset: vi.fn(),
     } as never);
     vi.mocked(queries.useCompleteOauthDraft).mockReturnValue({
-      mutate: completeDraft,
+      mutate: vi.fn(),
+      mutateAsync: completeDraft,
       isPending: false,
       reset: vi.fn(),
     } as never);
 
-    const completeHandshake = () => {
-      fireEvent.click(screen.getByRole('button', { name: 'New' }));
-      const dialog = screen.getByRole('dialog', { name: 'New upstream' });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-      fireEvent.click(
-        within(dialog).getByRole('button', {
-          name: 'Authorize with Anthropic',
-        }),
-      );
-      fireEvent.change(within(dialog).getByPlaceholderText('paste code...'), {
-        target: { value: 'oauth-code' },
-      });
-      fireEvent.click(
-        within(dialog).getByRole('button', {
-          name: 'Verify and fetch account',
-        }),
-      );
+    const completeHandshake = async () => {
+      const dialog = await openCreateToSignIn();
+      pasteStep(dialog);
+      await within(dialog).findByText('Signed in');
       return dialog;
     };
 
+    // A real year-long grant gets no fallback styling.
     renderRoute();
-    let dialog = completeHandshake();
-    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    let dialog = await completeHandshake();
     expect(
       within(dialog).queryByTestId('oauth-long-lived-fallback-notice'),
     ).toBeNull();
+    expect(within(dialog).getByText(/Long-lived connection/)).toBeDefined();
 
     cleanup();
     fallbackReason = 'rejected';
     renderRoute();
-    dialog = completeHandshake();
-    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    dialog = await completeHandshake();
     let notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
     expect(notice.getAttribute('data-reason')).toBe('rejected');
+    expect(notice.textContent).toContain('Connected — renews automatically');
 
     cleanup();
     fallbackReason = 'clamped';
-    grantedExpiresInSecs = 28_800;
     renderRoute();
-    dialog = completeHandshake();
-    expect(within(dialog).getByText('Account Preview')).toBeDefined();
+    dialog = await completeHandshake();
     notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
     expect(notice.getAttribute('data-reason')).toBe('clamped');
-    // The granted lifetime (28800s = 8 hours) is surfaced to the operator.
-    expect(notice.textContent).toContain('expires in 8 hours');
+
+    cleanup();
+    fallbackReason = 'scope_rejected';
+    renderRoute();
+    dialog = await completeHandshake();
+    notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
+    expect(notice.getAttribute('data-reason')).toBe('scope_rejected');
+    expect(notice.textContent).toContain('oauth.anthropic.scopes');
   });
 
-  test('shows the fallback notice when a reconnect falls back to a refreshing credential', () => {
+  test('shows the fallback notice when a reconnect falls back to a refreshing credential', async () => {
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
       data: {
         upstream_id: upstream.id,
@@ -1771,69 +1766,34 @@ describe('/upstreams long-lived OAuth credential', () => {
       isPending: false,
       isPlaceholderData: false,
     } as never);
-    const start = vi.fn(
-      (
-        _vars: { id: string },
-        options?: {
-          onSuccess?: (result: {
-            authorize_url: string;
-            state_token: string;
-            revision: number;
-          }) => void;
-        },
-      ) => {
-        options?.onSuccess?.({
-          authorize_url: 'https://example.com/authorize',
-          state_token: 'oauth-state-token',
-          revision: 2,
-        });
-      },
-    );
-    let completeData:
-      | {
-          upstream_id: string;
-          expires_at_unix_secs: number;
-          access_token_fingerprint: string;
-          mode: string;
-          long_lived_fallback: boolean;
-          fallback_reason: 'rejected' | 'clamped' | null;
-          granted_expires_in_secs: number | null;
-        }
-      | undefined;
-    const complete = vi.fn(
-      (
-        _vars: { id: string; state_token: string; code: string },
-        options?: { onSuccess?: (result: typeof completeData) => void },
-      ) => {
-        completeData = {
-          upstream_id: upstream.id,
-          expires_at_unix_secs: NOW_UNIX_SECS + 3600,
-          access_token_fingerprint: 'fp',
-          mode: 'refreshing',
-          long_lived_fallback: true,
-          fallback_reason: 'clamped',
-          granted_expires_in_secs: 3600,
-        };
-        options?.onSuccess?.(completeData);
-      },
-    );
+    const start = vi.fn().mockResolvedValue({
+      authorize_url: OAUTH_AUTHORIZE_URL,
+      state_token: OAUTH_STATE_TOKEN,
+      revision: 2,
+    });
+    const complete = vi.fn().mockResolvedValue({
+      upstream_id: upstream.id,
+      expires_at_unix_secs: NOW_UNIX_SECS + 3_600,
+      access_token_fingerprint: 'fp',
+      mode: 'refreshing',
+      long_lived_fallback: true,
+      fallback_reason: 'clamped',
+      granted_expires_in_secs: 3_600,
+    });
     vi.mocked(queries.useOAuthStart).mockReturnValue({
-      mutate: start,
+      mutate: vi.fn(),
+      mutateAsync: start,
       isPending: false,
       reset: vi.fn(),
     } as never);
-    vi.mocked(queries.useOAuthComplete).mockImplementation(
-      () =>
-        ({
-          mutate: complete,
-          isPending: false,
-          isSuccess: completeData !== undefined,
-          data: completeData,
-          reset: vi.fn(),
-        }) as never,
-    );
+    vi.mocked(queries.useOAuthComplete).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: complete,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
 
-    const view = renderRoute();
+    renderRoute();
 
     // The reconnect notice is the prominent entry point, same as the
     // pending-UX test above.
@@ -1842,29 +1802,22 @@ describe('/upstreams long-lived OAuth credential', () => {
       within(reconnectNotice).getByRole('button', { name: 'Connect' }),
     );
 
-    const dialog = screen.getByRole('dialog', { name: 'OAuth Authorization' });
-    fireEvent.click(
-      within(dialog).getByRole('button', {
-        name: 'Generate authorization URL',
-      }),
-    );
-    fireEvent.change(within(dialog).getByPlaceholderText(/paste code/), {
-      target: { value: 'oauth-code' },
+    const dialog = screen.getByRole('dialog', {
+      name: 'Connect OAuth Primary',
     });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Complete' }));
+    await within(dialog).findByText(/Link valid for/);
+    pasteStep(dialog);
     expect(complete).toHaveBeenCalledTimes(1);
 
-    view.rerender(routeElement());
-
-    // The modal stays open so the operator sees the demotion, and the notice
-    // reports the same reason the wizard would.
-    const openDialog = screen.getByRole('dialog', {
-      name: 'OAuth Authorization',
-    });
-    const notice = within(openDialog).getByTestId(
+    // The modal stays open on the success step so the operator sees the
+    // demotion, and the notice reports the exchange's own reason.
+    const notice = await within(dialog).findByTestId(
       'oauth-long-lived-fallback-notice',
     );
     expect(notice.getAttribute('data-reason')).toBe('clamped');
+    expect(notice.textContent).toContain('Connected — renews automatically');
+    expect(within(dialog).getByText('Connected')).toBeDefined();
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDefined();
   });
 
   test('nudges reconnect on the access-token clock and ignores the stored refresh token', () => {
@@ -1890,7 +1843,8 @@ describe('/upstreams long-lived OAuth credential', () => {
     expect(
       within(notice).getByRole('button', { name: 'Reconnect' }),
     ).toBeDefined();
-    expect(screen.getByText('Login expiring')).toBeDefined();
+    // The notice owns the problem; the credential section does not repeat it.
+    expect(screen.queryByText('Login expiring')).toBeNull();
 
     cleanup();
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
@@ -1910,5 +1864,174 @@ describe('/upstreams long-lived OAuth credential', () => {
     // uses it.
     expect(screen.queryByRole('status')).toBeNull();
     expect(screen.getByText('Long-lived')).toBeDefined();
+  });
+});
+
+describe('/upstreams reconnect identity check', () => {
+  const ALICE = {
+    email: 'alice@example.com',
+    uuid: 'acct-alice',
+    name: 'Alice',
+  };
+  const BOB = { email: 'bob@example.com', uuid: 'acct-bob', name: 'Bob' };
+
+  // A fully healthy, connected OAuth upstream: the card offers Reconnect and
+  // no nudge notice is in the way.
+  function mockConnectedUpstream(account: { email: string; uuid: string }) {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(oauthStatusData(upstream, 'user:inference')),
+    );
+    vi.mocked(queries.useUpstreamSubscriptionMetadata).mockReturnValue(
+      queryResult(subscriptionMetadataResponse(upstream, account)),
+    );
+  }
+
+  function mockReconnectExchange() {
+    const start = vi.fn().mockResolvedValue({
+      authorize_url: OAUTH_AUTHORIZE_URL,
+      state_token: OAUTH_STATE_TOKEN,
+      revision: 2,
+    });
+    const complete = vi.fn().mockResolvedValue({
+      upstream_id: upstream.id,
+      expires_at_unix_secs: NOW_UNIX_SECS + 3_600,
+      access_token_fingerprint: 'fp',
+      mode: 'long_lived_365d',
+      long_lived_fallback: false,
+      fallback_reason: null,
+      granted_expires_in_secs: null,
+    });
+    vi.mocked(queries.useOAuthStart).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: start,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useOAuthComplete).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: complete,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    return { start, complete };
+  }
+
+  async function openReconnectDialog() {
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+    const dialog = screen.getByRole('dialog', {
+      name: 'Reconnect OAuth Primary',
+    });
+    await within(dialog).findByText(/Link valid for/);
+    return dialog;
+  }
+
+  test('warns when the reconnect signs in a different Claude account', async () => {
+    mockConnectedUpstream(ALICE);
+    mockReconnectExchange();
+    vi.mocked(api.triggerSubscriptionMetadataRefresh).mockResolvedValue(
+      subscriptionMetadataResponse(upstream, BOB),
+    );
+
+    renderRoute();
+    const dialog = await openReconnectDialog();
+
+    // The previously connected account is shown up front as the expected
+    // sign-in.
+    expect(within(dialog).getByText('Sign in as')).toBeDefined();
+    expect(within(dialog).getByText(ALICE.email)).toBeDefined();
+
+    pasteStep(dialog);
+    await within(dialog).findByText('Reconnected');
+
+    expect(api.triggerSubscriptionMetadataRefresh).toHaveBeenCalledWith(
+      upstream.id,
+    );
+    expect(
+      within(dialog).getByText(/A different Claude account was connected/),
+    ).toBeDefined();
+    expect(within(dialog).getByText('Before')).toBeDefined();
+    expect(within(dialog).getByText(ALICE.email)).toBeDefined();
+    expect(within(dialog).getByText('Now')).toBeDefined();
+    expect(within(dialog).getByText(BOB.email)).toBeDefined();
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDefined();
+  });
+
+  test('confirms when the reconnect returns the same Claude account', async () => {
+    mockConnectedUpstream(ALICE);
+    mockReconnectExchange();
+    vi.mocked(api.triggerSubscriptionMetadataRefresh).mockResolvedValue(
+      subscriptionMetadataResponse(upstream, ALICE),
+    );
+
+    renderRoute();
+    const dialog = await openReconnectDialog();
+    pasteStep(dialog);
+    await within(dialog).findByText('Reconnected');
+
+    expect(within(dialog).getByText(/Same account as before/)).toBeDefined();
+    expect(within(dialog).queryByText(/different Claude account/)).toBeNull();
+    // The success step hands the operator a focused Done button (jsdom cannot
+    // exercise the dialog's focus trap, so presence is asserted here).
+    expect(within(dialog).getByRole('button', { name: 'Done' })).toBeDefined();
+  });
+});
+
+describe('/upstreams connect draft expiry', () => {
+  test('an expired sign-in session replaces saving with a fresh sign-in', async () => {
+    // The session timer ticks on setInterval, so fake it too for this test.
+    vi.useFakeTimers({
+      toFake: ['Date', 'setInterval', 'clearInterval'],
+      now: new Date('2026-06-18T00:00:01.000Z'),
+    });
+    const startDraft = vi.fn().mockResolvedValue({
+      authorize_url: OAUTH_AUTHORIZE_URL,
+      state_token: OAUTH_STATE_TOKEN,
+    });
+    const completeDraft = vi.fn().mockResolvedValue(draftCompleteResult());
+    vi.mocked(queries.useStartOauthDraft).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: startDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+    vi.mocked(queries.useCompleteOauthDraft).mockReturnValue({
+      mutate: vi.fn(),
+      mutateAsync: completeDraft,
+      isPending: false,
+      reset: vi.fn(),
+    } as never);
+
+    renderRoute();
+    const dialog = await openCreateToSignIn();
+    pasteStep(dialog);
+    await within(dialog).findByText('Signed in');
+    expect(
+      within(dialog).getByRole('button', { name: 'Add upstream' }),
+    ).toBeDefined();
+
+    // The exchange's 15-minute window lapses while the operator hesitates.
+    await act(async () => {
+      vi.advanceTimersByTime(16 * 60 * 1_000);
+    });
+
+    const expired = within(dialog).getByRole('alert');
+    expect(expired.textContent).toContain(
+      'This sign-in expired before the upstream was added.',
+    );
+    expect(
+      within(dialog).queryByRole('button', { name: 'Add upstream' }),
+    ).toBeNull();
+
+    // Recovering is one click: restart the session and land back on Sign in.
+    fireEvent.click(
+      within(dialog).getByRole('button', { name: 'Sign in again' }),
+    );
+    await within(dialog).findByText(/Link valid for/);
+    expect(
+      within(dialog).getByRole('link', { name: 'Sign in with Claude' }),
+    ).toBeDefined();
+    expect(
+      within(dialog).queryByRole('textbox', { name: 'Authorization code' }),
+    ).toBeNull();
   });
 });

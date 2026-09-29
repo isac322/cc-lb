@@ -1,9 +1,9 @@
 # ADR 0008 — Use-it-or-lose-it subscription quota urgency
 
-- Status: Accepted
+- Status: Accepted (five-hour pressure amended by ADR 0013 weekly pace gate)
 - Date: 2026-07-09
 - Ships with: pending
-- Supersedes: ADR 0003's base-window quota urgency formula and capacity multiplier inside base quota urgency. ADR 0010 keeps this pressure formula but makes base-tier warning signals ranking-neutral; the existing `0.20` warning multiplier remains active only in `Overage`.
+- Supersedes: the retired WRH subscription-preference base-window quota urgency formula and capacity multiplier inside base quota urgency. ADR 0010 keeps this pressure formula but makes base-tier warning signals ranking-neutral; the existing `0.20` warning multiplier remains active only in `Overage`.
 
 ## Context
 
@@ -151,19 +151,15 @@ Field semantics are tier- and era-specific:
 Add nullable chosen-upstream columns to `request_events_v1` for aggregate queries:
 
 ```text
-quota_urgency_5h
-quota_urgency_7d
-quota_urgency_combined
 quota_weight_factor
 quota_cache_multiplier
-quota_warning_multiplier
 quota_effective_weight
 quota_uniform_fallback
 ```
 
-These columns store only the selected/kept upstream's values. The payload JSON remains the source for every losing candidate's values. Existing rows are not backfilled.
+These columns store only the selected/kept upstream's values. The payload JSON remains the source for the urgency values (`quota_urgency_5h`, `quota_urgency_7d`, `quota_urgency_combined`), `quota_warning_multiplier`, and every losing candidate's values. Existing rows are not backfilled.
 
-Selection for these columns is by the terminally resolved/kept upstream ID. If that ID does not match a `CandidateUrgency` entry in the subscription-preference trace, all eight chosen-upstream columns remain `NULL`; values must never be copied from the formula winner or the first candidate as a fallback.
+Selection for these columns is by the terminally resolved/kept upstream ID. If that ID does not match a `CandidateUrgency` entry in the subscription-preference trace, all four chosen-upstream columns remain `NULL`; values must never be copied from the formula winner or the first candidate as a fallback.
 
 Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL` columns and a nullable checked `INTEGER` (`0`/`1`) for `quota_uniform_fallback`. Add Postgres migration `0078_request_events_quota_urgency.sql` with nullable `DOUBLE PRECISION` columns and nullable `BOOLEAN`. Neither migration may set non-null defaults or execute an `UPDATE` backfill.
 

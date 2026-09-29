@@ -1,4 +1,4 @@
-use crate::event_bus::RequestEventUpdate;
+use cc_lb_control::event_bus::RequestEventUpdate;
 
 use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
@@ -10,7 +10,7 @@ pub struct InlinePartialNotify<'a> {
 
 #[derive(Deserialize)]
 pub struct NotifyOrigin {
-    pub producer_url: Option<String>,
+    pub producer_url: String,
 }
 
 #[derive(Serialize)]

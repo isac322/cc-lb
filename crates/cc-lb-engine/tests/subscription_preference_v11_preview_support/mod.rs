@@ -4,20 +4,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, SubscriptionQuotaCacheLike};
 use cc_lb_domain::{
-    Principal, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
-    UpstreamCandidate,
-};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::lifecycle::{PreviewRouteInput, PreviewRouteOutcome};
-use cc_lb_engine::{
-    Body, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
-    SubscriptionQuotaCacheLike, UpstreamDispatch,
-};
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
+use cc_lb_engine::{Body, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::SubscriptionQuotaSample;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_upstream::SignedRequest;
@@ -26,7 +20,7 @@ use parking_lot::Mutex as ParkingMutex;
 use url::Url;
 use uuid::Uuid;
 
-use super::common::{RecordingHook, TestAuthn, TestState, collect_body, messages_request};
+use super::common::{TestAuthn, TestState, collect_body, messages_request};
 
 const PRINCIPAL: &str = "principal-test";
 const NOW: u64 = 1_700_000_000;
@@ -164,8 +158,6 @@ fn lifecycle(
     let authn = TestAuthn::with_principal_view(state, Arc::clone(&principal_view));
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(NoopRouter))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(principal_view)
         .subscription_quota_cache(cache)
         .subscription_quota_routing_max_staleness_secs(60)
@@ -193,11 +185,7 @@ fn principal_view() -> Arc<PrincipalView> {
         Vec::new(),
         HashMap::from([(
             PRINCIPAL.to_owned(),
-            (
-                Some(pipeline),
-                ObservabilityHooksCache::Inherit,
-                DialectCache::Inherit,
-            ),
+            (Some(pipeline), DialectCache::Inherit),
         )]),
     ))
 }
@@ -361,20 +349,5 @@ impl UpstreamDispatch for RecordingDispatch {
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))
             .expect("test response builds"))
-    }
-}
-
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "preview uses terminal strategy".to_owned(),
-        })
     }
 }

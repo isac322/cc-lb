@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use crate::common;
 
 use std::collections::HashMap;
@@ -7,18 +5,15 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{
-    InternalErrorKind, InternalErrorStage, Principal, TerminalStrategy, Upstream, UpstreamCandidate,
+    InternalErrorKind, InternalErrorStage, Principal, TerminalStrategy, UpstreamCandidate,
 };
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig};
-use cc_lb_routing::{
-    FilterError, FilterOutput, FilterPlugin, RouteDecision, RouteError, RouterPlugin,
-};
+use cc_lb_engine::{Lifecycle, LifecycleConfig};
+use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_api::{MetaStore, RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_sqlite::SqliteStorage;
 use http::StatusCode;
 use serde_json::Value;
@@ -35,7 +30,6 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = Uuid::from_u128(1);
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(sqlite_storage(&dir, "rfc-0002-live-qa.sqlite").await?);
@@ -46,10 +40,6 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
             calls: Arc::clone(&filter_calls),
         })],
         vec![upstream_record(upstream_id, "first")],
-        Arc::new(RecordingRouter {
-            calls: Arc::clone(&router_calls),
-            selected_id: Some(upstream_id),
-        }),
         state.clone(),
     )
     .with_event_bus(test_bus.bus_arc());
@@ -72,7 +62,6 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
         filter_calls.lock().expect("filter calls lock").as_slice(),
         &[vec![upstream_id]]
     );
-    assert!(router_calls.lock().expect("router calls lock").is_empty());
 
     let events = wait_for_events(storage.as_ref(), 1).await?;
     let event = &events[0];
@@ -95,10 +84,10 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
 async fn wait_for_events(
     storage: &dyn RequestEventStore,
     expected: usize,
-) -> Result<Vec<cc_lb_storage_api::types::RequestEvent>, Box<dyn std::error::Error>> {
+) -> Result<Vec<cc_lb_storage_api::RequestEvent>, Box<dyn std::error::Error>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
-        let events = RequestEventStore::query_request_events(storage, 0, u64::MAX, 10).await?;
+        let events = common::stored_request_events(storage).await?;
         if events.len() >= expected {
             return Ok(events);
         }
@@ -115,16 +104,15 @@ async fn sqlite_storage(
 ) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
     let storage =
-        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
             .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }
 
 fn lifecycle_with_pipeline(
     filters: Vec<Arc<dyn FilterPlugin>>,
     records: Vec<UpstreamRecord>,
-    router: Arc<dyn RouterPlugin>,
     state: TestState,
 ) -> Lifecycle {
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view(filters));
@@ -134,8 +122,6 @@ fn lifecycle_with_pipeline(
     });
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(router)
-        .global_observability_hooks(Vec::new())
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();
@@ -144,7 +130,7 @@ fn lifecycle_with_pipeline(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
@@ -157,11 +143,7 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     Arc::new(PrincipalView::for_tests(
         "principal-test",
@@ -192,34 +174,6 @@ fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
-    }
-}
-
-struct RecordingRouter {
-    calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
-    selected_id: Option<Uuid>,
-}
-
-impl RouterPlugin for RecordingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.calls.lock().expect("router calls lock").push(
-            candidates
-                .iter()
-                .map(|candidate| candidate.upstream_id)
-                .collect(),
-        );
-        Ok(RouteDecision {
-            upstream_id: self.selected_id,
-            upstream: Upstream::AnthropicDirect { base_url: None },
-            dialect: Arc::new(common::PassthroughDialect {
-                base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            }),
-        })
     }
 }
 

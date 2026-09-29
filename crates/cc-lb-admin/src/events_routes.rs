@@ -2,21 +2,21 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 
 use axum::{
-    Json, Router,
+    Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
     },
-    routing::get,
 };
-use cc_lb_control::BusReceiver;
-use cc_lb_control::record_dashboard_sse_lagged;
 use cc_lb_request_log::{RequestEventKind, RequestEventPartial, RequestEventUpdate};
 use cc_lb_storage_api::{RequestEvent, model_filter_matches};
 use serde_json::json;
-use tokio::{sync::broadcast::error::RecvError, time::Duration};
+use tokio::{
+    sync::broadcast::{self, error::RecvError},
+    time::Duration,
+};
 
 use crate::AdminState;
 use crate::events::{
@@ -44,13 +44,6 @@ impl ResetReason {
             Self::StorageError => "storage_error",
         }
     }
-}
-
-pub fn router() -> Router<AdminState> {
-    Router::new()
-        .route("/admin/events/recent", get(handle_recent_events))
-        .route("/admin/events/delta", get(handle_events_delta))
-        .route("/admin/events/stream", get(handle_events_stream))
 }
 
 pub async fn handle_recent_events(
@@ -216,7 +209,8 @@ pub async fn handle_events_stream(
                             }
                         }
                         BusUpdateResult::Lagged(skipped) => {
-                            record_dashboard_sse_lagged(skipped);
+                            metrics::counter!("cc_lb_dropped_events_total", "reason" => "sse_lagged")
+                                .increment(skipped);
                             yield Ok::<Event, Infallible>(reset_event(stream_state.last_finalized_cursor, ResetReason::BusLagged));
                             return;
                         }
@@ -265,17 +259,13 @@ enum BusUpdateResult {
     Closed,
 }
 
-async fn recv_bus_update(receiver: &mut BusReceiver) -> BusUpdateResult {
-    match receiver {
-        BusReceiver::InMemory(rx) => match rx.recv().await {
-            Ok(update) => BusUpdateResult::Update(update),
-            Err(RecvError::Lagged(skipped)) => BusUpdateResult::Lagged(skipped),
-            Err(RecvError::Closed) => BusUpdateResult::Closed,
-        },
-        BusReceiver::Remote(rx) => match rx.recv().await {
-            Some(update) => BusUpdateResult::Update(update),
-            None => BusUpdateResult::Closed,
-        },
+async fn recv_bus_update(
+    receiver: &mut broadcast::Receiver<RequestEventUpdate>,
+) -> BusUpdateResult {
+    match receiver.recv().await {
+        Ok(update) => BusUpdateResult::Update(update),
+        Err(RecvError::Lagged(skipped)) => BusUpdateResult::Lagged(skipped),
+        Err(RecvError::Closed) => BusUpdateResult::Closed,
     }
 }
 
@@ -437,11 +427,6 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
     {
         return false;
     }
-    if let Some(upstream) = filters.upstream
-        && partial.upstream != Some(upstream)
-    {
-        return false;
-    }
     if let Some(upstream_id) = filters.upstream_id
         && partial.upstream_id != Some(upstream_id)
     {
@@ -452,6 +437,9 @@ fn apply_filters_to_partial(partial: &RequestEventPartial, filters: &StreamFilte
             .upstream_response_status
             .is_some_and(|status| status_class.matches(status))
     {
+        return false;
+    }
+    if filters.errors_only && partial.upstream_response_status.unwrap_or(0) < 400 {
         return false;
     }
     if let Some(event_kind) = filters.event_kind
@@ -494,12 +482,7 @@ fn heartbeat_event(cursor: u64) -> Event {
 }
 
 fn final_event_id(event: &RequestEvent) -> Option<&str> {
-    let request_id_fallback = if event.request_id.is_empty() {
-        None
-    } else {
-        Some(event.request_id.as_str())
-    };
-    event.event_id.as_deref().or(request_id_fallback)
+    event.event_id.as_deref()
 }
 
 fn record_sse_reconnect() {
@@ -513,9 +496,6 @@ fn record_sse_backfill(rows: usize) {
 
 fn record_sse_reset(reason: ResetReason) {
     metrics::counter!("sse_reset_events_sent_total", "reason" => reason.as_str()).increment(1);
-    if reason == ResetReason::BusLagged {
-        metrics::counter!("sse_lagged_resync_total").increment(1);
-    }
 }
 
 fn record_sse_malformed_frame() {

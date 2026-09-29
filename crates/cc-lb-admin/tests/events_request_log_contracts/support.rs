@@ -145,7 +145,7 @@ pub async fn stream_response(state: AdminState) -> axum::response::Response {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/admin/events/stream?model={MODEL}"))
+                .uri(format!("/admin/v1/events/stream?model={MODEL}"))
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .body(Body::empty())
                 .expect("stream request builds"),

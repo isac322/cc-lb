@@ -1,6 +1,4 @@
-use crate::common::{
-    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, messages_request,
-};
+use crate::common::{TestAuthn, TestState, collect_body, messages_request};
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -10,10 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig, ProxyError,
-    TestClock, UpstreamDispatch,
-};
+use cc_lb_clock::TestClock;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
     UpstreamAffinityKind, UpstreamAffinityStore,
@@ -326,10 +323,6 @@ fn lifecycle_with_config_and_clock(
     let authn = TestAuthn::new(TestState::default());
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://unused.local/").expect("test URL parses"),
-        }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();

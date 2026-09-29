@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// Why the request terminated.
 ///
-/// String `error_code` mirrors the pre-existing catalog in
-/// `cc_lb_engine::terminal_observer::error_codes` so downstream consumers keep
-/// working during the shadow-mode migration.
+/// String `error_code` values come from the engine's
+/// `terminal_observer::error_codes` catalog.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

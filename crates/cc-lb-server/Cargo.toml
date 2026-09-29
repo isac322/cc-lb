@@ -14,8 +14,6 @@ sqlite = [
     "cc-lb-scheduler/sqlite",
     "cc-lb-admin/sqlite",
     "cc-lb-engine/sqlite",
-    "cc-lb-signer-anthropic-oauth/sqlite",
-    "dep:apalis-codec",
     "dep:apalis-sqlite",
     "dep:cc-lb-scheduler",
     "dep:scheduler-sqlx",
@@ -25,7 +23,6 @@ postgres = [
     "cc-lb-scheduler/postgres",
     "cc-lb-admin/postgres",
     "cc-lb-engine/postgres",
-    "cc-lb-signer-anthropic-oauth/postgres",
     "dep:apalis-postgres",
     "dep:cc-lb-scheduler",
     "dep:cc-lb-storage-postgres",
@@ -44,7 +41,6 @@ path = "tests/all.rs"
 
 [dependencies]
 anyhow.workspace = true
-apalis-codec = { version = "0.1.0-rc.9", optional = true, default-features = false, features = ["json"] }
 apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
 apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
 async-stream.workspace = true
@@ -61,12 +57,12 @@ cc-lb-request-log.workspace = true
 cc-lb-control = { path = "../cc-lb-control" }
 cc-lb-domain.workspace = true
 cc-lb-engine = { path = "../cc-lb-engine" }
-cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-lifecycle.workspace = true
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-wire = { workspace = true, features = ["std"] }
 cc-lb-routing.workspace = true
+cc-lb-quota.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-wasmtime = { workspace = true }
 cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
@@ -81,13 +77,10 @@ futures-util = "0.3"
 http.workspace = true
 http-body-util.workspace = true
 hex.workspace = true
-hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
-oauth2.workspace = true
 parking_lot = "0.12"
-nix = { version = "0.31.3", features = ["resource"] }
 rand = { version = "0.10", features = ["std", "std_rng"] }
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 reqwest.workspace = true
@@ -105,7 +98,7 @@ sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
 tikv-jemallocator = "0.7"
-tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower = { workspace = true, features = ["timeout", "util"] }
@@ -121,7 +114,8 @@ base64.workspace = true
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
-jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
+nix = { version = "0.31.3", features = ["resource"] }
 sqlx.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 wat.workspace = true

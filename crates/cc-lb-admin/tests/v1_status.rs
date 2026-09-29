@@ -136,9 +136,6 @@ async fn export_round_trips_through_stable_key_ordering() {
             order: 1000,
             wasm_registry_id: registry.id,
             config: json!({ "zeta": 1, "alpha": { "zeta": true, "alpha": false } }),
-            sse_per_event: true,
-            batched_events_per_flush: 3,
-            batched_flush_ms: 250,
         })
         .await
         .unwrap();
@@ -229,10 +226,8 @@ async fn seed_registry(
                 sha256: [seed; 32],
                 bytes: vec![seed; seed as usize],
                 size_bytes: seed as u64,
-                parse_validated_at_unix_secs: 1_800_000_000,
             },
             WasmRegistryEntryInput {
-                schema_hash: None,
                 name: name.to_owned(),
                 version: None,
                 original_filename: format!("{name}.wasm"),

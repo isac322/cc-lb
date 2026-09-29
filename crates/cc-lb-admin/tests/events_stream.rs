@@ -26,7 +26,7 @@ async fn events_stream_opens_with_sse_content_type() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/events/stream")
+                .uri("/admin/v1/events/stream")
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -56,7 +56,7 @@ async fn events_stream_first_byte_is_connected_comment() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/events/stream")
+                .uri("/admin/v1/events/stream")
                 .header("Authorization", format!("Bearer {TOKEN}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -77,7 +77,7 @@ async fn events_stream_first_byte_is_connected_comment() {
 #[tokio::test]
 async fn events_stream_503_when_storage_missing() {
     let state = config_admin_common::test_state_without_storage();
-    let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/stream", None).await;
+    let (status, _, _) = authed_bytes(app(state), "GET", "/admin/v1/events/stream", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
@@ -174,7 +174,7 @@ async fn events_stream_applies_combined_filters_to_partial_updates() {
 
     let response = stream_response_uri(
         state,
-        "/admin/events/stream?principal_id=principal-target&thread_id=thread-target&model=MODEL-tar&status_class=4xx&source_kind=renewal",
+        "/admin/v1/events/stream?principal_id=principal-target&thread_id=thread-target&model=MODEL-tar&status_class=4xx&source_kind=renewal",
         Some("0"),
     )
     .await;
@@ -233,8 +233,12 @@ async fn events_stream_applies_event_kind_filter_to_partial_updates() {
     let mut state = test_state(Config::default(), Some(storage));
     state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
 
-    let response =
-        stream_response_uri(state, "/admin/events/stream?event_kind=messages", Some("0")).await;
+    let response = stream_response_uri(
+        state,
+        "/admin/v1/events/stream?event_kind=messages",
+        Some("0"),
+    )
+    .await;
     let mut body = response.into_body();
     let mut text = String::new();
     while !text.contains("event: cursor") {
@@ -342,8 +346,12 @@ async fn events_stream_backfill_applies_event_kind_filter() {
     }
 
     let state = test_state(Config::default(), Some(storage));
-    let response =
-        stream_response_uri(state, "/admin/events/stream?event_kind=renewal", Some("0")).await;
+    let response = stream_response_uri(
+        state,
+        "/admin/v1/events/stream?event_kind=renewal",
+        Some("0"),
+    )
+    .await;
     let body = response.into_body();
     let text = read_sse_frames(body, 3).await;
     assert_eq!(message_request_ids(&text), ["req-renewal"]);
@@ -357,7 +365,7 @@ async fn events_stream_reconnect_with_last_event_id_still_requires_auth() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/events/stream")
+                .uri("/admin/v1/events/stream")
                 .header("Last-Event-ID", "1")
                 .body(Body::empty())
                 .unwrap(),
@@ -373,7 +381,7 @@ async fn stream_response(
 ) -> axum::response::Response {
     let mut request = Request::builder()
         .method("GET")
-        .uri("/admin/events/stream")
+        .uri("/admin/v1/events/stream")
         .header("Authorization", format!("Bearer {TOKEN}"));
     if let Some(last_event_id) = last_event_id {
         request = request.header("Last-Event-ID", last_event_id);

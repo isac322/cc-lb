@@ -28,16 +28,6 @@ function usageBucket(
     virtual_cost_micros: 0,
     latency_ms_sum: 0,
     latency_count: 0,
-    proxy_setup_ms_sum: 0,
-    proxy_setup_ms_count: 0,
-    shape_ms_sum: 0,
-    shape_ms_count: 0,
-    sign_ms_sum: 0,
-    sign_ms_count: 0,
-    upstream_ttfb_ms_sum: 0,
-    upstream_ttfb_ms_count: 0,
-    upstream_body_ms_sum: 0,
-    upstream_body_ms_count: 0,
     ...overrides,
   };
 }
@@ -89,11 +79,6 @@ const summary: DashboardSummaryResponse = {
     error_rate: 24 / 540,
     virtual_cost_micros: 7_500_000,
     avg_latency_ms: 200,
-    avg_proxy_setup_ms: 0,
-    avg_shape_ms: 0,
-    avg_sign_ms: 0,
-    avg_upstream_ttfb_ms: 0,
-    avg_upstream_body_ms: 0,
   },
   sparkline: { buckets: summaryBuckets },
   observed: true,
@@ -150,7 +135,7 @@ const principalUsage: DashboardUsageResponse = {
  * spread, and only the cache composition is rewritten: prompt tokens still add
  * up to 1,800 across the window and to 800 in the hovered middle bucket, so the
  * tokens tile keeps its value and its `Tokens 900` row while the ratios move —
- * `Avg cache miss` 44.4% → 70.0% (1,260/1,800) and the hovered bucket 50.0% →
+ * `Cache miss` 44.4% → 70.0% (1,260/1,800) and the hovered bucket 50.0% →
  * 80.0% (640/800). The last bucket was idle and reported no ratio at all; now it
  * reports one too, so the cache-miss line stops breaking mid-chart.
  */
@@ -261,8 +246,8 @@ type KpiChartId = (typeof KPI_CHART_IDS)[number];
 const TOKENS_VALUE_ROW = 'Tokens 900';
 const CACHE_MISS_ROW = 'Cache miss 50.0%';
 const REFRESHED_CACHE_MISS_ROW = 'Cache miss 80.0%';
-const CACHE_MISS_AVG = 'Avg cache miss 44.4%';
-const REFRESHED_CACHE_MISS_AVG = 'Avg cache miss 70.0%';
+const CACHE_MISS_AVG = 'Cache miss 44.4%';
+const REFRESHED_CACHE_MISS_AVG = 'Cache miss 70.0%';
 const PRINCIPAL_CACHE_HIT = '83.3% cache hit';
 const REFRESHED_PRINCIPAL_CACHE_HIT = '40.0% cache hit';
 
@@ -471,18 +456,18 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
     if (pathname === '/admin/v1/upstreams') {
       return json(200, { upstreams: [] });
     }
-    if (pathname === '/admin/dashboard/summary') {
+    if (pathname === '/admin/v1/dashboard/summary') {
       summaryRanges.push(url.searchParams.get('range') ?? '');
       return json(200, servedSummary);
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       principalUsageRanges.push(url.searchParams.get('range') ?? '');
       principalUsageProjections.push(
         url.searchParams.get('projection') ?? 'full',
       );
       return json(200, servedPrincipalUsage);
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 200 });
     }
     if (pathname === '/admin/v1/subscription-quotas/aggregate') {
@@ -501,7 +486,7 @@ async function installOverviewFixtures(page: Page): Promise<OverviewFixtures> {
       );
       return json(200, servedPoolHistory);
     }
-    if (pathname === '/admin/events/stream') {
+    if (pathname === '/admin/v1/events/stream') {
       return route.fulfill({
         status: 200,
         headers: {

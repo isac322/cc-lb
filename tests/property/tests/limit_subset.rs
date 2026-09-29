@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use cc_lb_engine::api_keys::types::{Limit, LimitKind};
+use cc_lb_control::api_keys::types::{Limit, LimitKind};
 use proptest::prelude::*;
 
 fn arb_limit_kind() -> impl Strategy<Value = LimitKind> {

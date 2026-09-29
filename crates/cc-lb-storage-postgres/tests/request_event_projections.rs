@@ -3,8 +3,8 @@ use std::{str::FromStr, sync::Arc};
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    BackendKind, CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore,
-    RequestEvent, RequestEventProjections, RequestEventStore,
+    CacheKeepaliveDecisionRow, CacheKeepaliveTurnRow, CacheTtl, MetaStore, RequestEvent,
+    RequestEventProjections, RequestEventStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -34,7 +34,7 @@ fn request_event_projections_postgres() {
 async fn run_projection_cases(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
-    storage.initialize(BackendKind::Postgres).await?;
+    storage.initialize().await?;
 
     append_with_projections_commits_all_rows_when_valid(&storage).await?;
     append_with_projections_rolls_back_all_rows_when_turn_insert_fails(&storage).await?;
@@ -47,6 +47,7 @@ async fn run_projection_cases(url: &str) -> Result<()> {
 fn event(event_id: &str, source_ref_id: &str) -> RequestEvent {
     RequestEvent {
         ts: 1_800_000_000,
+        ts_ms: Some(1_800_000_000_000),
         request_id: format!("renewal-request-{event_id}"),
         source_kind: Some("renewal".to_owned()),
         source_ref_id: Some(source_ref_id.to_owned()),

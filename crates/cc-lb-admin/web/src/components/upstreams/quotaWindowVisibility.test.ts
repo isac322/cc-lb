@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
 import {
   isObservedAtOrAfter,
-  QUOTA_WINDOW_ORDER,
   selectQuotaCardSnapshots,
   selectVisibleGraphWindows,
   seriesHasInRangeData,
@@ -223,156 +222,84 @@ describe('selectVisibleGraphWindows', () => {
 });
 
 describe('selectQuotaCardSnapshots', () => {
-  const nowUnixSecs = 1_000_000;
+  const windowsOf = (latestWindows: QuotaSnapshot[]) =>
+    selectQuotaCardSnapshots({ latestWindows }).map((s) => s.window);
 
   it('includes unobserved 5h and 7d placeholders', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: '5h',
-          state: 'unobserved',
-          observed_at_unix_millis: null,
-        }),
-        snap({
-          window: '7d',
-          state: 'unobserved',
-          observed_at_unix_millis: null,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['5h', '7d']);
+    expect(
+      windowsOf([
+        snap({ window: '5h', state: 'unobserved' }),
+        snap({ window: '7d', state: 'unobserved' }),
+      ]),
+    ).toEqual(['5h', '7d']);
   });
 
-  it('hides a proven-absent shared window', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
+  it('hides proven-absent windows', () => {
+    expect(
+      windowsOf([
         snap({ window: '5h' }),
-        snap({
-          window: '7d',
-          state: 'absent',
-          utilization: null,
-          observed_at_unix_millis: nowUnixSecs * 1000,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['5h']);
+        snap({ window: '7d', state: 'absent', utilization: null }),
+        snap({ window: '7d_sonnet', state: 'absent', utilization: null }),
+      ]),
+    ).toEqual(['5h']);
   });
 
-  it('includes a model window observed within the last week', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: '7d_sonnet',
-          observed_at_unix_millis: (nowUnixSecs - 172_800) * 1000,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['7d_sonnet']);
-  });
-
-  it('drops a model window observed more than a week ago', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: '7d_sonnet',
-          observed_at_unix_millis: (nowUnixSecs - 691_200) * 1000,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual([]);
-  });
-
-  it('keeps a model window observed exactly one week ago (inclusive)', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: '7d_fable',
-          observed_at_unix_millis: (nowUnixSecs - 604_800) * 1000,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['7d_fable']);
-  });
-
-  it('drops an unobserved model window', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: '7d_opus',
-          state: 'unobserved',
-          observed_at_unix_millis: null,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual([]);
-  });
-
-  it('includes enabled non-missing overage regardless of observed age', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
-        snap({
-          window: 'overage',
-          extra_usage_enabled: true,
-          observed_at_unix_millis: null,
-        }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['overage']);
-  });
-
-  it('drops an unobserved overage card', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
+  it('drops unobserved windows other than 5h and 7d', () => {
+    expect(
+      windowsOf([
+        snap({ window: '7d_opus', state: 'unobserved' }),
+        snap({ window: 'unified', state: 'unobserved' }),
         snap({
           window: 'overage',
           state: 'unobserved',
           extra_usage_enabled: true,
         }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual([]);
+      ]),
+    ).toEqual([]);
   });
 
-  it('includes a disabled overage that has a monthly limit set', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
+  it('keeps a legacy model window however old its last reading is', () => {
+    expect(
+      windowsOf([
+        snap({ window: '7d_sonnet', state: 'stale', age_secs: 30 * 86_400 }),
+      ]),
+    ).toEqual(['7d_sonnet']);
+  });
+
+  it('shows extra usage once its switch is reported, enabled or off', () => {
+    expect(
+      windowsOf([snap({ window: 'overage', extra_usage_enabled: false })]),
+    ).toEqual(['overage']);
+    expect(
+      windowsOf([
         snap({
           window: 'overage',
           extra_usage_enabled: false,
           extra_usage_monthly_limit: 5000,
-          observed_at_unix_millis: null,
         }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual(['overage']);
+      ]),
+    ).toEqual(['overage']);
+    expect(windowsOf([snap({ window: 'overage' })])).toEqual([]);
   });
 
-  it('orders cards by QUOTA_WINDOW_ORDER', () => {
-    const result = selectQuotaCardSnapshots({
-      latestWindows: [
+  it('lists every reported window in canonical order', () => {
+    expect(
+      windowsOf([
         snap({ window: 'overage', extra_usage_enabled: true }),
-        snap({
-          window: '7d_fable',
-          observed_at_unix_millis: (nowUnixSecs - 1000) * 1000,
-        }),
+        snap({ window: 'unified', utilization: null, status: 'allowed' }),
+        snap({ window: '7d_opus' }),
+        snap({ window: '7d_sonnet' }),
+        snap({ window: '7d_fable' }),
         snap({ window: '7d' }),
         snap({ window: '5h' }),
-      ],
-      nowUnixSecs,
-    });
-    expect(result.map((s) => s.window)).toEqual([
+      ]),
+    ).toEqual([
       '5h',
       '7d',
       '7d_fable',
+      '7d_sonnet',
+      '7d_opus',
+      'unified',
       'overage',
     ]);
   });
@@ -399,40 +326,5 @@ describe('range transitions', () => {
     expect(at(nowUnixSecs - 21600)).toEqual(['5h']); // 6h
     expect(at(nowUnixSecs - 86400)).toEqual(['5h']); // 24h
     expect(at(nowUnixSecs - 604800)).toEqual(['5h']); // 7d
-  });
-
-  it('drops a model card once its observation crosses the one-week cutoff', () => {
-    const observedAtUnixMillis = 1_000_000_000; // ms => 1_000_000 s
-    const latestWindows = [
-      snap({
-        window: '7d_opus',
-        observed_at_unix_millis: observedAtUnixMillis,
-      }),
-    ];
-
-    const before = selectQuotaCardSnapshots({
-      latestWindows,
-      nowUnixSecs: 1_000_000 + 604_800, // exactly one week later => inclusive keep
-    });
-    expect(before.map((s) => s.window)).toEqual(['7d_opus']);
-
-    const after = selectQuotaCardSnapshots({
-      latestWindows,
-      nowUnixSecs: 1_000_000 + 604_800 + 1, // one second past cutoff => drop
-    });
-    expect(after.map((s) => s.window)).toEqual([]);
-  });
-});
-
-describe('QUOTA_WINDOW_ORDER', () => {
-  it('lists the six detail windows in canonical order', () => {
-    expect(QUOTA_WINDOW_ORDER).toEqual([
-      '5h',
-      '7d',
-      '7d_sonnet',
-      '7d_opus',
-      '7d_fable',
-      'overage',
-    ]);
   });
 });

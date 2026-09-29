@@ -69,15 +69,11 @@ enum UploadAction {
 #[derive(Default)]
 struct UploadParts {
     bytes: Option<Vec<u8>>,
-    name: Option<String>,
     original_filename: Option<String>,
-    slot_kind: Option<String>,
     confirm_replacement: bool,
     replace_registry_id: Option<Uuid>,
     expected_revision: Option<u64>,
 }
-
-const SLOT_KIND_NAMES: &str = "filter|shape|observe";
 
 pub fn router() -> Router<AdminState> {
     let limiter = UploadRateLimitState::default();
@@ -250,43 +246,8 @@ async fn upload_wasm_inner(
         ))
     })?;
     validate_wasm_bytes(&bytes).map_err(Box::new)?;
-    let legacy_slot = parts
-        .slot_kind
-        .as_deref()
-        .map(parse_slot_kind)
-        .transpose()
-        .map_err(Box::new)?
-        .map(|(_, slot)| slot);
     let inspection = inspect_with_wasmtime(state, &bytes).await?;
-    let declared_slots = supported_slots_from_inspection(&inspection);
-    if let Some(slot) = legacy_slot
-        && !declared_slots.contains(&slot)
-    {
-        return Err(Box::new(
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "unsupported_slot",
-                    "plugin_name": inspection.metadata.name.as_str(),
-                    "slot": slot.as_str(),
-                })),
-            )
-                .into_response(),
-        ));
-    }
-    let inspected_schema_hash = inspection.primary_schema_hash();
-    if let Some(name) = &parts.name
-        && inspection.metadata.name != *name
-    {
-        return Err(Box::new(json_error(
-            StatusCode::BAD_REQUEST,
-            "identity_mismatch",
-            format!(
-                "multipart name `{name}` does not match `cc_lb.plugin.v1` metadata name `{}`",
-                inspection.metadata.name
-            ),
-        )));
-    }
+    let supported_slots = supported_slots_from_inspection(&inspection);
     let registry_name = inspection.metadata.name.clone();
     let original_filename = parts
         .original_filename
@@ -313,20 +274,14 @@ async fn upload_wasm_inner(
         .get_registry_entry_by_name(&registry_name)
         .await
         .map_err(|error| Box::new(storage_response(error)))?;
-    let supported_slots = match &existing_by_name {
-        Some(entry) if !entry.supported_slots.is_empty() => entry.supported_slots.clone(),
-        _ => declared_slots,
-    };
     let admin_id = admin_id(identity);
     let uploaded_at_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let blob = WasmBlob {
         sha256,
         size_bytes: bytes.len() as u64,
         bytes: bytes.clone(),
-        parse_validated_at_unix_secs: uploaded_at_unix_secs,
     };
     let entry_input = WasmRegistryEntryInput {
-        schema_hash: Some(inspected_schema_hash),
         name: registry_name.clone(),
         version: Some(inspection.metadata.version.clone()),
         original_filename: original_filename.clone(),
@@ -336,10 +291,10 @@ async fn upload_wasm_inner(
         description: inspection.metadata.description.clone(),
         usage: inspection.metadata.usage.clone(),
         hook_metadata: inspection.metadata.hooks.clone(),
-        supported_slots: supported_slots.clone(),
+        supported_slots,
     };
 
-    let (mut entry, status, action, idempotent, old_sha256_hex) = match existing_by_name {
+    let (entry, status, action, idempotent, old_sha256_hex) = match existing_by_name {
         Some(existing) if existing.sha256 == sha256 => {
             materialize_cache(state, &sha256_hex, &bytes)
                 .await
@@ -415,13 +370,6 @@ async fn upload_wasm_inner(
         }
     };
 
-    if idempotent && entry.supported_slots.is_empty() && !supported_slots.is_empty() {
-        storage
-            .update_supported_slots(entry.id, supported_slots.clone())
-            .await
-            .map_err(|error| Box::new(storage_response(error)))?;
-        entry.supported_slots = supported_slots;
-    }
     if let Some(old_sha256_hex) = old_sha256_hex {
         remove_cache_file(state, &old_sha256_hex).await;
     }
@@ -466,26 +414,8 @@ async fn read_upload_parts(mut multipart: Multipart) -> Result<UploadParts, Box<
                 }
                 parts.bytes = Some(data.to_vec());
             }
-            "name" => {
-                parts.name = Some(field.text().await.map_err(|error| {
-                    Box::new(json_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_multipart",
-                        error.to_string(),
-                    ))
-                })?);
-            }
             "original_filename" => {
                 parts.original_filename = Some(field.text().await.map_err(|error| {
-                    Box::new(json_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_multipart",
-                        error.to_string(),
-                    ))
-                })?);
-            }
-            "slot_kind" => {
-                parts.slot_kind = Some(field.text().await.map_err(|error| {
                     Box::new(json_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_multipart",
@@ -726,20 +656,6 @@ fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), Response> {
     Ok(())
 }
 
-#[allow(clippy::result_large_err)]
-fn parse_slot_kind(value: &str) -> Result<(HookKind, PluginSlotKind), Response> {
-    match value {
-        "filter" => Ok((HookKind::Filter, PluginSlotKind::Router)),
-        "shape" => Ok((HookKind::Shape, PluginSlotKind::Shape)),
-        "observe" => Ok((HookKind::Observe, PluginSlotKind::ObservabilityHook)),
-        other => Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_slot_kind",
-            format!("slot_kind must be one of {SLOT_KIND_NAMES}, got `{other}`"),
-        )),
-    }
-}
-
 async fn inspect_with_wasmtime(
     state: &AdminState,
     bytes: &[u8],
@@ -783,9 +699,6 @@ fn supported_slots_from_inspection(inspection: &ModuleInspection) -> Vec<PluginS
             }
             HookKind::Shape | HookKind::TransformResponse | HookKind::TransformSseEvent => {
                 slots.insert(PluginSlotKind::Shape);
-            }
-            HookKind::Observe => {
-                slots.insert(PluginSlotKind::ObservabilityHook);
             }
         }
     }
@@ -925,15 +838,4 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_slot_kind_rejects_response_transform_hooks() {
-        assert!(parse_slot_kind("transform_response").is_err());
-        assert!(parse_slot_kind("transform_sse_event").is_err());
-    }
 }

@@ -6,8 +6,8 @@ use tokio::task::JoinHandle;
 use super::cache::PartialRetentionCache;
 use super::metrics::{record_notify_dropped, record_notify_sent};
 use super::protocol::TruncatedPartialNotify;
-use crate::event_bus::RequestEventUpdate;
 use crate::metrics_labels::{NotifyDropReason, NotifySentOutcome};
+use cc_lb_control::event_bus::RequestEventUpdate;
 
 pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
 pub const PARTIAL_NOTIFY_MPSC_CAPACITY: usize = 1024;

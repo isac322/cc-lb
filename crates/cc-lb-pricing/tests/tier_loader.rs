@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_pricing::{LiteLlmLoader, PriceCatalog, TierRate, UsdPerMillion};
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -73,7 +73,9 @@ async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
     );
 
     // When the catalog is refreshed and parsed.
-    loader.refresh_once().await?;
+    let fetched = loader.fetch_and_fingerprint().await?;
+    loader.persist_snapshot(&fetched).await?;
+    loader.install_latest_local().await?;
     let snapshot = catalog.current();
     let pricing = snapshot
         .models
@@ -144,7 +146,9 @@ async fn refresh_applies_component_fallbacks_to_partial_tier_rates()
     );
 
     // When the catalog is refreshed and parsed.
-    loader.refresh_once().await?;
+    let fetched = loader.fetch_and_fingerprint().await?;
+    loader.persist_snapshot(&fetched).await?;
+    loader.install_latest_local().await?;
     let snapshot = catalog.current();
 
     // Then missing batch components use half base while other tiers use full base.
@@ -194,6 +198,6 @@ async fn sqlite_storage(
         Arc::new(cc_lb_clock::TestClock::new_at_secs(1_700_000_000)),
     )
     .await?;
-    storage.initialize(BackendKind::Sqlite).await?;
+    storage.initialize().await?;
     Ok(storage)
 }

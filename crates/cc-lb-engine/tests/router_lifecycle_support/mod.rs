@@ -1,32 +1,27 @@
-#![allow(dead_code, deprecated)]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_domain::Upstream;
 use cc_lb_engine::{
-    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle,
-    LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
-use cc_lb_observability::ObservabilityHook;
-use cc_lb_routing::{RouteDecision, RouteError, RouterPlugin};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
-    DialectError, DialectShapeContext, RetryDecision, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, UpstreamDialect,
+    RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability,
 };
 use http::{Response, StatusCode};
 use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::common::{RecordingHook, TestAuthn, TestState};
+use crate::common::{TestAuthn, TestState};
 
 #[derive(Clone, Default)]
 pub struct RouterLifecycleState {
-    pub router_candidates: Arc<Mutex<Vec<Vec<Uuid>>>>,
     pub router_choice_names: Arc<Mutex<Vec<String>>>,
     pub dispatched_urls: Arc<Mutex<Vec<String>>>,
     pub dispatch_calls: Arc<Mutex<u64>>,
@@ -34,11 +29,9 @@ pub struct RouterLifecycleState {
 
 pub fn lifecycle_with_records(
     records: Vec<UpstreamRecord>,
-    router: Arc<dyn RouterPlugin>,
     state: RouterLifecycleState,
 ) -> Lifecycle {
     let authn = TestAuthn::new(TestState::default());
-    let hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingHook::default());
     let dispatcher = Arc::new(RecordingDispatch {
         state: state.clone(),
     });
@@ -46,8 +39,6 @@ pub fn lifecycle_with_records(
         .signer_factory(Arc::new(RecordingSignerFactory {
             choices: state.router_choice_names.clone(),
         }))
-        .global_router(router)
-        .global_observability_hooks(vec![hook])
         .principal_view(authn.principal_view.clone())
         .upstream_records(records)
         .build();
@@ -56,34 +47,16 @@ pub fn lifecycle_with_records(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
 }
 
 pub fn api_key_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
-    upstream_record(
-        id,
-        name,
-        StorageUpstreamKind::AnthropicApiKey,
-        Some(Url::parse(base_url).expect("test base URL parses")),
-    )
-}
-
-pub fn anthropic_record(id: Uuid, name: &str) -> UpstreamRecord {
-    upstream_record(id, name, StorageUpstreamKind::AnthropicApiKey, None)
-}
-
-fn upstream_record(
-    id: Uuid,
-    name: &str,
-    kind: StorageUpstreamKind,
-    base_url: Option<Url>,
-) -> UpstreamRecord {
     UpstreamRecord {
         id,
         name: name.to_owned(),
-        kind,
-        base_url,
+        kind: StorageUpstreamKind::AnthropicApiKey,
+        base_url: Some(Url::parse(base_url).expect("test base URL parses")),
         enabled: true,
         oauth_credentials: None,
         oauth_never_refresh: false,
@@ -99,69 +72,6 @@ fn upstream_record(
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
     }
-}
-
-pub struct SelectingRouter {
-    pub selected_id: Option<Uuid>,
-    pub state: RouterLifecycleState,
-    pub plugin_upstream: Upstream,
-}
-
-impl RouterPlugin for SelectingRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.state
-            .router_candidates
-            .lock()
-            .expect("router candidates lock")
-            .push(
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.upstream_id)
-                    .collect(),
-            );
-        Ok(RouteDecision {
-            upstream_id: self.selected_id,
-            upstream: self.plugin_upstream.clone(),
-            dialect: Arc::new(UniversalDialect),
-        })
-    }
-}
-
-pub struct RejectingEmptyRouter {
-    pub state: RouterLifecycleState,
-}
-
-impl RouterPlugin for RejectingEmptyRouter {
-    fn route(
-        &self,
-        _ctx: &cc_lb_routing::RoutingContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        self.state
-            .router_candidates
-            .lock()
-            .expect("router candidates lock")
-            .push(
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.upstream_id)
-                    .collect(),
-            );
-        Err(RouteError::NoRoute {
-            reason: "no candidates".to_owned(),
-        })
-    }
-}
-
-pub fn plugin_upstream(base_url: &str) -> Upstream {
-    let _ = base_url;
-    Upstream::AnthropicDirect { base_url: None }
 }
 
 struct RecordingSignerFactory {
@@ -226,29 +136,5 @@ impl UpstreamDispatch for RecordingDispatch {
         )));
         *response.status_mut() = StatusCode::OK;
         Ok(response)
-    }
-}
-
-struct UniversalDialect;
-
-impl UpstreamDialect for UniversalDialect {
-    fn shape(
-        &self,
-        ctx: &DialectShapeContext,
-        upstream: &Upstream,
-        _principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        let mut url = match upstream {
-            Upstream::AnthropicDirect { .. } => Url::parse("https://api.anthropic.com/")?,
-        };
-        url.set_path(ctx.path.trim_start_matches('/'));
-        url.set_query(ctx.query.as_deref());
-        Ok(builder.shaped_request(
-            url,
-            ctx.method.clone(),
-            ctx.downstream_headers.clone(),
-            ctx.body_bytes.clone(),
-        ))
     }
 }

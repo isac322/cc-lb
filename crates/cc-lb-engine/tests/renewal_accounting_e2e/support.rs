@@ -5,21 +5,19 @@ mod renewal_fixture;
 
 use std::{collections::HashMap, sync::Arc};
 
-use cc_lb_engine::{
-    InMemoryBus,
-    api_keys::{
-        concurrent_guard::KeyConcurrencyManager,
-        limit_engine::{LimitEngine, Reservation},
-        principal_view::PrincipalView,
-    },
-    cache_keepalive::{
-        DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
-    },
+use cc_lb_control::InMemoryBus;
+use cc_lb_control::api_keys::{
+    concurrent_guard::KeyConcurrencyManager,
+    limit_engine::{LimitEngine, Reservation},
+    principal_view::PrincipalView,
+};
+use cc_lb_engine::cache_keepalive::{
+    DispatchOutcome, KeepaliveDispatchContext, KeepaliveDispatcher, RenewalFinalization,
 };
 use cc_lb_storage_api::{
     CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl,
-    types::{KeyStatus, Limit as StoredLimit, LimitKind, StoredApiKeyRecord},
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, KeyStatus,
+    Limit as StoredLimit, LimitKind, StoredApiKeyRecord,
 };
 
 use self::finalizer::{Completion, FinalizeInput, install_test_pricing, persist_finalization};
@@ -65,7 +63,7 @@ impl RenewalAccountingScenario {
             fixture,
             limit_engine: LimitEngine::new(
                 Arc::new(KeyConcurrencyManager::new()),
-                Arc::new(cc_lb_engine::SystemClock),
+                Arc::new(cc_lb_clock::SystemClock),
             ),
             principal_view,
             key_record,

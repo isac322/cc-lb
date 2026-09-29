@@ -106,7 +106,7 @@ async fn test_attempts_pagination_returns_next_cursor() {
 }
 
 #[tokio::test]
-async fn test_attempts_outcome_filter() {
+async fn test_attempts_status_filter() {
     let fixture = support::new_fixture().await;
     let expected = fixture
         .attempts
@@ -118,7 +118,7 @@ async fn test_attempts_outcome_filter() {
     let (status, body) = support::get_json(
         fixture.app,
         &format!(
-            "/admin/v1/upstreams/{}/warmup/attempts?limit=20&outcome=permanent_failure",
+            "/admin/v1/upstreams/{}/warmup/attempts?limit=20&status=permanent_failure",
             fixture.upstream_id
         ),
     )

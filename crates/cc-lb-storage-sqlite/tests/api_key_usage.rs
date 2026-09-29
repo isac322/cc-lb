@@ -3,7 +3,7 @@ use std::sync::Arc;
 use cc_lb_clock::TestClock;
 use cc_lb_storage_api::{
     ApiKeyUsage, ApiKeyUsageBucketDelta, ApiKeyUsageBucketKey, ApiKeyUsageBucketQuery,
-    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult, BackendKind, MetaStore,
+    ApiKeyUsageBucketStore, ApiKeyUsageFlush, ApiKeyUsageFlushResult, MetaStore,
 };
 use uuid::Uuid;
 
@@ -23,10 +23,7 @@ async fn storage() -> (
     let storage = cc_lb_storage_sqlite::open_sqlite(&database_url, clock.clone())
         .await
         .expect("open sqlite");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("migrate sqlite");
+    storage.initialize().await.expect("migrate sqlite");
     (directory, clock, storage)
 }
 

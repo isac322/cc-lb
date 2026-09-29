@@ -2,22 +2,17 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_engine::{ApplyStatus, DynamicView};
+use cc_lb_control::{ApplyStatus, DynamicView};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore, PlanTierStore,
+    MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore, PlanTierStore,
     PrincipalCreate, PrincipalKind, PrincipalStore, TierResolutionSource, UpstreamCreate,
     UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
-
-fn oauth_config() -> AnthropicOAuthConfig {
-    AnthropicOAuthConfig::default()
-}
 
 fn stores(storage: Arc<SqliteStorage>) -> Stores {
     Stores {
@@ -38,13 +33,10 @@ fn stores(storage: Arc<SqliteStorage>) -> Stores {
 async fn storage_fixture() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
-    let storage = open_sqlite(&database_url, Arc::new(cc_lb_engine::SystemClock))
+    let storage = open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("storage");
-    storage
-        .initialize(BackendKind::Sqlite)
-        .await
-        .expect("storage initialized");
+    storage.initialize().await.expect("storage initialized");
     let storage = Arc::new(storage);
     (dir, storage)
 }
@@ -147,7 +139,6 @@ async fn build(
 ) -> Arc<DynamicView> {
     build_dynamic_view(
         stores,
-        &oauth_config(),
         Arc::new(AeadService::from_master_key([1; 32])),
         None,
         current_generation,
@@ -155,10 +146,9 @@ async fn build(
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         30,
-        None,
-        None,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         1800,
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .await
     .expect("dynamic view builds")
@@ -176,11 +166,11 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     assert_eq!(view.generation, 1);
     assert_eq!(
         view.principal_view.principal_status("principal-a"),
-        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_control::api_keys::principal_view::PrincipalStatus::Active
     );
     assert_eq!(
         view.principal_view.principal_status("principal-b"),
-        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_control::api_keys::principal_view::PrincipalStatus::Active
     );
 
     PrincipalStore::soft_delete(&*storage, principal_a.id, principal_a.revision, 2)
@@ -191,11 +181,11 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
     assert_eq!(view.generation, 2);
     assert_eq!(
         view.principal_view.principal_status("principal-a"),
-        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Missing
+        cc_lb_control::api_keys::principal_view::PrincipalStatus::Missing
     );
     assert_eq!(
         view.principal_view.principal_status("principal-b"),
-        cc_lb_engine::api_keys::principal_view::PrincipalStatus::Active
+        cc_lb_control::api_keys::principal_view::PrincipalStatus::Active
     );
 }
 

@@ -79,9 +79,14 @@ export function formatCount(v: number | null | undefined): string {
   return EN_US_NUMBER.format(v === 0 ? 0 : v);
 }
 
+/**
+ * Requests per second: three significant digits, and `<0.01` below one per
+ * hundred seconds so a quiet window never reads as a long run of zeros.
+ */
 export function formatRate(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v) || v < 0) return DASH;
   if (v > Number.MAX_SAFE_INTEGER) return DASH;
+  if (v > 0 && v < 0.01) return '<0.01';
   return EN_US_RATE.format(v === 0 ? 0 : v);
 }
 
@@ -195,7 +200,8 @@ export function cacheMissRatio(components: TokenComponents): number | null {
 
 export interface SplitNumber {
   value: string;
-  unit: '' | 'k' | 'm' | 'b';
+  /** SI prefix — 'k' stays lowercase; 'M'/'B' never read as minutes/milli. */
+  unit: '' | 'k' | 'M' | 'B';
 }
 
 export function splitNum(v: number | null | undefined): SplitNumber {
@@ -212,21 +218,15 @@ export function splitNum(v: number | null | undefined): SplitNumber {
     return { value: roundCompact(v / 1_000), unit: 'k' };
   }
   if (v < 1_000_000_000) {
-    return { value: roundCompact(v / 1_000_000), unit: 'm' };
+    return { value: roundCompact(v / 1_000_000), unit: 'M' };
   }
-  return { value: roundCompact(v / 1_000_000_000), unit: 'b' };
+  return { value: roundCompact(v / 1_000_000_000), unit: 'B' };
 }
 
 function roundCompact(v: number): string {
   if (v >= 100) return Math.round(v).toString();
   if (v >= 10) return v.toFixed(1).replace(/\.0$/, '');
   return v.toFixed(1);
-}
-
-export function fmtUsdCompact(micros: number | null | undefined): string {
-  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
-  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
-  return formatUsdValue(micros / 1_000_000, 4);
 }
 
 export function fmtMsCompact(ms: number | null | undefined): {

@@ -1,7 +1,8 @@
 # Local dev infrastructure for cc-lb.
 # Brings up the postgres backend consumed by the RustRover run configs in `.run/`
 # (paired with `.run/cc-lb-local.toml`). Not used by CI — CI provisions postgres
-# via GitHub Actions `services:` in .github/workflows/postgres.yml.
+# via GitHub Actions `services:` in .github/workflows/ci.yml and
+# .github/workflows/postgres-scheduled.yml.
 
 services:
   postgres:

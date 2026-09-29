@@ -6,21 +6,21 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_engine::LifecycleConfig;
 use cc_lb_engine::cache_keepalive::{
     CacheKeepaliveCancelRequest, CacheKeepaliveEnqueueError, CacheKeepaliveEnqueueRequest,
     CacheKeepaliveEnqueuer, CacheKeepaliveNotTrackedRequest,
 };
-use cc_lb_engine::{DynamicViewBuilder, DynamicViewHolder, LifecycleConfig};
 use cc_lb_storage_api::CacheTtl;
 use http::{HeaderValue, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
-use common::{RecordingHook, TestAuthn, TestState, collect_body, managed_key_id, messages_request};
+use common::{TestAuthn, TestState, collect_body, managed_key_id, messages_request};
 use fixtures::{
-    AgentTurnDispatch, FirstRouter, RecordingSignerFactory, principal_with_keepalive, settle,
-    upstream_record,
+    AgentTurnDispatch, RecordingSignerFactory, principal_with_keepalive, settle, upstream_record,
 };
 
 #[derive(Default)]
@@ -83,8 +83,6 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
                 label: "initial",
                 calls: Arc::clone(&signer_log),
             }))
-            .global_router(Arc::new(FirstRouter))
-            .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
             .principal_view(Arc::clone(&principal_view))
             .upstream_records(vec![upstream.clone()])
             .build(),
@@ -94,7 +92,7 @@ async fn lifecycle_enqueues_durable_keepalive_through_current_proxy_path() {
         Arc::clone(&holder),
         Arc::new(AgentTurnDispatch),
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
 

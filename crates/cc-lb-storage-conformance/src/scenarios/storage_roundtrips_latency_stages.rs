@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_storage_api::{RequestEventStore as _, types::RequestEvent};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore as _};
 
-use crate::harness::{ConformanceBackend, with_conformance_fixture};
+use crate::harness::{ConformanceBackend, stored_request_events, with_conformance_fixture};
 
 pub async fn request_event_latency_stage_round_trip<B>(backend: Arc<B>) -> Result<()>
 where
@@ -11,11 +11,12 @@ where
     B::Storage: cc_lb_storage_api::Storage,
 {
     with_conformance_fixture(backend, |storage| async move {
-        // Event 1: all 9 new latency fields populated.
+        // Event 1: all 7 new latency fields populated.
         let event_full = RequestEvent {
             ts: 1_800_000_001,
             ts_ms: Some(1_800_000_001_000),
             request_id: "req_latency_full".to_owned(),
+            event_id: Some("req_latency_full".to_owned()),
             principal_id: Some("p_latency".to_owned()),
             key_id: Some("k_latency".to_owned()),
             model: Some("claude-sonnet-4-5".to_owned()),
@@ -28,8 +29,6 @@ where
             dns_ms: Some(12),
             connect_ms: Some(85),
             connection_reused: Some(false),
-            limit_reconcile_ms: Some(15),
-            observability_post_ms: Some(20),
             ..Default::default()
         };
 
@@ -38,6 +37,7 @@ where
             ts: 1_800_000_002,
             ts_ms: Some(1_800_000_002_000),
             request_id: "req_latency_warm".to_owned(),
+            event_id: Some("req_latency_warm".to_owned()),
             principal_id: Some("p_latency".to_owned()),
             key_id: Some("k_latency".to_owned()),
             model: Some("claude-sonnet-4-5".to_owned()),
@@ -50,16 +50,15 @@ where
             dns_ms: None,
             connect_ms: None,
             connection_reused: Some(true),
-            limit_reconcile_ms: Some(12),
-            observability_post_ms: Some(18),
             ..Default::default()
         };
 
-        // Event 3: all 9 new fields None — simulates an event written by an old version.
+        // Event 3: all 7 new fields None — simulates an event written by an old version.
         let event_none = RequestEvent {
             ts: 1_800_000_003,
             ts_ms: Some(1_800_000_003_000),
             request_id: "req_latency_none".to_owned(),
+            event_id: Some("req_latency_none".to_owned()),
             principal_id: Some("p_latency".to_owned()),
             key_id: Some("k_latency".to_owned()),
             model: Some("claude-sonnet-4-5".to_owned()),
@@ -72,8 +71,6 @@ where
             dns_ms: None,
             connect_ms: None,
             connection_reused: None,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             ..Default::default()
         };
 
@@ -81,9 +78,9 @@ where
         storage.append_request_event(&event_warm).await?;
         storage.append_request_event(&event_none).await?;
 
-        let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
+        let recent = stored_request_events(storage.as_ref()).await?;
 
-        // --- Event 1: assert all 9 fields survived the round-trip ---
+        // --- Event 1: assert all 7 fields survived the round-trip ---
         let got_full = recent
             .iter()
             .find(|e| e.request_id == "req_latency_full")
@@ -124,16 +121,6 @@ where
             "connection_reused mismatch: {:?}",
             got_full.connection_reused
         );
-        ensure!(
-            got_full.limit_reconcile_ms == Some(15),
-            "limit_reconcile_ms mismatch: {:?}",
-            got_full.limit_reconcile_ms
-        );
-        ensure!(
-            got_full.observability_post_ms == Some(20),
-            "observability_post_ms mismatch: {:?}",
-            got_full.observability_post_ms
-        );
 
         // --- Event 2: warm-pool — reused=true, dns/connect stay None (not Some(0)) ---
         let got_warm = recent
@@ -171,18 +158,8 @@ where
             "bulkhead_wait_ms mismatch: {:?}",
             got_warm.bulkhead_wait_ms
         );
-        ensure!(
-            got_warm.limit_reconcile_ms == Some(12),
-            "limit_reconcile_ms mismatch: {:?}",
-            got_warm.limit_reconcile_ms
-        );
-        ensure!(
-            got_warm.observability_post_ms == Some(18),
-            "observability_post_ms mismatch: {:?}",
-            got_warm.observability_post_ms
-        );
 
-        // --- Event 3: all 9 new fields must stay None after round-trip ---
+        // --- Event 3: all 7 new fields must stay None after round-trip ---
         let got_none = recent
             .iter()
             .find(|e| e.request_id == "req_latency_none")
@@ -222,16 +199,6 @@ where
             got_none.connection_reused.is_none(),
             "connection_reused must be None: {:?}",
             got_none.connection_reused
-        );
-        ensure!(
-            got_none.limit_reconcile_ms.is_none(),
-            "limit_reconcile_ms must be None: {:?}",
-            got_none.limit_reconcile_ms
-        );
-        ensure!(
-            got_none.observability_post_ms.is_none(),
-            "observability_post_ms must be None: {:?}",
-            got_none.observability_post_ms
         );
 
         Ok(())

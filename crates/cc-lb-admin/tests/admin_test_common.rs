@@ -1,4 +1,4 @@
-#![allow(dead_code, deprecated)]
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
@@ -11,12 +11,11 @@ use cc_lb_control::api_keys::{
     concurrent_guard::KeyConcurrencyManager, principal_view::PrincipalView,
 };
 use cc_lb_control::{
-    DynamicViewBuilder, DynamicViewHolder, RouteDecision, RouteError, RouterPlugin, RoutingContext,
-    UpstreamStatusSnapshot, api_keys::limit_engine::LimitEngine,
+    DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
+    api_keys::limit_engine::LimitEngine,
 };
-use cc_lb_domain::{Principal, Upstream, UpstreamCandidate};
-use cc_lb_observability::ObservabilityHook;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_domain::Upstream;
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_sqlite::SqliteStorage;
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use http_body_util::BodyExt;
@@ -46,8 +45,6 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
     Arc::new(DynamicViewHolder::new(
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))
-            .global_router(Arc::new(NoopRouter))
-            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
             .principal_view(principal_view)
             .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
             .build(),
@@ -70,21 +67,6 @@ impl SignerFactory for NoopSignerFactory {
     ) -> Result<Arc<dyn cc_lb_upstream::Signer>, cc_lb_upstream::SignerError> {
         Err(cc_lb_upstream::SignerError::MissingCredentials {
             reason: "noop test signer factory".to_owned(),
-        })
-    }
-}
-
-struct NoopRouter;
-
-impl RouterPlugin for NoopRouter {
-    fn route(
-        &self,
-        _ctx: &RoutingContext,
-        _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        Err(RouteError::NoRoute {
-            reason: "noop test router".to_owned(),
         })
     }
 }
@@ -182,7 +164,6 @@ pub async fn spawn_admin_server_with_clock_and_auth(
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: limit_engine_with_clock(clock.clone()),
         lifecycle: None,
-        subscription_metadata_hook: None,
         lazy_refresher: None,
         runtime: None,
         data_dir: None,
@@ -218,8 +199,6 @@ pub fn set_dynamic_principal(dynamic_view: &DynamicViewHolder, principal_id: &st
     ));
     let view = DynamicViewBuilder::new(dynamic_view.generation().saturating_add(1))
         .signer_factory(Arc::new(NoopSignerFactory))
-        .global_router(Arc::new(NoopRouter))
-        .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
         .principal_view(principal_view)
         .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
         .build();
@@ -240,7 +219,7 @@ pub async fn sqlite_storage_with_clock(
         .await
         .expect("admin sqlite opens");
     storage
-        .initialize(BackendKind::Sqlite)
+        .initialize()
         .await
         .expect("admin sqlite initializes");
     Arc::new(storage)

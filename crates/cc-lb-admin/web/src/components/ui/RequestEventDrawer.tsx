@@ -1,23 +1,20 @@
-import { Dialog as BaseDialog } from '@base-ui/react/dialog';
-import { Copy, X } from 'lucide-react';
-import { type ReactNode, useRef } from 'react';
+import { Copy } from 'lucide-react';
+import { useRef } from 'react';
 import { fmtBytes, fmtMs } from '../../lib/format';
 import { useRequestEventDetail } from '../../lib/queries';
+import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { useCopyButton } from '../../lib/useCopyButton';
 import { LatencyTimeline } from './latency/LatencyTimeline';
-import { Badge, Skeleton } from './primitives';
-import { CostPie } from './usage/CostPie';
-import { useActiveSlice } from './usage/PieChart';
-import { TokenPie } from './usage/TokenPie';
-
-const DASH = '—';
-
-import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
+import { Badge, Drawer, Skeleton } from './primitives';
 import {
+  COPY_BUTTON_CLASS,
   DetailSection,
   KvRow,
   RequestEventIdentity,
 } from './RequestEventIdentity';
+import { CostBreakdown, TokenBreakdown } from './usage/UsageBreakdown';
+
+const DASH = '—';
 
 export function RequestEventDrawer({
   event,
@@ -29,45 +26,29 @@ export function RequestEventDrawer({
   onClose: () => void;
 }) {
   return (
-    <BaseDialog.Root
+    <Drawer
+      open={!!event}
       onOpenChange={(open) => {
         if (!open) onClose();
       }}
-      open={!!event}
+      title="Request detail"
+      width="lg"
     >
-      <BaseDialog.Portal>
-        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
-        <BaseDialog.Popup className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full overflow-x-hidden">
-          <BaseDialog.Title className="sr-only">
-            Request detail
-          </BaseDialog.Title>
-          <BaseDialog.Description className="sr-only">
-            Detail view of a single request event
-          </BaseDialog.Description>
-          {event ? (
-            <RequestDetail
-              event={event}
-              onClose={onClose}
-              principalName={principalName}
-            />
-          ) : null}
-        </BaseDialog.Popup>
-      </BaseDialog.Portal>
-    </BaseDialog.Root>
+      {event ? (
+        <RequestDetail event={event} principalName={principalName} />
+      ) : null}
+    </Drawer>
   );
 }
 
 function RequestDetail({
   event,
   principalName,
-  onClose,
 }: {
   event: RequestEventWithPhase;
   principalName: string | null;
-  onClose: () => void;
 }) {
   const { copy } = useCopyButton();
-  const usageControl = useActiveSlice();
   const isPartial = event._phase === 'partial';
   const snapshotKey =
     event.event_id ??
@@ -125,43 +106,33 @@ function RequestDetail({
 
   return (
     <>
-      <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-1 flex-wrap min-w-0">
-            <span
-              className="font-mono text-xs text-text-faint break-all min-w-0"
-              title={merged.request_id}
-            >
-              {merged.request_id}
-            </span>
-            <button
-              type="button"
-              aria-label="Copy request id"
-              className="text-text-faint hover:text-text shrink-0"
-              onClick={() => copy(merged.request_id, 'Request ID')}
-            >
-              <Copy className="w-3 h-3" />
-            </button>
-            {isPartial && (
-              <Badge tone="neutral" className="animate-pulse shrink-0">
-                Live
-              </Badge>
-            )}
-          </div>
-          <div className="text-sm truncate">
-            {principalLabel} → {merged.upstream_name ?? merged.upstream ?? DASH}
-          </div>
+      <div className="px-4 py-3 border-b border-row min-w-0">
+        <div className="text-body text-text truncate">
+          {principalLabel} → {merged.upstream_name ?? DASH}
         </div>
-        <button
-          type="button"
-          aria-label="Close"
-          onClick={onClose}
-          className="text-text-muted hover:text-text shrink-0"
-        >
-          <X className="w-4 h-4" />
-        </button>
+        <div className="mt-1 flex items-center gap-1.5 flex-wrap min-w-0">
+          <span
+            className="font-mono text-data text-text-faint break-all min-w-0"
+            title={merged.request_id}
+          >
+            {merged.request_id}
+          </span>
+          <button
+            type="button"
+            aria-label="Copy request id"
+            className={COPY_BUTTON_CLASS}
+            onClick={() => copy(merged.request_id, 'Request ID')}
+          >
+            <Copy className="w-3 h-3" />
+          </button>
+          {isPartial && (
+            <Badge tone="neutral" className="animate-pulse shrink-0">
+              Live
+            </Badge>
+          )}
+        </div>
       </div>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 pb-8 space-y-5 text-xs min-w-0">
+      <div className="overflow-x-hidden p-4 pb-8 space-y-6 text-body min-w-0">
         <RequestEventIdentity
           event={merged}
           principalLabel={principalLabel}
@@ -170,10 +141,10 @@ function RequestDetail({
         />
 
         {merged._phase === 'final' && hasUpstreamFailure ? (
-          <DetailSection title="Upstream Failure">
-            <div className="bg-overlay-2 border border-subtle rounded p-3 space-y-2 min-w-0">
+          <DetailSection title="Upstream failure">
+            <div className="rounded-sm bg-danger/8 p-3 space-y-2 min-w-0">
               {merged.upstream_error_type ? (
-                <div className="font-mono text-danger break-all min-w-0">
+                <div className="font-mono text-data text-danger-text break-all min-w-0">
                   {merged.upstream_error_type}
                 </div>
               ) : null}
@@ -187,42 +158,47 @@ function RequestDetail({
         ) : null}
 
         {hasAnyToken ? (
-          <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-3 min-w-0">
+          <div className="grid grid-cols-1 min-[420px]:grid-cols-2 gap-x-6 gap-y-6 min-w-0">
             <DetailSection title="Tokens">
-              <TokenPie event={merged} control={usageControl} />
+              <TokenBreakdown event={merged} />
             </DetailSection>
-            <DetailSection title={isPartial ? 'Estimated Cost' : 'Cost'}>
-              <CostPie event={merged} control={usageControl} />
+            <DetailSection title={isPartial ? 'Estimated cost' : 'Cost'}>
+              <CostBreakdown event={merged} />
             </DetailSection>
           </div>
         ) : null}
 
-        {merged._phase === 'final' &&
-        (merged.body_bytes != null || isDetailPending) ? (
-          <KvRow
-            label="Body bytes"
-            value={
-              merged.body_bytes != null ? (
-                <MonoNum>{fmtBytes(merged.body_bytes)}</MonoNum>
-              ) : (
-                <Skeleton className="ml-auto h-3 w-20" />
-              )
-            }
-          />
-        ) : null}
-
         <DetailSection title="Latency">
-          <div className="flex items-center justify-between text-[11px] mb-2">
-            <span className="text-text-faint">Total</span>
-            <MonoNum>
-              {isPartial
-                ? merged.elapsed_ms != null
-                  ? fmtMs(merged.elapsed_ms)
-                  : DASH
-                : merged._phase === 'final'
-                  ? fmtMs(merged.duration_ms)
-                  : DASH}
-            </MonoNum>
+          <div className="space-y-1.5 mb-3">
+            <KvRow
+              label="Total"
+              value={
+                <span className="tabular-nums">
+                  {isPartial
+                    ? merged.elapsed_ms != null
+                      ? fmtMs(merged.elapsed_ms)
+                      : DASH
+                    : merged._phase === 'final'
+                      ? fmtMs(merged.duration_ms)
+                      : DASH}
+                </span>
+              }
+            />
+            {merged._phase === 'final' &&
+            (merged.body_bytes != null || isDetailPending) ? (
+              <KvRow
+                label="Body bytes"
+                value={
+                  merged.body_bytes != null ? (
+                    <span className="tabular-nums">
+                      {fmtBytes(merged.body_bytes)}
+                    </span>
+                  ) : (
+                    <Skeleton className="ml-auto h-3 w-20" />
+                  )
+                }
+              />
+            ) : null}
           </div>
           <LatencyTimeline
             event={merged}
@@ -233,8 +209,4 @@ function RequestDetail({
       </div>
     </>
   );
-}
-
-function MonoNum({ children }: { children: ReactNode }) {
-  return <span className="font-mono tabular-nums">{children}</span>;
 }

@@ -2,22 +2,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::{DynamicView, DynamicViewBuilder};
 use cc_lb_domain::{TtlClass, UpstreamCandidate, WarmCacheEntry};
-use cc_lb_engine::api_keys::principal_view::PrincipalView;
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_engine::{
-    DynamicView, DynamicViewBuilder, RequestKind, build_candidates, lifecycle::HASH_SCHEMA_VERSION,
-    parse_request_cache_breakpoints,
+    RequestKind, build_candidates, lifecycle::HASH_SCHEMA_VERSION, parse_request_cache_breakpoints,
 };
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::{HeaderMap, Method};
-use url::Url;
 use uuid::Uuid;
 
 use crate::common;
 mod prompt_cache_routing_support;
 
-use common::{TestAuthn, TestRouter, TestState};
+use common::{TestAuthn, TestState};
 use prompt_cache_routing_support::{
     TEST_MODEL, TEST_QUOTA_NOW_SECS, TestPromptCacheObservationCache, TestSubscriptionQuotaCache,
     known_base_quota_snapshots, plugin_principal, principal_record, seeded_uuid,
@@ -65,7 +64,7 @@ fn built_candidate_cache_score_drives_subscription_preference_component_route() 
         RequestKind::AnthropicMessages,
         &breakpoints,
         &warm_entries,
-        &cc_lb_engine::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
+        &cc_lb_clock::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
     );
     let owner = candidate(&candidates, owner_id, "owner");
     let peer = candidate(&candidates, quota_peer_id, "quota peer");
@@ -183,7 +182,7 @@ fn moved_cache_control_keeps_warm_upstream_routed_by_cache_hash() {
         RequestKind::AnthropicMessages,
         &turn_two_breakpoints,
         &warm_entries,
-        &cc_lb_engine::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
+        &cc_lb_clock::TestClock::new_at_secs(TEST_QUOTA_NOW_SECS),
     );
     let owner = candidate(&candidates, owner_id, "owner");
     let owner_score = owner.cache_score.as_ref().expect("owner cache score");
@@ -252,10 +251,6 @@ fn test_view(
     );
     DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
-        .global_observability_hooks(Vec::new())
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![
             upstream_record(owner_id),

@@ -50,10 +50,6 @@ pub struct RouteInfo {
     pub quota_urgency_combined: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_warning_multiplier: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_predicted_read_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
 }
 
 /// Reason routing failed.
@@ -86,19 +82,16 @@ pub enum LimitDecisionKind {
     },
     Rejected {
         reason: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        subject: Option<LimitSubject>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_summary: Option<LimitRequestSummary>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        route_summary: Option<RouteSummary>,
+        subject: LimitSubject,
+        request_summary: LimitRequestSummary,
+        route_summary: RouteSummary,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit_violation: Option<String>,
     },
 }
 
-/// Identity carried by `LimitDecisionKind::Rejected` for downstream audit
-/// subscribers to reconstruct the legacy `AuditEntry`.
+/// Identity carried by `LimitDecisionKind::Rejected` for the limit-rejection
+/// audit subscriber.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LimitSubject {
     pub principal_id: String,

@@ -7,13 +7,24 @@ import {
   Badge,
   Button,
   Card,
-  CardHeader,
+  ConfirmDialog,
+  cx,
   Hint,
+  IconButton,
+  Section,
   Skeleton,
   SkeletonRow,
   Spinner,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
+import {
+  EmptyValue,
+  Table,
+  TableCell,
+  TableEmptyRow,
+  TableHead,
+  TableHeadCell,
+} from '../ui/Table';
 import { PluginDeleteDialog } from './PluginDeleteDialog';
 import { SLOTS } from './slots/model';
 
@@ -28,25 +39,16 @@ const PLUGIN_COLUMN_WIDTHS = [
 ] as const;
 
 const PLUGIN_LOADING_ROWS = [0, 1, 2] as const;
-const PLUGIN_ROW_GEOMETRY_CLASS = 'h-20';
-
-const PLUGIN_SKELETON_CELL_CLASSES = [
-  '!px-4',
-  '!px-4',
-  '!px-4',
-  '!px-4',
-  '!px-4',
-  '!px-4',
-  '!px-4',
-] as const;
+/** Two text lines (name, then version · description) at a 56px row. */
+const PLUGIN_ROW_GEOMETRY_CLASS = 'h-14';
 
 const PLUGIN_SKELETON_CLASSES = [
-  'h-16 w-4/5',
-  'h-5 w-20',
+  'h-9 w-4/5',
+  'h-5 w-16',
   'h-4 w-28',
   'ml-auto h-4 w-16',
-  'mx-auto h-5 w-10',
-  'h-4 w-20',
+  'ml-auto h-4 w-6',
+  'h-4 w-16',
   'ml-auto h-4 w-24',
 ] as const;
 
@@ -73,6 +75,7 @@ export function PluginCatalog({
   // synchronous burst of clicks. This ref latches the sweep until it settles so
   // one click can never queue a second destructive server call.
   const gcInFlight = useRef(false);
+  const [gcConfirmOpen, setGcConfirmOpen] = useState(false);
 
   const runGc = () => {
     if (gcInFlight.current || gcPending) return;
@@ -94,78 +97,138 @@ export function PluginCatalog({
 
   return (
     <>
-      <Card>
-        <CardHeader
-          title={
-            <span className="flex items-baseline gap-2">
-              <span className="text-lg font-medium">Plugin library</span>
-            </span>
-          }
-          subtitle={
-            <span
-              className="flex min-h-5 min-w-56 items-center"
-              data-testid="plugin-count-slot"
-            >
-              {reg.isLoading ? (
-                <Skeleton as="span" className="block h-4 w-48" />
-              ) : (
-                <span className="text-sm text-text-faint">
-                  {entries.length} available · {unusedRegisteredCount} not used
-                  anywhere
-                </span>
-              )}
-            </span>
-          }
-          action={
-            <>
-              {gcPending ? (
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className="flex items-center gap-2 text-xs text-text-faint"
-                  data-testid="plugin-gc-progress"
-                >
-                  <Spinner className="w-3 h-3" />
-                  Cleaning orphaned uploads — waiting for the server.
-                </span>
-              ) : null}
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={gcPending}
-                loading={gcPending}
-                title="Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used By is 0."
-                onClick={runGc}
+      <Section
+        title="Plugin library"
+        subtitle={
+          // The fixed width keeps the action from shifting as the count
+          // loads; phones let the count wrap beside the action instead of
+          // running under it.
+          <span
+            className="flex min-h-5 items-center sm:min-w-56"
+            data-testid="plugin-count-slot"
+          >
+            {reg.isLoading ? (
+              <Skeleton as="span" className="block h-4 w-48" />
+            ) : (
+              <span className="tabular-nums">
+                {entries.length} available · {unusedRegisteredCount} not used
+                anywhere
+              </span>
+            )}
+          </span>
+        }
+        action={
+          <div className="flex flex-wrap items-center gap-3">
+            {gcPending ? (
+              <span
+                role="status"
+                aria-live="polite"
+                className="flex items-center gap-2 text-body-sm text-text-muted"
+                data-testid="plugin-gc-progress"
               >
-                {gcPending ? 'Cleaning...' : 'Clean orphaned uploads'}
-              </Button>
-            </>
-          }
-        />
-        <div className="min-h-72 overflow-x-auto">
-          <table className="w-full min-w-[960px] table-fixed font-mono text-xs">
+                <Spinner className="w-3 h-3" />
+                Cleaning orphaned uploads — waiting for the server.
+              </span>
+            ) : null}
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={gcPending}
+              loading={gcPending}
+              title="Remove uploaded WASM blobs no longer referenced by any registered plugin. Registered plugins remain available, even when Used by is 0."
+              onClick={() => setGcConfirmOpen(true)}
+            >
+              {gcPending ? 'Cleaning...' : 'Clean orphaned uploads'}
+            </Button>
+          </div>
+        }
+      >
+        {/* Phones: one two-line row per plugin, edge to edge. Line 1 is the
+            name and how many places use it; line 2 where it runs and what it
+            is. The hash, size, upload time and delete live in its detail. */}
+        <ul className="-mx-4 divide-y divide-row border-y border-row md:hidden">
+          {reg.isLoading ? (
+            PLUGIN_LOADING_ROWS.map((row) => (
+              <li key={row} className="px-4 py-3" aria-hidden="true">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="mt-2 h-3 w-56 max-w-full" />
+              </li>
+            ))
+          ) : entries.length ? (
+            entries.map((p) => {
+              const caption = [
+                (p.supported_slots ?? [])
+                  .map(
+                    (slot) => SLOTS.find((s) => s.id === slot)?.label ?? slot,
+                  )
+                  .join(', ') || 'Unknown slot',
+                p.version ? `v${p.version}` : null,
+                p.description ?? p.label,
+              ]
+                .filter(Boolean)
+                .join(' · ');
+              return (
+                <li key={p.id}>
+                  <button
+                    type="button"
+                    className="flex w-full flex-col gap-1 px-4 py-3 text-left hover:bg-overlay-2 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+                    onClick={() => onSelectPlugin(p.id)}
+                  >
+                    <span className="flex w-full items-center justify-between gap-3">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="truncate text-body font-medium text-text">
+                          {p.name}
+                        </span>
+                        {p.is_builtin && (
+                          <Badge className="shrink-0" tone="neutral">
+                            Built-in
+                          </Badge>
+                        )}
+                      </span>
+                      <span
+                        className={cx(
+                          'shrink-0 text-body-sm tabular-nums',
+                          p.refcount > 0
+                            ? 'text-text-muted'
+                            : 'text-text-faint',
+                        )}
+                      >
+                        Used by {p.refcount}
+                      </span>
+                    </span>
+                    <span className="line-clamp-2 text-caption text-text-faint">
+                      {caption}
+                    </span>
+                  </button>
+                </li>
+              );
+            })
+          ) : (
+            <li className="px-4 py-8 text-center text-body-sm text-text-muted">
+              No plugins uploaded.
+            </li>
+          )}
+        </ul>
+        <Card className="hidden overflow-x-auto md:block">
+          <Table className="min-w-[960px] table-fixed">
             <colgroup>
               {PLUGIN_COLUMN_WIDTHS.map((className, index) => (
                 <col key={index} className={className} />
               ))}
             </colgroup>
-            <thead className="table-header sticky top-0 z-10">
-              <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Name</th>
-                <th className="text-left px-4 py-2">
-                  <span className="block font-medium">Works in</span>
-                </th>
-                <th className="text-left px-4 py-2">
-                  <span className="block font-medium">File hash</span>
-                </th>
-                <th className="text-right px-4 py-2 tabular-nums">Size</th>
-                <th className="text-center px-4 py-2 tabular-nums">Used By</th>
-                <th className="text-left px-4 py-2">
-                  <span className="block font-medium">Added</span>
-                </th>
-                <th className="text-right px-4 py-2">Actions</th>
+            <TableHead>
+              <tr>
+                <TableHeadCell>Name</TableHeadCell>
+                <TableHeadCell>Works in</TableHeadCell>
+                <TableHeadCell>File hash</TableHeadCell>
+                <TableHeadCell numeric>Size</TableHeadCell>
+                <TableHeadCell numeric>Used by</TableHeadCell>
+                <TableHeadCell>Added</TableHeadCell>
+                <TableHeadCell className="text-right">
+                  <span className="sr-only">Actions</span>
+                </TableHeadCell>
               </tr>
-            </thead>
+            </TableHead>
             <tbody>
               {reg.isLoading ? (
                 PLUGIN_LOADING_ROWS.map((row) => (
@@ -173,149 +236,184 @@ export function PluginCatalog({
                     key={row}
                     className={PLUGIN_ROW_GEOMETRY_CLASS}
                     cols={7}
-                    cellClassNames={PLUGIN_SKELETON_CELL_CLASSES}
                     skeletonClassNames={PLUGIN_SKELETON_CLASSES}
                   />
                 ))
               ) : entries.length ? (
-                entries.map((p) => (
-                  <tr
-                    key={p.id}
-                    className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row hover:bg-overlay-1`}
-                  >
-                    <td className="px-4 py-2 max-w-[260px]">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className="text-sm font-medium font-sans truncate"
-                          title={p.name}
-                        >
-                          {p.name}
-                        </div>
-                        {p.is_builtin && <Badge tone="neutral">Built-in</Badge>}
-                      </div>
-                      {p.version ? (
-                        <div className="text-[11px] text-text-faint truncate">
-                          v{p.version}
-                        </div>
-                      ) : null}
-                      {p.label ? (
-                        <div
-                          className="text-[11px] text-text-faint truncate"
-                          title={p.label}
-                        >
-                          {p.label}
-                        </div>
-                      ) : null}
-                      {p.description ? (
-                        <div
-                          className="text-[11px] text-text-faint truncate mt-1"
-                          title={p.description}
-                        >
-                          {p.description}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className="px-4 py-2">
-                      <div className="flex flex-wrap gap-1">
-                        {p.supported_slots && p.supported_slots.length > 0 ? (
-                          p.supported_slots.map((slot) => (
-                            <Badge key={slot} tone="accent">
-                              {SLOTS.find((s) => s.id === slot)?.label ?? slot}
+                entries.map((p) => {
+                  // One secondary line under the name: "v0.5.1 · label · description".
+                  const subline = [
+                    p.version ? `v${p.version}` : null,
+                    p.label,
+                    p.description,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+                  return (
+                    // Pointer shortcut; keyboard users reach the same view
+                    // through the row's Inspect button.
+                    <tr
+                      key={p.id}
+                      className={`${PLUGIN_ROW_GEOMETRY_CLASS} border-b border-row last:border-b-0 transition-colors cursor-pointer hover:bg-hover-bg`}
+                      onClick={() => onSelectPlugin(p.id)}
+                    >
+                      <TableCell>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span
+                            className="truncate font-medium text-text"
+                            title={p.name}
+                          >
+                            {p.name}
+                          </span>
+                          {p.is_builtin && (
+                            <Badge className="shrink-0" tone="neutral">
+                              Built-in
                             </Badge>
-                          ))
-                        ) : (
-                          <Badge tone="warn">Unknown</Badge>
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-4 py-2">
-                      <div className="flex items-center gap-1">
-                        <Hint label={p.sha256_hex}>
-                          <code className="cursor-help">
-                            {p.sha256_hex.slice(0, 12)}…
-                          </code>
-                        </Hint>
-                        <button
-                          type="button"
-                          aria-label="Copy SHA256"
-                          className="text-text-faint hover:text-text"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copy(p.sha256_hex, 'SHA256');
-                          }}
-                        >
-                          <Copy className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
-                      {(p.size_bytes / 1024).toFixed(1)} KB
-                    </td>
-                    <td className="px-4 py-2 text-center">
-                      <Badge tone={p.refcount > 0 ? 'accent' : 'neutral'}>
-                        {p.refcount}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-2">
-                      <RelativeTime
-                        compact
-                        ts={new Date(p.uploaded_at_unix_secs * 1000)}
-                      />
-                    </td>
-                    <td className="px-4 py-2 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <button
-                          type="button"
-                          className="text-accent hover:underline font-medium"
-                          onClick={() => onSelectPlugin(p.id)}
-                        >
-                          Inspect
-                        </button>
-                        {!p.is_builtin && (
-                          <button
-                            type="button"
-                            aria-label="Delete plugin"
-                            title={
-                              p.refcount > 0
-                                ? `In use by ${p.refcount} reference(s)`
-                                : 'Delete plugin'
-                            }
-                            className="transition-colors text-text-faint hover:text-red-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-text-faint"
+                          )}
+                        </div>
+                        {subline ? (
+                          <div
+                            className="mt-0.5 truncate text-caption text-text-faint"
+                            title={subline}
+                          >
+                            {subline}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {p.supported_slots && p.supported_slots.length > 0 ? (
+                            p.supported_slots.map((slot) => (
+                              <Badge key={slot} tone="neutral">
+                                {SLOTS.find((s) => s.id === slot)?.label ??
+                                  slot}
+                              </Badge>
+                            ))
+                          ) : (
+                            <Badge tone="warn">Unknown</Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Hint label={p.sha256_hex}>
+                            <code className="cursor-help font-mono text-data text-text-muted">
+                              {p.sha256_hex.slice(0, 12)}…
+                            </code>
+                          </Hint>
+                          <IconButton
+                            label="Copy SHA256"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setPendingDelete({
-                                id: p.id,
-                                revision: p.revision,
-                                name: p.name,
-                                refcount: p.refcount,
-                              });
+                              copy(p.sha256_hex, 'SHA256');
                             }}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                            <Copy
+                              className="w-3.5 h-3.5"
+                              strokeWidth={1.75}
+                              aria-hidden="true"
+                            />
+                          </IconButton>
+                        </div>
+                      </TableCell>
+                      <TableCell numeric>
+                        {p.is_builtin && p.size_bytes === 0 ? (
+                          <EmptyValue label="Built-in" />
+                        ) : (
+                          <>
+                            {(p.size_bytes / 1024).toFixed(1)}{' '}
+                            <span className="text-text-muted">KB</span>
+                          </>
                         )}
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      </TableCell>
+                      {/* Plain count: the row and its Inspect action already
+                          open the detail view that lists every use. */}
+                      <TableCell
+                        numeric
+                        className={
+                          p.refcount > 0 ? 'text-text' : 'text-text-faint'
+                        }
+                      >
+                        {p.refcount}
+                      </TableCell>
+                      <TableCell className="text-text-muted">
+                        {p.is_builtin && p.uploaded_at_unix_secs === 0 ? (
+                          <EmptyValue label="Built-in" />
+                        ) : (
+                          <RelativeTime
+                            compact
+                            ts={new Date(p.uploaded_at_unix_secs * 1000)}
+                          />
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            type="button"
+                            aria-label={`Inspect ${p.name}`}
+                            className="inline-flex items-center h-11 md:h-7 px-2.5 rounded-sm text-label text-text underline decoration-subtle-strong underline-offset-4 transition-colors hover:decoration-accent focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onSelectPlugin(p.id);
+                            }}
+                          >
+                            Inspect
+                          </button>
+                          {p.is_builtin ? (
+                            // Keeps "Inspect" aligned with deletable rows.
+                            <span aria-hidden="true" className="w-11 md:w-8" />
+                          ) : (
+                            <IconButton
+                              label="Delete plugin"
+                              title={
+                                p.refcount > 0
+                                  ? `In use by ${p.refcount} reference(s)`
+                                  : 'Delete plugin'
+                              }
+                              className="hover:text-danger-text"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingDelete({
+                                  id: p.id,
+                                  revision: p.revision,
+                                  name: p.name,
+                                  refcount: p.refcount,
+                                });
+                              }}
+                            >
+                              <Trash2
+                                className="w-3.5 h-3.5"
+                                strokeWidth={1.75}
+                                aria-hidden="true"
+                              />
+                            </IconButton>
+                          )}
+                        </div>
+                      </TableCell>
+                    </tr>
+                  );
+                })
               ) : (
-                <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-8 text-center text-text-faint text-xs"
-                  >
-                    No plugins uploaded.
-                  </td>
-                </tr>
+                <TableEmptyRow colSpan={7}>No plugins uploaded.</TableEmptyRow>
               )}
             </tbody>
-          </table>
-        </div>
-      </Card>
+          </Table>
+        </Card>
+      </Section>
 
       <PluginDeleteDialog
         pendingDelete={pendingDelete}
         onClose={() => setPendingDelete(null)}
+      />
+
+      <ConfirmDialog
+        open={gcConfirmOpen}
+        onOpenChange={setGcConfirmOpen}
+        destructive
+        title="Clean orphaned uploads?"
+        description="This permanently deletes uploaded WASM files that no registered plugin points to — typically older versions left behind after a plugin was replaced. Registered plugins, including ones not used anywhere, are kept. A deleted file can only come back by uploading it again."
+        confirmLabel="Delete orphaned uploads"
+        onConfirm={runGc}
       />
     </>
   );

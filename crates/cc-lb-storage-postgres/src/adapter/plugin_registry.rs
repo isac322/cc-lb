@@ -197,7 +197,7 @@ impl PluginRegistryStore for PostgresStorage {
             .collect();
         let uploaded_at =
             unix_secs_to_datetime(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
-        let result = sqlx::query("UPDATE wasm_registry_v2 SET sha256 = $1, plugin_version = $2, original_filename = $3, uploaded_at = $4, uploaded_by_admin_id = $5, revision = revision + 1, description = $6, usage = $7, hook_metadata = $8, supported_slots = $9, schema_hash = $10 WHERE id = $11 AND revision = $12")
+        let result = sqlx::query("UPDATE wasm_registry_v2 SET sha256 = $1, plugin_version = $2, original_filename = $3, uploaded_at = $4, uploaded_by_admin_id = $5, revision = revision + 1, description = $6, usage = $7, hook_metadata = $8, supported_slots = $9 WHERE id = $10 AND revision = $11")
             .bind(blob.sha256.as_slice())
             .bind(&input.version)
             .bind(&input.original_filename)
@@ -207,7 +207,6 @@ impl PluginRegistryStore for PostgresStorage {
             .bind(&input.usage)
             .bind(hook_metadata_to_json(&input.hook_metadata)?)
             .bind(&supported_slots)
-            .bind(input.schema_hash.as_ref().map(|hash| hash.as_slice()))
             .bind(current.id)
             .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
             .execute(&mut *tx)
@@ -337,24 +336,6 @@ impl PluginRegistryStore for PostgresStorage {
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
     }
 
-    async fn update_supported_slots(
-        &self,
-        id: Uuid,
-        supported_slots: Vec<PluginSlotKind>,
-    ) -> StorageResult<()> {
-        let slots: Vec<String> = supported_slots
-            .iter()
-            .map(|slot| slot.as_str().to_owned())
-            .collect();
-        sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = $1 WHERE id = $2")
-            .bind(&slots)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
-    }
-
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -440,8 +421,8 @@ impl PluginRegistryStore for PostgresStorage {
             });
         }
         let id = Uuid::new_v4();
-        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0) RETURNING *")
-            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
+        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, revision) VALUES ($1,$2,$3,$4,$5,$6,0) RETURNING *")
+            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config)
             .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(input.principal_id.to_string())
@@ -492,18 +473,14 @@ impl PluginRegistryStore for PostgresStorage {
         expected_revision: u64,
         update: PluginChainEntryUpdate,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        if update.config.is_none()
-            && update.sse_per_event.is_none()
-            && update.batched_events_per_flush.is_none()
-            && update.batched_flush_ms.is_none()
-        {
+        let Some(config) = update.config else {
             return Err(StorageError::InvalidInput {
                 field: "plugin_chain.update".to_owned(),
                 reason: "empty_update".to_owned(),
             });
-        }
+        };
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let Some(mut current) = self.get_chain_in_tx(&mut tx, id).await? else {
+        let Some(current) = self.get_chain_in_tx(&mut tx, id).await? else {
             tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
@@ -512,20 +489,8 @@ impl PluginRegistryStore for PostgresStorage {
                 current: current.revision,
             });
         }
-        if let Some(value) = update.config {
-            current.config = value;
-        }
-        if let Some(value) = update.sse_per_event {
-            current.sse_per_event = value;
-        }
-        if let Some(value) = update.batched_events_per_flush {
-            current.batched_events_per_flush = value;
-        }
-        if let Some(value) = update.batched_flush_ms {
-            current.batched_flush_ms = value;
-        }
-        let row = sqlx::query("UPDATE plugin_chains_v2 SET config=$3, sse_per_event=$4, batched_events_per_flush=$5, batched_flush_ms=$6, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *")
-            .bind(id).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(current.config).bind(current.sse_per_event).bind(i32::try_from(current.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(current.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
+        let row = sqlx::query("UPDATE plugin_chains_v2 SET config=$3, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *")
+            .bind(id).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(config)
             .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
         let entry = chain_from_row(row)?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
@@ -821,15 +786,10 @@ async fn insert_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     blob: &WasmBlob,
 ) -> StorageResult<bool> {
-    let validated_at = unix_secs_to_datetime(
-        blob.parse_validated_at_unix_secs,
-        "wasm_blob.parse_validated_at",
-    )?;
-    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, created_at) VALUES ($1, $2, $3, $4, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, created_at) VALUES ($1, $2, $3, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
-        .bind(validated_at)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -848,7 +808,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots, schema_hash) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12, $13) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots, schema_hash")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, description, usage, hook_metadata, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10, $11, $12) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, plugin_version, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, description, usage, hook_metadata, supported_slots")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -861,7 +821,6 @@ async fn insert_registry_in_tx(
         .bind(&input.usage)
         .bind(hook_metadata_to_json(&input.hook_metadata)?)
         .bind(&supported_slots)
-        .bind(input.schema_hash.as_ref().map(|h| h.as_slice()))
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -988,19 +947,10 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             .into_iter()
             .filter_map(|s| PluginSlotKind::parse(&s))
             .collect(),
-        schema_hash: row
-            .try_get::<Option<Vec<u8>>, _>("schema_hash")
-            .map_err(map_sqlx_error)?
-            .map(|bytes| sha_to_array(&bytes))
-            .transpose()?,
     })
 }
 
 fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
-    let schema_hash_ok = match (existing.schema_hash, input.schema_hash) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    };
     existing.name == input.name
         && existing.version == input.version
         && existing.original_filename == input.original_filename
@@ -1009,7 +959,6 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
         && existing.usage == input.usage
         && existing.hook_metadata == input.hook_metadata
         && existing.supported_slots == input.supported_slots
-        && schema_hash_ok
 }
 
 fn is_singleton_slot(slot: PluginSlotKind) -> bool {
@@ -1031,18 +980,6 @@ fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry>
         order: row.try_get("order_value").map_err(map_sqlx_error)?,
         wasm_registry_id: row.try_get("wasm_registry_id").map_err(map_sqlx_error)?,
         config: row.try_get::<Value, _>("config").map_err(map_sqlx_error)?,
-        sse_per_event: row.try_get("sse_per_event").map_err(map_sqlx_error)?,
-        batched_events_per_flush: u32::try_from(
-            row.try_get::<i32, _>("batched_events_per_flush")
-                .map_err(map_sqlx_error)?,
-        )
-        .map_err(|_| StorageError::Corrupted {
-            message: "negative batched_events_per_flush".to_owned(),
-        })?,
-        batched_flush_ms: i64_to_u64(
-            row.try_get("batched_flush_ms").map_err(map_sqlx_error)?,
-            "plugin_chain.batched_flush_ms",
-        )?,
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",

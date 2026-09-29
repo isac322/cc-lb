@@ -19,18 +19,20 @@ export const cacheKeepaliveCardCopy = {
     ['Cost saved', 'net, after renewal spend'],
   ],
   caption: 'Renews the prompt-cache TTL during idle gaps.',
+  offLine: 'Off. Turn on to renew the prompt-cache TTL for idle sessions.',
   actions: ['Sessions', 'Settings'],
 } as const;
 
 export const cacheKeepaliveDrawerCopy = {
   sessionsTitle: 'Cache keepalive sessions',
   sessionDetailTitle: 'Session detail',
-  closeDetail: 'Close ▶',
+  closeDetail: 'Close',
+  backDetail: 'Back',
   closeHistoryAriaLabel: 'Close history',
   closeSettingsAriaLabel: 'Close settings',
   horizons: ['24h', '7d', 'All'],
   filters: [
-    'All',
+    'All statuses',
     'Renewed',
     'Scheduled',
     'Capped',

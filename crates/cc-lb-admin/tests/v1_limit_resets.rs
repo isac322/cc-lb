@@ -15,7 +15,9 @@ use cc_lb_control::anthropic_metadata::{
     cedar_ember_epoch_meta_key, cedar_ember_identity_meta_key, cedar_ember_meta_key,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AuditStore, MetaStore, UpstreamCreate, UpstreamRecord, UpstreamStore};
+use cc_lb_storage_api::{
+    AuditQueryScope, AuditStore, MetaStore, UpstreamCreate, UpstreamRecord, UpstreamStore,
+};
 use serde_json::{Value, json};
 use url::Url;
 use uuid::Uuid;
@@ -900,7 +902,7 @@ async fn claim_provider_5xx_reports_unknown_not_failure() {
     // upstream, submitted grant/request id, and the stable outcome code.
     let entries = server
         .storage
-        .query_audit(None, 0, u64::MAX, 100)
+        .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 100, false)
         .await
         .expect("query audit");
     let entry = entries

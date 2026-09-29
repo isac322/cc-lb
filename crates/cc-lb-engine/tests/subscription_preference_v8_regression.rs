@@ -4,10 +4,7 @@ use cc_lb_domain::{
     SubscriptionQuotaDataState, SubscriptionTier, UpstreamCandidate, UpstreamKind,
 };
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
-use cc_lb_pricing::{
-    CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion, global_catalog,
-    init_global_catalog,
-};
+use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_routing::{FilterPlugin, RoutingContext};
 use http::Method;
 use std::collections::HashMap;
@@ -224,9 +221,6 @@ fn same_thread_uses_formula_winner_without_cache_loss_gate() {
         vec![trace.formula_winner_upstream_id.unwrap()]
     );
     assert_eq!(trace.kept_upstream_id, trace.formula_winner_upstream_id);
-    assert_eq!(trace.incumbent_upstream_id, None);
-    assert_eq!(trace.estimated_switch_cache_loss_micros, None);
-    assert_eq!(trace.cache_loss_status, None);
     assert_eq!(trace.switch_gate_reason.as_deref(), Some("formula_winner"));
 }
 
@@ -288,6 +282,8 @@ fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
 #[test]
 fn near_full_allowed_quota_remains_smooth_positive_weight() {
     // Given: a cache-warm candidate with high but still allowed 7d utilization.
+    // The weekly window resets before the current 5h window, so its remaining
+    // quota is a real use-it-or-lose-it loss.
     let cache_warm_near_full_7d = with_live_cache(
         oauth_at_t0(
             "cache-warm-near-full-7d",
@@ -301,7 +297,7 @@ fn near_full_allowed_quota_remains_smooth_positive_weight() {
                 fresh(WINDOW_SEVEN_DAY)
                     .status("allowed")
                     .util(0.995)
-                    .reset_at(T0_SECS + 604_800)
+                    .reset_at(T0_SECS + 1_800)
                     .build(),
             ],
         ),
@@ -498,11 +494,7 @@ fn install_test_pricing() {
         cache_read_per_million_usd_by_tier: HashMap::new(),
         status: CatalogStatus::Ok,
     };
-    let catalog = PriceCatalog::new_empty();
-    catalog.install_snapshot(snapshot.clone());
-    if init_global_catalog(catalog).is_err() {
-        global_catalog().install_snapshot(snapshot);
-    }
+    global_catalog().install_snapshot(snapshot);
 }
 
 fn recorded_isac_personal_warning_snapshot() -> UpstreamCandidate {
@@ -646,7 +638,6 @@ fn principal() -> Principal {
     Principal {
         id: "principal".to_owned(),
         kind: PrincipalKind::InternalKey,
-        claims: serde_json::Map::new(),
     }
 }
 
@@ -659,7 +650,6 @@ fn oauth_at_t0(
         upstream_id: upstream_id(id_seed),
         name: name.to_owned(),
         kind: UpstreamKind::AnthropicOauth,
-        observed_rate_limits: Vec::new(),
         subscription_quotas: quotas,
         observed_at_unix_secs: T0_SECS,
         cache_score: None,

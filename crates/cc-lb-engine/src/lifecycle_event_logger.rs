@@ -451,7 +451,7 @@ impl LifecycleEventLoggerHandle {
 /// Spawn the subscriber that counts lifecycle events and aggregates request timings.
 ///
 /// `rx` is obtained from
-/// [`InMemoryBus::attach_lifecycle_writer`](crate::event_bus::InMemoryBus::attach_lifecycle_writer).
+/// [`InMemoryBus::attach_lifecycle_writer`](cc_lb_control::event_bus::InMemoryBus::attach_lifecycle_writer).
 pub fn spawn_lifecycle_event_logger(
     rx: mpsc::Receiver<LifecycleEvent>,
 ) -> LifecycleEventLoggerHandle {
@@ -586,8 +586,6 @@ mod tests {
             duration_ms: timing.duration_ms,
             request_body_read_ms: timing.request_body_read_ms,
             request_body_bytes: timing.request_body_bytes,
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: timing.proxy_setup_ms,
             setup_timings: Default::default(),
             io_timings: timing.io_timings,

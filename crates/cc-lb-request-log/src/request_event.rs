@@ -2,10 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::{
-    RequestCacheBreakpoint, RequestCacheState, RequestEventKind, RequestEventUpstream,
-    cache::is_zero,
-};
+use crate::{RequestCacheBreakpoint, RequestCacheState, RequestEventKind, cache::is_zero};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEvent {
@@ -29,7 +26,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_id: Option<String>,
     pub principal_kind: Option<String>,
-    pub upstream: Option<RequestEventUpstream>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,10 +109,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_warning_multiplier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_predicted_read_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage_would_have_picked_upstream_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_input_micros: Option<i64>,
@@ -158,10 +150,6 @@ pub struct RequestEvent {
     pub connect_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_reused: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit_reconcile_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observability_post_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,65 +302,5 @@ mod tests {
         let restored: RequestEvent =
             serde_json::from_value(json).expect("deserialize request latency fields");
         assert_eq!(restored, event);
-    }
-
-    #[test]
-    fn legacy_request_event_defaults_request_latency_fields_to_missing() {
-        let event: RequestEvent = serde_json::from_str(
-            r#"{"status":200,"duration_ms":1,"request_body_wait_ms":null,"response_body_wait_ms":null}"#,
-        )
-        .expect("deserialize legacy request event");
-
-        assert_eq!(event.request_body_read_ms, None);
-        assert_eq!(event.request_body_bytes, None);
-        assert_eq!(event.request_body_first_chunk_ms, None);
-        assert_eq!(event.request_body_receive_ms, None);
-        assert_eq!(event.request_body_wait_ms, None);
-        assert_eq!(event.request_body_process_ms, None);
-        assert_eq!(event.request_body_chunk_count, None);
-        assert_eq!(event.finalize_ms, None);
-        assert_eq!(event.response_body_wait_ms, None);
-        assert_eq!(event.response_body_process_ms, None);
-        assert_eq!(event.response_body_downstream_poll_gap_ms, None);
-        assert_eq!(event.retry_overhead_ms, None);
-        assert_eq!(event.json_parse_ms, None);
-        assert_eq!(event.cache_structure_ms, None);
-        assert_eq!(event.cache_token_key_ms, None);
-        assert_eq!(event.cache_count_lookup_ms, None);
-        assert_eq!(event.cache_tokenizer_queue_ms, None);
-        assert_eq!(event.cache_serialize_ms, None);
-        assert_eq!(event.cache_tokenize_ms, None);
-        assert_eq!(event.prepare_signer_ms, None);
-
-        let json = serde_json::to_value(&event).expect("serialize missing I/O timings");
-        for field in [
-            "request_body_first_chunk_ms",
-            "request_body_receive_ms",
-            "request_body_wait_ms",
-            "request_body_process_ms",
-            "request_body_chunk_count",
-            "response_body_wait_ms",
-            "response_body_process_ms",
-            "response_body_downstream_poll_gap_ms",
-            "retry_overhead_ms",
-        ] {
-            assert!(json.get(field).is_none(), "{field} must be omitted");
-        }
-    }
-
-    #[test]
-    fn request_event_source_metadata_defaults_without_legacy_json_fields() {
-        let legacy_event = r#"{"status":200,"duration_ms":0}"#;
-        let event: RequestEvent = serde_json::from_str(legacy_event).expect("deserialize legacy");
-
-        assert_eq!(event.source_kind, None);
-        assert_eq!(event.source_ref_id, None);
-
-        let event_json = serde_json::to_value(&event).expect("serialize legacy");
-        let event_object = event_json
-            .as_object()
-            .expect("request event serializes to object");
-        assert!(!event_object.contains_key("source_kind"));
-        assert!(!event_object.contains_key("source_ref_id"));
     }
 }

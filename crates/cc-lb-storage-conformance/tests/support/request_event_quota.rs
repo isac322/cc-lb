@@ -35,6 +35,7 @@ pub(crate) const LOSING_QUOTA: QuotaColumns = QuotaColumns {
 pub(crate) fn populated_event() -> Result<RequestEvent> {
     Ok(RequestEvent {
         ts: 1_900_500_100,
+        ts_ms: Some(1_900_500_100_000),
         request_id: "quota-columns-populated".to_owned(),
         event_id: Some(SELECTED_EVENT_ID.to_owned()),
         upstream_id: Some(SELECTED_UPSTREAM_ID),
@@ -56,6 +57,7 @@ pub(crate) fn populated_event() -> Result<RequestEvent> {
 pub(crate) fn mismatch_event() -> Result<RequestEvent> {
     Ok(RequestEvent {
         ts: 1_900_500_101,
+        ts_ms: Some(1_900_500_101_000),
         request_id: "quota-columns-mismatch".to_owned(),
         event_id: Some(MISMATCH_EVENT_ID.to_owned()),
         upstream_id: Some(MISMATCH_UPSTREAM_ID),
@@ -73,6 +75,7 @@ pub(crate) fn mismatch_event() -> Result<RequestEvent> {
 pub(crate) fn historical_event() -> RequestEvent {
     RequestEvent {
         ts: 1_900_500_102,
+        ts_ms: Some(1_900_500_102_000),
         request_id: "quota-columns-historical".to_owned(),
         event_id: Some(HISTORICAL_EVENT_ID.to_owned()),
         status: 200,
@@ -152,7 +155,6 @@ fn routing_trace_json(terminal_upstream_id: Uuid) -> Value {
                     candidate_json(LOSING_UPSTREAM_ID, LOSING_QUOTA),
                     candidate_json(SELECTED_UPSTREAM_ID, SELECTED_QUOTA)
                 ],
-                "previous_tier": null,
                 "formula_winner_upstream_id": SELECTED_UPSTREAM_ID,
                 "kept_upstream_id": terminal_upstream_id
             }

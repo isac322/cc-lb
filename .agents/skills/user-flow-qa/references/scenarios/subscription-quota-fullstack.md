@@ -1,7 +1,7 @@
 # Quota Full-Stack Functional QA — subscription-quota feature (PR #372)
 
 Goal: functionally test the **entire** subscription-quota feature end to end —
-storage → ingestion → HTTP endpoints → analysis/routing → admin-web UI — such that
+storage → ingestion → HTTP endpoints → routing → admin-web UI — such that
 a **zero-context agent can reproduce identical results from this file alone**.
 
 Two equally-weighted halves:
@@ -54,8 +54,8 @@ put_subscription_quota[_batch]   (crates/cc-lb-storage-sqlite/src/adapter/upstre
   ├─► latest_v1         (ALWAYS upsert, guarded observed_at>= — adapter:426-477)
   └─► checkpoints_v1    (insert ONLY on semantic change — adapter:133-202)
         ▼
-HTTP: latest / series / analysis / aggregate / pool-history   (crates/cc-lb-admin/src/subscription_quotas.rs)
-  ├─► admin-web UI (Overview pool chart, detail Quota History + snapshot cards + deficit, sidebar meters)
+HTTP: latest / series / aggregate / pool-history   (crates/cc-lb-admin/src/subscription_quotas.rs)
+  ├─► admin-web UI (Overview pool chart, detail Quota History + snapshot cards, sidebar meters)
   └─► quota-aware routing: staleness gate via `subscription_quota_routing_max_staleness_secs`;
         stale/rejected/exhausted upstreams are deprioritized/ineligible.  [verify in scheduler/engine]
 ```
@@ -107,7 +107,7 @@ Mutation primitives (apply Template T with these deltas):
 - **M7 cleanup/backfill**: `cc-lb compact-subscription-quota-history --storage-path $TDB [--drop-raw-observations]`. Writes meta markers `subscription_quota_checkpoint_backfill_v1_complete` / `_cleanup_v1_complete`; idempotent (marker present ⇒ returns cached report, no destructive work).
 - **Live trigger** (no SQL): `curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:52252/admin/v1/upstreams/<id>/warmup/fire-now` ⇒ real warmup, header-source observation persisted.
 
-Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_batch]`, `put_subscription_quota_checkpoint(s)`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs:283-350, traits.rs:259-283).
+Programmatic seed alt: `UpstreamSubscriptionQuotaStore::record_subscription_quota_samples`, `put_subscription_quota_checkpoints`, `list_latest_subscription_quota_for_upstreams`, `list_subscription_quota_series`; `MetaStore::put_meta_value` (crates/cc-lb-storage-api/src/upstream_subscription_quota.rs, traits.rs).
 
 ## 3. Part A — Point-in-time QA
 
@@ -115,26 +115,18 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 - latest upserted every accepted observation; checkpoint only on semantic change; evidence-only change ⇒ no checkpoint.
 - series returns last-checkpoint-before-`since` (left anchor) + checkpoints in `[since,until]`; NEVER fabricates leading zeroes (ADR 0007; test `subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes`).
 
-### 3.2 HTTP endpoint contracts (all paths also under legacy `/admin/…`)  — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
+### 3.2 HTTP endpoint contracts — crate `crates/cc-lb-admin/src/subscription_quotas.rs`
 | Endpoint | Required params | Key defaults | Guardrail → 400 error code |
 |---|---|---|---|
 | `GET /admin/v1/subscription-quotas/latest` | — | windows=all, source=merged, upstream_ids=all-active-oauth, max_staleness=routing cfg | `invalid_source` / `invalid_window` / `invalid_upstream_id` |
 | `…/series` | `since_unix_secs`,`until_unix_secs` | windows=5h,7d; bucket_secs=300(min1); max_points=1000 | `invalid_time_range` (until≤since); `max_points_per_series_too_large` (>10000); `bucket_range_too_large` ((until−since)/bucket > max*2); `too_many_upstreams` (>50) |
-| `…/analysis` | `since_unix_secs`,`until_unix_secs` | windows=5h,7d; source=merged; bucket_secs=60(fixed); max_points=10000(fixed) | `invalid_time_range`; `bucket_range_too_large` (>20,000 buckets / 1,200,000s); `too_many_upstreams` |
 | `…/aggregate` | — | windows=5h,7d; source=merged | source/window/upstream parse only |
 | `…/pool-history` | — | windows=5h,7d(only these two); since=now−6h; until=now | `unknown pool history window`; `pool history only supports 5h and 7d` (plain-text 400) |
-- source-merge: `merged`(default)|`header`|`api`. ETag `W/"v1:<max_observed_at_millis>"` + `If-None-Match`→304 on latest/series/analysis/aggregate (NOT pool-history); omitting `upstream_ids` skips the ETag SQL.
-- Response skeletons + full field lists: see per-endpoint curl examples appended in §3.2a of the source findings (latest.windows[].{state,utilization,status,resets_at,age_secs}; series.series[].{buckets[].{bucket_start_unix_secs,utilization_last}, markers[].{kind:reset|gap}}; analysis.upstreams[].windows[].{current_utilization,actual_account_burn,proxy_projected_burn,deficit,caveats}; aggregate.windows[].{utilization,confidence,provider_lots[],caveats}; pool-history.windows[].{latest,series[]}).
+- source-merge: `merged`(default)|`header`|`api`. ETag `W/"v1:<max_observed_at_millis>"` + `If-None-Match`→304 on latest/series/aggregate (NOT pool-history); omitting `upstream_ids` skips the ETag SQL.
+- Response skeletons + full field lists: see per-endpoint curl examples appended in §3.2a of the source findings (latest.windows[].{state,utilization,status,resets_at,age_secs}; series.series[].{buckets[].{bucket_start_unix_secs,utilization_last}, markers[].{kind:reset|gap}}; aggregate.windows[].{utilization,confidence,provider_lots[],caveats}; pool-history.windows[].{latest,series[]}).
 - Reproduce each: `curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:52252/admin/v1/subscription-quotas/<ep>?upstream_ids=<UID>&windows=5h&source=merged[&since_unix_secs=..&until_unix_secs=..&bucket_secs=..]" | jq`.
 
-### 3.2b Analysis range guardrail
-- **Point-in-time:** 1h/6h/24h/7d and the exact 1,200,000-second boundary return HTTP 200; 1,200,001 seconds returns HTTP 400 with `error:"bucket_range_too_large"`.
-- **Reproduce:** request `/admin/v1/subscription-quotas/analysis?since_unix_secs=1&until_unix_secs=1200002` on both v1 and legacy paths and assert the typed 400 response.
-- **Invariant:** validation runs before rollup or checkpoint storage reads, so an extreme caller-supplied range cannot start a minute-bucket walk.
-
-### 3.3 Frontend surfaces — execute the 8 browser cases in `subscription-quota-frontend.md` (TC-1 detail range windowing [gating, FIXED], TC-2 snapshot cards, TC-3 deficit/analysis, TC-4 empty/loading, TC-5 Overview pool, TC-6 sidebar, TC-7 ApiUsageCard, TC-8 QuotaObservedAt).
-
-### 3.4 Analysis/deficit values — given intervals, assert: `actual_account_burn` = median slope of valid utilization intervals; `proxy_projected_burn.effective_limit_tokens_estimate` = median(tokens/Δutilization); `eta_to_limit_secs` = (1−util)/slope; `deficit.shortfall_tokens` = projected_window − effective_limit; intervals never cross a reset (split_reset_cycles).
+### 3.3 Frontend surfaces — execute the 7 browser cases in `subscription-quota-frontend.md` (TC-1 detail range windowing [gating, FIXED], TC-2 snapshot cards, TC-4 empty/loading, TC-5 Overview pool, TC-6 sidebar, TC-7 ApiUsageCard, TC-8 QuotaObservedAt).
 
 ### 3.5 Fable 5 model-scoped weekly quota (documented, not executed)
 - Seed a `7d_fable` checkpoint for an upstream (e.g., `bh322yoo-max` or `qa-oauth`) with utilization 0.28, status `allowed`, resets_at 1800000004.
@@ -176,15 +168,15 @@ Programmatic seed alt: `UpstreamSubscriptionQuotaStore::put_subscription_quota[_
 
 ## 4. Part B — State-transition QA (~50%)
 
-Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoint) / UI. Wait the poll interval before asserting UI: latest ≈5s, series ≈30s, analysis ≈120s, aggregate/pool-history ≈30s.
+Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoint) / UI. Wait the poll interval before asserting UI: latest ≈5s, series ≈30s, aggregate/pool-history ≈30s.
 
-- **T1 utilization ↑ (M1)** — storage: +1 checkpoint row, latest.utilization/observed_at advance. API: `latest` new utilization + smaller age_secs + state `fresh`; `series` gains a bucket / updates `utilization_last`; `analysis` recomputes burn/eta/deficit; `aggregate` recomputes plan-weighted utilization; `pool-history` next snapshot rises. UI: sidebar meter %, snapshot card %, "observed Ns ago" resets, Quota History adds a step, Overview pool rises — **without manual reload** within poll interval.
+- **T1 utilization ↑ (M1)** — storage: +1 checkpoint row, latest.utilization/observed_at advance. API: `latest` new utilization + smaller age_secs + state `fresh`; `series` gains a bucket / updates `utilization_last`; `aggregate` recomputes plan-weighted utilization; `pool-history` next snapshot rises. UI: sidebar meter %, snapshot card %, "observed Ns ago" resets, Quota History adds a step, Overview pool rises — **without manual reload** within poll interval.
 - **T2 dedup (M2)** — storage: NO new checkpoint; latest.observed_at advances only. API: `series` bucket shape unchanged; `latest` age resets. UI: "observed Ns ago" resets but Quota History step count unchanged.
-- **T3 threshold crossing (M1 to cross)** — `latest.status` allowed→allowed_warning→rejected; `surpassed_threshold` set; UI status dot/badge/color change on card + sidebar. (series buckets do NOT expose status — assert via latest/analysis.)
-- **T4 window reset (M3)** — API: `series.markers` gains `kind:"reset"` (triggered by resets_at change OR utilization drop ≥0.5); latest utilization drops, resets_at moves forward, status→allowed; analysis starts a new cycle (no cross-reset interval). UI: reset marker on Quota History, snapshot reset countdown resets, drop step visible.
-- **T5 staleness (M4 + wait)** — API: `latest.state`→`stale` when age>max_staleness; `aggregate` window `stale_upstreams`++, `confidence`→`stale`, caveat added; `analysis.data_state`→`stale` + caveat; `series` shows a `kind:"gap"` marker for gaps > GAP_MULTIPLIER*bucket. UI: sidebar/card state dot green→amber; routing treats upstream as stale (deprioritized). 
+- **T3 threshold crossing (M1 to cross)** — `latest.status` allowed→allowed_warning→rejected; `surpassed_threshold` set; UI status dot/badge/color change on card + sidebar. (series buckets do NOT expose status — assert via latest.)
+- **T4 window reset (M3)** — API: `series.markers` gains `kind:"reset"` (triggered by resets_at change OR utilization drop ≥0.5); latest utilization drops, resets_at moves forward, status→allowed; UI: reset marker on Quota History, snapshot reset countdown resets, drop step visible.
+- **T5 staleness (M4 + wait)** — API: `latest.state`→`stale` when age>max_staleness; `aggregate` window `stale_upstreams`++, `confidence`→`stale`, caveat added; `series` shows a `kind:"gap"` marker for gaps > GAP_MULTIPLIER*bucket. UI: sidebar/card state dot green→amber; routing treats upstream as stale (deprioritized). 
 - **T6 overage/extra-usage (M5)** — overage snapshot card appears/updates; sidebar shows overage window; overage utilization = used/limit when `utilization` null; `latest` exposes extra_usage_* fields.
-- **T7 source divergence (M6)** — `source=merged` returns the newest of header/api per (upstream,window); `source=header` vs `api` return the divergent values; merged series may show sawtooth if sources alternate; analysis may drop to low confidence / add header-only caveat. UI tooltip "from: <source>" reflects the winner.
+- **T7 source divergence (M6)** — `source=merged` returns the newest of header/api per (upstream,window); `source=header` vs `api` return the divergent values; merged series may show sawtooth if sources alternate; UI tooltip "from: <source>" reflects the winner.
 - **T8 cleanup/backfill (M7)** — after `--drop-raw-observations`: live writer keeps persisting latest+checkpoints (raw insert skipped); Quota History still renders; re-run idempotent (marker fast-path). (Regression fixes: 9c0cbaa8 writer, e18fb76b chart clip.)
 - **T9 polling auto-refresh** — after ANY mutation, the DOM value changes on its own within the interval (no reload). Assert by snapshotting the same element before/after the wait.
 - **T10 routing reaction (M1→100% / M3 reset / M4 stale)** — an upstream at 100%/rejected or stale becomes ineligible/deprioritized for selection; after reset it becomes eligible again. Observe via proxy routing behavior or selected-upstream metrics/logs; config `subscription_quota_routing_max_staleness_secs`.
@@ -242,11 +234,9 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
   - **Expected observable result:** Both endpoints return `200`. The `5h` series contains a `markers[]` entry with `kind:"reset"`, its last utilization is exactly `0.05`, and `/latest` shows `status:"allowed"` with the new reset-cycle utilization. No leading `0%` bucket is fabricated before the left anchor.
 
 
-- **T14 analysis range rejection/recovery** — INITIAL: request a supported 7d range and observe HTTP 200. MUTATION: widen the same request to 1,200,001 seconds and observe HTTP 400 `bucket_range_too_large`. EXPECTED: restore the range to the exact 1,200,000-second boundary and observe HTTP 200 again; no storage mutation or service restart is required.
 
 ## 5. Automated-test coverage map (leverage; focus manual QA on gaps)
 - Endpoint contracts + series windowing/anchor/no-zeroes: `crates/cc-lb-admin/tests/subscription_quotas.rs` (snapshot + some multi-observation transition, including Fable tests).
-- Analysis range boundary and v1/legacy rejection: `crates/cc-lb-admin/tests/subscription_quotas.rs` (`subscription_quota_analysis_enforces_bucket_range_guardrail`).
 - Checkpoint dedup/fingerprint + range/anchor: `crates/cc-lb-storage-api/tests/subscription_quota_checkpoint.rs`, `crates/cc-lb-storage-conformance/tests/scenarios/upstream_subscription_quota_store.rs` (transition-heavy, including Fable storage conformance).
 - Cleanup/backfill idempotency + writer-continues-after-drop: `crates/cc-lb-server/tests/subscription_quota_checkpoint_{cleanup,backfill,writer}.rs`.
 - Storage roundtrips: `crates/cc-lb-storage-sqlite/tests/storage_roundtrips_sqlite.rs` (+ postgres).
@@ -261,7 +251,6 @@ Each: **INITIAL → MUTATION (§2) → EXPECTED** at storage / API (each endpoin
 | Case | Layer(s) | Result | Evidence |
 |------|----------|--------|----------|
 | §3.2 endpoint contracts | API | PASS | /series + /latest HTTP 200 with correct payloads during T1/T4 |
-| **T14 analysis range rejection/recovery** | API | **PASS** | Isolated server: 7d `200` → 1,200,001s `400 bucket_range_too_large` → 1,200,000s `200` |
 | §3.1 storage invariants | storage | PASS | +1 checkpoint only on semantic change; latest guarded by observed_at>= |
 | §3.3 TC-1..8 (frontend) | UI | PASS (prior run) | subscription-quota-frontend.md verdict PASS |
 | **T1 utilization ↑** | storage→API | **PASS** | /series last bucket `utilization_last` 0.82→0.917; checkpoints 5402→5403 (+1) |

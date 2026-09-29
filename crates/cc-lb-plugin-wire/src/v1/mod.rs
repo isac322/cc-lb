@@ -3,11 +3,11 @@
 //! Shared types between host (`cc-lb-runtime-wasmtime`) and guest
 //! (`cc-lb-pdk-wasmtime`) compiled in lockstep.
 //!
-//! Wire types for the three hooks the wasmtime runtime ships:
-//! filter (Phase 1), shape (Phase 2), observe
-//! (Phase 2). Signer extension is intentionally not exposed across
-//! the plugin boundary — host-side built-in Anthropic API-key and OAuth
-//! signers handle credential signing in-process.
+//! Wire types for the hooks the wasmtime runtime ships: filter, shape,
+//! transform_response, and transform_sse_event. Signer
+//! extension is intentionally not exposed across the plugin boundary —
+//! host-side built-in Anthropic API-key and OAuth signers handle
+//! credential signing in-process.
 //!
 //! rkyv derives `Archive` + `Serialize` + `Deserialize` for every wire type.
 //! The host calls `rkyv::access::<ArchivedFilterRequest, rkyv::rancor::Error>`
@@ -33,14 +33,14 @@
 //!   round-trips and for round-trip test fixtures.
 //! * **Borrowed ref** (`FilterRequestRef<'a>`, `ShapeRequestRef<'a>`,
 //!   ...) — `&'a str` / `&'a [u8]` fields with `#[rkyv(with =
-//!   InlineAsBox)]`. Used by the host in `wire_to_host_wire_request`
+//!   InlineAsBox)]`. Used by the host when encoding hook requests
 //!   so the request body (up to 100 MiB on `/v1/files`) is serialised
 //!   IN PLACE from the request pipeline's `bytes::Bytes` without any
 //!   `.to_vec()` copy.
 //!
 //! Both variants archive to the same `ArchivedBox<ArchivedSlice<u8>>`
 //! / `ArchivedBox<ArchivedStr>` byte layouts — verified by the wire
-//! round-trip tests in `crates/cc-lb-plugin-wire/tests/borrowed_wire_roundtrip.rs`.
+//! round-trip tests in `crates/cc-lb-plugin-wire/tests/wire_roundtrip.rs`.
 //! When either variant is written to guest memory, the guest reads it
 //! via `rkyv::access::<ArchivedFilterRequest, _>` — the archived
 //! type name is identical because the owned type is the sole `Archive`
@@ -420,42 +420,6 @@ pub enum TransformSseEventResult {
     Unchanged,
     Replace { events: Box<[SseEvent]> },
     Drop,
-}
-
-/// Lifecycle event delivered to the observe hook. rkyv mirror of
-/// `cc_lb_observability::ObserveEvent`.
-#[derive(Archive, Serialize, Deserialize, Clone, Debug)]
-#[rkyv(derive(Debug))]
-pub enum ObserveEvent {
-    RequestStarted {
-        request_id: Box<str>,
-        downstream_user_agent: Option<Box<str>>,
-    },
-    AuthnComplete {
-        principal_id: Box<str>,
-        principal_kind: Box<str>,
-    },
-    UpstreamChosen {
-        upstream: Upstream,
-    },
-    Chunk {
-        batch_index: u64,
-        event_count: u64,
-        total_bytes: u64,
-    },
-    RequestFinished {
-        status: u16,
-        input_tokens: Option<u64>,
-        output_tokens: Option<u64>,
-        cache_creation_input_tokens: Option<u64>,
-        cache_read_input_tokens: Option<u64>,
-        duration_ms: u64,
-    },
-    Error {
-        code: Box<str>,
-        message: Box<str>,
-        source: Box<str>,
-    },
 }
 
 include!(concat!(env!("OUT_DIR"), "/wire_schema_impls.rs"));

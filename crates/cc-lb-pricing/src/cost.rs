@@ -1,7 +1,7 @@
 use crate::tier_resolver::{resolve_optional_price, resolve_tier_rate};
 use crate::{
-    ComputedCostBreakdown, CostEstimate, PricingStatus, UpstreamKind, UsdPerMillion,
-    canonical_service_tier, global_catalog, normalize_model_id,
+    ComputedCostBreakdown, PricingStatus, UsdPerMillion, canonical_service_tier, global_catalog,
+    normalize_model_id,
 };
 
 /// Multiplier the provider applies to base input pricing for a 1-hour cache write.
@@ -23,14 +23,6 @@ pub(crate) fn resolved_cache_creation_1h_price(base_input_price: UsdPerMillion) 
     ))
 }
 
-#[deprecated(note = "use virtual_cost_micros_full to include cache token costs and upstream kind")]
-pub fn virtual_cost_micros(model: &str, input_tokens: u64, output_tokens: u64) -> CostEstimate {
-    virtual_cost_micros_full(model, input_tokens, output_tokens, 0, 0, 0, None, None)
-        .into_estimate()
-}
-
-// CLIPPY-ALLOW: component token counts and tier context are the stable public pricing API.
-#[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full(
     model: &str,
     input: u64,
@@ -38,10 +30,9 @@ pub fn virtual_cost_micros_full(
     cache_creation_5m_input: u64,
     cache_creation_1h_input: u64,
     cache_read_input: u64,
-    upstream_kind: Option<UpstreamKind>,
     service_tier: Option<&str>,
 ) -> ComputedCostBreakdown {
-    let normalized = normalize_model_id(model, upstream_kind);
+    let normalized = normalize_model_id(model);
     let snapshot = global_catalog().current();
     let Some(pricing) = snapshot.models.get(&normalized) else {
         record_missing_price_field(&normalized, "model");
@@ -182,7 +173,7 @@ mod tests {
             status: CatalogStatus::Ok,
         });
 
-        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 1_000_000, 0, None, None);
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 1_000_000, 0, None);
 
         assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
     }

@@ -1,5 +1,4 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
-import { createEventSource, type EventSourceClient } from 'eventsource-client';
 import * as z from 'zod';
 import { clearAdminToken, getAdminToken } from './auth';
 
@@ -338,11 +337,6 @@ export interface SummaryTotals {
   error_rate: number;
   virtual_cost_micros: number;
   avg_latency_ms: number;
-  avg_proxy_setup_ms: number;
-  avg_shape_ms: number;
-  avg_sign_ms: number;
-  avg_upstream_ttfb_ms: number;
-  avg_upstream_body_ms: number;
 }
 
 export interface UsageBucket {
@@ -356,9 +350,10 @@ export interface UsageBucket {
   virtual_cost_micros: number;
   /**
    * Per-category cost in micros, aggregated from the request events behind the
-   * bucket. Populated only for principal-grouped `/admin/usage` buckets, and
-   * omitted for windows whose events predate per-category cost or whose event
-   * data disagrees with the rollup — `virtual_cost_micros` stays authoritative.
+   * bucket. Populated only for principal-grouped `/admin/v1/dashboard/usage`
+   * buckets, and omitted for windows whose events predate per-category cost or
+   * whose event data disagrees with the rollup — `virtual_cost_micros` stays
+   * authoritative.
    */
   cost_input_micros?: number | null;
   cost_output_micros?: number | null;
@@ -367,18 +362,6 @@ export interface UsageBucket {
   cost_cache_read_micros?: number | null;
   latency_ms_sum: number;
   latency_count: number;
-  latency_ms_min?: number;
-  latency_ms_max?: number;
-  proxy_setup_ms_sum: number;
-  proxy_setup_ms_count: number;
-  shape_ms_sum: number;
-  shape_ms_count: number;
-  sign_ms_sum: number;
-  sign_ms_count: number;
-  upstream_ttfb_ms_sum: number;
-  upstream_ttfb_ms_count: number;
-  upstream_body_ms_sum: number;
-  upstream_body_ms_count: number;
 }
 
 export interface Sparkline {
@@ -481,7 +464,6 @@ export const RequestEventPartialSchema = z.looseObject({
   principal_id: z.string().nullable().optional(),
   principal_kind: z.string().nullable().optional(),
   key_id: z.string().nullable().optional(),
-  upstream: z.string().nullable().optional(),
   upstream_id: z.string().nullable().optional(),
   upstream_name: z.string().nullable().optional(),
   thread_id: z.string().nullable().optional(),
@@ -576,70 +558,6 @@ export type FinalRequestEventUpdate = z.infer<
 >;
 export type RequestEventUpdate = z.infer<typeof RequestEventUpdateSchema>;
 
-/**
- * Async-iterate typed `RequestEventUpdate` frames from the admin SSE stream.
- *
- * The generator owns the `EventSource` connection: aborting `signal` closes
- * it, and iteration ends when the server closes. Malformed JSON and
- * schema-invariant violations are dropped silently in production (warned in
- * dev). 401 responses call `notifyAuthRequired` so the login flow can
- * re-engage.
- *
- * Designed as the `streamFn` input for TanStack Query's
- * `experimental_streamedQuery`; consumers should not iterate it manually.
- */
-export async function* streamRequestEventUpdates(
-  signal: AbortSignal,
-): AsyncGenerator<RequestEventUpdate> {
-  const token = getAdminToken();
-  const client: EventSourceClient = createEventSource({
-    url: '/admin/events/stream',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    fetch: async (url, init) => {
-      const res = await fetch(url, init as RequestInit);
-      if (res.status === 401) {
-        const body = await res
-          .clone()
-          .json()
-          .catch(() => null);
-        const parsed = UnauthorizedResponseSchema.safeParse(body);
-        notifyAuthRequired(
-          parsed.success ? parsed.data.auth_mode : null,
-          Boolean(token),
-        );
-        throw new ApiError(401, 'unauthorized', body, 'Unauthorized');
-      }
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      return res;
-    },
-  });
-  const onAbort = () => client.close();
-  signal.addEventListener('abort', onAbort, { once: true });
-  try {
-    for await (const msg of client) {
-      let raw: unknown;
-      try {
-        raw = JSON.parse(msg.data);
-      } catch {
-        continue;
-      }
-      const parsed = RequestEventUpdateSchema.safeParse(raw);
-      if (!parsed.success) {
-        if (import.meta.env.DEV) {
-          console.warn('[SSE] request-event schema drift', parsed.error, raw);
-        }
-        continue;
-      }
-      yield parsed.data;
-    }
-  } finally {
-    signal.removeEventListener('abort', onAbort);
-    client.close();
-  }
-}
-
 export interface RequestEvent {
   ts: number | null;
   ts_ms?: number | null;
@@ -648,7 +566,6 @@ export interface RequestEvent {
   principal_id?: string;
   key_id?: string;
   principal_kind?: string;
-  upstream?: string;
   upstream_id?: string;
   upstream_name?: string;
   thread_id?: string | null;
@@ -722,8 +639,6 @@ export interface RequestEvent {
   dns_ms?: number;
   connect_ms?: number;
   connection_reused?: boolean;
-  limit_reconcile_ms?: number;
-  observability_post_ms?: number;
   first_body_chunk_ms?: number;
   body_chunk_count?: number;
   body_bytes?: number;
@@ -780,34 +695,6 @@ export function fetchEventsHistogram(
   return getJson<EventsHistogramPayload>(
     `/admin/v1/events/histogram?${params.toString()}`,
   );
-}
-
-interface PrincipalLimitSnapshot {
-  kind: 'requests' | 'tokens' | 'input_tokens' | 'output_tokens';
-  limit: number | null;
-  remaining: number | null;
-  reset: string | null;
-  observed_at_unix_secs: number;
-  stored_at_unix_secs: number;
-  observed: boolean;
-}
-
-interface PrincipalLimitWindow {
-  window: string;
-  snapshots: PrincipalLimitSnapshot[];
-}
-
-interface PrincipalLimitIdentity {
-  identity_kind: 'account' | 'credential' | 'unobserved';
-  identity_value: string | null;
-  account_observed: boolean;
-  windows: PrincipalLimitWindow[];
-}
-
-export interface PrincipalLimitsResponse {
-  principal_id: string;
-  observed: boolean;
-  identities: PrincipalLimitIdentity[];
 }
 
 interface ApiKeyRecord {
@@ -871,7 +758,6 @@ export interface ConfigEditorResponse {
   saved_at_unix_secs: number | null;
   file: ConfigFileInfo;
   overrides: ConfigOverrideInfo[];
-  restart_required: boolean;
 }
 
 export interface ConfigDraftResponse {
@@ -890,7 +776,6 @@ export interface ConfigDraftSavedResponse {
 export interface ConfigFileSavedResponse {
   revision: number;
   saved_at_unix_secs: number;
-  restart_required: boolean;
   fingerprint: string;
 }
 
@@ -932,8 +817,10 @@ export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';
 
 // Why a long-lived 365-day request fell back to a refreshing credential:
 // 'rejected' = the token endpoint refused the custom expires_in outright,
-// 'clamped' = it accepted but granted a materially shorter lifetime.
-export type OAuthFallbackReason = 'rejected' | 'clamped';
+// 'clamped' = it accepted but granted a materially shorter lifetime,
+// 'scope_rejected' = refused because oauth.anthropic.scopes asks for a scope
+// Anthropic will not issue a year-long token for.
+export type OAuthFallbackReason = 'rejected' | 'clamped' | 'scope_rejected';
 
 export interface UpstreamOAuthStatusResponse {
   upstream_id: string;
@@ -1016,7 +903,6 @@ interface AuditEntry {
   actor_kind?: string | null;
   actor_email?: string | null;
   admin_action: string | null;
-  kind?: string;
   payload?: Record<string, unknown>;
 }
 
@@ -1039,7 +925,7 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '7d_sonnet': '7d (Sonnet)',
   '7d_opus': '7d (Opus)',
   '7d_fable': '7d (Fable)',
-  overage: 'Extra Usage',
+  overage: 'Extra usage',
   unified: 'Unified',
 };
 
@@ -1105,61 +991,6 @@ export interface SeriesResponse {
   bucket_secs: number;
   source: string;
   series: SeriesResponseItem[];
-}
-
-export interface BurnResponse {
-  utilization_per_second: number | null;
-  utilization_per_hour: number | null;
-  eta_to_limit_secs: number | null;
-  resets_before_limit: boolean | null;
-  confidence: string;
-  sample_count: number;
-  reason: string | null;
-}
-
-export interface ProxyBurnResponse {
-  proxy_tokens_per_second: number | null;
-  proxy_tokens_per_hour: number | null;
-  effective_limit_tokens_estimate: number | null;
-  utilization_per_hour: number | null;
-  eta_to_limit_secs: number | null;
-  resets_before_limit: boolean | null;
-  confidence: string;
-  sample_count: number;
-  reason: string | null;
-}
-
-export interface DeficitResponse {
-  projected_proxy_tokens_window: number;
-  effective_limit_tokens_estimate: number;
-  shortfall_tokens: number;
-  recommended_multiplier: number;
-  confidence: string;
-}
-
-export interface AnalysisWindowResponse {
-  window: string;
-  current_utilization: number | null;
-  resets_at_unix_secs: number | null;
-  data_state: string;
-  actual_account_burn: BurnResponse;
-  proxy_projected_burn: ProxyBurnResponse;
-  deficit: DeficitResponse | null;
-  caveats: string[];
-}
-
-export interface AnalysisUpstreamResponse {
-  upstream_id: string;
-  upstream_name: string;
-  windows: AnalysisWindowResponse[];
-}
-
-export interface AnalysisResponse {
-  since_unix_secs: number;
-  until_unix_secs: number;
-  now_unix_secs: number;
-  max_staleness_secs: number;
-  upstreams: AnalysisUpstreamResponse[];
 }
 
 export interface AggregateProviderLotResponse {

@@ -10,8 +10,8 @@ use http::Response;
 use metrics::Unit;
 use thiserror::Error;
 
-use crate::clock::{Clock, ClockHandle, unix_secs};
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
+use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 
 const HALF_OPEN_INITIALIZING: u32 = u32::MAX;
 
@@ -423,7 +423,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::clock::SystemClock;
+    use cc_lb_clock::SystemClock;
 
     #[test]
     fn evict_removes_entry() {

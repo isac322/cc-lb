@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_clock::{Clock, ClockHandle};
@@ -11,7 +11,6 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use tokio::time::{self, Instant};
 
 use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotFetch};
 
@@ -27,20 +26,7 @@ pub struct LiteLlmLoader {
     url: String,
     cache_path: PathBuf,
     http: HttpClient,
-    last_failure_kind: Arc<Mutex<Option<String>>>,
     clock: ClockHandle,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PriceCatalogStatus {
-    Ok {
-        fetched_at_ms: u64,
-    },
-    Stale {
-        fetched_at_ms: u64,
-        last_failure_kind: String,
-    },
-    CostDisabled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,66 +74,8 @@ impl LiteLlmLoader {
             url,
             cache_path,
             http,
-            last_failure_kind: Arc::new(Mutex::new(None)),
             clock,
         }
-    }
-
-    pub async fn wait_for_first_snapshot(catalog: &Arc<PriceCatalog>, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if matches!(catalog.status(), CatalogStatus::Ok) {
-                return true;
-            }
-
-            let now = Instant::now();
-            if now >= deadline {
-                return false;
-            }
-
-            let remaining = deadline.saturating_duration_since(now);
-            time::sleep(remaining.min(Duration::from_millis(50))).await;
-        }
-    }
-
-    pub fn current_status(&self) -> PriceCatalogStatus {
-        let snapshot = self.catalog.current();
-        match snapshot.status {
-            CatalogStatus::Ok => {
-                if let Some(last_failure_kind) = self.last_failure_kind() {
-                    PriceCatalogStatus::Stale {
-                        fetched_at_ms: snapshot.fetched_at_ms,
-                        last_failure_kind,
-                    }
-                } else {
-                    PriceCatalogStatus::Ok {
-                        fetched_at_ms: snapshot.fetched_at_ms,
-                    }
-                }
-            }
-            CatalogStatus::Stale => PriceCatalogStatus::Stale {
-                fetched_at_ms: snapshot.fetched_at_ms,
-                last_failure_kind: self
-                    .last_failure_kind()
-                    .unwrap_or_else(|| "unknown".to_owned()),
-            },
-            CatalogStatus::CostDisabled => PriceCatalogStatus::CostDisabled,
-        }
-    }
-
-    pub async fn refresh_once(&self) -> Result<u64, LoaderError> {
-        let fetched = self.fetch_and_fingerprint().await?;
-        let fetched_at_ms = fetched.fetched_at_ms;
-        self.persist_snapshot(&fetched).await?;
-        let _installed = install_cached_bytes(
-            &self.catalog,
-            fetched.bytes,
-            Some(fetched_at_ms),
-            &*self.clock,
-        )?;
-        self.record_success();
-        Ok(fetched_at_ms)
     }
 
     pub async fn fetch_and_fingerprint(&self) -> Result<FetchedCatalog, LoaderError> {
@@ -217,19 +145,6 @@ impl LiteLlmLoader {
         }
 
         Ok(false)
-    }
-
-    fn record_success(&self) {
-        if let Ok(mut guard) = self.last_failure_kind.lock() {
-            *guard = None;
-        }
-    }
-
-    fn last_failure_kind(&self) -> Option<String> {
-        self.last_failure_kind
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
     }
 }
 

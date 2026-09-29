@@ -46,12 +46,33 @@ runs:
           fi
         }
 
+        # Crate versions are owned by release-plz, so a PR cannot bump them.
+        # A breaking change declared with a conventional-commit marker
+        # (`type(scope)!:` subject or `BREAKING CHANGE:` footer) on a commit
+        # that touched the crate since its last release tag is checked as a
+        # major release, which is the bump release-plz will apply. Undeclared
+        # breaks are still rejected. Requires full history and tags.
+        semver_check() {
+          local crate="$1" pkgid version tag log
+          local args=(--package "$crate")
+          pkgid="$(cargo pkgid -p "$crate")" || return 1
+          version="${pkgid##*[@#]}"
+          tag="$crate-v$version"
+          # Read the whole log before matching: `git log | grep -q` under
+          # pipefail fails with SIGPIPE once grep exits on an early match.
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null &&
+            log="$(git log --format='%s%n%b' "$tag..HEAD" -- "crates/$crate")" &&
+            grep -Eq '^[a-z]+(\([^)]*\))?!:|^BREAKING[ -]CHANGE:' <<<"$log"; then
+            echo "Declared breaking change to $crate since $tag; checking as a major release."
+            args+=(--release-type major)
+          fi
+          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 cargo semver-checks "${args[@]}"
+        }
+
         run_check "cargo semver-checks cc-lb-plugin-wire" \
-          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
-          cargo semver-checks --package cc-lb-plugin-wire
+          semver_check cc-lb-plugin-wire
         run_check "cargo semver-checks cc-lb-plugin-conformance" \
-          env CC_LB_SKIP_WASM_FIXTURE_BUILD=1 \
-          cargo semver-checks --package cc-lb-plugin-conformance
+          semver_check cc-lb-plugin-conformance
         run_check "cargo publish --dry-run cc-lb-plugin-wire" \
           cargo publish --dry-run -p cc-lb-plugin-wire
 

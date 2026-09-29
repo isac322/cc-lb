@@ -159,7 +159,7 @@ The migration to checkpoint-only history is complete and the legacy raw
   and then drops it.
 - The observation-flavored API was renamed to sample terminology
   (`SubscriptionQuotaObservationRecord` -> `SubscriptionQuotaSample`,
-  `put_subscription_quota{,_batch}` -> `record_subscription_quota_sample{,s}`).
+  `put_subscription_quota_batch` -> `record_subscription_quota_samples`).
 - The vestigial `dedup_elapsed_override_secs` knob (the 30 s time-based
   duplicate-suppression window described in the Context above) has been removed
   from `SubscriptionQuotaConfig`, the writer config, and `config-schema.json`.
@@ -169,3 +169,16 @@ The migration to checkpoint-only history is complete and the legacy raw
 
 The two-phase compaction/cleanup process described above is retained for
 historical context; that tooling no longer ships.
+
+## Update (2026-09-29): storage-level series and full-checkpoint reads removed
+
+The read path described in the Context above no longer exists in storage.
+The admin `/series`, `/analysis`, and `/aggregate` endpoints build series in
+`crates/cc-lb-admin/src/subscription_quotas/series.rs` from
+`list_subscription_quota_slim_checkpoints`, which returns the per-key left
+anchor plus every checkpoint inside `[since, until]`. The storage trait methods
+`list_subscription_quota_series`, `list_subscription_quota_checkpoint_ranges`,
+and `list_latest_subscription_quota_checkpoints_for_upstreams`, together with
+their SQLite/Postgres bucketing and full-record read helpers, have been
+deleted. Full checkpoint rows are only read directly by tests that verify what
+the writer persisted.

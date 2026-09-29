@@ -61,7 +61,7 @@ The `proxy-e2e-qa` `SKILL.md` has no scenario index table, so this scenario does
   cmp "$QA_ROOT/fixtures/c2-hit.sse" "$QA_ROOT/c2-stream.out"
   curl -fsS "$QA_FIXTURE/captures/c2-stream-0003" -o "$QA_ROOT/c2-stream-capture.json"
   curl -fsS -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
-    "$QA_ADMIN/admin/usage?range=1h&step=1m&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
+    "$QA_ADMIN/admin/v1/usage?range=1h&step=1m&group_by=upstream&upstream_id=$QA_UPSTREAM_ID" \
     -o "$QA_ROOT/c2-usage.json"
   jq -e '.upstream == "cache-hit"' "$QA_ROOT/c2-stream-capture.json"
   jq -e '[.series[].buckets[].cache_read_input_tokens] | add >= 128' "$QA_ROOT/c2-usage.json"
@@ -73,8 +73,8 @@ The `proxy-e2e-qa` `SKILL.md` has no scenario index table, so this scenario does
 - **C3.1 Shape output strips protected headers; the trusted signer overrides a spoofed credential:**
   ```bash
   SHAPE_ID="$(curl -fsS -X POST -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
-    -F "bytes=@$QA_ROOT/fixtures/shape-strip.wasm" -F 'name=qa-shape-strip-spoof' \
-    -F 'original_filename=shape-strip.wasm' -F 'slot_kind=shape' \
+    -F "bytes=@$QA_ROOT/fixtures/shape-strip.wasm" \
+    -F 'original_filename=shape-strip.wasm' \
     "$QA_ADMIN/admin/v1/plugins/wasm" | jq -er '.id')"
   curl -fsS -X POST -H "Authorization: Bearer $QA_ADMIN_TOKEN" -H 'content-type: application/json' \
     -d "{\"slot\":\"shape\",\"wasm_registry_id\":\"$SHAPE_ID\",\"position\":\"first\"}" \
@@ -106,11 +106,11 @@ The `proxy-e2e-qa` `SKILL.md` has no scenario index table, so this scenario does
 - **C3.3 Filter plugin that rejects every candidate fails closed:**
   ```bash
   FILTER_ID="$(curl -fsS -X POST -H "Authorization: Bearer $QA_ADMIN_TOKEN" \
-    -F "bytes=@$QA_ROOT/fixtures/filter-reject-all.wasm" -F 'name=qa-filter-reject-all' \
-    -F 'original_filename=filter-reject-all.wasm' -F 'slot_kind=filter' \
+    -F "bytes=@$QA_ROOT/fixtures/filter-reject-all.wasm" \
+    -F 'original_filename=filter-reject-all.wasm' \
     "$QA_ADMIN/admin/v1/plugins/wasm" | jq -er '.id')"
   curl -fsS -X POST -H "Authorization: Bearer $QA_ADMIN_TOKEN" -H 'content-type: application/json' \
-    -d "{\"slot\":\"filter\",\"wasm_registry_id\":\"$FILTER_ID\",\"position\":\"first\"}" \
+    -d "{\"slot\":\"router\",\"wasm_registry_id\":\"$FILTER_ID\",\"position\":\"first\"}" \
     "$QA_ADMIN/admin/v1/principals/$QA_PRINCIPAL_ID/plugin-chain" \
     -o "$QA_ROOT/c3-filter-chain.json"
   curl -sS -D "$QA_ROOT/c3-filter.headers" -o "$QA_ROOT/c3-filter.json" -w '%{http_code}\n' \

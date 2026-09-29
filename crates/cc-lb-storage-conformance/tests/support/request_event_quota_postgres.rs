@@ -4,8 +4,11 @@ macro_rules! define_request_event_quota_postgres_tests {
 
         type PostgresQuotaRow = (Option<f64>, Option<f64>, Option<f64>, Option<f64>);
 
-        const POSTGRES_QUOTA_SELECT: &str = "SELECT quota_urgency_5h, quota_urgency_7d, \
-            quota_urgency_combined, quota_warning_multiplier \
+        const POSTGRES_QUOTA_SELECT: &str = "SELECT \
+            (convert_from(payload, 'UTF8')::jsonb ->> 'quota_urgency_5h')::float8, \
+            (convert_from(payload, 'UTF8')::jsonb ->> 'quota_urgency_7d')::float8, \
+            (convert_from(payload, 'UTF8')::jsonb ->> 'quota_urgency_combined')::float8, \
+            (convert_from(payload, 'UTF8')::jsonb ->> 'quota_warning_multiplier')::float8 \
             FROM request_events_v1 WHERE event_id = $1";
 
         #[test]
@@ -23,13 +26,17 @@ macro_rules! define_request_event_quota_postgres_tests {
                     // When the selected winner values are persisted through RequestEventStore.
                     storage.append_request_event(&event).await?;
 
-                    // Then payload reads and dedicated columns both retain the selected values.
-                    let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(read_back.len(), 1);
-                    request_event_quota_support::assert_populated_event(&read_back[0]);
-                    let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
-                    assert_eq!(recent.len(), 1);
-                    request_event_quota_support::assert_populated_event(&recent[0]);
+                    // Then payload reads and the stored payload JSON both retain the selected values.
+                    let row_count =
+                        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM request_events_v1")
+                            .fetch_one(&fixture.pool)
+                            .await?;
+                    assert_eq!(row_count, 1);
+                    let read_back = storage
+                        .get_request_event(request_event_quota_support::SELECTED_EVENT_ID)
+                        .await?
+                        .expect("persisted request event");
+                    request_event_quota_support::assert_populated_event(&read_back);
 
                     let row = sqlx::query_as::<_, PostgresQuotaRow>(POSTGRES_QUOTA_SELECT)
                         .bind(request_event_quota_support::SELECTED_EVENT_ID)
@@ -179,7 +186,7 @@ macro_rules! define_request_event_quota_postgres_tests {
                             .fetch_one(&fixture.pool)
                             .await?;
 
-                    // Then all dedicated quota columns stay NULL.
+                    // Then the stored payloads carry no quota values.
                     let null_row: PostgresQuotaRow = (None, None, None, None);
                     assert_eq!(mismatch_row, null_row);
                     assert_eq!(historical_row, null_row);

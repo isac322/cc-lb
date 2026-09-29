@@ -141,13 +141,12 @@ sections, and one `cc_lb.plugin.v1` metadata custom section.
 
 ## Hook Contracts
 
-cc-lb supports three plugin slot kinds. A wasm artifact may implement one or more hooks, and upload-time `slot_kind=filter|shape|observe` selects which slot the registration targets.
+cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more hooks; upload registers the artifact for every slot whose hook it exports.
 
 | Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
 | `filter` | `cc_lb_filter` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. The V1 request exposes the requested service tier. |
 | `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
-| `observe` | `cc_lb_observe` | `ObserveEvent` | none | Receive lifecycle events for side effects. |
 
 Filter example:
 
@@ -243,22 +242,6 @@ mod request_only_shaper {
 }
 ```
 
-Observe example:
-
-```rust
-use cc_lb_plugin_wire::v1::ObserveEvent;
-
-#[handler(
-    observe,
-    wire = 1,
-    description = "Receives request lifecycle events.",
-    usage = "Attach as an observability hook for audit or metrics sinks.",
-)]
-pub fn observe(event: ObserveEvent) {
-    let _ = event;
-}
-```
-
 Each handler declares its own `wire = N`. The published PDK supports `wire = 1`
 for every hook.
 
@@ -284,11 +267,9 @@ Required per-hook fields:
 Upload rejection names relevant to plugin authors include:
 
 - `missing_part`: a required multipart field is absent.
-- `invalid_slot_kind`: `slot_kind` is not `filter`, `shape`, or `observe`.
 - `invalid_wasm_magic`: uploaded bytes do not start with the wasm magic.
 - `invalid_wasm_length`: uploaded bytes are too short to be wasm.
 - `wasm_too_large`: the wasm exceeds the 32 MiB upload limit.
-- `identity_mismatch`: multipart `name` does not match plugin metadata `name`.
 - `invalid_wasm`: wasmtime admission rejected exports, metadata, wire versions,
   fingerprints, imports, or the runtime probe.
 
@@ -336,7 +317,6 @@ The host maintains supported-version lists per hook:
 
 - `HOST_SUPPORTED_FILTER_VERSIONS`
 - `HOST_SUPPORTED_SHAPE_VERSIONS`
-- `HOST_SUPPORTED_OBSERVE_VERSIONS`
 - `HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS`
 - `HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS`
 
@@ -346,10 +326,11 @@ chain or called on user traffic.
 
 ## Layout Fingerprint (`WireSchema`)
 
-The wire layout fingerprint is derived from the Rust type AST with
-`#[derive(WireSchema)]`. The derive macro builds a canonical descriptor string
-from the type name, fields, variants, and field types, then embeds
-`BLAKE3(descriptor)` as a 32-byte fingerprint.
+Each hook wire type carries a layout fingerprint. `cc-lb-plugin-wire` builds a
+canonical descriptor string from the type name, fields, variants, and field
+types, and embeds `BLAKE3(descriptor)` as a 32-byte fingerprint.
+`#[cc_lb_plugin]` embeds the fingerprint of each handler's request type in the
+plugin.
 
 Plugin authors do not edit schema tags or manual hashes. A field edit naturally
 changes the descriptor and the embedded fingerprint. During admission, the host
@@ -401,9 +382,7 @@ Upload through the admin API:
 curl -sS -X POST \
   -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \
   -F "bytes=@target/wasm32-unknown-unknown/release/my_plugin.wasm" \
-  -F "name=my-plugin" \
   -F "original_filename=my-plugin.wasm" \
-  -F "slot_kind=filter" \
   "http://localhost:$ADMIN_PORT/admin/v1/plugins/wasm"
 ```
 
@@ -489,8 +468,8 @@ current host can inspect, compile, fingerprint-check, and probe the plugin.
 `run()` builds a live runtime session and performs ABI round-trips using the
 canonical payload for each hook's declared wire version. A filter plugin
 receives the V1 request with `service_tier = Some("priority")`. It proves the
-boundary works; it does not replace semantic tests for your plugin's routing,
-shaping, or observability behavior.
+boundary works; it does not replace semantic tests for your plugin's routing
+or shaping behavior.
 
 ## Wire Version Bump Policy
 

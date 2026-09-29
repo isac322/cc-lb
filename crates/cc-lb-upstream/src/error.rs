@@ -1,4 +1,3 @@
-use cc_lb_domain::CredentialStrategy;
 use thiserror::Error;
 
 /// Request shaping failures returned by [`crate::UpstreamDialect`].
@@ -8,12 +7,6 @@ pub enum DialectError {
     #[error("unsupported request: {reason}")]
     UnsupportedRequest {
         /// Redacted unsupported-request reason.
-        reason: String,
-    },
-    /// The selected upstream does not match the dialect.
-    #[error("upstream mismatch: {reason}")]
-    UpstreamMismatch {
-        /// Redacted mismatch reason.
         reason: String,
     },
     /// URL construction failed.
@@ -31,12 +24,6 @@ pub enum SignerError {
     /// No credentials are configured for the selected upstream.
     #[error("missing credentials: {reason}")]
     MissingCredentials {
-        /// Redacted credential reason.
-        reason: String,
-    },
-    /// Credentials exist but cannot be used.
-    #[error("invalid credentials: {reason}")]
-    InvalidCredentials {
         /// Redacted credential reason.
         reason: String,
     },
@@ -58,12 +45,6 @@ pub enum SignerError {
         /// Redacted expiry reason.
         reason: String,
     },
-    /// The factory was asked to build a signer for the wrong strategy.
-    #[error("wrong signer strategy: {strategy:?}")]
-    WrongStrategy {
-        /// Selected auth strategy.
-        strategy: CredentialStrategy,
-    },
 }
 
 /// Upstream failures observed after a request has been relayed.
@@ -72,14 +53,6 @@ pub enum UpstreamError {
     /// Upstream returned an unauthorized response.
     #[error("upstream unauthorized with status {status}")]
     Unauthorized {
-        /// HTTP status returned by the upstream.
-        status: http::StatusCode,
-        /// Redacted upstream response body, when available.
-        body: Option<bytes::Bytes>,
-    },
-    /// Upstream returned a retryable response.
-    #[error("upstream retryable status {status}")]
-    Retryable {
         /// HTTP status returned by the upstream.
         status: http::StatusCode,
         /// Redacted upstream response body, when available.

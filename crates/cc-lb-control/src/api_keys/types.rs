@@ -20,7 +20,7 @@ mod tests {
 
     #[test]
     fn key_status_bincode_roundtrip() {
-        let value = KeyStatus::Disabled;
+        let value = KeyStatus::Revoked;
 
         let decoded: KeyStatus = bincode_roundtrip(&value);
 

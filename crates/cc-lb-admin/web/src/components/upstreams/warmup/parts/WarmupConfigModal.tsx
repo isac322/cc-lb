@@ -31,7 +31,7 @@ export function WarmupConfigModal({ open, onOpenChange, plugin }: Props) {
         <span className="font-mono">
           {plugin.wasm_registry_id}
           {plugin.wire_version != null && (
-            <span className="ml-2 text-xs text-text-faint">
+            <span className="ml-2 font-sans text-caption text-text-faint">
               wire v{plugin.wire_version}
             </span>
           )}
@@ -40,16 +40,12 @@ export function WarmupConfigModal({ open, onOpenChange, plugin }: Props) {
       description="The exact config this warm-up sent to the shape plugin."
       size="md"
       footer={
-        <Button
-          variant="secondary"
-          iconLeft={<Copy className="w-3 h-3" />}
-          onClick={handleCopy}
-        >
+        <Button variant="secondary" iconLeft={<Copy />} onClick={handleCopy}>
           {copied ? 'Copied' : 'Copy JSON'}
         </Button>
       }
     >
-      <pre className="text-xs font-mono whitespace-pre-wrap break-all bg-bg border border-subtle rounded-sm p-3 max-h-[60vh] overflow-y-auto">
+      <pre className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap break-all rounded-sm bg-overlay-2 p-3 font-mono text-data">
         {pretty || '{}'}
       </pre>
     </Modal>

@@ -376,3 +376,7 @@ const fn source_matches_merge(
 #[cfg(test)]
 #[path = "series_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "series_storage_tests.rs"]
+mod storage_tests;

@@ -96,7 +96,7 @@ async function installAppFixtures(
         upstreams: upstreams.map((upstream) => ({ id: upstream.id, name: upstream.name, status: upstream.enabled ? 'active' : 'disabled', last_apply_at_unix_secs: null, last_apply_error: null })),
       });
     }
-    if (pathname === '/admin/usage') {
+    if (pathname === '/admin/v1/dashboard/usage') {
       return json(200, {
         range: url.searchParams.get('range') ?? '24h',
         step: url.searchParams.get('step') ?? 'hour',
@@ -107,7 +107,7 @@ async function installAppFixtures(
         series: [],
       });
     }
-    if (pathname === '/admin/events/recent') {
+    if (pathname === '/admin/v1/events/recent') {
       return json(200, { events: [], observed: true, count: 0, limit: 5 });
     }
     if (pathname === '/admin/v1/subscription-quotas/latest') {
@@ -124,9 +124,6 @@ async function installAppFixtures(
     }
     if (pathname === '/admin/v1/subscription-quotas/series') {
       return json(200, { since_unix_secs: 0, until_unix_secs: 0, bucket_secs: 60, source: 'merged', series: [] });
-    }
-    if (pathname === '/admin/v1/subscription-quotas/analysis') {
-      return json(200, { since_unix_secs: 0, until_unix_secs: 0, now_unix_secs: 0, max_staleness_secs: 300, upstreams: [] });
     }
     return json(200, {});
   });

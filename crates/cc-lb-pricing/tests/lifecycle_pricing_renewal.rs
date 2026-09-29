@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use cc_lb_control::{BusReceiver, LifecycleBusReceiver, RequestEventBus};
+use cc_lb_control::RequestEventBus;
 use cc_lb_lifecycle::{
     LifecycleEvent, ParseInfo, RouteInfo, TerminationReason, UsageSnapshot, UsageSource,
 };
@@ -21,9 +21,8 @@ struct RecordingBus {
 impl RequestEventBus for RecordingBus {
     fn publish(&self, _update: RequestEventUpdate) {}
 
-    fn subscribe(&self) -> BusReceiver {
-        let (_, rx) = broadcast::channel(1);
-        BusReceiver::InMemory(rx)
+    fn subscribe(&self) -> broadcast::Receiver<RequestEventUpdate> {
+        broadcast::channel(1).1
     }
 
     fn publish_lifecycle(&self, event: LifecycleEvent) {
@@ -33,14 +32,13 @@ impl RequestEventBus for RecordingBus {
             .push(event);
     }
 
-    fn subscribe_lifecycle(&self) -> LifecycleBusReceiver {
-        let (_, rx) = broadcast::channel(1);
-        LifecycleBusReceiver::InMemory(rx)
+    fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent> {
+        broadcast::channel(1).1
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
+async fn renewal_is_priced_only_after_terminal() {
     // Given a renewal lifecycle that has usage and an OAuth upstream route, but no terminal.
     install_renewal_pricing();
     let incomplete_bus = Arc::new(RecordingBus::default());
@@ -75,8 +73,6 @@ async fn renewal_is_priced_only_after_terminal_with_oauth_route_kind() {
             connect_ms: None,
             connection_reused: None,
             internal_errors: Vec::new(),
-            limit_reconcile_ms: None,
-            observability_post_ms: None,
             proxy_setup_ms: None,
             request_body_read_ms: None,
             request_body_bytes: None,
@@ -172,8 +168,6 @@ async fn send_renewal_pricing_inputs(tx: &mpsc::Sender<LifecycleEvent>, event_id
             quota_urgency_7d: None,
             quota_urgency_combined: None,
             quota_warning_multiplier: None,
-            lineage_would_have_predicted_read_tokens: None,
-            lineage_would_have_picked_upstream_id: None,
         }),
         routing_trace: None,
     })

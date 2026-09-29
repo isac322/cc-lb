@@ -3,6 +3,7 @@ import { mergeDateIntoField } from '../../lib/calendarDate';
 import { useTimezone } from '../../lib/locale';
 import { formatInTimezone } from '../../lib/timezone';
 import { DateTimeField, parseBound } from './DateTimeField';
+import { Button } from './primitives';
 
 export interface TimeRangeBoundsProps {
   readonly since?: number;
@@ -77,8 +78,9 @@ export function TimeRangeBounds({
         }}
       />
       <DateTimeField
-        label="To (blank = now)"
+        label="To"
         aria-label="Range end"
+        placeholder="Now"
         error={untilError}
         value={untilStr}
         onChange={setUntilStr}
@@ -88,13 +90,7 @@ export function TimeRangeBounds({
           commit(sinceStr, next);
         }}
       />
-      <button
-        type="button"
-        className="h-7 px-2.5 text-xs rounded-sm border border-subtle hover:bg-[color:var(--color-hover-bg)]"
-        onClick={() => commit(sinceStr, untilStr)}
-      >
-        Apply
-      </button>
+      <Button onClick={() => commit(sinceStr, untilStr)}>Apply</Button>
     </>
   );
 }

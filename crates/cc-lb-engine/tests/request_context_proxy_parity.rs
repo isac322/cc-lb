@@ -4,10 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
 use cc_lb_domain::{Principal, UpstreamCandidate};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
-};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_routing::{FilterError, FilterOutput, FilterPlugin, PerCandidateReason, RoutingContext};
 use cc_lb_upstream::SignedRequest;
@@ -15,7 +13,7 @@ use http::{Method, Response, StatusCode};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
+use crate::common::{TestAuthn, TestState, lifecycle_with_parts, messages_request};
 
 type FilterOutcome = (String, Vec<PerCandidateReason>);
 
@@ -93,11 +91,7 @@ fn lifecycle(state: ParityState) -> Lifecycle {
     let mut chains = HashMap::new();
     chains.insert(
         "principal-test".to_owned(),
-        (
-            Some(pipeline),
-            ObservabilityHooksCache::Inherit,
-            DialectCache::Inherit,
-        ),
+        (Some(pipeline), DialectCache::Inherit),
     );
     let principal_view = Arc::new(PrincipalView::for_tests(
         "principal-test",
@@ -110,13 +104,7 @@ fn lifecycle(state: ParityState) -> Lifecycle {
 
     lifecycle_with_parts(
         authn,
-        Arc::new(TestRouter {
-            base_url: "http://upstream.local/"
-                .parse()
-                .expect("fixture URL parses"),
-        }),
         Arc::new(CapturingDispatch { state }),
-        Vec::new(),
         LifecycleConfig::default(),
     )
 }

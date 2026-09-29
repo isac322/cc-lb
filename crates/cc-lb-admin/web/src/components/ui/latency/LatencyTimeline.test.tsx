@@ -19,7 +19,6 @@ function ev(overrides: Partial<RequestEvent>): RequestEventWithPhase {
   return {
     ts: 1234567890,
     request_id: 'req_test',
-    upstream: 'anthropic',
     status: 200,
     duration_ms: 0,
     _phase: 'final',
@@ -205,7 +204,6 @@ describe('buildStageDetails', () => {
         upstream_ttfb_ms: 20,
         upstream_body_ms: 50,
         finalize_ms: 10,
-        limit_reconcile_ms: 3,
       }),
     );
 
@@ -222,7 +220,6 @@ describe('buildStageDetails', () => {
       5,
     );
     expect(stages.find((stage) => stage.key === 'finalize')?.ms).toBe(10);
-    expect(stages.map((stage) => stage.key)).not.toContain('limit_reconcile');
   });
 
   it('selects one complete stream body stage when both body fields match', () => {
@@ -322,15 +319,6 @@ describe('buildStageDetails', () => {
         finalize_ms: null,
       }),
     );
-    const mixed = buildStageDetails(
-      ev({
-        source_kind: 'proxy',
-        duration_ms: 100,
-        request_body_read_ms: 20,
-        finalize_ms: undefined,
-        limit_reconcile_ms: 10,
-      }),
-    );
 
     expect(measuredZero.map((stage) => stage.key)).toEqual([
       'request_body_read',
@@ -338,11 +326,6 @@ describe('buildStageDetails', () => {
     ]);
     expect(missing).toEqual([]);
     expect(explicitNull).toEqual([]);
-    expect(mixed.map((stage) => stage.key)).toEqual([
-      'request_body_read',
-      'limit_reconcile',
-    ]);
-    expect(mixed.find((stage) => stage.key === 'limit_reconcile')?.ms).toBe(10);
   });
 });
 
@@ -480,24 +463,21 @@ describe('LatencyTimeline', () => {
       content_delta_count: 128,
       ping_count: 6,
       inter_token_avg_ms: 28,
-      observability_post_ms: 6,
-      limit_reconcile_ms: 4,
+      finalize_ms: 4,
     });
     render(<LatencyTimeline event={event} />);
     expect(screen.getByText('Internal pre')).toBeTruthy();
     expect(screen.getByText('Wait')).toBeTruthy();
     expect(screen.getByText('Upstream')).toBeTruthy();
     expect(screen.getByText('Body')).toBeTruthy();
-    expect(screen.getByText('Internal post')).toBeTruthy();
     expect(screen.getByText('SSE markers')).toBeTruthy();
-    expect(screen.queryByText('Observability post')).toBeNull();
     const stageDetails = screen
       .getByText(/^Stage details \(\d+\)$/)
       .closest('details');
     expect(stageDetails).not.toBeNull();
     expect(
       within(stageDetails!).getByRole('button', {
-        name: /Limit reconcile.*Internal post.*4 ms/,
+        name: /Finalize.*Finalize.*4 ms/,
       }),
     ).toBeTruthy();
   });
@@ -531,7 +511,6 @@ describe('LatencyTimeline', () => {
           response_body_process_ms: 20,
           response_body_downstream_poll_gap_ms: 10,
           finalize_ms: 50,
-          limit_reconcile_ms: 20,
         })}
       />,
     );
@@ -766,7 +745,6 @@ describe('LatencyTimeline', () => {
           upstream_ttfb_ms: 20,
           upstream_body_ms: 55,
           finalize_ms: 10,
-          limit_reconcile_ms: 3,
         })}
       />,
     );
@@ -821,36 +799,6 @@ describe('LatencyTimeline', () => {
       requestBodyDetail.compareDocumentPosition(setupDetail) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
-    expect(screen.queryByText('Internal post')).toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Finalize[\s\S]*Limit reconcile: 3 ms[\s\S]*Other finalize: 7 ms[\s\S]*10 ms/,
-      }),
-    ).toBeTruthy();
-  });
-  it('keeps mixed ingress rows on the legacy Internal post path', () => {
-    render(
-      <LatencyTimeline
-        event={ev({
-          source_kind: 'proxy',
-          duration_ms: 100,
-          request_body_read_ms: 20,
-          limit_reconcile_ms: 10,
-        })}
-      />,
-    );
-
-    expect(screen.getByText('Internal post')).toBeTruthy();
-    expect(screen.queryByText('Finalize')).toBeNull();
-    const stageDetails = screen
-      .getByText(/^Stage details \(\d+\)$/)
-      .closest('details');
-    expect(stageDetails).not.toBeNull();
-    expect(
-      within(stageDetails!).getByRole('button', {
-        name: /Limit reconcile.*Internal post.*10 ms/,
-      }),
-    ).toBeTruthy();
   });
 
   it('renders a cancelled 499 as Partial stream instead of a completed body', () => {
@@ -910,12 +858,11 @@ describe('LatencyTimeline', () => {
     );
 
     expect(screen.getAllByText('Renewal cycle').length).toBeGreaterThan(0);
-    const renewalResponsibility = screen.getByRole('button', {
-      name: 'Renewal cycle, 500 ms, 100% of total',
-    });
     expect(
-      renewalResponsibility.querySelector('.text-blue-300'),
-    ).not.toBeNull();
+      screen.getByRole('button', {
+        name: 'Renewal cycle, 500 ms, 100% of total',
+      }),
+    ).toBeDefined();
     expect(screen.queryByText('Internal pre')).toBeNull();
     expect(screen.queryByText('Body')).toBeNull();
     expect(screen.queryByText('Finalize')).toBeNull();

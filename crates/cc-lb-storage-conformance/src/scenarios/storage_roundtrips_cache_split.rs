@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::{Result, ensure};
-use cc_lb_storage_api::{RequestEventStore as _, types::RequestEvent};
+use cc_lb_storage_api::{RequestEvent, RequestEventStore as _};
 
-use crate::harness::{ConformanceBackend, with_conformance_fixture};
+use crate::harness::{ConformanceBackend, stored_request_events, with_conformance_fixture};
 
 pub async fn request_event_cache_split_round_trip<B>(backend: Arc<B>) -> Result<()>
 where
@@ -15,6 +15,7 @@ where
             ts: 1_800_000_000,
             ts_ms: Some(1_800_000_000_000),
             request_id: "req_cache_split_breakdown".to_owned(),
+            event_id: Some("req_cache_split_breakdown".to_owned()),
             principal_id: Some("p_split".to_owned()),
             key_id: Some("k_split".to_owned()),
             model: Some("claude-sonnet-4-5-20250929".to_owned()),
@@ -37,7 +38,7 @@ where
 
         storage.append_request_event(&event).await?;
 
-        let recent = storage.query_recent_request_events(0, u64::MAX, 10).await?;
+        let recent = stored_request_events(storage.as_ref()).await?;
         let got = recent
             .into_iter()
             .find(|e| e.request_id == "req_cache_split_breakdown")

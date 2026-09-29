@@ -15,15 +15,12 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
+use cc_lb_control::api_keys::principal_view::{
+    DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
+};
+use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream};
-use cc_lb_engine::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPipelineCache, ShapePluginCache,
-};
-use cc_lb_engine::{
-    DispatchError, DynamicViewBuilder, DynamicViewHolder, Lifecycle, LifecycleConfig,
-    UpstreamDispatch,
-};
+use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_upstream::{
@@ -37,17 +34,13 @@ use http_body::{Body as HttpBody, Frame};
 use tokio::sync::Notify;
 use url::Url;
 
-use super::common::{RecordingHook, TestAuthn, TestLifecycleBus, TestRouter, TestState};
+use super::common::{TestAuthn, TestLifecycleBus, TestState};
 
 pub fn lifecycle(dispatcher: Arc<dyn UpstreamDispatch>, test_bus: &TestLifecycleBus) -> Lifecycle {
     let state = TestState::default();
     super::common::lifecycle_with_parts(
         TestAuthn::new(state),
-        Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }),
         dispatcher,
-        vec![Arc::new(RecordingHook::default())],
         cc_lb_engine::LifecycleConfig::default(),
     )
     .with_event_bus(test_bus.bus_arc())
@@ -67,7 +60,6 @@ pub fn transform_lifecycle(
             Some(Arc::new(RouterPipelineCache::empty(
                 TerminalStrategy::FirstPick,
             ))),
-            ObservabilityHooksCache::Inherit,
             DialectCache::Explicit(ShapePluginCache { dialect }),
         ),
     );
@@ -79,8 +71,6 @@ pub fn transform_lifecycle(
         allowed_upstreams: vec![upstream_id],
         default_limits: Vec::new(),
         enabled: true,
-        last_apply_error: None,
-        last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
         created_at_unix_secs: 0,
@@ -94,10 +84,6 @@ pub fn transform_lifecycle(
     );
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(TestRouter {
-            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-        }))
-        .global_observability_hooks(vec![Arc::new(RecordingHook::default())])
         .principal_view(authn.principal_view.clone())
         .upstream_records(vec![UpstreamRecord {
             id: upstream_id,
@@ -115,7 +101,7 @@ pub fn transform_lifecycle(
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_engine::SystemClock),
+        Arc::new(cc_lb_clock::SystemClock),
     )
     .with_event_bus(test_bus.bus_arc())
 }
