@@ -106,23 +106,16 @@ The exclusion applies only to credentials that are actually stored as long-lived
 
 To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. Both pools connect to the same database file (SQLite) or the same DSN (Postgres), but they maintain separate connection limits.
 
-The connection budget is governed by the formula verified in the Wave 0.3 evidence file `.omo/evidence/task-0-3-connection-budget.md`:
+Budget the configured pool limits across all replicas:
 
 ```
 (main_pool + apalis_pool) * replicas <= 0.7 * max_connections
 ```
 
-For example, in our production Postgres environment:
-- `max_connections` is 240.
-- The 70% safety ceiling is 168 connections.
-- The main pool default is 10 connections.
-- The Apalis scheduler pool default is 5 connections.
-
-With these defaults, the system easily scales up to 10 replicas:
-
-```
-(10 + 5) * 10 = 150 connections <= 168 (Verified)
-```
+Set the main and scheduler pool limits against PostgreSQL's configured
+`max_connections`. Leave the remaining capacity for other database clients
+and operational work; recheck the budget when changing pool limits or replica
+count.
 
 ## 4. Idempotency and Scheduling State
 

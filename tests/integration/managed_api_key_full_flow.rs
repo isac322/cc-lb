@@ -553,7 +553,7 @@ fn seed_price_catalog() {
 fn append_step(step: u8, message: &str) -> std::io::Result<()> {
     let dir = evidence_dir();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("task-31-step-{step}.log"));
+    let path = dir.join(format!("step-{step}.log"));
     std::fs::write(path, format!("{} {message}\n", now_secs()))
 }
 
@@ -562,7 +562,9 @@ fn evidence_dir() -> std::path::PathBuf {
         .parent()
         .and_then(std::path::Path::parent)
         .expect("integration crate lives under tests/integration")
-        .join(".omo/evidence")
+        .join("target")
+        .join("test-evidence")
+        .join("managed-api-key-full-flow")
 }
 
 fn now_secs() -> u64 {

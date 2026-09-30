@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub const BASELINE_PATH: &str = "tests/load/baseline.json";
-pub const EVIDENCE_PATH: &str = ".omo/evidence/task-40-perf-budget.json";
+pub const EVIDENCE_PATH: &str = "target/test-evidence/load/perf-budget.json";
 pub const LIVE_TAIL_EVIDENCE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

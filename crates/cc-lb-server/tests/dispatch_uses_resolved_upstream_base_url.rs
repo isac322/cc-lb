@@ -1,17 +1,21 @@
-//! Reproducer for `.omo/issues/2026-06-07-dispatch-ignores-admin-state.md`.
+//! Regression test: the dispatch URL must use the resolved (principal-allowed)
+//! upstream's `base_url`, not the dialect carried by the first candidate
+//! route.
 //!
-//! When two AnthropicApiKey upstreams are enabled, the principal allows ONLY
-//! the second one, but the first one is returned by `DbRouter::route` because
-//! it currently uses `routes.first()` and `route.dialect` (which carries the
-//! per-upstream `base_url` for AnthropicApiKey / AnthropicOauth) is taken from
-//! the wrong upstream. The lifecycle correctly recomputes `route.upstream` and
-//! `resolved_upstream_id` from the candidate set, but never recomputes the
-//! dialect — so dispatch goes to whatever `base_url` the first route happens
+//! Original defect: when two AnthropicApiKey upstreams were enabled and the
+//! principal allowed ONLY the second one, `DbRouter::route` still returned the
+//! first route, and `route.dialect` (which carries the per-upstream `base_url`
+//! for AnthropicApiKey / AnthropicOauth) was taken from that wrong upstream.
+//! The lifecycle correctly recomputed `route.upstream` and
+//! `resolved_upstream_id` from the candidate set, but never recomputed the
+//! dialect — so dispatch went to whatever `base_url` the first route happened
 //! to carry (defaulting to `https://api.anthropic.com` when `base_url=None`).
 //!
-//! Expected behavior: dispatch URL must match the resolved upstream's
-//! `base_url` (i.e. the principal-allowed upstream). This test FAILS before
-//! the fix and PASSES after the dialect is rebuilt for the resolved upstream.
+//! This test failed on the pre-fix code path and passes once the dialect is
+//! rebuilt for the resolved upstream. (Originally written as the reproducer
+//! for the retired local issue file
+//! `.omo/issues/2026-06-07-dispatch-ignores-admin-state.md`; kept here for
+//! historical provenance only.)
 
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;

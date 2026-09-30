@@ -1,7 +1,5 @@
 use crate::common;
 
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -48,7 +46,7 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
         .expect("success body collects")
         .to_bytes();
     assert_eq!(client_body, upstream_body);
-    write_success_diff_evidence(&upstream_body, &client_body);
+    // assert_eq! above already reports both bodies on mismatch; no artifact needed.
 }
 
 struct FixedSuccessDispatch {
@@ -62,31 +60,4 @@ impl UpstreamDispatch for FixedSuccessDispatch {
         *response.status_mut() = StatusCode::OK;
         Ok(response)
     }
-}
-
-fn write_success_diff_evidence(upstream_body: &Bytes, client_body: &Bytes) {
-    let diff = if upstream_body == client_body {
-        "No differences.\n".as_bytes().to_vec()
-    } else {
-        format!(
-            "upstream={:?}\nclient={:?}\n",
-            String::from_utf8_lossy(upstream_body),
-            String::from_utf8_lossy(client_body)
-        )
-        .into_bytes()
-    };
-
-    for dir in evidence_dirs() {
-        fs::create_dir_all(&dir).expect("evidence directory is created");
-        fs::write(dir.join("task-24-success-passthrough.diff"), &diff)
-            .expect("success passthrough evidence is written");
-    }
-}
-
-fn evidence_dirs() -> Vec<PathBuf> {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    vec![
-        PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".omo/evidence".to_owned())),
-        manifest_dir.join("../../.omo/evidence"),
-    ]
 }

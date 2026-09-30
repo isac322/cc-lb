@@ -29,8 +29,13 @@ jobs:
     # The self-hosted pool may schedule either an x86_64 or arm64 runner.
     # Dockerfile isolates host-only Cargo linker configuration, cross-compiles
     # the static musl binary with both storage backends, builds the SPA, and
-    # runs a smoke test. Runner pods carry the in-cluster sccache S3 credentials.
+    # runs a smoke test using the configured compiler cache.
     runs-on: cc-lb-500m
+    env:
+      # docker/build-push-action uploads a per-step build record artifact
+      # (docker-build-*); bound its retention so records do not outlive the
+      # debugging window they exist for.
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/export-sccache-env

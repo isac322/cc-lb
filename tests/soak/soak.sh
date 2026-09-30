@@ -217,7 +217,7 @@ fi
 case "$DURATION" in
   *[!A-Za-z0-9_.-]*) usage ;;
 esac
-CSV_PATH=${CC_LB_SOAK_CSV:-"$ROOT_DIR/.omo/evidence/task-41-soak-$DURATION.csv"}
+CSV_PATH=${CC_LB_SOAK_CSV:-"$ROOT_DIR/target/test-evidence/soak/soak-$DURATION.csv"}
 
 mkdir -p "$SCRIPT_DIR/.tmp" "$(dirname -- "$CSV_PATH")"
 TMP_DIR=$(mktemp -d "$SCRIPT_DIR/.tmp/run.XXXXXX")

@@ -1,6 +1,8 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
 // TanStack Query hooks for every admin v1 endpoint surfaced by the dashboard.
-// Source-of-truth: .omo/plans/cc-lb-dashboard-overhaul.md (API SURFACE section).
+// Endpoint paths, wire types and auth transport come from `./api` and
+// `./cacheKeepaliveApi`; the server registers the matching routes under
+// `crates/cc-lb-admin/src/v1/`.
 
 import {
   type InfiniteData,

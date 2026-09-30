@@ -1,15 +1,7 @@
 import { test, expect } from '@playwright/test';
-import fs from 'fs';
-import path from 'path';
 
 test.describe('Router Pipeline', () => {
-  test('drag reorder, terminal toggle, and hover panels', async ({ page }) => {
-    // Ensure evidence directory exists
-    const evidenceDir = path.join(process.cwd(), '../../../.omo/evidence');
-    if (!fs.existsSync(evidenceDir)) {
-      fs.mkdirSync(evidenceDir, { recursive: true });
-    }
-
+  test('drag reorder, terminal toggle, and hover panels', async ({ page }, testInfo) => {
     // Go to principals page
     await page.goto('/principals');
     
@@ -29,18 +21,18 @@ test.describe('Router Pipeline', () => {
     // Step 1: principal load
     await page.locator('button:has-text("admin")').first().click();
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step1.png') });
+    await page.screenshot({ path: testInfo.outputPath('chain-loaded-after-principal-select.png') });
 
     // Step 2: router slot list rendered
     const pluginList = page.locator('ul').first();
     await expect(pluginList).toBeVisible();
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step2.png') });
+    await page.screenshot({ path: testInfo.outputPath('router-slot-list-rendered.png') });
 
     // Step 3: terminal row locked - no drag handle
     const terminalRow = page.locator('div.bg-overlay-1').filter({ hasText: 'Terminal step' }).first();
     await expect(terminalRow).toBeVisible();
     await expect(terminalRow.locator('button[aria-label="Drag to reorder"]')).toHaveCount(0);
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step3.png') });
+    await page.screenshot({ path: testInfo.outputPath('terminal-row-locked.png') });
 
     // Step 4: add second router plugin
     await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
@@ -48,7 +40,7 @@ test.describe('Router Pipeline', () => {
     await page.locator('text=Add filter').click();
     await page.locator('.absolute.w-64 button', { hasText: 'canary-router' }).first().click();
     await expect(pluginList.locator('li[data-key]:not([data-key^="connector-"])').filter({ hasNotText: 'Add filter' })).toHaveCount(initialCount + 1);
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step4.png') });
+    await page.screenshot({ path: testInfo.outputPath('second-router-plugin-added.png') });
 
     // Step 5: reorder via down button
     const firstItemText = await pluginList.locator('li[data-key]:not([data-key^="connector-"])').nth(0).locator('button.hover\\:underline').textContent();
@@ -65,7 +57,7 @@ test.describe('Router Pipeline', () => {
     
 
     
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step5.png') });
+    await page.screenshot({ path: testInfo.outputPath('reorder-via-down-button.png') });
 
     const infoButton = pluginList.locator('li').filter({ hasText: 'subscription-preference' }).first().locator('button.hover\\:underline');
     await infoButton.click();
@@ -95,7 +87,7 @@ test.describe('Router Pipeline', () => {
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
     await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
     await expect(page.locator('input[name="term-strategy"][value="random"]')).toBeChecked();
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step6.png') });
+    await page.screenshot({ path: testInfo.outputPath('terminal-strategy-random-persisted.png') });
   });
 
   test('complex chain auto-opens Advanced with disabled Basic', async ({ page }) => {

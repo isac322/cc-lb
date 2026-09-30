@@ -416,8 +416,9 @@ pub fn evidence_path(name: &str) -> PathBuf {
         .expect("tests dir")
         .parent()
         .expect("repo root")
-        .join(".omo")
-        .join("evidence")
+        .join("target")
+        .join("test-evidence")
+        .join("tls")
         .join(name)
 }
 

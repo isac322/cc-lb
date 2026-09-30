@@ -43,6 +43,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # docker/build-push-action uploads a per-step build record artifact
+      # (docker-build-*); bound its retention so records do not outlive the
+      # debugging window they exist for.
+      DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
     steps:
       - uses: actions/checkout@v7
         with:
