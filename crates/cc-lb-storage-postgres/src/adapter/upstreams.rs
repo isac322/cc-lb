@@ -650,13 +650,12 @@ async fn set_split_status(
         "last_warmup_at",
     )?;
 
-    if let Some(value) = patch.last_apply_error {
-        if !is_oauth
+    if let Some(value) = patch.last_apply_error
+        && (!is_oauth
             || !refresh_requires_reconnect(last_apply_error.as_deref())
-            || refresh_requires_reconnect(value.as_deref())
-        {
-            last_apply_error = value;
-        }
+            || refresh_requires_reconnect(value.as_deref()))
+    {
+        last_apply_error = value;
     }
     if let Some(value) = patch.last_apply_at_unix_secs {
         last_apply_at = value

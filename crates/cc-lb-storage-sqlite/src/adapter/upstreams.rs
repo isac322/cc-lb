@@ -620,13 +620,12 @@ async fn set_split_status_in_tx(
         .map_err(map_sqlx_error)?
         == Some(UpstreamKind::AnthropicOauth.as_str());
     let mut current = StatusFields::from_row(row.as_ref())?;
-    if let Some(value) = status.last_apply_error {
-        if !is_oauth
+    if let Some(value) = status.last_apply_error
+        && (!is_oauth
             || !refresh_requires_reconnect(current.last_apply_error.as_deref())
-            || refresh_requires_reconnect(value.as_deref())
-        {
-            current.last_apply_error = value;
-        }
+            || refresh_requires_reconnect(value.as_deref()))
+    {
+        current.last_apply_error = value;
     }
     if let Some(value) = status.last_apply_at_unix_secs {
         current.last_apply_at = value
