@@ -23,21 +23,21 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.1"
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.98.1"
 
 [workspace.dependencies]
-cc-lb-domain = { path = "crates/cc-lb-domain", version = "0.8.1" }
-cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "0.8.1" }
-cc-lb-quota = { path = "crates/cc-lb-quota", version = "0.8.1" }
-cc-lb-request-log = { path = "crates/cc-lb-request-log", version = "0.8.1" }
-cc-lb-routing = { path = "crates/cc-lb-routing", version = "0.8.1" }
-cc-lb-upstream = { path = "crates/cc-lb-upstream", version = "0.8.1" }
+cc-lb-domain = { path = "crates/cc-lb-domain", version = "1.0.0" }
+cc-lb-lifecycle = { path = "crates/cc-lb-lifecycle", version = "1.0.0" }
+cc-lb-quota = { path = "crates/cc-lb-quota", version = "1.0.0" }
+cc-lb-request-log = { path = "crates/cc-lb-request-log", version = "1.0.0" }
+cc-lb-routing = { path = "crates/cc-lb-routing", version = "1.0.0" }
+cc-lb-upstream = { path = "crates/cc-lb-upstream", version = "1.0.0" }
 
 # Internal, unpublished — RFC-0002 lifecycle transport.
-cc-lb-control = { path = "crates/cc-lb-control", version = "0.8.1" }
+cc-lb-control = { path = "crates/cc-lb-control", version = "1.0.0" }
 cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.4" }
 cc-lb-plugin-wire = { version = "0.8", path = "crates/cc-lb-plugin-wire" }
 cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
