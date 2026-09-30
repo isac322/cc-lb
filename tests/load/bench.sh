@@ -7,7 +7,7 @@ MODE=${1:-all}
 FAKE_PID=''
 PROXY_PID=''
 TMP_DIR=''
-EVIDENCE_PATH="$ROOT_DIR/.omo/evidence/task-40-perf-budget.json"
+EVIDENCE_PATH="$ROOT_DIR/target/test-evidence/load/perf-budget.json"
 BASELINE_PATH="$ROOT_DIR/tests/load/baseline.json"
 API_KEY=''
 ADMIN_TOKEN='admin-token'
@@ -227,7 +227,7 @@ run_mode() {
     --fallback "$FALLBACK"
 }
 
-mkdir -p "$SCRIPT_DIR/.tmp" "$ROOT_DIR/.omo/evidence"
+mkdir -p "$SCRIPT_DIR/.tmp" "$(dirname -- "$EVIDENCE_PATH")"
 TMP_DIR=$(mktemp -d "$SCRIPT_DIR/.tmp/run.XXXXXX")
 
 cargo build --release -q -p fake-anthropic

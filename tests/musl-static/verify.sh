@@ -15,14 +15,14 @@ fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 binary_path="$root_dir/target/$target/release/cc-lb"
-evidence_dir="$root_dir/.omo/evidence"
-verify_log="$evidence_dir/task-50-musl-verify.log"
-file_ldd_log="$evidence_dir/task-50-file-ldd.txt"
-nm_log="$evidence_dir/task-50-nm.txt"
-size_log="$evidence_dir/task-50-size.txt"
-version_log="$evidence_dir/task-50-version.txt"
-config_log="$evidence_dir/task-50-config-validate.log"
-build_log="$evidence_dir/task-50-musl-static-build.log"
+evidence_dir="$root_dir/target/test-evidence/musl-static"
+verify_log="$evidence_dir/verify.log"
+file_ldd_log="$evidence_dir/file-ldd.txt"
+nm_log="$evidence_dir/nm.txt"
+size_log="$evidence_dir/size.txt"
+version_log="$evidence_dir/version.txt"
+config_log="$evidence_dir/config-validate.log"
+build_log="$evidence_dir/build.log"
 temp_dir="$(mktemp -d)"
 
 cleanup() {

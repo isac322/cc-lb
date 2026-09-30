@@ -39,6 +39,7 @@ All notable changes to this project will be documented in this file.
 - The admin dashboard brand mark is now the let-gate — two squared bracket "c" shapes forming a gate with one accent lane through it — replacing the old 240° dial in the sidebar, the top bar and the sign-in frame.
 - The admin dashboard uses a new neutral graphite colour scheme in both Night and Day. Colour now comes from data (charts, meters, session and request-kind chips). Controls such as the primary button, the on switch and the focus ring are neutral silver (Night) or ink (Day), and session chips cycle through nine hues instead of seven.
 - The Docs link at the foot of the dashboard sidebar has been removed until a dedicated documentation page exists.
+- Real-client, soak, load, musl and TLS diagnostics now use `target/test-evidence/<suite>/` instead of `.omo/evidence/`. Playwright screenshots and attachments use per-test output paths, and Rust tests no longer write unused agent evidence files. CI artifact names no longer contain agent task numbers. Artifact retention is 7 days for final reports and Docker build records, and 1 day for intermediate coverage files. Existing stored artifacts require separate cleanup; GitHub may take time to recalculate the available storage.
 
 ### Fixed
 

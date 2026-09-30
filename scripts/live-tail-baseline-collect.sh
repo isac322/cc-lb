@@ -4,7 +4,8 @@
 # Periodic /metrics scraper for a single cc-lb instance. Filters to the
 # live-tail metric family and appends timestamped JSONL records to an output
 # file. Intended to run under a systemd timer (or cron) for the duration of
-# the baseline window — Task 0.3 in .omo/plans/live-tail-followups.md.
+# the baseline window — see docs/live-tail-baseline-collection.md for setup,
+# systemd units, and the summarizer workflow.
 #
 # Explicit caveat: this collects a **single-operator personal-prod baseline**
 # from ONE cc-lb instance running on the operator's own machine. Do not

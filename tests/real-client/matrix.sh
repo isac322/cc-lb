@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-EVIDENCE_DIR="$ROOT_DIR/.omo/evidence"
-SUMMARY="$EVIDENCE_DIR/task-36-real-client-matrix.txt"
+EVIDENCE_DIR="$ROOT_DIR/target/test-evidence/real-client"
+SUMMARY="$EVIDENCE_DIR/matrix.txt"
 mkdir -p "$EVIDENCE_DIR"
 : > "$SUMMARY"
 
@@ -23,7 +23,7 @@ for client in $clients; do
     client_upstreams="$client_upstreams anthropic-affinity"
   fi
   for upstream in $client_upstreams; do
-    log="$EVIDENCE_DIR/task-36-real-$client-$upstream.log"
+    log="$EVIDENCE_DIR/$client-$upstream.log"
     printf 'running %s/%s\n' "$client" "$upstream" > "$log"
     set +e
     "$SCRIPT_DIR/run.sh" "$client" "$upstream" >> "$log" 2>&1
@@ -45,7 +45,7 @@ for client in $clients; do
 done
 
 if [ "${RUN_MULTI_REPLICA:-0}" = "1" ]; then
-  log="$EVIDENCE_DIR/task-37-multi-replica-postgres.log"
+  log="$EVIDENCE_DIR/multi-replica-postgres.log"
   printf 'running multi-replica-postgres\n' > "$log"
   set +e
   "$SCRIPT_DIR/../multi-replica/multi-replica-postgres.sh" >> "$log" 2>&1

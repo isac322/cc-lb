@@ -1,10 +1,7 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::PathBuf;
 
 use http::HeaderMap;
 use http::HeaderValue;
-use serde_json::json;
 
 use cc_lb_engine::strip_hop_by_hop;
 
@@ -55,23 +52,6 @@ fn writes_hop_by_hop_snapshot() {
     .collect::<BTreeSet<_>>();
 
     assert_eq!(removed, expected_removed);
-
-    let snapshot = json!({
-        "before": before,
-        "after": after,
-        "removed": removed,
-    });
-    let output = serde_json::to_string_pretty(&snapshot).unwrap();
-
-    let out_dir =
-        PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".omo/evidence".to_owned()));
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let root_evidence_dir = manifest_dir.join("../../.omo/evidence");
-
-    for dir in [&out_dir, &root_evidence_dir] {
-        fs::create_dir_all(dir).unwrap();
-        fs::write(dir.join("task-23-no-hop-by-hop.json"), &output).unwrap();
-    }
 }
 
 fn header_names(headers: &HeaderMap) -> BTreeSet<String> {
