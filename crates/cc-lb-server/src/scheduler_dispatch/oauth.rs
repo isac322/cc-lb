@@ -630,10 +630,10 @@ impl SchedulerDispatch {
         if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(false);
         }
-        if let Err(error) = result {
-            if upstream.oauth_token_generation == generation {
-                return Err(SchedulerError::Job(error.to_string()));
-            }
+        if let Err(error) = result
+            && upstream.oauth_token_generation == generation
+        {
+            return Err(SchedulerError::Job(error.to_string()));
         }
         Ok(true)
     }
