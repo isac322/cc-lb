@@ -15,6 +15,7 @@ import { WINDOW_LABELS } from '../../lib/api';
 import { sumTokens } from '../../lib/format';
 import { useTimezone } from '../../lib/locale';
 import {
+  isTerminalOAuthReconnectReason,
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
@@ -255,9 +256,10 @@ export function rowMaxUsedPct(row: UpstreamUsageRow): number | null {
 }
 
 /**
- * Usage order: upstreams that need attention, then subscription upstreams,
- * then API-key upstreams (no subscription quota), then disabled ones; inside
- * each group the most-used window first (no reading last), then by name.
+ * Usage order: terminal credential failures, then upstreams needing
+ * attention, subscription upstreams, API-key upstreams, and healthy disabled
+ * upstreams. Each group sorts by most-used window (no reading last), then by
+ * name.
  */
 export function sortUpstreamRowsByUsage(
   rows: readonly UpstreamUsageRow[],
@@ -268,13 +270,16 @@ export function sortUpstreamRowsByUsage(
         row.nudge != null ||
         row.health.tone === 'danger' ||
         row.health.tone === 'warn';
-      const group = row.upstream.enabled
-        ? attention
+      const group =
+        row.nudge != null && isTerminalOAuthReconnectReason(row.nudge.reason)
           ? 0
-          : row.upstream.kind === 'anthropic_oauth'
+          : row.nudge != null || (row.upstream.enabled && attention)
             ? 1
-            : 2
-        : 3;
+            : !row.upstream.enabled
+              ? 4
+              : row.upstream.kind === 'anthropic_oauth'
+                ? 2
+                : 3;
       return { row, group, used: rowMaxUsedPct(row) };
     })
     .sort(
@@ -433,6 +438,9 @@ function NameCell({ row }: { row: UpstreamUsageRow }) {
             className={cx('status-dot shrink-0', tone)}
           />
           <span className="truncate">{text}</span>
+          {!upstream.enabled && nudge ? (
+            <span className="shrink-0 text-text-muted">· Disabled</span>
+          ) : null}
         </span>
       ) : null}
     </div>

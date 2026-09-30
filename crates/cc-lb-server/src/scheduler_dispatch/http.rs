@@ -29,12 +29,32 @@ pub(super) struct UsageFetchResponse {
     pub body: Bytes,
 }
 
+#[derive(thiserror::Error)]
+pub(super) enum RefreshRequestError {
+    #[error("oauth token endpoint returned {status}")]
+    Endpoint { status: StatusCode, body: Bytes },
+    #[error(transparent)]
+    Other(#[from] SchedulerError),
+}
+
+impl std::fmt::Debug for RefreshRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Endpoint { status, .. } => formatter
+                .debug_struct("Endpoint")
+                .field("status", status)
+                .finish_non_exhaustive(),
+            Self::Other(error) => std::fmt::Debug::fmt(error, formatter),
+        }
+    }
+}
+
 pub(super) async fn request_refresh(
     http: &JsonHttpClient,
     oauth_cfg: &AnthropicOAuthConfig,
     cancel: &CancellationToken,
     refresh_token: &str,
-) -> SchedulerResult<TokenEndpointResponse> {
+) -> Result<TokenEndpointResponse, RefreshRequestError> {
     let body = refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token);
     let request = Request::post(oauth_cfg.token_url.as_str())
         .header(
@@ -45,24 +65,34 @@ pub(super) async fn request_refresh(
         .body(Full::new(Bytes::from(body)))
         .map_err(|error| SchedulerError::Job(error.to_string()))?;
     let response = tokio::select! {
-        _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth refresh cancelled".to_owned())),
+        _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()).into()),
         response = tokio::time::timeout(Duration::from_secs(30), http.request(request)) => response,
     }
     .map_err(|_| SchedulerError::Job("oauth refresh request timed out".to_owned()))?
     .map_err(|error| SchedulerError::Job(error.to_string()))?;
-    if !response.status().is_success() {
-        return Err(SchedulerError::Job(format!(
-            "oauth token endpoint returned {}",
-            response.status()
-        )));
+    let status = response.status();
+    if !status.is_success() {
+        let body = if status == StatusCode::BAD_REQUEST {
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(SchedulerError::Job("oauth refresh cancelled".to_owned()).into()),
+                body = tokio::time::timeout(Duration::from_secs(30), response.into_body().collect()) => body,
+            }
+            .map_err(|_| SchedulerError::Job("oauth refresh response body timed out".to_owned()))?
+            .map_err(|error| SchedulerError::Job(error.to_string()))?
+            .to_bytes()
+        } else {
+            Bytes::new()
+        };
+        return Err(RefreshRequestError::Endpoint { status, body });
     }
-    let bytes = response
+    let body = response
         .into_body()
         .collect()
         .await
         .map_err(|error| SchedulerError::Job(error.to_string()))?
         .to_bytes();
-    parse_token_endpoint_response(&bytes).map_err(|error| SchedulerError::Job(error.to_string()))
+    parse_token_endpoint_response(&body)
+        .map_err(|error| SchedulerError::Job(error.to_string()).into())
 }
 
 pub(super) async fn fetch_usage(

@@ -35,7 +35,8 @@ vi.mock('../lib/queries', async () => {
   return {
     ...actual,
     usePrincipalNameMap: vi.fn(),
-    useRecentEventsInfinite: vi.fn(),
+    useRecentEventsPage: vi.fn(),
+    recentEventsPageQueryOptions: vi.fn(),
     useSubscriptionQuotaAggregate: vi.fn(),
     useSubscriptionQuotaPoolHistory: vi.fn(),
     useSummary: vi.fn(),
@@ -43,7 +44,6 @@ vi.mock('../lib/queries', async () => {
     useUpstreams: vi.fn(),
   };
 });
-
 vi.mock('../lib/useLiveEventStream', () => ({
   useLiveEventStream: vi.fn(),
 }));
@@ -428,10 +428,44 @@ function aggregateResponse(
   };
 }
 
-function mockLiveStream(eventsMap: LiveEventMap, version = 0) {
+function mockRequestEventsFeed(
+  events: readonly RequestEvent[] = [],
+  {
+    liveEventsMap = new Map(),
+    version = 0,
+  }: {
+    liveEventsMap?: LiveEventMap;
+    version?: number;
+  } = {},
+) {
+  vi.mocked(queries.useRecentEventsPage).mockReturnValue({
+    data: {
+      events,
+      observed: true,
+      count: events.length,
+      limit: 500,
+    },
+    isPending: false,
+    isPlaceholderData: false,
+    isFetching: false,
+    error: null,
+    refetch: vi.fn(),
+  } as never);
+  vi.mocked(queries.recentEventsPageQueryOptions).mockImplementation(
+    (_filters, pageParam) =>
+      ({
+        queryKey: ['events', pageParam],
+        queryFn: async () => ({
+          events: [],
+          observed: true,
+          count: 0,
+          limit: 500,
+        }),
+      }) as never,
+  );
   vi.mocked(liveEvents.useLiveEventStream).mockReturnValue({
     error: null,
-    eventsMap,
+    eventsMap: liveEventsMap,
     forceReconnect: vi.fn(),
     lastActivityAt: null,
     lastCursor: null,
@@ -466,13 +500,6 @@ function mockPendingOverviewQueries() {
     isPending: true,
     isPlaceholderData: false,
   } as never);
-  vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
-    data: { pages: [{ events: [] }] },
-    fetchNextPage: vi.fn(),
-    hasNextPage: false,
-    isFetchingNextPage: false,
-    isLoading: false,
-  } as never);
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
   vi.mocked(queries.useSubscriptionQuotaAggregate).mockReturnValue({
     data: undefined,
@@ -484,7 +511,7 @@ function mockPendingOverviewQueries() {
     isPending: true,
     isPlaceholderData: false,
   } as never);
-  mockLiveStream(new Map());
+  mockRequestEventsFeed();
 }
 
 function mockResolvedEmptyQuotaQueries() {
@@ -1466,43 +1493,76 @@ describe('Overview loading geometry', () => {
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
-  it('previews the ten newest requests at their natural height with a link to Logs', () => {
-    mockPendingOverviewQueries();
-    vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
-      data: {
-        pages: [
-          {
-            events: Array.from({ length: 12 }, (_, index) => ({
-              duration_ms: 10,
-              event_kind: 'messages',
-              model: 'test-model',
-              request_id: `request-${index + 1}`,
-              status: 200,
-              ts: index + 1,
-            })),
-          },
-        ],
-      },
-      fetchNextPage: vi.fn(),
-      hasNextPage: true,
-      isFetchingNextPage: false,
-      isLoading: false,
-    } as never);
+  it('renders the first 50 latest requests and pages through retained history', () => {
+    mockResolvedKpiQueries();
+    const history = Array.from({ length: 500 }, (_, index) => ({
+      duration_ms: 10,
+      event_kind: 'messages' as const,
+      model: 'test-model',
+      request_id: `request-${500 - index}`,
+      status: 200,
+      ts: 500 - index,
+    }));
+    mockRequestEventsFeed(history);
+    const { rerender } = render(<OverviewPage />);
 
-    render(<OverviewPage />);
-
-    const rows = screen.getAllByLabelText(/^View request request-/);
-    expect(rows.map((row) => row.getAttribute('aria-label'))).toEqual(
+    const table = screen
+      .getByLabelText('View request request-500')
+      .closest('table');
+    if (table === null) throw new Error('Expected latest requests table');
+    const rowIds = () =>
       Array.from(
-        { length: 10 },
-        (_, index) => `View request request-${12 - index}`,
-      ),
+        table.querySelectorAll<HTMLTableRowElement>(
+          'tbody tr[aria-label^="View request "]',
+        ),
+        (row) => row.getAttribute('aria-label'),
+      );
+    const historyPages = Array.from({ length: 10 }, (_, page) =>
+      history
+        .slice(page * 50, (page + 1) * 50)
+        .map((event) => `View request ${event.request_id}`),
     );
-    // A preview has no infinite-scroll footer; the full history is on Logs.
-    expect(screen.queryByText('No more entries')).toBeNull();
+    expect(rowIds()).toEqual(historyPages[0]);
+    const pagination = screen.getByRole('navigation', {
+      name: 'Log pagination',
+    });
+    const previousButton = within(pagination).getByRole('button', {
+      name: 'Previous page',
+    }) as HTMLButtonElement;
+    const nextButton = within(pagination).getByRole('button', {
+      name: 'Next page',
+    }) as HTMLButtonElement;
+    expect(previousButton.disabled).toBe(true);
+    expect(nextButton.disabled).toBe(false);
     expect(
       screen.getByRole('link', { name: 'Open logs' }).getAttribute('href'),
     ).toBe('/logs');
+
+    for (let page = 1; page < historyPages.length; page += 1) {
+      fireEvent.click(nextButton);
+      expect(rowIds()).toEqual(historyPages[page]);
+    }
+
+    const liveMap: LiveEventMap = new Map([
+      ['live-501', { phase: 'final', event: finalLiveEvent(501) }],
+    ]);
+    mockRequestEventsFeed(history, { liveEventsMap: liveMap, version: 1 });
+    rerender(<OverviewPage />);
+
+    expect(rowIds()).toEqual(historyPages[9]);
+    for (let page = 8; page >= 0; page -= 1) {
+      fireEvent.click(previousButton);
+      expect(rowIds()).toEqual(
+        page === 0
+          ? ['View request live-501', ...historyPages[0].slice(0, 49)]
+          : historyPages[page],
+      );
+    }
+    fireEvent.click(nextButton);
+    expect(rowIds()).toEqual(
+      history.slice(49, 99).map((event) => `View request ${event.request_id}`),
+    );
+    expect(queries.recentEventsPageQueryOptions).not.toHaveBeenCalled();
   });
 
   it('collapses the traffic strip to one line when the range has no requests', () => {
@@ -1524,17 +1584,21 @@ describe('Overview loading geometry', () => {
 
   it('requests only messages events and shows no other categories from mixed data', () => {
     mockResolvedKpiQueries();
-    const eventsMap: LiveEventMap = new Map([
+    const historical = {
+      duration_ms: 10,
+      event_kind: 'messages' as const,
+      model: 'historical-model',
+      request_id: 'historical-1',
+      status: 200,
+      ts: 5,
+    };
+    const liveMap: LiveEventMap = new Map([
       ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
       [
         'live-2',
         {
           phase: 'final',
-          event: {
-            ...finalLiveEvent(2),
-            event_kind: 'messages',
-            source_kind: 'renewal',
-          },
+          event: { ...finalLiveEvent(2), source_kind: 'renewal' },
         },
       ],
       [
@@ -1559,121 +1623,56 @@ describe('Overview loading geometry', () => {
         },
       ],
     ]);
-    mockLiveStream(eventsMap, 4);
-    vi.mocked(queries.useRecentEventsInfinite).mockReturnValue({
-      data: {
-        pages: [
-          {
-            events: [
-              {
-                duration_ms: 10,
-                event_kind: 'messages',
-                model: 'historical-model',
-                request_id: 'historical-1',
-                status: 200,
-                ts: 5,
-              },
-              {
-                duration_ms: 10,
-                event_kind: 'models',
-                model: 'historical-models',
-                request_id: 'historical-2',
-                status: 200,
-                ts: 4,
-              },
-            ],
-          },
-        ],
-      },
-      fetchNextPage: vi.fn(),
-      hasNextPage: false,
-      isFetchingNextPage: false,
-      isLoading: false,
-    } as never);
+    mockRequestEventsFeed([historical], { liveEventsMap: liveMap, version: 4 });
 
     render(<OverviewPage />);
 
-    expect(queries.useRecentEventsInfinite).toHaveBeenCalledWith({
-      event_kind: 'messages',
-    });
-    expect(liveEvents.useLiveEventStream).toHaveBeenCalledWith({
-      event_kind: 'messages',
-    });
+    expect(queries.useRecentEventsPage).toHaveBeenCalledWith(
+      { event_kind: 'messages' },
+      { kind: 'initial', limit: 500 },
+    );
     expect(screen.getByLabelText('View request live-1')).toBeDefined();
     expect(screen.getByLabelText('View request historical-1')).toBeDefined();
     expect(screen.queryByLabelText('View request live-2')).toBeNull();
     expect(screen.queryByLabelText('View request live-3')).toBeNull();
     expect(screen.queryByLabelText('View request live-4')).toBeNull();
-    expect(screen.queryByLabelText('View request historical-2')).toBeNull();
   });
 
-  it('keeps the pool chart memoized across live-only request updates', () => {
+  it('keeps live rows while the shared feed marks only new arrivals', () => {
     mockResolvedKpiQueries();
-    const eventsMap: LiveEventMap = new Map([
+    const liveMap: LiveEventMap = new Map([
       ['live-1', { phase: 'final', event: finalLiveEvent(1) }],
     ]);
-    mockLiveStream(eventsMap, 1);
+    mockRequestEventsFeed([], { liveEventsMap: liveMap, version: 1 });
     const { rerender } = render(<OverviewPage />);
     const initialChartRenderCount = rechartsMock.areaChartRenderCount;
 
-    eventsMap.set('live-2', {
+    liveMap.set('live-2', {
       phase: 'final',
       event: finalLiveEvent(2),
     });
-    mockLiveStream(eventsMap, 2);
+    mockRequestEventsFeed([], { liveEventsMap: liveMap, version: 2 });
     rerender(<OverviewPage />);
 
-    expect(initialChartRenderCount).toBeGreaterThan(0);
     expect(rechartsMock.areaChartRenderCount).toBe(initialChartRenderCount);
-    expect(screen.getByLabelText('View request live-2')).toBeDefined();
-  });
-
-  it('flashes the newest live row after the twentieth insertion', () => {
-    mockResolvedKpiQueries();
-    // live-1 is inserted first but carries the newest timestamp, so it stays
-    // inside the ten-row preview while it ages out of the flash window.
-    const firstEvent = { ...finalLiveEvent(1), ts: 100 };
-    const eventsMap: LiveEventMap = new Map();
-    eventsMap.set('live-1', { phase: 'final', event: firstEvent });
-    for (let index = 2; index <= 20; index += 1) {
-      eventsMap.set(`live-${index}`, {
-        phase: 'final',
-        event: finalLiveEvent(index),
-      });
-    }
-    mockLiveStream(eventsMap, 20);
-    const { rerender } = render(<OverviewPage />);
-
-    expect(screen.getByLabelText('View request live-1').className).toContain(
+    expect(screen.getByLabelText('View request live-1')).toBeDefined();
+    expect(screen.getByLabelText('View request live-2').className).toContain(
       'flash-in',
     );
-    eventsMap.set('live-21', {
-      phase: 'final',
-      event: finalLiveEvent(21),
-    });
-    mockLiveStream(eventsMap, 21);
-    rerender(<OverviewPage />);
 
-    expect(screen.getByLabelText('View request live-21').className).toContain(
-      'flash-in',
-    );
-    expect(
-      screen.getByLabelText('View request live-1').className,
-    ).not.toContain('flash-in');
-
-    eventsMap.set('live-1', {
+    liveMap.set('live-1', {
       phase: 'final',
-      event: { ...firstEvent, status: 201 },
+      event: { ...finalLiveEvent(1), status: 201 },
     });
-    mockLiveStream(eventsMap, 22);
+    mockRequestEventsFeed([], { liveEventsMap: liveMap, version: 3 });
     rerender(<OverviewPage />);
 
     expect(
       screen.getByLabelText('View request live-1').className,
     ).not.toContain('flash-in');
-    expect(screen.getByLabelText('View request live-21').className).toContain(
-      'flash-in',
-    );
+    expect(
+      screen.getByLabelText('View request live-2').className,
+    ).not.toContain('flash-in');
   });
 });
 
@@ -1965,6 +1964,13 @@ function costBar(trigger: HTMLElement): string[] {
   );
 }
 
+function costTrackWidth(trigger: HTMLElement): string {
+  return (
+    trigger.querySelector<HTMLElement>('[data-cell-bar] > div')?.style.width ??
+    ''
+  );
+}
+
 /** Every figure the open breakdown shows, in order. */
 function costDetailValues(): string[] {
   return Array.from(
@@ -2002,6 +2008,99 @@ describe('Top principal cost breakdown and cache hit', () => {
     ]);
   });
 
+  it('keeps principal costs at two decimals while exposing exact micros', () => {
+    renderPrincipals([
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'cost-zero',
+        name: 'Zero cost',
+        cost_micros: 0,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'cost-integer',
+        name: 'Integer cost',
+        cost_micros: 12_000_000,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'cost-fraction',
+        name: 'Fraction cost',
+        cost_micros: 12_340_000,
+      },
+      {
+        ...UNRECORDED_PRINCIPAL,
+        id: 'cost-subcent',
+        name: 'Sub-cent cost',
+        cost_micros: 1_234,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'cost-large',
+        name: 'Large cost',
+        cost_micros: 12_345_678_900_000,
+      },
+    ]);
+
+    expect(costTrigger('Zero cost').textContent).toContain('$0.00');
+    expect(costTrigger('Integer cost').textContent).toContain('$12.00');
+    expect(costTrigger('Fraction cost').textContent).toContain('$12.34');
+    expect(costTrigger('Sub-cent cost').textContent).toContain('$0.00');
+    expect(costTrigger('Large cost').textContent).toContain('$12,345,678.90');
+    expect(costTrigger('Sub-cent cost').getAttribute('aria-label')).toContain(
+      '$0.001234',
+    );
+
+    fireEvent.click(costTrigger('Sub-cent cost'));
+    expect(costDetailValues()).toEqual(['Total', '$0.001234']);
+  });
+
+  it('keeps compact token units aligned and categorically distinct', () => {
+    renderPrincipals([
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'tokens-k',
+        name: 'Tokens k',
+        tokens: 1_000,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'tokens-m',
+        name: 'Tokens M',
+        tokens: 1_000_000,
+      },
+      {
+        ...COMPLETE_PRINCIPAL,
+        id: 'tokens-b',
+        name: 'Tokens B',
+        tokens: 1_000_000_000,
+      },
+    ]);
+
+    const unitStyle = (name: string, unit: string) => {
+      const row = screen
+        .getByRole('link', { name })
+        .closest<HTMLElement>('[data-testid="top-principal-row"]');
+      if (!row) throw new Error(`Missing top principal row for ${name}`);
+      const tokenCell = within(row).getAllByRole('cell')[2]!;
+      return Array.from(tokenCell.querySelectorAll('span'))
+        .find((span) => span.textContent === unit)
+        ?.getAttribute('style');
+    };
+
+    expect(unitStyle('Tokens k', 'k')).toBeTruthy();
+    expect(unitStyle('Tokens M', 'M')).toBeTruthy();
+    expect(unitStyle('Tokens B', 'B')).toBeTruthy();
+    const colors = [
+      unitStyle('Tokens k', 'k'),
+      unitStyle('Tokens M', 'M'),
+      unitStyle('Tokens B', 'B'),
+    ];
+    expect(colors[0]).not.toBe(colors[1]);
+    expect(colors[0]).not.toBe(colors[2]);
+    expect(colors[1]).not.toBe(colors[2]);
+  });
+
   it('draws the cost bar in the request table categories, order and colors', () => {
     renderPrincipals([COMPLETE_PRINCIPAL]);
 
@@ -2014,13 +2113,54 @@ describe('Top principal cost breakdown and cache hit', () => {
     ]);
   });
 
+  it('scales relative cost bars to the highest active principal', () => {
+    renderPrincipals([
+      { ...COMPLETE_PRINCIPAL, name: 'Highest', cost_micros: 1_000_000 },
+      {
+        ...PARTIAL_PRINCIPAL,
+        name: 'Half',
+        cost_micros: 500_000,
+        cost_components_micros: {
+          ...PARTIAL_PRINCIPAL.cost_components_micros!,
+          input: 100_000,
+          output: 100_000,
+          cache_read: 300_000,
+        },
+      },
+      {
+        ...UNRECORDED_PRINCIPAL,
+        name: 'Zero',
+        cost_micros: 0,
+        cost_components_micros: {
+          input: 0,
+          output: 0,
+          cache_create_5m: 0,
+          cache_create_1h: 0,
+          cache_read: 0,
+        },
+      },
+    ]);
+
+    expect(costTrackWidth(costTrigger('Highest'))).toBe('100%');
+    expect(costTrackWidth(costTrigger('Half'))).toBe('50%');
+    expect(costTrackWidth(costTrigger('Zero'))).toBe('');
+    expect(costBar(costTrigger('Half'))).toEqual([
+      'var(--color-series-cache-read) 60%',
+      'var(--color-series-input) 20%',
+      'var(--color-series-output) 20%',
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Requests' }));
+    expect(costTrackWidth(costTrigger('Half'))).toBe('50%');
+  });
+
   it('opens the exact breakdown from the keyboard', async () => {
     const user = userEvent.setup();
     renderPrincipals([COMPLETE_PRINCIPAL]);
     const trigger = costTrigger('Complete principal');
 
     expect(trigger.getAttribute('aria-label')).toBe(
-      'Complete principal cost $1.00, show breakdown',
+      'Complete principal cost $1.0000, show breakdown',
     );
     expect(screen.queryByTestId('top-principal-cost-details')).toBeNull();
     trigger.focus();
@@ -2079,12 +2219,6 @@ describe('Top principal cost breakdown and cache hit', () => {
       'Cache read',
       '$0.2000',
       '25%',
-      'Cache create 5m',
-      '$0.0000',
-      '—',
-      'Cache create 1h',
-      '$0.0000',
-      '—',
       'Input',
       '$0.2000',
       '25%',
@@ -2137,6 +2271,7 @@ describe('Top principal cost breakdown and cache hit', () => {
     renderPrincipals([
       { ...COMPLETE_PRINCIPAL, id: 'a', name: 'Low', cache_hit_ratio: 0.2 },
       { ...COMPLETE_PRINCIPAL, id: 'b', name: 'None', cache_hit_ratio: null },
+
       { ...COMPLETE_PRINCIPAL, id: 'c', name: 'High', cache_hit_ratio: 0.9 },
     ]);
     const order = () =>
@@ -2172,9 +2307,6 @@ describe('Top principal cost breakdown and cache hit', () => {
       'Cache create 5m',
       '$0.1500',
       '5%',
-      'Cache create 1h',
-      '$0.0000',
-      '—',
       'Input',
       '$0.3000',
       '10%',
@@ -2219,9 +2351,6 @@ describe('Top principal cost breakdown and cache hit', () => {
 
     // The breakdown was never closed or re-opened: it re-rendered in place.
     expect(costDetailValues()).toEqual([
-      'Cache read',
-      '$0.0000',
-      '—',
       'Cache create 5m',
       '$0.1000',
       '3%',

@@ -601,7 +601,7 @@ describe('RequestEventsTable', () => {
   );
 
   describe('Cost Tooltip', () => {
-    it('renders 5 rows with $0.0000 formatting for each sub-cost and sums correctly', async () => {
+    it('shows positive cost categories and keeps the authoritative total', async () => {
       const user = userEvent.setup();
       const events: RequestEventWithPhase[] = [
         {
@@ -628,9 +628,9 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      // Find the cost cell (it should display $0.0035)
-      const costCell = screen.getByText('$0.0035');
-      expect(costCell).toBeDefined();
+      const costCell = screen.getByRole('button', {
+        name: 'Cost $0.0035, show breakdown',
+      });
 
       // Hover over the cost cell to trigger the tooltip
       await user.hover(costCell);
@@ -647,26 +647,21 @@ describe('RequestEventsTable', () => {
       const tooltips = await screen.findAllByText('Cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // Check all 5 rows are present
-      expect(screen.getAllByText('Output').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache create 5m').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache create 1h').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache read').length).toBeGreaterThan(0);
+      // Zero and absent categories stay out of the popover.
+      expect(screen.queryByText('Cache create 5m')).toBeNull();
+      expect(screen.queryByText('Cache create 1h')).toBeNull();
 
       // Check values
       expect(screen.getAllByText('$0.0010').length).toBeGreaterThan(0);
       expect(screen.getAllByText('$0.0020').length).toBeGreaterThan(0);
       expect(screen.getAllByText('$0.0005').length).toBeGreaterThan(0);
 
-      // Check that 0 values are formatted as $0.0000
-      const zeroValues = screen.getAllByText('$0.0000');
-      expect(zeroValues.length).toBeGreaterThanOrEqual(2);
-
+      // No zero-value rows are rendered.
       // Check total
       expect(screen.getAllByText('Total').length).toBeGreaterThan(0);
-      // The total value $0.0035 should appear twice (once in cell, once in tooltip)
+      // The exact total remains in the accessible trigger and tooltip.
       const totals = screen.getAllByText('$0.0035');
-      expect(totals.length).toBeGreaterThanOrEqual(2);
+      expect(totals.length).toBeGreaterThanOrEqual(1);
     });
 
     it('shows em-dash for partial rows', async () => {
@@ -696,35 +691,31 @@ describe('RequestEventsTable', () => {
         />,
       );
 
-      // Find the cost cell (it should display Est. —)
-      const costCell = screen.getByText('Est. —');
-      expect(costCell).toBeDefined();
+      const costCell = screen.getByRole('button', {
+        name: 'Cost Est. —, show breakdown',
+      });
 
       // Hover over the cost cell to trigger the tooltip
       await user.hover(costCell);
 
       // Wait for the popover to appear
-      const inputLabel = await screen.findAllByText(
-        'Input',
+      const estimateLabels = await screen.findAllByText(
+        'Estimated cost',
         {},
         { timeout: 1000 },
       );
-      expect(inputLabel.length).toBeGreaterThan(0);
+      expect(estimateLabels.length).toBeGreaterThan(0);
 
       // Check tooltip contents
       const tooltips = await screen.findAllByText('Estimated cost');
       expect(tooltips.length).toBeGreaterThan(0);
 
-      // Check all 5 rows are present
-      expect(screen.getAllByText('Output').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache create 5m').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache create 1h').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('Cache read').length).toBeGreaterThan(0);
-
-      // Check that values are em-dashes
-      const dashes = screen.getAllByText('—');
-      // 5 rows + 1 total + 1 cell = 7 dashes
-      expect(dashes.length).toBeGreaterThanOrEqual(7);
+      // A partial zero estimate has no positive categories to list.
+      expect(screen.queryByText('Input')).toBeNull();
+      expect(screen.queryByText('Output')).toBeNull();
+      expect(screen.queryByText('Cache create 5m')).toBeNull();
+      expect(screen.queryByText('Cache create 1h')).toBeNull();
+      expect(screen.queryByText('Cache read')).toBeNull();
     });
   });
 

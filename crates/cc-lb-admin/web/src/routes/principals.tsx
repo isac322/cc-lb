@@ -58,6 +58,7 @@ import {
   ToggleSwitch,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { Select } from '../components/ui/Select';
 import {
@@ -69,7 +70,6 @@ import {
   TableRow,
 } from '../components/ui/Table';
 import { formatCount } from '../lib/format';
-import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   type ChainSlot,
   type LimitKind,
@@ -88,7 +88,6 @@ import {
   usePrincipalNameMap,
   usePrincipals,
   usePrincipalWritePending,
-  useRecentEvents,
   useReorderChain,
   useRevokeKey,
   useRouterTerminalStrategy,
@@ -104,6 +103,7 @@ import {
 } from '../lib/requestErrorCodes';
 import { undoToast } from '../lib/undoToast';
 import { useCopyButton } from '../lib/useCopyButton';
+import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
 
 const PRINCIPAL_FILTERS = [
   'all',
@@ -708,57 +708,30 @@ function PrincipalDetail({
 
 export function RecentRequestsCard({ principal }: { principal: Principal }) {
   const principalNameMap = usePrincipalNameMap();
-  const recent = useRecentEvents({
-    principal_id: principal.id,
-    limit: '5',
-    event_kind: 'messages',
+  const feed = useRequestEventsFeed({
+    filters: {
+      principal_id: principal.id,
+      event_kind: 'messages',
+    },
   });
-  const events = useMemo(() => {
-    return (recent.data?.events ?? [])
-      .filter(isMessagesRequestEvent)
-      .map((e) => ({
-        ...e,
-        _phase: 'final' as const,
-      }));
-  }, [recent.data]);
-  const loading = recent.data === undefined && recent.isPending;
   return (
     <DetailSection
       span="full"
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
       title="Recent requests"
-      description={
-        <span className="inline-flex h-5 items-center">
-          {loading ? (
-            <span
-              className="skeleton inline-block h-3 w-48"
-              data-testid="recent-requests-subtitle-skeleton"
-              aria-hidden="true"
-            />
-          ) : events.length === 0 ? (
-            `No recent requests from ${principal.name}`
-          ) : (
-            `Last ${events.length} from ${principal.name}`
-          )}
-        </span>
-      }
+      description={`Latest requests from ${principal.name}`}
     >
-      <div
-        className={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
-        data-testid="recent-requests-table-slot"
-      >
-        <RequestEventsTable
-          events={events}
-          principalNameMap={principalNameMap}
-          loading={loading}
-          columns={{
-            principal: false,
-            cost: true,
-            tokens: true,
-          }}
-          emptyTitle="No recent requests for this principal"
-        />
-      </div>
+      <RequestEventsFeed
+        feed={feed}
+        principalNameMap={principalNameMap}
+        columns={{
+          principal: false,
+          cost: true,
+          tokens: true,
+        }}
+        tableContainerClassName={PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS}
+        emptyTitle="No recent requests for this principal"
+      />
     </DetailSection>
   );
 }

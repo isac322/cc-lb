@@ -8,8 +8,9 @@ use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_control::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_oauth_protocol::{
-    ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
-    refresh_token_form_body, refreshed_token_parts,
+    ExistingTokenParts, TokenEndpointResponse, is_terminal_refresh_failure,
+    parse_token_endpoint_response, refresh_requires_reconnect, refresh_token_form_body,
+    refreshed_token_parts,
 };
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
@@ -19,6 +20,7 @@ use cc_lb_scheduler::worker::{
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::{
     AuditActorFields, AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord,
+    UpstreamStatusUpdate,
 };
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Request, StatusCode};
@@ -504,6 +506,9 @@ impl LazyRefreshHandle for LazyRefresher {
                 reason: RefreshError::NotRefreshable.to_string(),
             });
         }
+        check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
+            .await
+            .map_err(lazy_refresh_error)?;
         let expires_at_unix_secs = bundle.expires_at_unix_secs;
         let claim = self
             .claim_guard
@@ -612,6 +617,9 @@ impl LazyRefreshHandle for LazyRefresher {
             // enqueue.
             return Ok(());
         }
+        check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
+            .await
+            .map_err(lazy_refresh_error)?;
         let expires_at_unix_secs = bundle.expires_at_unix_secs;
         let claim = self
             .claim_guard
@@ -651,6 +659,12 @@ pub enum RefreshError {
     Encrypt,
     #[error("oauth token endpoint returned {0}")]
     Status(StatusCode),
+    #[error("oauth token endpoint returned {0}; reauthorization required")]
+    ReconnectRequired(StatusCode),
+    #[error("oauth refresh token expired; reauthorization required")]
+    RefreshTokenExpired,
+    #[error("oauth credential requires reauthorization")]
+    ExistingReconnectRequired,
     #[error("oauth token endpoint request failed: {0}")]
     Http(String),
     #[error("oauth token response parse failed: {0}")]
@@ -662,6 +676,46 @@ pub enum RefreshError {
     /// endpoint.
     #[error("long-lived oauth credential must not be refreshed; reauthorization required")]
     NotRefreshable,
+}
+
+async fn check_refresh_allowed(
+    stores: &Stores,
+    upstream: &UpstreamRecord,
+    bundle: &OAuthTokenBundle,
+    clock: &dyn Clock,
+) -> Result<(), RefreshError> {
+    if bundle.never_refresh {
+        return Err(RefreshError::NotRefreshable);
+    }
+    if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
+        return Err(RefreshError::ExistingReconnectRequired);
+    }
+    if bundle
+        .refresh_token_expires_at_unix_secs
+        .is_some_and(|expires_at| expires_at <= unix_secs(clock.now()))
+    {
+        record_refresh_failure(stores, upstream, "refresh_token_expired".to_owned()).await?;
+        return Err(RefreshError::RefreshTokenExpired);
+    }
+    Ok(())
+}
+
+async fn record_refresh_failure(
+    stores: &Stores,
+    upstream: &UpstreamRecord,
+    reason: String,
+) -> StorageResult<()> {
+    stores
+        .upstreams
+        .set_status(
+            upstream.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some(reason)),
+                expected_oauth_token_generation: Some(upstream.oauth_token_generation),
+                ..Default::default()
+            },
+        )
+        .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -676,12 +730,22 @@ async fn refresh_flow(
     upstream: UpstreamRecord,
     clock: &dyn Clock,
 ) -> Result<u64, RefreshError> {
+    let current = stores
+        .upstreams
+        .get_by_id(upstream.id)
+        .await?
+        .ok_or(RefreshError::MissingCredentials)?;
+    if current.oauth_token_generation > upstream.oauth_token_generation {
+        return Ok(current.oauth_token_generation);
+    }
+    let upstream = current;
     let previous = upstream
         .oauth_credentials
         .as_ref()
         .ok_or(RefreshError::MissingCredentials)?
         .decrypt(aead, upstream.id.as_bytes())
         .map_err(|_| RefreshError::Decrypt)?;
+    check_refresh_allowed(stores, &upstream, &previous, clock).await?;
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
@@ -730,10 +794,7 @@ async fn refresh_flow(
         Err(error) => {
             increment_metric(&upstream.name, "failure");
             let reason = reason_for(&error);
-            let status_result = stores
-                .upstreams
-                .set_last_apply_error(upstream.id, Some(reason.clone()))
-                .await;
+            let status_result = record_refresh_failure(stores, &upstream, reason.clone()).await;
             emit_audit(
                 audit,
                 AuditPayload::UpstreamOauthRefreshFailure {
@@ -777,8 +838,12 @@ async fn request_refresh(
         }
     };
     let status = response.status();
-    if !status.is_success() {
-        return Err(RefreshError::Status(status));
+    if !status.is_success() && status != StatusCode::BAD_REQUEST {
+        return Err(if is_terminal_refresh_failure(status.as_u16(), &[]) {
+            RefreshError::ReconnectRequired(status)
+        } else {
+            RefreshError::Status(status)
+        });
     }
     let bytes = tokio::select! {
         _ = cancel.cancelled() => return Err(RefreshError::Cancelled),
@@ -789,6 +854,13 @@ async fn request_refresh(
                 .to_bytes()
         }
     };
+    if !status.is_success() {
+        return Err(if is_terminal_refresh_failure(status.as_u16(), &bytes) {
+            RefreshError::ReconnectRequired(status)
+        } else {
+            RefreshError::Status(status)
+        });
+    }
     parse_token_endpoint_response(&bytes).map_err(RefreshError::Parse)
 }
 
@@ -864,7 +936,11 @@ async fn emit_audit(
 
 fn reason_for(error: &RefreshError) -> String {
     match error {
+        RefreshError::ReconnectRequired(status) => format!("status_{}", status.as_u16()),
+        RefreshError::Status(StatusCode::BAD_REQUEST) => "status_400_retryable".to_owned(),
         RefreshError::Status(status) => format!("status_{}", status.as_u16()),
+        RefreshError::RefreshTokenExpired => "refresh_token_expired".to_owned(),
+        RefreshError::ExistingReconnectRequired => "reauthorization_required".to_owned(),
         RefreshError::Http(_) => "network".to_owned(),
         RefreshError::Parse(_) => "parse".to_owned(),
         RefreshError::Cancelled => "cancelled".to_owned(),
@@ -877,6 +953,12 @@ fn reason_for(error: &RefreshError) -> String {
         // `refresh_one` guard long before that. The arm exists because the
         // variant does, and a catch-all would silently swallow future ones.
         RefreshError::NotRefreshable => "not_refreshable".to_owned(),
+    }
+}
+
+fn lazy_refresh_error(error: RefreshError) -> LazyRefreshError {
+    LazyRefreshError::Failed {
+        reason: error.to_string(),
     }
 }
 
@@ -958,6 +1040,12 @@ mod tests {
         let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
         fixture.hold_refresh_response();
         let upstream_id = fixture.create_oauth_upstream().await;
+        let starting_generation = fixture
+            .storage
+            .read_oauth_token_generation(upstream_id)
+            .await
+            .expect("starting generation read")
+            .expect("starting generation exists");
         let claims = Arc::new(TestOAuthRefreshClaims::single_winner());
         let config = LazyRefreshContentionConfig::for_tests(
             Duration::from_secs(30),
@@ -981,7 +1069,7 @@ mod tests {
             .expect("second lazy refresh task joins")
             .expect("second lazy refresh joins");
         assert_eq!(fixture.refresh_call_count(), 1);
-        assert_eq!(claims.completed_generation(), Some(1));
+        assert_eq!(claims.completed_generation(), Some(starting_generation + 1),);
     }
 
     #[tokio::test]

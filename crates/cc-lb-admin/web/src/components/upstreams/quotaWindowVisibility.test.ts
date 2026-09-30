@@ -164,6 +164,7 @@ describe('selectVisibleGraphWindows', () => {
           window: 'overage',
           observed_at_unix_millis: 1_500_000,
           extra_usage_enabled: true,
+          extra_usage_monthly_limit: 5000,
         }),
       ],
       series: [series('overage', [1200])],
@@ -179,6 +180,7 @@ describe('selectVisibleGraphWindows', () => {
           window: 'overage',
           observed_at_unix_millis: 1_500_000,
           extra_usage_enabled: true,
+          extra_usage_monthly_limit: 5000,
         }),
       ],
       series: [series('overage', [500])],
@@ -194,13 +196,32 @@ describe('selectVisibleGraphWindows', () => {
           window: 'overage',
           observed_at_unix_millis: 1_500_000,
           extra_usage_enabled: false,
-          extra_usage_monthly_limit: null,
+          extra_usage_monthly_limit: 5000,
         }),
       ],
       series: [series('overage', [1200])],
       sinceUnixSecs,
     });
     expect(result).toEqual([]);
+  });
+
+  it('keeps the Unified account envelope out of independent quota chart series', () => {
+    const unified = snap({
+      window: 'unified',
+      observed_at_unix_millis: 1_500_000,
+      status: 'allowed',
+      representative_claim: '5h',
+    });
+    expect(
+      selectVisibleGraphWindows({
+        latestWindows: [unified],
+        series: [series('unified', [1200])],
+        sinceUnixSecs,
+      }),
+    ).toEqual([]);
+    expect(selectQuotaCardSnapshots({ latestWindows: [unified] })).toEqual([
+      unified,
+    ]);
   });
 
   it('returns visible windows ordered by QUOTA_WINDOW_ORDER', () => {
@@ -266,26 +287,14 @@ describe('selectQuotaCardSnapshots', () => {
     ).toEqual(['7d_sonnet']);
   });
 
-  it('shows extra usage once its switch is reported, enabled or off', () => {
-    expect(
-      windowsOf([snap({ window: 'overage', extra_usage_enabled: false })]),
-    ).toEqual(['overage']);
+  it('lists every reported window in canonical order', () => {
     expect(
       windowsOf([
         snap({
           window: 'overage',
-          extra_usage_enabled: false,
+          extra_usage_enabled: true,
           extra_usage_monthly_limit: 5000,
         }),
-      ]),
-    ).toEqual(['overage']);
-    expect(windowsOf([snap({ window: 'overage' })])).toEqual([]);
-  });
-
-  it('lists every reported window in canonical order', () => {
-    expect(
-      windowsOf([
-        snap({ window: 'overage', extra_usage_enabled: true }),
         snap({ window: 'unified', utilization: null, status: 'allowed' }),
         snap({ window: '7d_opus' }),
         snap({ window: '7d_sonnet' }),
@@ -303,6 +312,43 @@ describe('selectQuotaCardSnapshots', () => {
       'overage',
     ]);
   });
+});
+
+describe('Extra usage budget visibility', () => {
+  it.each([
+    { enabled: false, budget: 5000, visible: false },
+    { enabled: null, budget: 5000, visible: false },
+    { enabled: true, budget: null, visible: false },
+    { enabled: true, budget: 0, visible: false },
+    { enabled: true, budget: -1, visible: false },
+    { enabled: true, budget: Number.NaN, visible: false },
+    { enabled: true, budget: Number.POSITIVE_INFINITY, visible: false },
+    { enabled: true, budget: 1, visible: true },
+    { enabled: true, budget: 5000, visible: true },
+  ])(
+    'uses the same budget gate in quota rows and history for $enabled / $budget',
+    ({ enabled, budget, visible }) => {
+      const latestWindows = [
+        snap({
+          window: 'overage',
+          extra_usage_enabled: enabled,
+          extra_usage_monthly_limit: budget,
+          observed_at_unix_millis: 1_500_000,
+        }),
+      ];
+      const expected = visible ? ['overage'] : [];
+      expect(
+        selectQuotaCardSnapshots({ latestWindows }).map((s) => s.window),
+      ).toEqual(expected);
+      expect(
+        selectVisibleGraphWindows({
+          latestWindows,
+          series: [series('overage', [1200])],
+          sinceUnixSecs: 1000,
+        }),
+      ).toEqual(expected);
+    },
+  );
 });
 
 describe('range transitions', () => {

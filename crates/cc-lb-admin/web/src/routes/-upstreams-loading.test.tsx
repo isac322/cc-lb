@@ -13,6 +13,7 @@ import * as api from '../lib/api';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
+import * as requestEventsFeed from '../lib/useRequestEventsFeed';
 import { Route } from './upstreams';
 
 let searchState: { selectedId?: string; action?: 'new' | 'reconnect' } = {};
@@ -28,6 +29,9 @@ vi.mock('@tanstack/react-router', async () => {
     useNavigate: () => navigateMock,
   };
 });
+vi.mock('../lib/useRequestEventsFeed', () => ({
+  useRequestEventsFeed: vi.fn(),
+}));
 
 vi.mock('../lib/queries', async () => {
   const actual = (await vi.importActual('../lib/queries')) as typeof queries;
@@ -40,7 +44,6 @@ vi.mock('../lib/queries', async () => {
     useOAuthComplete: vi.fn(),
     useOAuthStart: vi.fn(),
     usePrincipalNameMap: vi.fn(),
-    useRecentEvents: vi.fn(),
     useStartOauthDraft: vi.fn(),
     useStatus: vi.fn(),
     useSubscriptionQuotaLatest: vi.fn(),
@@ -122,6 +125,34 @@ function queryResult(data: unknown, overrides: Record<string, unknown> = {}) {
     isLoading: false,
     isPending: false,
     isPlaceholderData: false,
+    ...overrides,
+  } as never;
+}
+function feedState(overrides: Record<string, unknown> = {}) {
+  return {
+    rows: [],
+    filteredRows: [],
+    pageRows: [],
+    firstPageEvents: [],
+    historyFilters: {},
+    loading: false,
+    isFetching: false,
+    error: null,
+    page: 0,
+    pageCount: 1,
+    pageSize: 50,
+    totalRows: 0,
+    hasMore: false,
+    loadingNext: false,
+    previousPage: vi.fn(),
+    nextPage: vi.fn().mockResolvedValue(undefined),
+    refresh: vi.fn(),
+    live: {},
+    liveEnabled: true,
+    tailStatus: 'live',
+    statusLabel: 'Live',
+    statusColor: 'ok',
+    liveFlashIds: new Set<string>(),
     ...overrides,
   } as never;
 }
@@ -289,6 +320,12 @@ function recentData(model: string) {
     ],
   };
 }
+function recentRows(model: string) {
+  return recentData(model).events.map((event) => ({
+    ...event,
+    _phase: 'final' as const,
+  }));
+}
 
 function mutationResult() {
   const mutateAsync = vi.fn();
@@ -310,6 +347,15 @@ function routeElement() {
 
 function renderRoute() {
   return render(routeElement());
+}
+
+function statusNoticeNamed(title: string): HTMLElement {
+  const titleNode = screen.getByText(title, { exact: true });
+  const notice = titleNode.closest('[role="status"]');
+  if (!(notice instanceof HTMLElement)) {
+    throw new Error(`Status notice not found: ${title}`);
+  }
+  return notice;
 }
 
 const OAUTH_AUTHORIZE_URL =
@@ -451,12 +497,9 @@ beforeEach(() => {
     isPending: true,
     isPlaceholderData: false,
   } as never);
-  vi.mocked(queries.useRecentEvents).mockReturnValue({
-    data: undefined,
-    isLoading: true,
-    isPending: true,
-    isPlaceholderData: false,
-  } as never);
+  vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(
+    feedState({ loading: true }),
+  );
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
 
   vi.mocked(queries.useUpdateUpstreamWarmupSettings).mockReturnValue(
@@ -571,9 +614,6 @@ describe('/upstreams cold-load geometry', () => {
       expect(rangeItem.className).toContain('md:h-[1.625rem]');
     }
     expect(within(shell).queryByText('Timestamp')).toBeNull();
-    expect(
-      within(shell).queryByTestId('recent-requests-table-slot'),
-    ).toBeNull();
     expect(within(shell).queryByTestId('warmup-card')).toBeNull();
     expect(within(shell).queryByTestId('oauth-status-card-body')).toBeNull();
     expect(screen.getAllByTestId('upstream-list-loading-row')).toHaveLength(4);
@@ -606,11 +646,12 @@ describe('/upstreams cold-load geometry', () => {
     );
     expect(oauthGrid.className).toContain('space-y-3');
 
-    const requestSlot = screen.getByTestId('recent-requests-table-slot');
-    expect(requestSlot.className).toContain('min-h-48');
-    expect(within(requestSlot).getByText('Timestamp')).toBeDefined();
-    expect(requestSlot.querySelectorAll('tbody tr')).toHaveLength(5);
-    expect(screen.queryByText(/Loading/)).toBeNull();
+    const requestTable = screen.getByText('Timestamp').closest('table');
+    expect(requestTable).not.toBeNull();
+    expect(requestTable?.querySelectorAll('tbody tr')).toHaveLength(5);
+    expect(requestTable?.querySelector('thead')?.textContent).not.toContain(
+      'Upstream',
+    );
     expect(screen.queryByText('—%')).toBeNull();
     // Pending quota reserves the row's usage figures; an API-key row has
     // no subscription quota to wait for and reads as its kind at once.
@@ -671,12 +712,9 @@ describe('/upstreams cold-load geometry', () => {
       isPending: false,
       isPlaceholderData: false,
     } as never);
-    vi.mocked(queries.useRecentEvents).mockReturnValue({
-      data: { events: [] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
+    vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(
+      feedState(),
+    );
 
     renderRoute();
 
@@ -695,8 +733,8 @@ describe('/upstreams cold-load geometry', () => {
     const loadedOauthGrid = screen.getByTestId('oauth-status-loaded-grid');
     expect(loadedOauthGrid.className).toContain('space-y-3');
     expect(
-      screen.getByTestId('recent-requests-table-slot').className,
-    ).toContain('min-h-48');
+      screen.getByText('No recent requests for this upstream'),
+    ).toBeDefined();
   });
 });
 
@@ -804,10 +842,8 @@ describe('/upstreams refresh retention', () => {
         isPlaceholderData,
       }),
     );
-    vi.mocked(queries.useRecentEvents).mockImplementation(() =>
-      queryResult(recentData(phaseData[phase].requestModel), {
-        isPlaceholderData,
-      }),
+    vi.mocked(requestEventsFeed.useRequestEventsFeed).mockImplementation(() =>
+      feedState({ pageRows: recentRows(phaseData[phase].requestModel) }),
     );
 
     const view = renderRoute();
@@ -856,11 +892,6 @@ describe('/upstreams refresh retention', () => {
     expect(
       screen
         .getByTestId('oauth-status-card-body')
-        .querySelectorAll('.skeleton'),
-    ).toHaveLength(0);
-    expect(
-      screen
-        .getByTestId('recent-requests-table-slot')
         .querySelectorAll('.skeleton'),
     ).toHaveLength(0);
     expect(oauthSidebarRow.querySelectorAll('.skeleton')).toHaveLength(0);
@@ -924,11 +955,12 @@ describe('/upstreams refresh retention', () => {
             );
       return queryResult(data, { isPlaceholderData });
     });
-    vi.mocked(queries.useRecentEvents).mockImplementation(() =>
-      queryResult(
-        recentData(phase === 'old' ? 'old-request-model' : 'new-request-model'),
-        { isPlaceholderData },
-      ),
+    vi.mocked(requestEventsFeed.useRequestEventsFeed).mockImplementation(() =>
+      feedState({
+        pageRows: recentRows(
+          phase === 'old' ? 'old-request-model' : 'new-request-model',
+        ),
+      }),
     );
 
     const view = renderRoute();
@@ -946,11 +978,6 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('old-request-model')).toBeDefined();
     expect(
       screen.getByTestId('api-usage-card').querySelectorAll('.skeleton'),
-    ).toHaveLength(0);
-    expect(
-      screen
-        .getByTestId('recent-requests-table-slot')
-        .querySelectorAll('.skeleton'),
     ).toHaveLength(0);
     expect(apiSidebarRow.querySelectorAll('.skeleton')).toHaveLength(0);
 
@@ -1011,10 +1038,11 @@ describe('/upstreams refresh retention', () => {
           ? queryResult(oauthStatusData(upstream, 'identity-old-scope'))
           : queryResult(undefined, { isLoading: true, isPending: true }),
     );
-    vi.mocked(queries.useRecentEvents).mockImplementation((options) =>
-      options.upstream_id === upstream.id
-        ? queryResult(recentData('identity-old-model'))
-        : queryResult(undefined, { isLoading: true, isPending: true }),
+    vi.mocked(requestEventsFeed.useRequestEventsFeed).mockImplementation(
+      (options) =>
+        options?.filters?.upstream_id === upstream.id
+          ? feedState({ pageRows: recentRows('identity-old-model') })
+          : feedState({ loading: true }),
     );
 
     const view = renderRoute();
@@ -1053,11 +1081,14 @@ describe('/upstreams refresh retention', () => {
         .querySelectorAll('.skeleton'),
     ).toHaveLength(2);
     expect(screen.getByTestId('oauth-status-loading-grid')).toBeDefined();
-    expect(
-      screen
-        .getByTestId('recent-requests-table-slot')
-        .querySelectorAll('tbody tr'),
-    ).toHaveLength(5);
+    const requestTable = screen.getByText('Timestamp').closest('table');
+    expect(requestTable?.querySelectorAll('tbody tr')).toHaveLength(5);
+    expect(requestEventsFeed.useRequestEventsFeed).toHaveBeenLastCalledWith({
+      filters: {
+        upstream_id: secondOauthUpstream.id,
+        event_kind: 'messages',
+      },
+    });
     expect(
       screen.getByText(
         `No subscription quota data for ${secondOauthUpstream.name}`,
@@ -1365,7 +1396,7 @@ describe('/upstreams mutation pending UX', () => {
 
     // The reconnect notice is the prominent entry point; the OAuth card keeps
     // its own Connect button, so scope the click to the notice's status role.
-    const reconnectNotice = screen.getByRole('status');
+    const reconnectNotice = statusNoticeNamed('OAuth not connected');
     expect(
       within(reconnectNotice).getByText('OAuth not connected'),
     ).toBeDefined();
@@ -1559,55 +1590,217 @@ describe('/upstreams OAuth card', () => {
     expect(screen.getByTestId('oauth-status-loaded-grid')).toBeDefined();
   });
 
-  test('shows the reconnect notice while the live record reports a renewal failure and clears it once resolved', () => {
-    mockOAuthStatus(2_100_000_000);
-    // The runtime /status snapshot reports no error; only the upstream
-    // record's live last_apply_error drives the classifier.
-    vi.mocked(queries.useStatus).mockReturnValue({
-      data: {
-        upstreams: [
-          {
-            id: upstream.id,
-            name: upstream.name,
-            status: 'applied',
-            last_apply_at_unix_secs: NOW_UNIX_SECS,
-            last_apply_error: null,
-          },
-        ],
-      },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
-    const failingUpstream: Upstream = {
-      ...upstream,
-      status: { ...upstream.status, last_apply_error: 'status_401' },
-    };
-    vi.mocked(queries.useUpstreams).mockReturnValue({
-      data: { upstreams: [failingUpstream, apiKeyUpstream] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
+  test.each([
+    'status_400_retryable',
+    'status_429',
+    'status_503',
+    'network',
+    'storage',
+    'parse',
+  ])(
+    'shows an observed non-terminal renewal failure %s as retrying',
+    (last_apply_error) => {
+      mockOAuthStatus(2_100_000_000);
+      vi.mocked(queries.useUpstreams).mockReturnValue(
+        queryResult({
+          upstreams: [
+            {
+              ...upstream,
+              status: { ...upstream.status, last_apply_error },
+            },
+            apiKeyUpstream,
+          ],
+        }),
+      );
 
-    const view = renderRoute();
+      renderRoute();
 
-    const notice = screen.getByRole('alert');
-    expect(within(notice).getByText('Token renewal failed')).toBeDefined();
-    expect(
-      within(notice).getByRole('button', { name: 'Reconnect' }),
-    ).toBeDefined();
+      expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+        'Retrying',
+      );
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
 
-    vi.mocked(queries.useUpstreams).mockReturnValue({
-      data: { upstreams: [upstream, apiKeyUpstream] },
-      isLoading: false,
-      isPending: false,
-      isPlaceholderData: false,
-    } as never);
-    view.rerender(routeElement());
+  test('a renewable elapsed access token is renewing, not disconnected', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          status: 'expired',
+          expires_at_unix_secs: Math.floor(Date.now() / 1000) - 1,
+        }),
+      ),
+    );
+    renderRoute();
 
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Renewing',
+    );
     expect(screen.queryByRole('alert')).toBeNull();
   });
+
+  test('an expired access token without renewal is an expired login', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          status: 'expired',
+          expires_at_unix_secs: Math.floor(Date.now() / 1000) - 1,
+          refresh_token_present: false,
+          refresh_token_expires_at_unix_secs: null,
+        }),
+      ),
+    );
+    renderRoute();
+
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Login expired',
+    );
+    expect(screen.getByRole('alert')).toBeDefined();
+  });
+
+  test('unknown credential mode does not imply a usable credential', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(oauthStatusData(upstream, 'user:inference', { mode: null })),
+    );
+    renderRoute();
+
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Unknown',
+    );
+  });
+
+  test('a failed credential lookup does not imply the account is disconnected', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+    } as never);
+    renderRoute();
+
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Unavailable',
+    );
+    expect(
+      screen.getByText(/Credential status could not be loaded/),
+    ).toBeDefined();
+    expect(
+      screen.queryByText(/Use Connect to authorize this upstream/),
+    ).toBeNull();
+  });
+
+  test('unreadable stored credentials remain a reconnect error', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
+      queryResult(
+        oauthStatusData(upstream, 'user:inference', {
+          status: 'corrupted',
+          expires_at_unix_secs: null,
+          refresh_token_present: false,
+          refresh_token_expires_at_unix_secs: null,
+          mode: null,
+          can_refresh: false,
+        }),
+      ),
+    );
+    renderRoute();
+
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Reconnect required',
+    );
+    expect(
+      within(screen.getByRole('alert')).getByRole('button', {
+        name: 'Reconnect',
+      }),
+    ).toBeDefined();
+  });
+
+  test('a known terminal failure outranks a failed credential recheck', () => {
+    vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue({
+      data: oauthStatusData(upstream, 'user:inference'),
+      isPending: false,
+      isError: true,
+    } as never);
+    vi.mocked(queries.useUpstreams).mockReturnValue(
+      queryResult({
+        upstreams: [
+          {
+            ...upstream,
+            status: { ...upstream.status, last_apply_error: 'status_401' },
+          },
+          apiKeyUpstream,
+        ],
+      }),
+    );
+    renderRoute();
+
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Reconnect required',
+    );
+    expect(
+      within(screen.getByRole('alert')).getByRole('button', {
+        name: 'Reconnect',
+      }),
+    ).toBeDefined();
+  });
+
+  test.each(['status_400', 'status_401', 'refresh_token_expired'])(
+    'a terminal renewal failure %s stays actionable until the live record clears',
+    (last_apply_error) => {
+      mockOAuthStatus(2_100_000_000);
+      // The runtime /status snapshot reports no error; only the upstream
+      // record's live last_apply_error drives the classifier.
+      vi.mocked(queries.useStatus).mockReturnValue({
+        data: {
+          upstreams: [
+            {
+              id: upstream.id,
+              name: upstream.name,
+              status: 'applied',
+              last_apply_at_unix_secs: NOW_UNIX_SECS,
+              last_apply_error: null,
+            },
+          ],
+        },
+        isLoading: false,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+      const failingUpstream: Upstream = {
+        ...upstream,
+        status: { ...upstream.status, last_apply_error },
+      };
+      vi.mocked(queries.useUpstreams).mockReturnValue({
+        data: { upstreams: [failingUpstream, apiKeyUpstream] },
+        isLoading: false,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+
+      const view = renderRoute();
+
+      const notice = screen.getByRole('alert');
+      expect(
+        within(notice).getByRole('button', { name: 'Reconnect' }),
+      ).toBeDefined();
+      expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+        last_apply_error === 'refresh_token_expired'
+          ? 'Login expired'
+          : 'Reconnect required',
+      );
+
+      vi.mocked(queries.useUpstreams).mockReturnValue({
+        data: { upstreams: [upstream, apiKeyUpstream] },
+        isLoading: false,
+        isPending: false,
+        isPlaceholderData: false,
+      } as never);
+      view.rerender(routeElement());
+
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+        'Connected',
+      );
+    },
+  );
 });
 
 describe('/upstreams long-lived OAuth credential', () => {
@@ -1797,7 +1990,7 @@ describe('/upstreams long-lived OAuth credential', () => {
 
     // The reconnect notice is the prominent entry point, same as the
     // pending-UX test above.
-    const reconnectNotice = screen.getByRole('status');
+    const reconnectNotice = statusNoticeNamed('OAuth not connected');
     fireEvent.click(
       within(reconnectNotice).getByRole('button', { name: 'Connect' }),
     );
@@ -1828,6 +2021,7 @@ describe('/upstreams long-lived OAuth credential', () => {
           mode: 'long_lived_365d',
           can_refresh: false,
           expires_at_unix_secs: now + 10 * 24 * 60 * 60,
+          refresh_token_present: false,
           refresh_token_expires_at_unix_secs: null,
         }),
       ),
@@ -1836,15 +2030,17 @@ describe('/upstreams long-lived OAuth credential', () => {
     renderRoute();
 
     // Inside the 14-day window the access-token deadline drives the nudge.
-    const notice = screen.getByRole('status');
+    const notice = statusNoticeNamed('Long-lived token expiring soon');
     expect(
       within(notice).getByText('Long-lived token expiring soon'),
     ).toBeDefined();
     expect(
       within(notice).getByRole('button', { name: 'Reconnect' }),
     ).toBeDefined();
-    // The notice owns the problem; the credential section does not repeat it.
-    expect(screen.queryByText('Login expiring')).toBeNull();
+    // The credential keeps its conspicuous current state beside the notice.
+    expect(screen.getByTestId('oauth-current-status').textContent).toBe(
+      'Login expiring',
+    );
 
     cleanup();
     vi.mocked(queries.useUpstreamOAuthStatus).mockReturnValue(
@@ -1861,8 +2057,11 @@ describe('/upstreams long-lived OAuth credential', () => {
     renderRoute();
 
     // A lapsed refresh-token clock must not nudge a credential that never
-    // uses it.
-    expect(screen.queryByRole('status')).toBeNull();
+    // uses it. The Credential card still has its own Reconnect action, so
+    // absence is scoped to the nudge's visible title rather than all statuses.
+    expect(
+      screen.queryByText('Long-lived token expiring soon', { exact: true }),
+    ).toBeNull();
     expect(screen.getByText('Long-lived')).toBeDefined();
   });
 });

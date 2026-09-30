@@ -12,6 +12,7 @@ import { toast } from 'sonner';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
 import { queryClient as appQueryClient } from '../lib/queryClient';
+import * as requestEventsFeed from '../lib/useRequestEventsFeed';
 import {
   ApiKeysCard,
   RecentRequestsCard,
@@ -28,6 +29,9 @@ vi.mock('@tanstack/react-router', async () => {
     useNavigate: () => navigateMock,
   };
 });
+vi.mock('../lib/useRequestEventsFeed', () => ({
+  useRequestEventsFeed: vi.fn(),
+}));
 
 vi.mock('../lib/queries', async () => {
   const actual = await vi.importActual<typeof queries>('../lib/queries');
@@ -49,7 +53,6 @@ vi.mock('../lib/queries', async () => {
     useUpdatePrincipalDefaultLimits: vi.fn(),
     useUpdatePrincipalCacheKeepalive: vi.fn(),
     useCacheKeepaliveSummary: vi.fn(),
-    useRecentEvents: vi.fn(),
     usePrincipalNameMap: vi.fn(),
     usePrincipalKeys: vi.fn(),
     useIssueKey: vi.fn(),
@@ -99,6 +102,34 @@ function principalFixture(
     cache_keepalive: null,
     ...overrides,
   };
+}
+function feedState(overrides: Record<string, unknown> = {}) {
+  return {
+    rows: [],
+    filteredRows: [],
+    pageRows: [],
+    firstPageEvents: [],
+    historyFilters: {},
+    loading: false,
+    isFetching: false,
+    error: null,
+    page: 0,
+    pageCount: 1,
+    pageSize: 50,
+    totalRows: 0,
+    hasMore: false,
+    loadingNext: false,
+    previousPage: vi.fn(),
+    nextPage: vi.fn().mockResolvedValue(undefined),
+    refresh: vi.fn(),
+    live: {},
+    liveEnabled: true,
+    tailStatus: 'live',
+    statusLabel: 'Live',
+    statusColor: 'ok',
+    liveFlashIds: new Set<string>(),
+    ...overrides,
+  } as never;
 }
 
 function renderPrincipalDetail(
@@ -159,12 +190,9 @@ beforeEach(() => {
     isLoading: false,
     isPending: false,
   } as never);
-  vi.mocked(queries.useRecentEvents).mockReturnValue({
-    data: { events: [] },
-    isLoading: false,
-    isPending: false,
-    isPlaceholderData: false,
-  } as never);
+  vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(
+    feedState({ loading: true }),
+  );
   vi.mocked(queries.usePrincipalNameMap).mockReturnValue(new Map());
   vi.mocked(queries.usePrincipalKeys).mockReturnValue({
     data: { keys: [] },
@@ -335,85 +363,25 @@ test('principal detail reads keepalive to access with every section expanded', (
   expect(cardNamed('Shape').getByText('None')).toBeDefined();
 });
 
-test('recent requests delegates pending geometry to the structured table', () => {
-  vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
-    new Map([[principal.id, principal.name]]),
+test('recent requests scope the shared feed and preserve container-fit columns', () => {
+  vi.mocked(requestEventsFeed.useRequestEventsFeed).mockReturnValue(
+    feedState({ loading: true }),
   );
-  vi.mocked(queries.useRecentEvents).mockReturnValue({
-    data: undefined,
-    isLoading: true,
-    isPending: true,
-    isPlaceholderData: false,
-  } as never);
-
-  const { container } = renderWithProviders(
-    <RecentRequestsCard principal={principal} />,
-  );
-
-  expect(screen.queryByText(/Loading recent requests/)).toBeNull();
-  expect(
-    screen.queryByText('No recent requests for this principal'),
-  ).toBeNull();
-  expect(screen.getByTestId('recent-requests-subtitle-skeleton')).toBeDefined();
-  const slot = screen.getByTestId('recent-requests-table-slot');
-  expect(slot.className).toContain('min-h-48');
-  // Column visibility belongs to RequestEventsTable; the card only needs every
-  // skeleton row to fill the same columns as its header.
-  const columnCount = slot.querySelectorAll('thead th').length;
-  expect(columnCount).toBeGreaterThan(0);
-  const rows = slot.querySelectorAll('tbody tr');
-  expect(rows).toHaveLength(5);
-  for (const row of rows) {
-    expect(row.className).toContain('border-b');
-    expect(row.querySelectorAll('td')).toHaveLength(columnCount);
-  }
-  expect(container.textContent).not.toContain('—');
-});
-
-test('recent requests asks the backend for messages only and hides other categories', () => {
-  vi.mocked(queries.useRecentEvents).mockReturnValue({
-    data: {
-      events: [
-        {
-          duration_ms: 10,
-          event_kind: 'messages',
-          request_id: 'request-messages',
-          status: 200,
-          ts: 3,
-        },
-        {
-          duration_ms: 10,
-          event_kind: 'messages',
-          request_id: 'request-renewal',
-          source_kind: 'renewal',
-          status: 200,
-          ts: 2,
-        },
-        {
-          duration_ms: 10,
-          request_id: 'request-unclassified',
-          status: 200,
-          ts: 1,
-        },
-      ],
-    },
-    isLoading: false,
-    isPending: false,
-    isPlaceholderData: false,
-  } as never);
 
   renderWithProviders(<RecentRequestsCard principal={principal} />);
 
-  expect(queries.useRecentEvents).toHaveBeenCalledWith({
-    principal_id: principal.id,
-    limit: '5',
-    event_kind: 'messages',
+  expect(requestEventsFeed.useRequestEventsFeed).toHaveBeenCalledWith({
+    filters: {
+      principal_id: principal.id,
+      event_kind: 'messages',
+    },
   });
-  expect(screen.getByLabelText('View request request-messages')).toBeDefined();
-  expect(screen.queryByLabelText('View request request-renewal')).toBeNull();
-  expect(
-    screen.queryByLabelText('View request request-unclassified'),
-  ).toBeNull();
+  const requestTable = screen.getByText('Timestamp').closest('table');
+  expect(requestTable).not.toBeNull();
+  expect(requestTable?.querySelectorAll('tbody tr')).toHaveLength(5);
+  expect(requestTable?.querySelector('thead')?.textContent).not.toContain(
+    'Principal',
+  );
 });
 
 test('API key loading keeps the table header and per-column skeleton rows', () => {
@@ -1254,9 +1222,15 @@ test('toggle pending locks both principal header mutations', () => {
 
   const toggle = screen.getByRole('switch', { name: 'Enabled' });
   expect(toggle.hasAttribute('disabled')).toBe(true);
-  expect(screen.getByRole('status').textContent).toContain('Disabling...');
+  const heading = screen.getByText('p-1', { selector: 'h2' });
+  const detailHeader = heading.closest('header');
+  if (!(detailHeader instanceof HTMLElement)) {
+    throw new Error('Principal detail header not found');
+  }
+  const header = within(detailHeader);
+  expect(header.getByRole('status').textContent).toContain('Disabling...');
   expect(
-    screen.getByRole('button', { name: 'Delete' }).hasAttribute('disabled'),
+    header.getByRole('button', { name: 'Delete' }).hasAttribute('disabled'),
   ).toBe(true);
 });
 

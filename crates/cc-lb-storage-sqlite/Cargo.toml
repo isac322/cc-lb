@@ -15,6 +15,7 @@ path = "tests/all.rs"
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-domain.workspace = true
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire", features = ["std"] }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 async-trait = { workspace = true }

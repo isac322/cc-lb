@@ -67,12 +67,10 @@ pub struct UpstreamRecord {
 
 impl UpstreamRecord {
     /// Fingerprint of the stored OAuth credential ciphertext. Every
-    /// credential write — refresh, reauthorization, replacement — produces
-    /// new ciphertext (random nonce), so this is the authoritative
-    /// "same credential" check for state bound to a specific credential,
-    /// like the polled `cedar_ember` snapshot. `oauth_token_generation` is
-    /// not sufficient: it only advances on `complete_refresh`, not on
-    /// reauthorization.
+    /// credential write — refresh, reauthorization, replacement — advances
+    /// `oauth_token_generation` and produces new ciphertext (random nonce).
+    /// The fingerprint identifies the actual ciphertext for state bound to
+    /// a specific credential, like the polled `cedar_ember` snapshot.
     pub fn oauth_credential_fingerprint(&self) -> Option<u64> {
         use std::hash::{Hash, Hasher};
         self.oauth_credentials.as_ref().map(|credentials| {
@@ -109,11 +107,17 @@ pub struct UpstreamUpdate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpstreamStatusUpdate {
+    /// For Anthropic OAuth records, terminal refresh failures cannot be
+    /// replaced by nonterminal errors or cleared through status updates.
+    /// Credential writes clear them.
     pub last_apply_error: Option<Option<String>>,
     pub last_apply_at_unix_secs: Option<Option<u64>>,
     /// When `Some(value)`, write `value` to `upstream_status_v1.last_warmup_at`.
     /// `Some(None)` clears it; `None` leaves it untouched.
     pub last_warmup_at_unix_secs: Option<Option<u64>>,
+    /// When `Some(value)`, only apply the status update if the stored OAuth
+    /// token generation still equals `value`; a mismatch is a conflict.
+    pub expected_oauth_token_generation: Option<u64>,
 }
 
 #[async_trait]
