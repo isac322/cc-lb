@@ -106,7 +106,9 @@ The exclusion applies only to credentials that are actually stored as long-lived
 
 To prevent background tasks from starving the main request-handling path, the scheduler uses a separate connection pool. This isolation is configured via the `separate_pool` setting in `SchedulerConfig`. Both pools connect to the same database file (SQLite) or the same DSN (Postgres), but they maintain separate connection limits.
 
-The connection budget is governed by the formula verified in the Wave 0.3 evidence file `.omo/evidence/task-0-3-connection-budget.md`:
+The connection budget is governed by the following formula (first recorded in a
+Wave 0.3 evidence note, `.omo/evidence/task-0-3-connection-budget.md`, a local
+working artifact that is not tracked in this repository):
 
 ```
 (main_pool + apalis_pool) * replicas <= 0.7 * max_connections

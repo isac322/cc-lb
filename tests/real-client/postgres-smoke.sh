@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-EVIDENCE_DIR="$ROOT_DIR/.omo/evidence"
+EVIDENCE_DIR="$ROOT_DIR/target/test-evidence/real-client"
 mkdir -p "$EVIDENCE_DIR"
 
 : "${CI_POSTGRES_URL:?CI_POSTGRES_URL must be set (e.g. postgres://user:pw@host:5432/db)}"

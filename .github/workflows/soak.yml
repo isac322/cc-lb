@@ -42,6 +42,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: task-41-soak-rss
-          path: .omo/evidence/task-41-soak-24h.csv
+          name: soak-rss
+          path: target/test-evidence/soak/soak-24h.csv
+          retention-days: 7
           if-no-files-found: error

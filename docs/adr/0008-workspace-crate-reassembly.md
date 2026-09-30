@@ -97,7 +97,7 @@ Every edge points toward equal-or-more-stable. The five published crates depend 
 
 The implementation plan encodes machine-checkable gates:
 
-- **Acyclicity + direction:** `cargo metadata`-derived edges asserted against `.omo/evidence/cadence-labels.json`; no STABLE→UNSTABLE edge.
+- **Acyclicity + direction:** `cargo metadata`-derived edges asserted against the cadence layering in §6 (the per-crate labels were originally recorded in `.omo/evidence/cadence-labels.json`, a working artifact removed from tracking in #405); no STABLE→UNSTABLE edge.
 - **Forbidden edges:** forward-tree helpers `no_dep`/`has_dep` (e.g. `no_dep admin engine` must pass post-migration; it fails on origin/master today, empirically confirmed).
 - **Publish legality:** `cargo package` for all five published crates; deleted packages asserted absent via `cargo metadata` node-absence.
 - **Byte-compat:** origin/master golden fixtures for `request_events_v1` and `PluginSlotKind`/`KeyStatus` serde strings; a normalized proxy-parity harness diffs the semantic subset across three scenarios (happy `POST /v1/messages`, 401 retry/refresh, filter/limit).

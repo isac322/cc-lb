@@ -1,6 +1,4 @@
 import { expect, type Page, test } from '@playwright/test';
-import fs from 'fs';
-import path from 'path';
 import { COPY } from '../src/lib/copy/warmup';
 
 type WarmupPlugin = { wasm_registry_id: string; config: Record<string, unknown> } | null;
@@ -34,16 +32,7 @@ type PluginFixture = {
   supported_slots: string[];
 };
 
-const evidenceDir = path.join(process.cwd(), '../../../.omo/evidence/warmup');
 const specRevision = 4;
-
-function ensureEvidenceDir() {
-  fs.mkdirSync(evidenceDir, { recursive: true });
-}
-
-function evidencePath(name: string) {
-  return path.join(evidenceDir, name);
-}
 
 function oauthHealthy(overrides: Partial<UpstreamFixture> = {}): UpstreamFixture {
   return {
@@ -267,9 +256,8 @@ async function noSeriousA11yViolations(page: Page) {
 }
 
 test.describe('WarmupCard', () => {
-  test.beforeEach(() => ensureEvidenceDir());
 
-  test('Scenario 1: Steady-state happy path (OAuth + enabled + populated)', async ({ page }) => {
+  test('Scenario 1: Steady-state happy path (OAuth + enabled + populated)', async ({ page }, testInfo) => {
     const seeded = oauthHealthy({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } });
     await installAppFixtures(page, { upstreams: [seeded, oauthDisabled(), apiKeyUpstream()] });
     await openUpstreams(page);
@@ -279,7 +267,7 @@ test.describe('WarmupCard', () => {
     await expect(page.getByTestId('warmup-last')).toHaveText(/\d+ (minutes?|hours?|days?) ago/);
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
-    await page.screenshot({ path: evidencePath('scenario-1-steady-state.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-1-steady-state.png'), fullPage: true });
   });
 
   test('Scenario 1b: History data loads only after opening the drawer', async ({
@@ -294,7 +282,7 @@ test.describe('WarmupCard', () => {
     await expect.poll(() => fixtures.warmupAttemptRequests()).toBe(1);
   });
 
-  test('Scenario 2: Fire-now confirm + 200 success', async ({ page }) => {
+  test('Scenario 2: Fire-now confirm + 200 success', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       onFireNow: () => ({ status: 200, body: { fired: true, cycle_key: 1718380800 } }),
     });
@@ -302,13 +290,13 @@ test.describe('WarmupCard', () => {
     await confirmFireNow(page);
 
     await expect(page.getByTestId('warmup-fire-now')).toBeDisabled();
-    await page.screenshot({ path: evidencePath('scenario-2-fire-success.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-2-fire-success.png'), fullPage: true });
     await expect(page.getByText(COPY.fireSuccess)).toBeVisible();
     await page.waitForTimeout(1100);
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
   });
 
-  test('Scenario 3: Fire-now 202 lease_held inline panel', async ({ page }) => {
+  test('Scenario 3: Fire-now 202 lease_held inline panel', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       onFireNow: () => ({ status: 202, body: { fired: false, reason: 'lease_held', held_by: 'background-loop' } }),
     });
@@ -321,13 +309,13 @@ test.describe('WarmupCard', () => {
     await expect(panel).toContainText('background-loop');
     await expect(panel).toContainText('Try again in ~30 seconds');
     await expect(page.locator('[data-sonner-toast][data-type="error"]')).toHaveCount(0);
-    await page.screenshot({ path: evidencePath('scenario-3-lease-held.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-3-lease-held.png'), fullPage: true });
     await page.waitForTimeout(10500);
     await expect(panel).toHaveCount(0);
   });
 
   for (const reason of ['auth_failed', 'forbidden', 'bad_request', 'not_found', 'dialect_plugin_failed'] as const) {
-    test(`Scenario 4: Fire-now 502 ${reason}`, async ({ page }) => {
+    test(`Scenario 4: Fire-now 502 ${reason}`, async ({ page }, testInfo) => {
       await installAppFixtures(page, {
         onFireNow: () => ({ status: 502, body: { fired: false, reason } }),
       });
@@ -337,11 +325,11 @@ test.describe('WarmupCard', () => {
       const panel = page.getByTestId('warmup-error-panel');
       await expect(panel).toHaveAttribute('data-reason', reason);
       await expect(panel).toHaveText(COPY.fireErrorReasons[reason]);
-      await page.screenshot({ path: evidencePath(`scenario-4-error-${reason}.png`), fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath(`scenario-4-error-${reason}.png`), fullPage: true });
     });
   }
 
-  test('Scenario 5: Fire-now 503 transient', async ({ page }) => {
+  test('Scenario 5: Fire-now 503 transient', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       onFireNow: () => ({ status: 503, body: { fired: false, reason: 'dialect_plugin_transient' } }),
     });
@@ -351,10 +339,10 @@ test.describe('WarmupCard', () => {
     const panel = page.getByTestId('warmup-error-panel');
     await expect(panel).toHaveAttribute('data-reason', 'dialect_plugin_transient');
     await expect(panel).toHaveText(COPY.fireErrorReasons.dialect_plugin_transient);
-    await page.screenshot({ path: evidencePath('scenario-5-transient.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-5-transient.png'), fullPage: true });
   });
 
-  test('Scenario 6: Dialect plugin save (PATCH happy path)', async ({ page }) => {
+  test('Scenario 6: Dialect plugin save (PATCH happy path)', async ({ page }, testInfo) => {
     let patchBody: unknown;
     let ifMatch: string | null = null;
     await installAppFixtures(page, {
@@ -372,13 +360,13 @@ test.describe('WarmupCard', () => {
 
     await expect.poll(() => patchBody).toEqual({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } });
     expect(ifMatch).toBe(`W/"${specRevision}"`);
-    fs.writeFileSync(evidencePath('scenario-6-patch-body.json'), JSON.stringify(patchBody, null, 2));
+    await testInfo.attach('scenario-6-patch-body.json', { body: JSON.stringify(patchBody, null, 2), contentType: 'application/json' });
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByText(COPY.dialectPluginSaveSuccess)).toBeVisible();
-    await page.screenshot({ path: evidencePath('scenario-6-plugin-save.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-6-plugin-save.png'), fullPage: true });
   });
 
-  test('Scenario 7: Dialect plugin clear (DELETE)', async ({ page }) => {
+  test('Scenario 7: Dialect plugin clear (DELETE)', async ({ page }, testInfo) => {
     const seeded = oauthHealthy({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } });
     let deleteUrl = '';
     let ifMatch: string | null = null;
@@ -401,10 +389,10 @@ test.describe('WarmupCard', () => {
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('');
     await expect(page.getByTestId('warmup-plugin-clear')).toHaveCount(0);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
-    await page.screenshot({ path: evidencePath('scenario-7-plugin-clear.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-7-plugin-clear.png'), fullPage: true });
   });
 
-  test('Scenario 8: Stale-revision 409 recovery', async ({ page }) => {
+  test('Scenario 8: Stale-revision 409 recovery', async ({ page }, testInfo) => {
     let attempts = 0;
     await installAppFixtures(page, {
       onPatch: async (_request, upstream) => {
@@ -423,10 +411,10 @@ test.describe('WarmupCard', () => {
     await page.getByTestId('warmup-plugin-select').selectOption('anthropic-shape-v2');
     await expect.poll(() => attempts).toBe(2);
     await expect(page.getByTestId('warmup-stale-hint')).toHaveCount(0);
-    await page.screenshot({ path: evidencePath('scenario-8-stale-revision.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-8-stale-revision.png'), fullPage: true });
   });
 
-  test('Scenario 9: Disabled upstream still exposes warmup controls when warmup is enabled', async ({ page }) => {
+  test('Scenario 9: Disabled upstream still exposes warmup controls when warmup is enabled', async ({ page }, testInfo) => {
     const warmupOnlyUpstream = oauthHealthy({
       id: 'oauth-paused-stale',
       name: 'oauth-paused-stale',
@@ -447,19 +435,19 @@ test.describe('WarmupCard', () => {
     await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
     await expect(page.getByTestId('warmup-fire-now')).toBeVisible();
     await expect(page.getByTestId('warmup-enable-btn')).toHaveCount(0);
-    await page.screenshot({ path: evidencePath('scenario-9-warmup-only-while-disabled.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-9-warmup-only-while-disabled.png'), fullPage: true });
   });
 
-  test('Scenario 10: api_key upstream renders nothing', async ({ page }) => {
+  test('Scenario 10: api_key upstream renders nothing', async ({ page }, testInfo) => {
     await installAppFixtures(page);
     await openUpstreams(page, 'api-key-id');
 
     await expect(page.locator('[data-testid="warmup-card"]')).toHaveCount(0);
     await expect(page.getByTestId('api-usage-card')).toBeVisible();
-    await page.screenshot({ path: evidencePath('scenario-10-api-key-hidden.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-10-api-key-hidden.png'), fullPage: true });
   });
 
-  test('Scenario 11: Unknown plugin fallback', async ({ page }) => {
+  test('Scenario 11: Unknown plugin fallback', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       upstreams: [oauthHealthy({ warmup_dialect_plugin: { wasm_registry_id: 'ghost-plugin', config: {} } }), oauthDisabled(), apiKeyUpstream()],
       plugins: [shapePlugin('anthropic-shape-v2')],
@@ -468,20 +456,20 @@ test.describe('WarmupCard', () => {
 
     await expect(page.getByTestId('warmup-plugin-select').locator('option', { hasText: COPY.unknownPluginTemplate.replace('{id}', 'ghost-plugin') })).toHaveCount(1);
     await expect(page.getByTestId('warmup-plugin-clear')).toBeVisible();
-    await page.screenshot({ path: evidencePath('scenario-11-unknown-plugin.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-11-unknown-plugin.png'), fullPage: true });
   });
 
-  test('Scenario 12: Zero shape-plugins available', async ({ page }) => {
+  test('Scenario 12: Zero shape-plugins available', async ({ page }, testInfo) => {
     await installAppFixtures(page, { plugins: [routerPlugin()] });
     await openUpstreams(page);
 
     await expect(page.getByTestId('warmup-plugin-select')).toHaveCount(0);
     await expect(page.getByText(COPY.noShapePluginsAvailable)).toBeVisible();
     await expect(page.getByTestId('warmup-card').getByRole('link', { name: 'Plugins' })).toHaveAttribute('href', '/plugins');
-    await page.screenshot({ path: evidencePath('scenario-12-no-shape-plugins.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-12-no-shape-plugins.png'), fullPage: true });
   });
 
-  test('Scenario 13: A11y keyboard tab order + focus return', async ({ page }) => {
+  test('Scenario 13: A11y keyboard tab order + focus return', async ({ page }, testInfo) => {
     await installAppFixtures(page, {
       upstreams: [oauthHealthy({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } }), oauthDisabled(), apiKeyUpstream()],
     });
@@ -501,8 +489,8 @@ test.describe('WarmupCard', () => {
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('warmup-fire-now')).toBeFocused();
     const violations = await noSeriousA11yViolations(page);
-    fs.writeFileSync(evidencePath('scenario-13-axe-results.json'), JSON.stringify(violations, null, 2));
+    await testInfo.attach('scenario-13-axe-results.json', { body: JSON.stringify(violations, null, 2), contentType: 'application/json' });
     expect(violations).toEqual([]);
-    await page.screenshot({ path: evidencePath('scenario-13-a11y-focus.png'), fullPage: true });
+    await page.screenshot({ path: testInfo.outputPath('scenario-13-a11y-focus.png'), fullPage: true });
   });
 });

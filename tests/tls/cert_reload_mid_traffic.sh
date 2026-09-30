@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-EVIDENCE_PATH=${CC_LB_TLS_EVIDENCE:-"$ROOT_DIR/.omo/evidence/task-47-cert-reload.log"}
+EVIDENCE_PATH=${CC_LB_TLS_EVIDENCE:-"$ROOT_DIR/target/test-evidence/tls/cert-reload-mid-traffic.log"}
 API_KEY=''
 ADMIN_TOKEN='admin-token'
 FAKE_PID=''

@@ -198,6 +198,8 @@ jobs:
 
       - name: Build and smoke-test production image
         uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
         with:
           context: .
           target: smoke
@@ -465,8 +467,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: task-43-coverage-lcov
+          name: coverage-lcov
           path: target/coverage.lcov
+          retention-days: 7
           if-no-files-found: error
 
   e2e:
@@ -506,6 +509,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: task-36-real-client-evidence
-          path: .omo/evidence/task-36-*
+          name: real-client-evidence
+          path: target/test-evidence/real-client
+          retention-days: 7
           if-no-files-found: error

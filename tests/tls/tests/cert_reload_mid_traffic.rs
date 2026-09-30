@@ -49,7 +49,7 @@ async fn cert_reload_mid_traffic_keeps_in_flight_stream_alive() {
         after.peer_fingerprint == app.cert_b_fingerprint,
         app.cert_a_fingerprint != app.cert_b_fingerprint,
     );
-    common::write_evidence("task-47-tls-reload.log", &evidence);
+    common::write_evidence("tls-reload.log", &evidence);
 
     println!(
         "cert_reload_mid_traffic PASSED: in_flight_completed_with_cert_a=true new_conn_used_cert_b=true old_fp={} new_fp={}",

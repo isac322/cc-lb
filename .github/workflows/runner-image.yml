@@ -88,6 +88,8 @@ jobs:
 
       - name: Build runner image
         uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
         with:
           context: .github/runner-image
           file: .github/runner-image/Dockerfile

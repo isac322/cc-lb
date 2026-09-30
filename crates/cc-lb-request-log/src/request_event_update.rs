@@ -17,8 +17,8 @@ use crate::{RequestEvent, RequestEventKind};
 /// `iterations`, `cache_breakpoints`, and detailed stream timing) are
 /// intentionally excluded to keep partial payloads compact.
 ///
-/// See `.omo/plans/dashboard-live-tail-redesign.md` §3.4 for the field
-/// classification rationale.
+/// Include a field here only if it is knowable mid-flight and useful for the
+/// live row; terminal-only data belongs on the final [`RequestEvent`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEventPartial {
     pub event_id: String,
