@@ -11,6 +11,7 @@ import {
 import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd, splitNum, sumTokens } from '../../lib/format';
+import { TIME_PRESET_OPTIONS, type TimePreset } from '../../lib/timePresets';
 import {
   CHART_AXIS,
   CHART_CURSOR,
@@ -39,10 +40,7 @@ function modelSeriesColor(model: string, index: number): string {
   ).stroke;
 }
 
-const RANGE_OPTIONS = [
-  { value: '24h', label: '24h' },
-  { value: '7d', label: '7d' },
-] as const;
+const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const METRIC_OPTIONS = [
   { value: 'tokens', label: 'Tokens' },
   { value: 'cost', label: 'Cost' },
@@ -51,8 +49,8 @@ const METRIC_OPTIONS = [
 type Props = {
   data: DashboardUsageResponse | undefined;
   isLoading: boolean;
-  range: '24h' | '7d';
-  onRangeChange: (r: '24h' | '7d') => void;
+  range: TimePreset;
+  onRangeChange: (r: TimePreset) => void;
   metric: 'tokens' | 'cost';
   onMetricChange: (m: 'tokens' | 'cost') => void;
 };
@@ -99,7 +97,7 @@ export function ApiUsageCard({
 
   const formatXAxis = (ts: number) => {
     const d = new Date(ts * 1000);
-    if (range === '24h') {
+    if (range !== '7d') {
       return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' });

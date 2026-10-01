@@ -2,7 +2,7 @@ import { Input as BaseInput } from '@base-ui/react/input';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
-import { cx, INPUT_CLASS } from '../ui/primitives';
+import { cx, Spinner } from '../ui/primitives';
 
 type Props = {
   upstream: Upstream;
@@ -72,13 +72,23 @@ export function InlineNameEditor({ upstream, className }: Props) {
   };
 
   if (isEditing) {
+    // The control must keep reading as the title, not as a boxed form field:
+    // same title-page type and line box, auto-sized to the current text by an
+    // invisible sizer so typing never shifts the layout, and the same dotted
+    // underline the resting title hints at on hover.
     return (
-      <div className={cx('relative inline-block', className)}>
+      <span className={cx('relative inline-grid max-w-full', className)}>
+        <span
+          aria-hidden="true"
+          className="invisible col-start-1 row-start-1 block min-w-0 overflow-hidden whitespace-pre text-title-page"
+        >
+          {name.length > 0 ? name : ' '}
+        </span>
         <BaseInput
           className={cx(
-            INPUT_CLASS,
-            'text-title-page w-fit',
-            updateUpstream.isPending && 'opacity-50 cursor-not-allowed',
+            'col-start-1 row-start-1 w-full min-w-0 rounded-sm border-b border-dotted border-text-faint bg-transparent text-title-page text-text transition-colors',
+            'focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+            updateUpstream.isPending && 'cursor-not-allowed opacity-50',
           )}
           disabled={updateUpstream.isPending}
           onBlur={handleSave}
@@ -89,11 +99,9 @@ export function InlineNameEditor({ upstream, className }: Props) {
           value={name}
         />
         {updateUpstream.isPending && (
-          <div className="absolute right-2 top-1/2 -translate-y-1/2">
-            <div className="w-4 h-4 border-2 border-text-faint border-t-text rounded-full animate-spin" />
-          </div>
+          <Spinner className="absolute right-0 top-1/2 size-4 -translate-y-1/2 text-text-faint" />
         )}
-      </div>
+      </span>
     );
   }
 

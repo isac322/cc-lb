@@ -19,7 +19,14 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { useSyncExternalStore } from 'react';
+import {
+  type ComponentProps,
+  type ComponentType,
+  createContext,
+  type ReactNode,
+  useContext,
+  useSyncExternalStore,
+} from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RecentEventsPayload, RequestEvent } from '../lib/api';
 import { filterLogRows } from '../lib/logRows';
@@ -27,18 +34,58 @@ import type * as queries from '../lib/queries';
 import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import { Route } from '../routes/logs';
+import type * as RequestEventsTableModule from './ui/RequestEventsTable';
 
 const queryMocks = vi.hoisted(() => ({
   fetchRecentEventsPage: vi.fn(),
 }));
 
-const liveState = vi.hoisted(() => ({
-  eventsMap: new Map() as LiveEventMap,
-  listeners: new Set<() => void>(),
-  version: 0,
-}));
+type LiveStore = {
+  readonly eventsMap: LiveEventMap;
+  readonly listeners: Set<() => void>;
+  version: number;
+  readonly subscribe: (listener: () => void) => () => void;
+  readonly getSnapshot: () => number;
+};
+
+// Each renderLogs call owns one LiveStore and provides it to its own React
+// tree. The mocked hook reads the store from context at call time only, so a
+// late publisher from an earlier render can only mutate the store it owns.
+const LiveStoreContext = createContext<LiveStore | null>(null);
+
+const liveStores: LiveStore[] = [];
 
 const queryClients: QueryClient[] = [];
+
+function createLiveStore(): LiveStore {
+  const store: LiveStore = {
+    eventsMap: new Map() as LiveEventMap,
+    listeners: new Set<() => void>(),
+    version: 0,
+    subscribe: (listener) => {
+      store.listeners.add(listener);
+      return () => {
+        store.listeners.delete(listener);
+      };
+    },
+    getSnapshot: () => store.version,
+  };
+  liveStores.push(store);
+  return store;
+}
+
+function createLivePublisher(store: LiveStore) {
+  return (event: RequestEvent) => {
+    act(() => {
+      store.eventsMap.set(event.event_id ?? event.request_id, {
+        phase: 'final',
+        event,
+      });
+      store.version += 1;
+      for (const listener of store.listeners) listener();
+    });
+  };
+}
 
 const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   request_id: `req-${i}`,
@@ -53,33 +100,62 @@ const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   cost_usd_micros: 10_000,
 }));
 
+function applyRecentFilters(
+  events: readonly RequestEvent[],
+  filters: Record<string, string | undefined>,
+): RequestEvent[] {
+  // Mirrors the backend model contract (`model_filter_matches`): lowercase the
+  // needle minus a leading `claude-`; a row matches when its model starts with
+  // the core or is a `claude-*` id containing it. An absent core means no
+  // filter; a present one never matches a model-less row.
+  const core = filters.model
+    ?.trim()
+    .toLowerCase()
+    .replace(/^claude-/, '');
+  return events.filter((event) => {
+    if (filters.thread_id && event.thread_id !== filters.thread_id) {
+      return false;
+    }
+    if (core) {
+      const model = event.model?.toLowerCase() ?? '';
+      const matches =
+        model.startsWith(core) ||
+        (model.startsWith('claude-') && model.slice(7).includes(core));
+      if (!matches) return false;
+    }
+    if (
+      filters.status_class &&
+      filters.status_class !== `${Math.floor(event.status / 100)}xx`
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function makeRecentPage(
   filters: Record<string, string | undefined>,
   pageParam: queries.RecentEventsPageParam,
+  sourceEvents: readonly RequestEvent[] = mockEvents,
 ): RecentEventsPayload {
-  const filtered = mockEvents.filter(
-    (event) =>
-      (!filters.thread_id || event.thread_id === filters.thread_id) &&
-      (!filters.model ||
-        event.model.toLowerCase().startsWith(filters.model.toLowerCase())) &&
-      (!filters.status_class ||
-        filters.status_class === `${Math.floor(event.status / 100)}xx`),
-  );
+  const filtered = applyRecentFilters(sourceEvents, filters);
   const start =
     pageParam.kind === 'initial'
       ? 0
-      : filtered.findIndex(
-          (event) =>
-            event.ts_ms < pageParam.ts_ms ||
-            (event.ts_ms === pageParam.ts_ms &&
-              event.request_id < pageParam.event_id),
-        );
+      : filtered.findIndex((event) => {
+          const eventTsMs = event.ts_ms ?? (event.ts ?? 0) * 1000;
+          return (
+            eventTsMs < pageParam.ts_ms ||
+            (eventTsMs === pageParam.ts_ms &&
+              event.request_id < pageParam.event_id)
+          );
+        });
   const pageStart = start < 0 ? filtered.length : start;
-  const events = filtered.slice(pageStart, pageStart + pageParam.limit);
+  const pageEvents = filtered.slice(pageStart, pageStart + pageParam.limit);
   return {
-    events,
-    observed: events.length > 0,
-    count: events.length,
+    events: pageEvents,
+    observed: pageEvents.length > 0,
+    count: pageEvents.length,
     limit: pageParam.limit,
   };
 }
@@ -98,21 +174,71 @@ vi.mock('../lib/queries', async () => {
   };
 });
 
-vi.mock('../lib/useLiveEventStream', () => {
-  const subscribe = (listener: () => void) => {
-    liveState.listeners.add(listener);
-    return () => liveState.listeners.delete(listener);
-  };
-  const getSnapshot = () => liveState.version;
-  return {
-    useLiveEventStream: () => ({
-      eventsMap: liveState.eventsMap,
-      version: useSyncExternalStore(subscribe, getSnapshot, getSnapshot),
+vi.mock('../lib/useLiveEventStream', () => ({
+  useLiveEventStream: () => {
+    const store = useContext(LiveStoreContext);
+    if (store === null) {
+      throw new Error(
+        'useLiveEventStream mock rendered outside a renderLogs LiveStoreContext',
+      );
+    }
+    return {
+      eventsMap: store.eventsMap,
+      version: useSyncExternalStore(
+        store.subscribe,
+        store.getSnapshot,
+        store.getSnapshot,
+      ),
       status: 'idle',
       permanentFailure: false,
-    }),
+    };
+  },
+}));
+
+// Every test renders the real table unless it opts into the row-only table.
+// The context is read only while the mocked table renders, after module init.
+vi.mock('./ui/RequestEventsTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof RequestEventsTableModule>();
+  return {
+    ...actual,
+    RequestEventsTable: (
+      props: ComponentProps<typeof actual.RequestEventsTable>,
+    ) => {
+      if (!useContext(RowOnlyRequestEventsTableContext)) {
+        return <actual.RequestEventsTable {...props} />;
+      }
+      return (
+        <table>
+          <tbody>
+            {props.events.map((event) => {
+              const eventKey = event.event_id ?? event.request_id;
+              return (
+                <tr aria-label={`View request ${eventKey}`} key={eventKey}>
+                  <td>{eventKey}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      );
+    },
   };
 });
+
+const RowOnlyRequestEventsTableContext = createContext(false);
+
+/**
+ * Swaps only the table leaf for bare rows. The feed, its paging and live merge
+ * stay real, so a test that walks hundreds of rows asserts which rows show
+ * without paying for each row's full presentation.
+ */
+function RowOnlyRequestEventsTable({ children }: { children: ReactNode }) {
+  return (
+    <RowOnlyRequestEventsTableContext.Provider value={true}>
+      {children}
+    </RowOnlyRequestEventsTableContext.Provider>
+  );
+}
 
 global.URL.createObjectURL = vi.fn(() => 'blob:test');
 global.URL.revokeObjectURL = vi.fn();
@@ -123,7 +249,10 @@ global.IntersectionObserver = class IntersectionObserver {
   disconnect() {}
 } as unknown as typeof global.IntersectionObserver;
 
-async function renderLogs(search: Record<string, string> = {}) {
+async function renderLogs(
+  search: Record<string, string> = {},
+  options: { wrapper?: ComponentType<{ children: ReactNode }> } = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -151,13 +280,17 @@ async function renderLogs(search: Record<string, string> = {}) {
     }),
   });
   await router.load();
+  const liveStore = createLiveStore();
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>,
+    <LiveStoreContext.Provider value={liveStore}>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </LiveStoreContext.Provider>,
+    { wrapper: options.wrapper },
   );
   await screen.findByRole('heading', { name: 'Logs', level: 1 });
-  return { ...view, router };
+  return { ...view, router, publishLiveEvent: createLivePublisher(liveStore) };
 }
 
 function rowIds(table: HTMLElement) {
@@ -171,17 +304,6 @@ function rowIds(table: HTMLElement) {
 
 function expectedRows(events: readonly RequestEvent[]) {
   return events.map((event) => `View request ${event.request_id}`);
-}
-
-function publishLiveEvent(event: RequestEvent) {
-  act(() => {
-    liveState.eventsMap.set(event.event_id ?? event.request_id, {
-      phase: 'final',
-      event,
-    });
-    liveState.version += 1;
-    for (const listener of liveState.listeners) listener();
-  });
 }
 
 describe('LogsPage', () => {
@@ -222,9 +344,11 @@ describe('LogsPage', () => {
     queryMocks.fetchRecentEventsPage.mockReset();
     for (const queryClient of queryClients) queryClient.clear();
     queryClients.length = 0;
-    liveState.eventsMap.clear();
-    liveState.listeners.clear();
-    liveState.version = 0;
+    for (const store of liveStores) {
+      store.eventsMap.clear();
+      store.listeners.clear();
+    }
+    liveStores.length = 0;
     vi.useRealTimers();
   });
 
@@ -297,6 +421,82 @@ describe('LogsPage', () => {
         event_kind: 'renewal',
       }).map((row) => row.request_id),
     ).toEqual(['target']);
+  });
+
+  it.each([
+    ['sonnet', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    ['SONNET', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    [' sonnet-4-5 ', ['sonnet-modern', 'sonnet-bare']],
+    ['3-5-sonnet', ['sonnet-legacy']],
+    ['claude-sonnet', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    ['claude-3-5-sonnet-20241022', ['sonnet-legacy']],
+    ['sonnet-modern', []],
+  ] as const)(
+    'filters models without requiring the vendor prefix: %s',
+    (model, expected) => {
+      const rows = [
+        { request_id: 'sonnet-modern', model: 'claude-sonnet-4-5-20250929' },
+        { request_id: 'sonnet-legacy', model: 'claude-3-5-sonnet-20241022' },
+        { request_id: 'sonnet-bare', model: 'Sonnet-4-5' },
+        { request_id: 'other', model: 'claude-opus-4-5-20251101' },
+        { request_id: 'model-less', model: null },
+      ] as RequestEventWithPhase[];
+
+      expect(
+        filterLogRows(rows, { model }).map((row) => row.request_id),
+      ).toEqual(expected);
+      // A whitespace needle and a bare vendor prefix are both absent filters.
+      for (const absent of ['', '  ', 'claude-', 'CLAUDE- ']) {
+        expect(filterLogRows(rows, { model: absent })).toHaveLength(
+          rows.length,
+        );
+      }
+    },
+  );
+
+  it('filters arriving live rows with the same fuzzy model predicate', async () => {
+    const events = [
+      {
+        ts: 5,
+        ts_ms: 5_000,
+        request_id: 'historical-sonnet',
+        model: 'claude-3-5-sonnet-20241022',
+        status: 200,
+        duration_ms: 10,
+        event_kind: 'messages' as const,
+      },
+    ];
+    queryMocks.fetchRecentEventsPage.mockImplementation((filters, pageParam) =>
+      makeRecentPage(filters, pageParam, events),
+    );
+    const { publishLiveEvent } = await renderLogs({ model: 'sonnet' });
+
+    const table = screen.getByRole('table');
+    await waitFor(() =>
+      expect(rowIds(table)).toEqual(['View request historical-sonnet']),
+    );
+
+    publishLiveEvent({
+      ...mockEvents[0],
+      request_id: 'live-sonnet',
+      model: 'claude-sonnet-4-5-20250929',
+      ts: 6,
+      ts_ms: 6_000,
+    });
+    publishLiveEvent({
+      ...mockEvents[0],
+      request_id: 'live-other',
+      model: 'other-vendor-model',
+      ts: 7,
+      ts_ms: 7_000,
+    });
+
+    await waitFor(() =>
+      expect(rowIds(table)).toEqual([
+        'View request live-sonnet',
+        'View request historical-sonnet',
+      ]),
+    );
   });
 
   it('shows applied filters as removable chips behind a collapsed panel', async () => {
@@ -420,7 +620,10 @@ describe('LogsPage', () => {
   }, 30_000);
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
-    await renderLogs();
+    const { publishLiveEvent } = await renderLogs(
+      {},
+      { wrapper: RowOnlyRequestEventsTable },
+    );
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),
@@ -439,7 +642,7 @@ describe('LogsPage', () => {
   });
 
   it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
-    await renderLogs();
+    const { publishLiveEvent } = await renderLogs();
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),

@@ -34,18 +34,48 @@ export type RequestEventsFeedFilters = Omit<LogRowFilters, 'event_kind'> & {
   readonly until_unix_secs?: number;
 };
 
+/**
+ * How the feed exposes rows to the DOM.
+ *
+ * - `paged`: one `pageSize` page at a time with `previousPage`/`nextPage`
+ *   (the Logs surface). History is unbounded and pages are immutable
+ *   snapshots.
+ * - `infinite`: a stable top slice of the newest rows that grows by
+ *   `pageSize` each time `loadMore` runs (driven by a scroll sentinel).
+ *   Older history is fetched only when the retained rows are exhausted, and
+ *   retention stops at `maxRetained`, after which `hasMore` is false.
+ * - `preview`: the newest `pageSize` rows only; no paging or loading more.
+ */
+export type RequestEventsFeedMode = 'paged' | 'infinite' | 'preview';
+
 export interface UseRequestEventsFeedOptions {
   readonly filters?: RequestEventsFeedFilters;
   readonly live?: boolean;
-  /** Number of historical rows retained in the first request. Defaults to 500. */
+  /** Defaults to `paged`. See {@link RequestEventsFeedMode}. */
+  readonly mode?: RequestEventsFeedMode;
+  /**
+   * Number of historical rows requested first. Defaults to 500. In
+   * `infinite` mode it never exceeds `maxRetained`.
+   */
   readonly initialHistoryLimit?: number;
-  /** Number of rows exposed to the DOM on each page. Capped at 50. */
+  /**
+   * Rows per page (`paged`), rows shown (`preview`), or the initial slice and
+   * growth step (`infinite`). Capped at 50.
+   */
   readonly pageSize?: number;
+  /**
+   * `infinite` only: the most rows the feed renders and the most history rows
+   * it keeps. Defaults to 500. Older history is trimmed only as newer rows
+   * push it past the rendered window, never from the rendered prefix.
+   */
+  readonly maxRetained?: number;
 }
 
 export interface RequestEventsFeedState {
+  readonly mode: RequestEventsFeedMode;
   readonly rows: readonly RequestEventWithPhase[];
   readonly filteredRows: readonly RequestEventWithPhase[];
+  /** Rows to render: the current page, the grown slice, or the preview. */
   readonly pageRows: readonly RequestEventWithPhase[];
   readonly firstPageEvents: readonly RequestEvent[] | undefined;
   readonly historyFilters: Record<string, string>;
@@ -55,11 +85,23 @@ export interface RequestEventsFeedState {
   readonly page: number;
   readonly pageCount: number;
   readonly pageSize: number;
+  /** `infinite` only: rows currently revealed; otherwise `pageRows.length`. */
+  readonly visibleCount: number;
+  /** `infinite` only: retention bound; otherwise `Infinity`. */
+  readonly maxRetained: number;
   readonly totalRows: number;
+  /** More rows are reachable via `nextPage` (paged) or `loadMore` (infinite). */
   readonly hasMore: boolean;
+  /** A next page or older history request is in flight. */
   readonly loadingNext: boolean;
   readonly previousPage: () => void;
   readonly nextPage: () => Promise<void>;
+  /**
+   * `infinite`: reveal the next `pageSize` retained rows, fetching older
+   * history first when none remain. `paged`: same as `nextPage`. `preview`:
+   * no-op. Safe to call repeatedly; concurrent calls coalesce.
+   */
+  readonly loadMore: () => Promise<void>;
   readonly refresh: () => void;
   readonly live: LiveEventStreamState;
   readonly liveEnabled: boolean;
@@ -72,6 +114,16 @@ export interface RequestEventsFeedState {
 const DEFAULT_INITIAL_HISTORY_LIMIT = 500;
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 50;
+const DEFAULT_MAX_RETAINED = 500;
+/** Mirrors `MAX_RECENT_EVENTS_LIMIT` on `/admin/v1/events/recent`. */
+const MAX_HISTORY_REQUEST = 500;
+
+type OrderedEvent = {
+  readonly event_id?: string;
+  readonly request_id: string;
+  readonly ts?: number | null;
+  readonly ts_ms?: number | null;
+};
 
 function stringFilterKey(filters: Record<string, string | undefined>): string {
   return JSON.stringify(
@@ -88,9 +140,33 @@ function eventIdentity(event: {
   return event.event_id ?? event.request_id;
 }
 
-function appendUniqueEvents(
+function eventTimestampMs(event: OrderedEvent): number {
+  if (event.ts_ms != null) return event.ts_ms;
+  if (event.ts != null) return event.ts * 1000;
+  return 0;
+}
+
+/**
+ * Newest first by timestamp, then by identity descending: the order and
+ * compound `(ts_ms, event_id)` cursor of `/admin/v1/events/recent`, so
+ * timestamp ties render deterministically and match pagination boundaries.
+ */
+function compareNewestFirst(left: OrderedEvent, right: OrderedEvent): number {
+  const byTime = eventTimestampMs(right) - eventTimestampMs(left);
+  if (byTime !== 0) return byTime;
+  const leftId = eventIdentity(left);
+  const rightId = eventIdentity(right);
+  return leftId < rightId ? 1 : leftId > rightId ? -1 : 0;
+}
+
+/**
+ * Merge history pages by identity, keep them newest first, and drop the oldest
+ * rows past `maxRetained`. Returns `current` when nothing new arrived.
+ */
+function mergeHistoryEvents(
   current: readonly RequestEvent[],
   additions: readonly RequestEvent[],
+  maxRetained: number,
 ): readonly RequestEvent[] {
   const seen = new Set(current.map(eventIdentity));
   let merged: RequestEvent[] | undefined;
@@ -101,7 +177,10 @@ function appendUniqueEvents(
     merged ??= [...current];
     merged.push(event);
   }
-  return merged ?? current;
+  if (merged === undefined) return current;
+  merged.sort(compareNewestFirst);
+  if (merged.length > maxRetained) merged.length = maxRetained;
+  return merged;
 }
 
 function normalizeFilters(filters: RequestEventsFeedFilters): LogRowFilters & {
@@ -168,17 +247,22 @@ function rowFiltersFrom(input: RequestEventsFeedFilters): LogRowFilters {
 
 function statusFor(
   liveEnabled: boolean,
+  awaitingHistory: boolean,
   live: LiveEventStreamState,
 ): {
   tailStatus: ConnectionStatus | 'failed';
   statusLabel: string;
   statusColor: 'neutral' | 'ok' | 'warn' | 'danger';
 } {
-  const tailStatus = liveEnabled
-    ? live.permanentFailure
+  // The stream waits for the history watermark before connecting; that is
+  // part of connecting, not the tail being off.
+  const tailStatus = !liveEnabled
+    ? 'idle'
+    : live.permanentFailure
       ? 'failed'
-      : live.status
-    : 'idle';
+      : awaitingHistory && live.status === 'idle'
+        ? 'connecting'
+        : live.status;
   return {
     tailStatus,
     statusLabel: {
@@ -252,14 +336,26 @@ export function useRequestEventsFeed(
   const rowFilters = useMemo(() => rowFiltersFrom(filters), [filters]);
   const filterKey = stringFilterKey(historyFilters);
   const liveFilterKey = stringFilterKey(liveFilters);
+  const mode: RequestEventsFeedMode = options.mode ?? 'paged';
+  const infinite = mode === 'infinite';
   const liveEnabled = options.live !== false && filters.until_unix_secs == null;
-  const initialHistoryLimit = Math.max(
-    DEFAULT_PAGE_SIZE,
-    Math.floor(options.initialHistoryLimit ?? DEFAULT_INITIAL_HISTORY_LIMIT),
-  );
   const pageSize = Math.min(
     MAX_PAGE_SIZE,
     Math.max(1, Math.floor(options.pageSize ?? DEFAULT_PAGE_SIZE)),
+  );
+  const maxRetained = infinite
+    ? Math.max(
+        pageSize,
+        Math.floor(options.maxRetained ?? DEFAULT_MAX_RETAINED),
+      )
+    : Number.POSITIVE_INFINITY;
+  const initialHistoryLimit = Math.min(
+    MAX_HISTORY_REQUEST,
+    maxRetained,
+    Math.max(
+      DEFAULT_PAGE_SIZE,
+      Math.floor(options.initialHistoryLimit ?? DEFAULT_INITIAL_HISTORY_LIMIT),
+    ),
   );
   const queryClient = useQueryClient();
   const initialPageParam = useMemo<RecentEventsPageParam>(
@@ -267,9 +363,20 @@ export function useRequestEventsFeed(
     [initialHistoryLimit],
   );
   const recent = useRecentEventsPage(historyFilters, initialPageParam);
-  const live = useLiveEventStream(liveFilters, { enabled: liveEnabled });
+  // Connect the tail only once the history it merges with has answered, and
+  // resume it from that history's watermark: every event committed after the
+  // history snapshot is replayed, so none fall between the two.
+  const historySettled = recent.data !== undefined || recent.isError;
+  const historyWatermark = recent.data?.cursor;
+  const live = useLiveEventStream(liveFilters, {
+    enabled: liveEnabled && historySettled,
+    seedCursor:
+      typeof historyWatermark === 'number'
+        ? String(historyWatermark)
+        : undefined,
+  });
 
-  const paginationIdentity = `${filterKey}|${initialHistoryLimit}|${pageSize}`;
+  const paginationIdentity = `${filterKey}|${mode}|${initialHistoryLimit}|${pageSize}|${maxRetained}`;
   const [activePaginationIdentity, setActivePaginationIdentity] =
     useState(paginationIdentity);
   const [historyEvents, setHistoryEvents] = useState<readonly RequestEvent[]>(
@@ -286,14 +393,17 @@ export function useRequestEventsFeed(
     () => new Set(),
   );
   const [page, setPage] = useState(0);
+  const [visibleCount, setVisibleCount] = useState(pageSize);
   const [loadingNext, setLoadingNext] = useState(false);
   const [nextError, setNextError] = useState<Error | null>(null);
   const requestGenerationRef = useRef(0);
+  const loadInFlightRef = useRef(false);
   const paginationRequestIdentityRef = useRef(paginationIdentity);
   useLayoutEffect(() => {
     if (paginationRequestIdentityRef.current === paginationIdentity) return;
     paginationRequestIdentityRef.current = paginationIdentity;
     requestGenerationRef.current += 1;
+    loadInFlightRef.current = false;
   }, [paginationIdentity]);
   useEffect(
     () => () => {
@@ -311,6 +421,7 @@ export function useRequestEventsFeed(
     setHistoryExhausted(false);
     setExhaustedCursorKeys(new Set());
     setPage(0);
+    setVisibleCount(pageSize);
     setLoadingNext(false);
     setNextError(null);
   }
@@ -320,13 +431,18 @@ export function useRequestEventsFeed(
     ? false
     : historyExhausted;
   const activePage = paginationIdentityChanged ? 0 : page;
+  const activeVisibleCount = paginationIdentityChanged
+    ? pageSize
+    : visibleCount;
 
   useEffect(() => {
     if (recent.data === undefined || recent.isPlaceholderData) return;
     const events = recent.data.events;
-    setHistoryEvents((current) => appendUniqueEvents(current, events));
+    setHistoryEvents((current) =>
+      mergeHistoryEvents(current, events, maxRetained),
+    );
     if (events.length < recent.data.limit) setHistoryExhausted(true);
-  }, [recent.data, recent.isPlaceholderData]);
+  }, [recent.data, recent.isPlaceholderData, maxRetained]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: The SSE reducer mutates eventsMap in place; version is its content revision.
   const rangedLiveEvents = useMemo(
@@ -344,7 +460,12 @@ export function useRequestEventsFeed(
   );
   // biome-ignore lint/correctness/useExhaustiveDependencies: Unbounded live ranges retain the mutable SSE map, so its revision invalidates merged rows.
   const rows = useMemo(
-    () => mergeLogRows(rangedLiveEvents, activeHistoryEvents),
+    // mergeLogRows orders by timestamp only; break ties by identity so rows
+    // never swap places between renders and agree with the history cursor.
+    () =>
+      mergeLogRows(rangedLiveEvents, activeHistoryEvents).sort(
+        compareNewestFirst,
+      ),
     [rangedLiveEvents, activeHistoryEvents, live.version],
   );
   const filteredRows = useMemo(
@@ -352,10 +473,94 @@ export function useRequestEventsFeed(
     [rows, rowFilters],
   );
 
+  // ── infinite ───────────────────────────────────────────────────────────
+  const renderLimit = Math.min(activeVisibleCount, maxRetained);
+  const historyTail = activeHistoryEvents[activeHistoryEvents.length - 1];
+  const historyTailCursor =
+    historyTail === undefined ? undefined : getRecentEventsCursor(historyTail);
+  const historyTailTs = historyTailCursor?.ts_ms;
+  const historyTailEventId = historyTailCursor?.event_id;
+  const canFetchOlder =
+    infinite &&
+    !activeHistoryExhausted &&
+    historyTailCursor !== undefined &&
+    activeHistoryEvents.length < maxRetained;
+  const retainedBeyondWindow = filteredRows.length > renderLimit;
+  const infiniteHasMore =
+    infinite &&
+    renderLimit < maxRetained &&
+    (retainedBeyondWindow || canFetchOlder);
+
+  const loadOlder = useCallback(async () => {
+    if (!infinite || loadInFlightRef.current) return;
+    if (retainedBeyondWindow) {
+      setVisibleCount((current) => Math.min(current + pageSize, maxRetained));
+      return;
+    }
+    if (
+      !canFetchOlder ||
+      historyTailTs === undefined ||
+      historyTailEventId === undefined
+    ) {
+      return;
+    }
+    const limit = Math.min(
+      MAX_PAGE_SIZE,
+      maxRetained - activeHistoryEvents.length,
+    );
+    const requestGeneration = requestGenerationRef.current + 1;
+    requestGenerationRef.current = requestGeneration;
+    loadInFlightRef.current = true;
+    setLoadingNext(true);
+    setNextError(null);
+    try {
+      const older = await queryClient.fetchQuery(
+        recentEventsPageQueryOptions(historyFilters, {
+          kind: 'cursor',
+          limit,
+          ts_ms: historyTailTs,
+          event_id: historyTailEventId,
+        }),
+      );
+      if (requestGeneration !== requestGenerationRef.current) return;
+      setHistoryEvents((current) =>
+        mergeHistoryEvents(current, older.events, maxRetained),
+      );
+      if (older.events.length < limit) setHistoryExhausted(true);
+      if (older.events.length > 0) {
+        setVisibleCount((current) => Math.min(current + pageSize, maxRetained));
+      }
+    } catch (error) {
+      if (requestGeneration === requestGenerationRef.current) {
+        setNextError(
+          error instanceof Error ? error : new Error('Unable to load requests'),
+        );
+      }
+    } finally {
+      if (requestGeneration === requestGenerationRef.current) {
+        loadInFlightRef.current = false;
+        setLoadingNext(false);
+      }
+    }
+  }, [
+    activeHistoryEvents.length,
+    canFetchOlder,
+    historyFilters,
+    historyTailEventId,
+    historyTailTs,
+    infinite,
+    maxRetained,
+    pageSize,
+    queryClient,
+    retainedBeyondWindow,
+  ]);
+
+  // ── paged ──────────────────────────────────────────────────────────────
   const activeSnapshots = paginationIdentityChanged ? [] : snapshots;
-  const pageCount = activeSnapshots.length + 1;
+  const pageCount = mode === 'paged' ? activeSnapshots.length + 1 : 1;
   const clampedPage = Math.min(activePage, pageCount - 1);
   const pageRows = useMemo(() => {
+    if (infinite) return filteredRows.slice(0, renderLimit);
     if (clampedPage === 0) return filteredRows.slice(0, pageSize);
     const snapshotEvents = activeSnapshots[clampedPage - 1]?.events ?? [];
     const snapshotIds = new Set(snapshotEvents.map(eventIdentity));
@@ -372,17 +577,19 @@ export function useRequestEventsFeed(
     activeSnapshots,
     clampedPage,
     filteredRows,
+    infinite,
     pageSize,
     rangedLiveEvents,
+    renderLimit,
     rowFilters,
     rows,
   ]);
   const currentCursor = useMemo(
     () =>
-      pageRows.length
+      mode === 'paged' && pageRows.length
         ? getRecentEventsCursor(pageRows[pageRows.length - 1])
         : undefined,
-    [pageRows],
+    [mode, pageRows],
   );
   const currentCursorTs = currentCursor?.ts_ms;
   const currentCursorEventId = currentCursor?.event_id;
@@ -417,15 +624,17 @@ export function useRequestEventsFeed(
       ) || rangedLiveEvents.has(currentCursorEventId)
     );
   }, [activeHistoryEvents, currentCursorEventId, rangedLiveEvents]);
-  const hasMore =
-    clampedPage < pageCount - 1 ||
-    remainingHistoryEvents.length > 0 ||
-    (!activeHistoryExhausted &&
-      currentCursorKey !== undefined &&
-      !exhaustedCursorKeys.has(currentCursorKey));
+  const pagedHasMore =
+    currentCursor !== undefined &&
+    (clampedPage < pageCount - 1 ||
+      remainingHistoryEvents.length > 0 ||
+      (!activeHistoryExhausted &&
+        currentCursorKey !== undefined &&
+        !exhaustedCursorKeys.has(currentCursorKey)));
 
   const nextPage = useCallback(async () => {
     if (
+      mode !== 'paged' ||
       loadingNext ||
       currentCursorTs === undefined ||
       currentCursorEventId === undefined ||
@@ -482,7 +691,9 @@ export function useRequestEventsFeed(
         );
         return;
       }
-      setHistoryEvents((current) => appendUniqueEvents(current, next.events));
+      setHistoryEvents((current) =>
+        mergeHistoryEvents(current, next.events, maxRetained),
+      );
       if (next.events.length < next.limit) setHistoryExhausted(true);
       rememberPage(next.events);
     } catch (error) {
@@ -507,20 +718,29 @@ export function useRequestEventsFeed(
     exhaustedCursorKeys,
     historyFilters,
     loadingNext,
+    maxRetained,
+    mode,
     pageSize,
     queryClient,
     remainingHistoryEvents,
   ]);
 
   const previousPage = useCallback(() => {
+    if (mode !== 'paged') return;
     requestGenerationRef.current += 1;
     setLoadingNext(false);
     setNextError(null);
     setPage((current) => Math.max(0, current - 1));
-  }, []);
+  }, [mode]);
+
+  const loadMore = useCallback(async () => {
+    if (mode === 'infinite') return loadOlder();
+    if (mode === 'paged') return nextPage();
+  }, [loadOlder, mode, nextPage]);
 
   const refresh = useCallback(() => {
     requestGenerationRef.current += 1;
+    loadInFlightRef.current = false;
     setLoadingNext(false);
     setNextError(null);
     void recent.refetch();
@@ -557,13 +777,14 @@ export function useRequestEventsFeed(
     return flashIds;
   }, [live.eventsMap, live.version, liveFilterKey]);
 
-  const totalRows = Math.max(
-    filteredRows.length,
-    clampedPage * pageSize + pageRows.length,
-  );
-  const status = statusFor(liveEnabled, live);
+  const totalRows =
+    mode === 'paged'
+      ? Math.max(filteredRows.length, clampedPage * pageSize + pageRows.length)
+      : Math.min(filteredRows.length, maxRetained);
+  const status = statusFor(liveEnabled, !historySettled, live);
 
   return {
+    mode,
     rows,
     filteredRows,
     pageRows,
@@ -578,11 +799,15 @@ export function useRequestEventsFeed(
     page: clampedPage,
     pageCount,
     pageSize,
+    visibleCount: infinite ? renderLimit : pageRows.length,
+    maxRetained,
     totalRows,
-    hasMore: hasMore && currentCursor !== undefined,
+    hasMore:
+      mode === 'paged' ? pagedHasMore : mode === 'infinite' && infiniteHasMore,
     loadingNext,
     previousPage,
     nextPage,
+    loadMore,
     refresh,
     live,
     liveEnabled,

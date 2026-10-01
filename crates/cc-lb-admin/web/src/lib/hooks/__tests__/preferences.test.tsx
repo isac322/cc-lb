@@ -15,6 +15,7 @@ import {
 } from '../../../components/ui/RelativeTime';
 import { useLocale, useTimezone } from '../../locale';
 import { initTheme, useTheme } from '../../theme';
+import { TIME_PRESETS, useSharedTimeRange } from '../../timePresets';
 
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: light)';
 
@@ -75,7 +76,26 @@ function AllPreferencesProbe() {
   useLocale();
   useTimezone();
   useTheme();
+  useSharedTimeRange();
   return null;
+}
+
+function TimeRangeProbe({ id }: { id: string }) {
+  const { range, setRange } = useSharedTimeRange();
+
+  return (
+    <div>
+      <span data-testid={`${id}-range`}>{range}</span>
+      <button type="button" onClick={() => setRange('1h')}>
+        {id} hour
+      </button>
+    </div>
+  );
+}
+
+function TimeRangeServerProbe() {
+  const { range } = useSharedTimeRange();
+  return <span>{range}</span>;
 }
 
 function ServerProbe() {
@@ -274,6 +294,105 @@ describe('theme preference', () => {
   });
 });
 
+describe('shared time range preference', () => {
+  test('defaults to 7d and persists only through the setter', () => {
+    render(
+      <>
+        <TimeRangeProbe id="first" />
+        <TimeRangeProbe id="second" />
+      </>,
+    );
+
+    expect(screen.getByTestId('first-range').textContent).toBe('7d');
+    expect(screen.getByTestId('second-range').textContent).toBe('7d');
+    expect(window.localStorage.getItem('cclb.timeRange')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'first hour' }));
+
+    expect(screen.getByTestId('first-range').textContent).toBe('1h');
+    expect(screen.getByTestId('second-range').textContent).toBe('1h');
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('1h');
+  });
+
+  test('restores a valid persisted preset', () => {
+    for (const preset of TIME_PRESETS) {
+      window.localStorage.setItem('cclb.timeRange', preset);
+      const view = render(<TimeRangeProbe id={preset} />);
+      expect(screen.getByTestId(`${preset}-range`).textContent).toBe(preset);
+      view.unmount();
+    }
+  });
+
+  test('ignores stored values outside the preset set without rewriting them', () => {
+    for (const [index, stored] of ['all', '30d'].entries()) {
+      window.localStorage.setItem('cclb.timeRange', stored);
+      const view = render(<TimeRangeProbe id={`bad-${index}`} />);
+      expect(screen.getByTestId(`bad-${index}-range`).textContent).toBe('7d');
+      view.unmount();
+    }
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('30d');
+  });
+
+  test('falls back to the default and stays responsive when storage fails', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('denied');
+    });
+
+    render(<TimeRangeProbe id="private" />);
+    expect(screen.getByTestId('private-range').textContent).toBe('7d');
+
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('denied');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'private hour' }));
+    expect(screen.getByTestId('private-range').textContent).toBe('1h');
+  });
+
+  test('follows cross-tab storage events without writing back', () => {
+    render(
+      <>
+        <TimeRangeProbe id="first" />
+        <TimeRangeProbe id="second" />
+      </>,
+    );
+
+    act(() => {
+      window.localStorage.setItem('cclb.timeRange', '6h');
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'cclb.timeRange',
+          newValue: '6h',
+        }),
+      );
+    });
+
+    expect(screen.getByTestId('first-range').textContent).toBe('6h');
+    expect(screen.getByTestId('second-range').textContent).toBe('6h');
+
+    act(() => {
+      window.localStorage.setItem('cclb.timeRange', 'nonsense');
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'cclb.timeRange',
+          newValue: 'nonsense',
+        }),
+      );
+    });
+
+    expect(screen.getByTestId('first-range').textContent).toBe('7d');
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('nonsense');
+
+    act(() => {
+      window.localStorage.clear();
+      window.dispatchEvent(
+        new StorageEvent('storage', { key: null, newValue: null }),
+      );
+    });
+
+    expect(screen.getByTestId('first-range').textContent).toBe('7d');
+  });
+});
+
 test('does not publish a new snapshot when stored values are unchanged', () => {
   let localeRenders = 0;
   let themeRenders = 0;
@@ -420,6 +539,15 @@ test('uses stable server defaults instead of browser preference state', () => {
 
   expect(first).toBe('<span>auto|en-US|auto|UTC|dark|dark</span>');
   expect(second).toBe(first);
+});
+
+test('uses a stable server snapshot for the shared time range', () => {
+  window.localStorage.setItem('cclb.timeRange', '1h');
+
+  const first = renderToString(<TimeRangeServerProbe />);
+
+  expect(first).toBe('<span>7d</span>');
+  expect(renderToString(<TimeRangeServerProbe />)).toBe(first);
 });
 
 test('does not recompute absolute timestamps for unrelated renders', () => {

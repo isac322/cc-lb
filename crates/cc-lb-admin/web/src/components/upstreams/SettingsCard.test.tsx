@@ -265,4 +265,16 @@ describe('InlineNameEditor commit boundary', () => {
     expect(mutate).not.toHaveBeenCalled();
     expect(screen.getByText(upstream.name)).toBeDefined();
   });
+
+  test('keeps the page-title typography instead of boxed input chrome', () => {
+    render(<InlineNameEditor upstream={upstream} />);
+
+    fireEvent.click(screen.getByText(upstream.name));
+    const input = screen.getByRole('textbox');
+
+    expect(input.className).toContain('text-title-page');
+    expect(input.className).toContain('border-dotted');
+    expect(input.className).not.toContain('bg-input-bg');
+    expect(input.className).not.toContain('h-9');
+  });
 });

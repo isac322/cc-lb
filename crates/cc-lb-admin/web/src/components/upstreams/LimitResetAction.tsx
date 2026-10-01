@@ -40,7 +40,6 @@ const COUPON_WINDOW_LABELS: Record<string, string> = {
   '7d_omelette': 'Weekly (Omelette)',
   '7d_oauth_apps': 'Weekly (OAuth apps)',
   overage: 'Extra Usage',
-  unified: 'Unified',
 };
 
 function windowLabel(name: string): string {

@@ -5,7 +5,7 @@ use cc_lb_storage_api::{
     RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
     RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
     RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
-    model_filter_like_pattern, model_filter_matches, normalize_usage_rollup_dimension,
+    model_filter_like_patterns, model_filter_matches, normalize_usage_rollup_dimension,
 };
 use sqlx::AssertSqlSafe;
 use std::{collections::BTreeMap, time::Instant};
@@ -575,7 +575,7 @@ const HISTOGRAM_SQL_HEAD: &str = "SELECT MIN(MAX((list_ts_ms - ?1) / ?2, 0), ?3)
  WHERE ts >= ?4 AND ts <= ?5 \
    AND list_ts_ms >= ?14 AND list_ts_ms < ?15 \
    AND (?6 IS NULL OR principal_id = ?6) \
-   AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\') \
+   AND (?7 IS NULL OR lower(model) LIKE ?7 ESCAPE '\\' OR lower(model) LIKE ?18 ESCAPE '\\') \
    AND (?8 IS NULL OR upstream_id = ?8) \
    AND (?13 IS NULL OR thread_id = ?13) \
    AND (?9 IS NULL OR list_status BETWEEN ?9 AND ?10) \
@@ -631,6 +631,19 @@ async fn request_event_histogram(
     let (source_kind_all, source_kind_exact) =
         request_event_list_sql::source_kind_filter(query.source_kind.as_deref());
 
+    // The model predicate is the disjunction documented on
+    // `model_filter_like_patterns`: `?7` carries the literal-prefix arm and
+    // `?18` the `claude-`-namespaced contains arm. `None` (absent filter)
+    // binds NULL to both and disables the clause via `?7 IS NULL`.
+    let [model_prefix_pattern, model_contains_pattern] = query
+        .filters
+        .model
+        .as_deref()
+        .and_then(model_filter_like_patterns)
+        .map_or([None, None], |[prefix, contains]| {
+            [Some(prefix), Some(contains)]
+        });
+
     static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
         (
             [HISTOGRAM_SQL_HEAD, HISTOGRAM_SQL_TAIL].concat(),
@@ -667,13 +680,7 @@ async fn request_event_histogram(
         )?)
         .bind(u64_to_i64_upper(query.until_unix_secs))
         .bind(query.filters.principal_id.as_deref())
-        .bind(
-            query
-                .filters
-                .model
-                .as_deref()
-                .map(model_filter_like_pattern),
-        )
+        .bind(model_prefix_pattern)
         .bind(query.filters.upstream_id.map(|id| id.to_string()))
         .bind(status_min)
         .bind(status_max)
@@ -693,6 +700,10 @@ async fn request_event_histogram(
         ))
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .bind(i64::from(query.filters.errors_only))
+        // Parameter `?18`: second arm of the model-pattern disjunction. sqlx
+        // binds SQLite parameters positionally, so this 18th .bind call lands
+        // on `?18` regardless of the placeholder's position in the SQL.
+        .bind(model_contains_pattern)
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

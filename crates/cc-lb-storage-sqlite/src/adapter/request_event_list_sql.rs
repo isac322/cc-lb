@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
     RequestEvent, RequestEventListItem, RequestEventListQuery, StatusClass, StorageResult,
-    model_filter_like_pattern,
+    model_filter_like_patterns,
 };
 use sqlx::FromRow;
 
@@ -89,7 +89,7 @@ SELECT \
 FROM request_events_v1 \
 WHERE ts >= ?1 AND ts <= ?2 \
   AND (?3 IS NULL OR principal_id = ?3) \
-  AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\') \
+  AND (?4 IS NULL OR lower(model) LIKE ?4 ESCAPE '\\' OR lower(model) LIKE ?16 ESCAPE '\\') \
   AND (?5 IS NULL OR upstream_id = ?5) \
   AND (?13 IS NULL OR thread_id = ?13) \
   AND (?6 IS NULL OR list_status BETWEEN ?6 AND ?7) \
@@ -215,6 +215,18 @@ pub(super) async fn list_request_events(
         .map(status_class_range)
         .map_or((None, None), |(min, max)| (Some(min), Some(max)));
     let (source_kind_all, source_kind_exact) = source_kind_filter(query.source_kind.as_deref());
+    // Model predicate mirrors the histogram disjunction documented on
+    // `model_filter_like_patterns`: `?4` carries the literal-prefix arm and
+    // `?16` the `claude-`-namespaced contains arm. An absent/blank/bare
+    // `claude-` filter binds NULL to both and disables the clause.
+    let [model_prefix_pattern, model_contains_pattern] = query
+        .filters
+        .model
+        .as_deref()
+        .and_then(model_filter_like_patterns)
+        .map_or([None, None], |[prefix, contains]| {
+            [Some(prefix), Some(contains)]
+        });
 
     static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
         (
@@ -240,13 +252,7 @@ pub(super) async fn list_request_events(
         )?)
         .bind(u64_to_i64_upper(query.until_unix_secs))
         .bind(query.filters.principal_id.as_deref())
-        .bind(
-            query
-                .filters
-                .model
-                .as_deref()
-                .map(model_filter_like_pattern),
-        )
+        .bind(model_prefix_pattern)
         .bind(query.filters.upstream_id.map(|id| id.to_string()))
         .bind(status_min)
         .bind(status_max)
@@ -263,6 +269,8 @@ pub(super) async fn list_request_events(
         .bind(query.filters.thread_id.as_deref())
         .bind(query.filters.event_kind.map(|kind| kind.as_str()))
         .bind(i64::from(query.filters.errors_only))
+        // Parameter `?16`: second arm of the model-pattern disjunction.
+        .bind(model_contains_pattern)
         .fetch_all(storage.pool())
         .await
         .map_err(map_sqlx_error)?;

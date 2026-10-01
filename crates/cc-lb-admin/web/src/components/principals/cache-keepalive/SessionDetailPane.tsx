@@ -223,8 +223,11 @@ export function SessionDetailPane({ principalId, sessionId, onClose }: Props) {
   const isActiveSession =
     session.state === 'renewed' || session.state === 'scheduled';
   const latestTagLabel = isActiveSession ? 'Current turn · Live' : 'Final turn';
-  const latestTagTone: 'neutral' | 'warn' =
-    session.state === 'expired' ? 'warn' : 'neutral';
+  const latestTagTone: 'ok' | 'neutral' | 'warn' = isActiveSession
+    ? 'ok'
+    : session.state === 'expired'
+      ? 'warn'
+      : 'neutral';
 
   const STATE_TONE: Record<
     string,

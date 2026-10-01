@@ -1,7 +1,8 @@
 // Linear quota usage: the fill is what has been USED of a window, matching
-// the utilization Claude reports. Neutral ink below 80% used, warn from 80%,
-// danger from 95%. The only mark on the track is the optional even-pace
-// tick: where usage would sit if spread evenly over the window.
+// the utilization Claude reports. Its color is the pace-relative severity
+// from `quotaSeverity`: how far usage runs ahead of the even-pace mark (or
+// the absolute warn/danger thresholds when no pace is known). The only mark
+// on the track is that same optional even-pace tick.
 // Static: nothing animates, so reduced motion needs no special case.
 import {
   formatQuotaPercent,
@@ -52,7 +53,7 @@ export function UsageMeter({
 }: UsageMeterProps) {
   const used = clampPct(usedPct);
   const pace = clampPct(pacePct);
-  const severity = quotaSeverity(used);
+  const severity = quotaSeverity(used, pace);
   const valueText = [
     used === null ? 'No reading' : `${formatQuotaPercent(used)} used`,
     pace === null ? null : `even pace ${formatQuotaPercent(pace)}`,
@@ -73,9 +74,7 @@ export function UsageMeter({
         <span
           className={cx(
             'text-title-card tabular-nums',
-            severity === 'warn' || severity === 'danger'
-              ? QUOTA_SEVERITY_TEXT_CLASS[severity]
-              : 'text-text',
+            QUOTA_SEVERITY_TEXT_CLASS[severity],
           )}
         >
           {used === null ? '—' : `${formatQuotaPercent(used)} used`}

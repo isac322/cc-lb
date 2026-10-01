@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QuotaSnapshot } from '../../lib/api';
 import { QuotaWindowRow, QuotaWindowRows } from './QuotaWindowRows';
@@ -61,6 +61,27 @@ describe('QuotaWindowRow', () => {
     expect(Number(marker?.dataset.pacePct)).toBeCloseTo((2 / 7) * 100, 6);
   });
 
+  it('colors a window ahead of pace as danger even below 95% used', () => {
+    // 55% used of a 5h window resetting in 4h: 1h elapsed is a 20% pace,
+    // so usage runs 35 points ahead — past the 30-point danger gap.
+    renderRow(snap({ utilization: 0.55, resets_at_unix_secs: NOW + 4 * 3600 }));
+    const meter = screen.getByRole('meter');
+    expect(meter.getAttribute('aria-valuetext')).toBe(
+      '55% used, even pace 20%',
+    );
+    expect(meter.querySelector('.bg-danger')).not.toBeNull();
+  });
+
+  it('draws no pace tick while the reset sits more than one length ahead', () => {
+    const row = renderRow(
+      snap({ utilization: 0.2, resets_at_unix_secs: NOW + 6 * 3600 }),
+    );
+    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    expect(screen.getByRole('meter').getAttribute('aria-valuetext')).toBe(
+      '20% used',
+    );
+  });
+
   it('shows extra usage as dollars spent of the monthly limit', () => {
     const row = renderRow(
       snap({
@@ -109,58 +130,19 @@ describe('QuotaWindowRow', () => {
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
 
-  it('shows observed unified restriction status and reset without a quota meter', () => {
-    const row = renderRow(
-      snap({
-        window: 'unified',
-        status: 'allowed_warning',
-        representative_claim: '7d',
-        surpassed_threshold: true,
-        resets_at_unix_secs: NOW + 7200,
-      }),
+  it('renders nothing for the backend-only unified window', () => {
+    // `unified` is not a SubscriptionQuotaWindow; the backend may still
+    // report it on the wire for routing, but the row must not render.
+    render(
+      <QuotaWindowRows>
+        <QuotaWindowRow
+          snap={snap({
+            window: 'unified',
+          } as unknown as Partial<QuotaSnapshot>)}
+          nowUnixSecs={NOW}
+        />
+      </QuotaWindowRows>,
     );
-    expect(row.textContent).toContain('Allowed with warning');
-    expect(row.textContent).toContain('42% reported');
-    expect(row.textContent).toContain('Applies to 7d');
-    expect(row.textContent).toContain('Threshold exceeded');
-    expect(row.textContent).toContain('Resets in');
-    expect(row.textContent).not.toContain('Not started');
-    expect(screen.queryByRole('meter')).toBeNull();
-  });
-
-  it('preserves the provider restriction reason without fabricating utilization', () => {
-    const row = renderRow(
-      snap({
-        window: 'unified',
-        utilization: null,
-        status: 'rejected',
-        disabled_reason: 'account_restricted',
-      }),
-    );
-    expect(row.textContent).toContain('Restricted');
-    expect(row.textContent).toContain('account_restricted');
-    expect(row.textContent).not.toContain('%');
-    expect(screen.queryByRole('meter')).toBeNull();
-  });
-
-  it('explains the Unified account envelope on keyboard focus', async () => {
-    renderRow(snap({ window: 'unified', utilization: null }));
-    fireEvent.focus(screen.getByRole('button', { name: 'Unified' }));
-    const explanation = await screen.findByText(
-      /provider's aggregate account restriction/,
-    );
-    expect(explanation.textContent).toContain('not a separate quota');
-  });
-
-  it('shows no reset countdown on an unobserved unified window', () => {
-    const row = renderRow(
-      snap({
-        window: 'unified',
-        state: 'unobserved',
-        resets_at_unix_secs: NOW + 7200,
-      }),
-    );
-    expect(row.textContent).toContain('No reading');
-    expect(row.textContent).not.toContain('Resets in');
+    expect(screen.queryByRole('listitem')).toBeNull();
   });
 });
