@@ -1,8 +1,8 @@
 // Linear quota usage: the fill is what has been USED of a window, matching
 // the utilization Claude reports. Its color is the pace-relative severity
-// from `quotaSeverity`: how far usage runs ahead of the even-pace mark (or
-// the absolute warn/danger thresholds when no pace is known). The only mark
-// on the track is that same optional even-pace tick.
+// from `quotaSeverity`: how far usage runs ahead of the even-pace mark (a
+// window without pace reads neutral). The only mark on the track is that
+// same optional even-pace tick.
 // Static: nothing animates, so reduced motion needs no special case.
 import {
   formatQuotaPercent,

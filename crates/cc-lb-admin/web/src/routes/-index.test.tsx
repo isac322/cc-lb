@@ -93,6 +93,11 @@ vi.mock('../components/ui/RequestEventsTable', async (importOriginal) => {
                 </tr>
               );
             })}
+            {props.events.length > 0 && props.sentinelRef && (
+              <tr ref={props.sentinelRef}>
+                <td />
+              </tr>
+            )}
           </tbody>
         </table>
       );
@@ -112,6 +117,30 @@ function RowOnlyRequestEventsTable({ children }: { children: ReactNode }) {
     <RowOnlyRequestEventsTableContext.Provider value={true}>
       {children}
     </RowOnlyRequestEventsTableContext.Provider>
+  );
+}
+
+// jsdom has no IntersectionObserver; capture the callback so tests drive the
+// feed's load-more sentinel like a real scroll would.
+const observerMock = vi.hoisted(() => ({
+  callback: null as IntersectionObserverCallback | null,
+}));
+global.IntersectionObserver = class IntersectionObserver {
+  constructor(callback: IntersectionObserverCallback) {
+    observerMock.callback = callback;
+  }
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+} as unknown as typeof global.IntersectionObserver;
+
+/** Simulates the scroll sentinel entering the table's scroll slot. */
+function intersectSentinel() {
+  const callback = observerMock.callback;
+  if (callback === null) throw new Error('No IntersectionObserver was created');
+  callback(
+    [{ isIntersecting: true } as IntersectionObserverEntry],
+    {} as IntersectionObserver,
   );
 }
 
@@ -688,6 +717,7 @@ beforeEach(() => {
   routerMock.search = { range: '24h' };
   rechartsMock.areaChartRenderCount = 0;
   rechartsMock.tooltip = null;
+  observerMock.callback = null;
   // OAuthReconnectSummary polls upstreams itself; default to a resolved
   // empty list so no OAuth status queries spin up. Tests that need an
   // OAuth upstream override this.
@@ -1640,7 +1670,7 @@ describe('Overview loading geometry', () => {
     );
   });
 
-  it('renders the first 50 latest requests and pages through retained history', () => {
+  it('scrolls the newest requests up to the retained 500, then trims the oldest for live arrivals', () => {
     mockResolvedKpiQueries();
     const history = RETAINED_HISTORY;
     mockRequestEventsFeed(history);
@@ -1659,31 +1689,28 @@ describe('Overview loading geometry', () => {
         ),
         (row) => row.getAttribute('aria-label'),
       );
-    const historyPages = Array.from({ length: 10 }, (_, page) =>
-      history
-        .slice(page * 50, (page + 1) * 50)
-        .map((event) => `View request ${event.request_id}`),
-    );
-    expect(rowIds()).toEqual(historyPages[0]);
-    const pagination = screen.getByRole('navigation', {
-      name: 'Log pagination',
-    });
-    const previousButton = within(pagination).getByRole('button', {
-      name: 'Previous page',
-    }) as HTMLButtonElement;
-    const nextButton = within(pagination).getByRole('button', {
-      name: 'Next page',
-    }) as HTMLButtonElement;
-    expect(previousButton.disabled).toBe(true);
-    expect(nextButton.disabled).toBe(false);
+    const labels = (events: typeof history) =>
+      events.map((event) => `View request ${event.request_id}`);
+    // Scrolling reveals 50 more rows per pass; the feed stops at the 500-row
+    // retention cap with no page controls.
+    expect(rowIds()).toEqual(labels(history.slice(0, 50)));
     expect(
       screen.getByRole('link', { name: 'Open logs' }).getAttribute('href'),
     ).toBe('/logs');
+    expect(
+      screen.queryByRole('navigation', { name: 'Log pagination' }),
+    ).toBeNull();
 
-    for (let page = 1; page < historyPages.length; page += 1) {
-      fireEvent.click(nextButton);
-      expect(rowIds()).toEqual(historyPages[page]);
+    act(() => intersectSentinel());
+    expect(rowIds()).toEqual(labels(history.slice(0, 100)));
+    for (let pass = 1; pass < 9; pass += 1) {
+      act(() => intersectSentinel());
     }
+    expect(rowIds()).toEqual(labels(history));
+    // At the cap the sentinel never asks the backend for older pages.
+    act(() => intersectSentinel());
+    expect(rowIds()).toEqual(labels(history));
+    expect(queries.recentEventsPageQueryOptions).not.toHaveBeenCalled();
 
     const liveMap: LiveEventMap = new Map([
       ['live-501', { phase: 'final', event: finalLiveEvent(501) }],
@@ -1691,20 +1718,12 @@ describe('Overview loading geometry', () => {
     mockRequestEventsFeed(history, { liveEventsMap: liveMap, version: 1 });
     rerender(<OverviewPage />);
 
-    expect(rowIds()).toEqual(historyPages[9]);
-    for (let page = 8; page >= 0; page -= 1) {
-      fireEvent.click(previousButton);
-      expect(rowIds()).toEqual(
-        page === 0
-          ? ['View request live-501', ...historyPages[0].slice(0, 49)]
-          : historyPages[page],
-      );
-    }
-    fireEvent.click(nextButton);
-    expect(rowIds()).toEqual(
-      history.slice(49, 99).map((event) => `View request ${event.request_id}`),
-    );
-    expect(queries.recentEventsPageQueryOptions).not.toHaveBeenCalled();
+    // The cap still holds: the live arrival takes the head and pushes the
+    // oldest retained row out.
+    expect(rowIds()).toEqual([
+      'View request live-501',
+      ...labels(history.slice(0, 499)),
+    ]);
   });
 
   it('collapses the traffic strip to one line when the range has no requests', () => {

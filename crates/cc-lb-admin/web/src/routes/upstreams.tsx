@@ -24,7 +24,6 @@ import {
   CHART_AXIS,
   CHART_CURSOR,
   CHART_GRID,
-  CHART_THRESHOLD,
   SeriesFillGradient,
   useChartId,
 } from '../components/ui/charts';
@@ -128,7 +127,6 @@ import {
 } from '../lib/queries';
 import {
   formatQuotaPercent,
-  QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
   type QuotaSeverity,
   quotaSeverity,
@@ -653,8 +651,6 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
 const QUOTA_CHART_HEIGHT = 280;
-/** The usage threshold on the chart: danger at 95% used, pace or not. */
-const USAGE_THRESHOLDS = [{ y: QUOTA_DANGER_PCT, tone: 'danger' }] as const;
 
 /**
  * Windows that keep a gradient fill in the quota-history chart: the three
@@ -1326,68 +1322,59 @@ function DetailView({
               <Skeleton className="h-3 w-20" />
             </>
           ) : chartData.rows.length > 0 && visibleGraphWindows.length > 0 ? (
-            <>
-              {visibleGraphWindows.map((windowName) => {
-                const dimmed =
-                  effectiveIsolatedWindow !== null &&
-                  effectiveIsolatedWindow !== windowName;
-                const currentSnap = selectedLatest?.windows.find(
-                  (w) => w.window === windowName,
-                );
-                const current = currentSnap?.utilization;
-                const currentSeverity = currentSnap
-                  ? snapshotQuotaSeverity(currentSnap, nowUnixSecs)
-                  : 'none';
-                return (
-                  <button
-                    key={windowName}
-                    type="button"
-                    onClick={() =>
-                      setIsolatedWindow((prev) =>
-                        prev === windowName ? null : windowName,
-                      )
-                    }
-                    aria-pressed={effectiveIsolatedWindow === windowName}
-                    className="-mx-1.5 flex min-h-6 max-md:min-h-10 cursor-pointer items-center gap-1.5 rounded-sm px-1.5 text-body-sm transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+            visibleGraphWindows.map((windowName) => {
+              const dimmed =
+                effectiveIsolatedWindow !== null &&
+                effectiveIsolatedWindow !== windowName;
+              const currentSnap = selectedLatest?.windows.find(
+                (w) => w.window === windowName,
+              );
+              const current = currentSnap?.utilization;
+              const currentSeverity = currentSnap
+                ? snapshotQuotaSeverity(currentSnap, nowUnixSecs)
+                : 'none';
+              return (
+                <button
+                  key={windowName}
+                  type="button"
+                  onClick={() =>
+                    setIsolatedWindow((prev) =>
+                      prev === windowName ? null : windowName,
+                    )
+                  }
+                  aria-pressed={effectiveIsolatedWindow === windowName}
+                  className="-mx-1.5 flex min-h-6 max-md:min-h-10 cursor-pointer items-center gap-1.5 rounded-sm px-1.5 text-body-sm transition-colors hover:bg-overlay-5 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={cx(
+                      'size-2.5 shrink-0 rounded-xs',
+                      dimmed && 'opacity-40',
+                    )}
+                    style={{
+                      backgroundColor: getWindowColor(windowName).stroke,
+                    }}
+                  />
+                  <span
+                    className={dimmed ? 'text-text-faint' : 'text-text-muted'}
                   >
+                    {windowLabel(windowName)}
+                  </span>
+                  {current != null ? (
                     <span
-                      aria-hidden="true"
                       className={cx(
-                        'size-2.5 shrink-0 rounded-xs',
-                        dimmed && 'opacity-40',
+                        'tabular-nums',
+                        dimmed
+                          ? 'text-text-faint'
+                          : QUOTA_SEVERITY_TEXT_CLASS[currentSeverity],
                       )}
-                      style={{
-                        backgroundColor: getWindowColor(windowName).stroke,
-                      }}
-                    />
-                    <span
-                      className={dimmed ? 'text-text-faint' : 'text-text-muted'}
                     >
-                      {windowLabel(windowName)}
+                      {formatQuotaPercent(current * 100)} used
                     </span>
-                    {current != null ? (
-                      <span
-                        className={cx(
-                          'tabular-nums',
-                          dimmed
-                            ? 'text-text-faint'
-                            : QUOTA_SEVERITY_TEXT_CLASS[currentSeverity],
-                        )}
-                      >
-                        {formatQuotaPercent(current * 100)} used
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
-              <span className="flex items-center gap-1.5 whitespace-nowrap text-body-sm text-text-muted">
-                <span
-                  aria-hidden="true"
-                  className="w-3 border-t border-dashed border-danger"
-                />
-                Danger at {QUOTA_DANGER_PCT}% used
-              </span>
-            </>
+                  ) : null}
+                </button>
+              );
+            })
           ) : null}
         </div>
         <div
@@ -1433,14 +1420,6 @@ function DetailView({
                   domain={[0, 100]}
                   allowDataOverflow={false}
                 />
-                {USAGE_THRESHOLDS.map(({ y, tone }) => (
-                  <ReferenceLine
-                    key={y}
-                    y={y}
-                    {...CHART_THRESHOLD[tone]}
-                    ifOverflow="extendDomain"
-                  />
-                ))}
                 <Tooltip
                   cursor={CHART_CURSOR}
                   content={({ active, payload, label }) => {
@@ -1455,8 +1434,8 @@ function DetailView({
                           const key = String(p.dataKey);
                           // A sample's pace comes from its own moment inside
                           // the latest snapshot's window; samples from earlier
-                          // windows have no known reset and use the absolute
-                          // fallback rather than today's pace.
+                          // windows have no known reset and stay neutral
+                          // rather than judged by today's pace.
                           const sampleSnap = selectedLatest?.windows.find(
                             (w) => w.window === key,
                           );

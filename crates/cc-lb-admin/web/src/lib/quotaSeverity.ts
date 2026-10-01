@@ -3,43 +3,37 @@ import { WINDOW_DURATION_SECS } from './colors';
 /**
  * Quota severity is the only thing a quota figure's color communicates, and
  * it is pace-relative: usage far ahead of even pace reads worse than the
- * same figure on pace. `used` at 95%+ is always danger. Without a pace
- * reading (untimed windows, unstarted or expired resets) severity falls back
- * to the absolute rule: warn from 80% used. With pace, danger when used
- * runs 30+ points ahead of pace, warn when used is 90%+ or 10+ points
- * ahead, ok otherwise. Window identity (5h / 7d / 7d_fable) belongs to
- * legends and chart series, never to the number or bar itself.
+ * same figure on pace. There is no absolute cutoff — a bare `used` number,
+ * however high, is neutral without a pace to compare it with. With pace,
+ * danger when used runs 30+ points ahead of pace, warn at 10+ points, ok
+ * otherwise. Window identity (5h / 7d / 7d_fable) belongs to legends and
+ * chart series, never to the number or bar itself.
  */
 export type QuotaSeverity = 'none' | 'ok' | 'warn' | 'danger';
 
-/** Absolute thresholds: warn below this, danger from this, pace or not. */
-export const QUOTA_WARN_PCT = 80;
-export const QUOTA_DANGER_PCT = 95;
 /**
- * With an even-pace reading, warn starts at this utilization and the
- * used-minus-pace gaps below decide warn vs danger.
+ * With an even-pace reading, the used-minus-pace gaps below decide warn vs
+ * danger.
  */
-export const QUOTA_PACE_WARN_PCT = 90;
 export const QUOTA_PACE_WARN_GAP = 10;
 export const QUOTA_PACE_DANGER_GAP = 30;
 
 /**
  * `used` is 0-100; `null` or a non-finite value means no reading. `pace` is
- * the even-pace mark from `quotaPacePct`; `null` means pace is unavailable
- * and severity falls back to the absolute warn-at-80 rule.
+ * the even-pace mark from `quotaPacePct`; `null`, `undefined` or non-finite
+ * means pace is unavailable and the reading stays neutral (`ok`).
  */
 export function quotaSeverity(
   used: number | null,
   pace?: number | null,
 ): QuotaSeverity {
   if (used === null || !Number.isFinite(used)) return 'none';
-  if (used >= QUOTA_DANGER_PCT) return 'danger';
   if (pace === null || pace === undefined || !Number.isFinite(pace)) {
-    return used >= QUOTA_WARN_PCT ? 'warn' : 'ok';
+    return 'ok';
   }
   const gap = used - pace;
   if (gap >= QUOTA_PACE_DANGER_GAP) return 'danger';
-  if (used >= QUOTA_PACE_WARN_PCT || gap >= QUOTA_PACE_WARN_GAP) return 'warn';
+  if (gap >= QUOTA_PACE_WARN_GAP) return 'warn';
   return 'ok';
 }
 
@@ -98,8 +92,8 @@ export interface QuotaReading {
  * Even pace for a snapshot's window at `atUnixSecs`, from that window's own
  * reset. `null` when the snapshot was never observed or `atUnixSecs` lies
  * outside the window that ends at the reset (expired, not yet opened), so
- * severity falls back to the absolute rule. A past `atUnixSecs` inside the
- * same window gives that moment's pace, never the current one.
+ * the reading stays neutral. A past `atUnixSecs` inside the same window
+ * gives that moment's pace, never the current one.
  */
 export function snapshotQuotaPacePct(
   snap: QuotaReading,
