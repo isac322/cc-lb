@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Terminal OAuth refresh failures (`400 invalid_grant`, `401`, or an expired refresh token) now latch reconnect-required state across scheduled, watchdog, and lazy refresh paths until credential replacement or reconnect; transient network, `5xx`, and non-terminal `400` failures still retry.
+- Disabled OAuth upstreams remain visible with reconnect notices, and quota rows distinguish hidden extra-usage budgets from Unified provider restriction state.
+
+### Changed
+
+- Shared request feeds now paginate older history by cursor beyond Overview's initial 500 rows with 50-row pages, while keeping live SSE bounds separate from historical retention.
+- Overview top-principal cost bars use the full result set as their relative maximum, with fixed two-decimal values and exact details; cache-hit thresholds, token unit colors, and positive-only cost breakdowns match the request views.
+
 ## [1.0.0] - 2026-09-30
 
 cc-lb 1.0.0 is the first stable release and marks the contract boundary: the versioned admin API (`/admin/v1/…`), the CLI, the configuration format, the Prometheus metrics and the `filter`/`shape` plugin slots are now the supported surface, and later breaking changes to them will come in a new major version. Getting there meant a final round of removals: the compatibility aliases, legacy data formats and dead schema left behind by earlier cutovers (#890), the Wasm observability plugin slot (#885), and the quota analysis endpoint (#883). This release also ships a redesigned admin dashboard with a new brand and colour scheme (#883).

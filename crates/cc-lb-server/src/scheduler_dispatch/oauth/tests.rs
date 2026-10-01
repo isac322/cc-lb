@@ -43,6 +43,9 @@ use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, Laz
 use crate::scheduler_dispatch::{SchedulerDispatch, SchedulerDispatchDeps};
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
+#[path = "tests/scheduled.rs"]
+mod scheduled;
+
 #[test]
 fn usage_poll_includes_disabled_registered_oauth_upstream() {
     let mut upstream = registered_oauth_upstream();
@@ -204,43 +207,45 @@ async fn force_refresh_usage_token_invokes_lazy_refresh_for_refreshing_credentia
     assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 1);
 }
 
-/// A successful usage poll clears a previously recorded apply error, mirroring
-/// `complete_refresh` clearing the error on a successful token refresh. A
-/// clean upstream is a no-op.
 #[tokio::test]
-async fn clear_recorded_apply_error_clears_stored_error() {
+async fn reconnect_required_blocks_usage_refresh_and_poll() {
     let fixture = DispatchFixture::new().await;
-    let upstream = fixture.oauth_upstream(true).await;
-
-    fixture
-        .dispatch
-        .clear_recorded_apply_error(&upstream)
-        .await
-        .expect("clean upstream is a no-op");
-
+    let upstream = fixture.oauth_upstream(false).await;
     UpstreamStore::set_last_apply_error(
         fixture.storage.as_ref(),
         upstream.id,
         Some("status_401".to_owned()),
     )
     .await
-    .expect("error recorded");
-    let errored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+    .expect("terminal error recorded");
+    let mut errored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
         .await
         .expect("upstream fetch")
         .expect("upstream exists");
-    assert_eq!(errored.last_apply_error.as_deref(), Some("status_401"));
 
     fixture
         .dispatch
-        .clear_recorded_apply_error(&errored)
+        .ensure_fresh_usage_token(&mut errored)
         .await
-        .expect("error cleared");
-    let cleared = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
+        .expect("terminal gate skips proactive refresh");
+    assert!(
+        !fixture
+            .dispatch
+            .force_refresh_usage_token(&mut errored)
+            .await
+            .expect("terminal gate skips forced refresh")
+    );
+    assert!(matches!(
+        fixture.dispatch.poll_usage(upstream.id, None).await,
+        Ok(cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation::Skip)
+    ));
+    let stored = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream.id)
         .await
         .expect("upstream fetch")
         .expect("upstream exists");
-    assert_eq!(cleared.last_apply_error, None);
+    assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
+    assert_eq!(fixture.refresh_entry_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 0);
 }
 
 /// Long-lived upstreams never reach the token-refresh path that schedules

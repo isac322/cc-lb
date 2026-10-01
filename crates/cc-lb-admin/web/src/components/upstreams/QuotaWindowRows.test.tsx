@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QuotaSnapshot } from '../../lib/api';
 import { QuotaWindowRow, QuotaWindowRows } from './QuotaWindowRows';
@@ -78,17 +78,29 @@ describe('QuotaWindowRow', () => {
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
 
-  it('shows disabled extra usage as Off with an empty meter', () => {
-    const row = renderRow(
-      snap({
-        window: 'overage',
-        utilization: null,
-        extra_usage_enabled: false,
-      }),
-    );
-    expect(row.textContent).toContain('Off');
-    expect(screen.getByRole('meter').getAttribute('aria-valuenow')).toBeNull();
-  });
+  it.each([
+    { enabled: false, budget: 5000 },
+    { enabled: true, budget: 0 },
+    { enabled: true, budget: null },
+  ])(
+    'omits extra usage without an active positive budget',
+    ({ enabled, budget }) => {
+      render(
+        <QuotaWindowRows>
+          <QuotaWindowRow
+            snap={snap({
+              window: 'overage',
+              extra_usage_enabled: enabled,
+              extra_usage_monthly_limit: budget,
+            })}
+            nowUnixSecs={NOW}
+          />
+        </QuotaWindowRows>,
+      );
+      expect(screen.queryByRole('listitem')).toBeNull();
+      expect(screen.queryByText('Extra usage')).toBeNull();
+    },
+  );
 
   it('says a window without a live reset has not started', () => {
     const row = renderRow(snap({ utilization: 0, resets_at_unix_secs: null }));
@@ -97,15 +109,47 @@ describe('QuotaWindowRow', () => {
     expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
   });
 
-  it('counts down to reset on an observed unified window, without pace', () => {
+  it('shows observed unified restriction status and reset without a quota meter', () => {
     const row = renderRow(
-      snap({ window: 'unified', resets_at_unix_secs: NOW + 7200 }),
+      snap({
+        window: 'unified',
+        status: 'allowed_warning',
+        representative_claim: '7d',
+        surpassed_threshold: true,
+        resets_at_unix_secs: NOW + 7200,
+      }),
     );
-    expect(row.textContent).toContain('Unified');
-    expect(row.textContent).toContain('42% used');
+    expect(row.textContent).toContain('Allowed with warning');
+    expect(row.textContent).toContain('42% reported');
+    expect(row.textContent).toContain('Applies to 7d');
+    expect(row.textContent).toContain('Threshold exceeded');
     expect(row.textContent).toContain('Resets in');
     expect(row.textContent).not.toContain('Not started');
-    expect(row.querySelector('[data-slot="pace-marker"]')).toBeNull();
+    expect(screen.queryByRole('meter')).toBeNull();
+  });
+
+  it('preserves the provider restriction reason without fabricating utilization', () => {
+    const row = renderRow(
+      snap({
+        window: 'unified',
+        utilization: null,
+        status: 'rejected',
+        disabled_reason: 'account_restricted',
+      }),
+    );
+    expect(row.textContent).toContain('Restricted');
+    expect(row.textContent).toContain('account_restricted');
+    expect(row.textContent).not.toContain('%');
+    expect(screen.queryByRole('meter')).toBeNull();
+  });
+
+  it('explains the Unified account envelope on keyboard focus', async () => {
+    renderRow(snap({ window: 'unified', utilization: null }));
+    fireEvent.focus(screen.getByRole('button', { name: 'Unified' }));
+    const explanation = await screen.findByText(
+      /provider's aggregate account restriction/,
+    );
+    expect(explanation.textContent).toContain('not a separate quota');
   });
 
   it('shows no reset countdown on an unobserved unified window', () => {

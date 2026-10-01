@@ -24,6 +24,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-clock = { path = "../cc-lb-clock" }
 cc-lb-control = { path = "../cc-lb-control" }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 chrono = { workspace = true }
@@ -53,7 +54,6 @@ path = "tests/all.rs"
 async-trait = { workspace = true }
 axum.workspace = true
 base64.workspace = true
-cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-server = { path = "../cc-lb-server", default-features = false }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }

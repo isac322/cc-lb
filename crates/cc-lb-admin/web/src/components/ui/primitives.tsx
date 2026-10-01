@@ -271,22 +271,30 @@ const STATUS_TEXT: Record<
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 };
-/** Dot + sentence-case phrase. Exceptions carry their tone; healthy stays muted. */
+/** Dot + phrase; only explicit traffic-light surfaces render healthy in green. */
 export function StatusBadge({
   tone,
   label,
+  trafficLight = false,
 }: {
   tone: 'ok' | 'warn' | 'danger' | 'neutral' | 'live';
   label: ReactNode;
+  /** Opt in only where the current state requires red/yellow/green emphasis. */
+  trafficLight?: boolean;
 }) {
   return (
     <span
       className={cx(
         'inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap text-label',
-        STATUS_TEXT[tone],
+        trafficLight && tone === 'ok'
+          ? 'text-traffic-success-text'
+          : STATUS_TEXT[tone],
       )}
     >
-      <span className={cx('status-dot', tone)} />
+      <span
+        aria-hidden="true"
+        className={cx('status-dot', tone, trafficLight && 'traffic-light lg')}
+      />
       <span>{label}</span>
     </span>
   );

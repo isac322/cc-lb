@@ -16,6 +16,7 @@ use cc_lb_control::{
 };
 use cc_lb_domain::{BUILTIN_SUBSCRIPTION_PREFERENCE_ID, RateLimitObservation, Upstream};
 use cc_lb_engine::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
+use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_quota::plan_capacity::{
     PRO_CAPACITY_RATIO, PlanInfo, PlanTierClassification, TierKey, classify_plan_tier,
 };
@@ -30,7 +31,7 @@ use cc_lb_storage_api::{
     PluginRegistryStore, PluginSlotKind, PrincipalRecord, PrincipalStore,
     PromptCacheObservationStore, RateLimitKind, StorageError, StorageResult, TierResolutionSource,
     UpstreamPlanTierRecord, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataStore,
+    UpstreamRecord, UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataStore,
     UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use cc_lb_upstream::{Signer, SignerError, SignerFactory};
@@ -815,16 +816,24 @@ async fn apply_upstreams(
 ) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
     let mut statuses = HashMap::new();
     for upstream in upstreams {
+        let is_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
+        let last_apply_error = if is_oauth {
+            upstream.last_apply_error.clone()
+        } else {
+            None
+        };
         if !upstream.enabled {
-            stores
-                .upstreams
-                .set_last_apply_error(upstream.id, None)
-                .await?;
+            if !is_oauth {
+                stores
+                    .upstreams
+                    .set_last_apply_error(upstream.id, None)
+                    .await?;
+            }
             statuses.insert(
                 upstream.name.clone(),
                 UpstreamStatusEntry {
                     status: ApplyStatus::Disabled,
-                    last_apply_error: None,
+                    last_apply_error,
                     last_apply_at_unix_secs: now,
                 },
             );
@@ -832,30 +841,64 @@ async fn apply_upstreams(
         }
 
         if let Err(message) = validate_upstream(upstream, aead) {
-            stores
-                .upstreams
-                .set_last_apply_error(upstream.id, Some(message.clone()))
-                .await?;
+            let reconnect_required =
+                is_oauth && refresh_requires_reconnect(last_apply_error.as_deref());
+            if !reconnect_required {
+                if is_oauth {
+                    match stores
+                        .upstreams
+                        .set_status(
+                            upstream.id,
+                            UpstreamStatusUpdate {
+                                last_apply_error: Some(Some(message.clone())),
+                                last_apply_at_unix_secs: Some(Some(now)),
+                                expected_oauth_token_generation: Some(
+                                    upstream.oauth_token_generation,
+                                ),
+                                ..UpstreamStatusUpdate::default()
+                            },
+                        )
+                        .await
+                    {
+                        Ok(()) | Err(StorageError::Conflict { .. }) => {}
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    stores
+                        .upstreams
+                        .set_last_apply_error(upstream.id, Some(message.clone()))
+                        .await?;
+                }
+            }
             statuses.insert(
                 upstream.name.clone(),
                 UpstreamStatusEntry {
                     status: ApplyStatus::Error,
-                    last_apply_error: Some(message),
+                    last_apply_error: if reconnect_required {
+                        last_apply_error
+                    } else {
+                        Some(message)
+                    },
                     last_apply_at_unix_secs: now,
                 },
             );
             continue;
         }
 
-        stores
-            .upstreams
-            .set_last_apply_error(upstream.id, None)
-            .await?;
+        // Applying a view cannot prove the refresh token usable. Only a real
+        // OAuth token write clears its renewal error; avoiding a status write
+        // here also preserves a terminal failure arriving during this build.
+        if !is_oauth {
+            stores
+                .upstreams
+                .set_last_apply_error(upstream.id, None)
+                .await?;
+        }
         statuses.insert(
             upstream.name.clone(),
             UpstreamStatusEntry {
                 status: ApplyStatus::Active,
-                last_apply_error: None,
+                last_apply_error,
                 last_apply_at_unix_secs: now,
             },
         );
@@ -1091,6 +1134,162 @@ mod tests {
     };
 
     const MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    #[tokio::test]
+    async fn stale_oauth_validation_failure_cannot_poison_replacement_long_lived_credential() {
+        let (_dir, storage) = storage_fixture(19).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let aead = AeadService::from_master_key([1; 32]);
+        let created = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: "stale-missing-oauth".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                ..UpstreamCreate::default()
+            },
+        )
+        .await
+        .expect("oauth upstream created");
+        let snapshot =
+            UpstreamStore::set_enabled(storage.as_ref(), created.id, created.revision, true)
+                .await
+                .expect("capture enabled state before credential installation");
+        let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+            &aead,
+            &cc_lb_aead::OAuthTokenBundle {
+                access_token: "long-lived-access".to_owned(),
+                refresh_token: "long-lived-refresh".to_owned(),
+                expires_at_unix_secs: 1_900_000_000,
+                refresh_token_expires_at_unix_secs: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: true,
+            },
+            snapshot.id.as_bytes(),
+        )
+        .expect("encrypt actual long-lived credential");
+        let replaced = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            snapshot.id,
+            snapshot.revision,
+            encrypted,
+            true,
+        )
+        .await
+        .expect("actual credential installation after snapshot");
+        assert!(replaced.oauth_token_generation > snapshot.oauth_token_generation);
+        let stale_statuses = apply_upstreams(&stores, std::slice::from_ref(&snapshot), &aead, 1)
+            .await
+            .expect("stale validation conflict is skipped");
+        assert_eq!(
+            stale_statuses
+                .get(&snapshot.name)
+                .expect("stale apply status")
+                .status,
+            ApplyStatus::Error
+        );
+        let current = UpstreamStore::get_by_id(storage.as_ref(), snapshot.id)
+            .await
+            .expect("load installed credential")
+            .expect("upstream exists");
+        assert_eq!(current.last_apply_error, None);
+        assert_eq!(
+            current.oauth_token_generation,
+            replaced.oauth_token_generation
+        );
+        assert!(current.oauth_never_refresh);
+        let fresh_statuses = apply_upstreams(&stores, std::slice::from_ref(&current), &aead, 2)
+            .await
+            .expect("fresh credential validates");
+        assert_eq!(
+            fresh_statuses
+                .get(&snapshot.name)
+                .expect("fresh apply status")
+                .status,
+            ApplyStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn applying_stale_oauth_snapshot_cannot_clear_later_terminal_refresh_failure() {
+        let (_dir, storage) = storage_fixture(18).await;
+        let stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        let aead = AeadService::from_master_key([1; 32]);
+        for enabled in [true, false] {
+            let created = UpstreamStore::create(
+                storage.as_ref(),
+                UpstreamCreate {
+                    name: format!("stale-oauth-{enabled}"),
+                    kind: UpstreamKind::AnthropicOauth,
+                    ..UpstreamCreate::default()
+                },
+            )
+            .await
+            .expect("oauth upstream created");
+            let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                &aead,
+                &cc_lb_aead::OAuthTokenBundle {
+                    access_token: "valid-access".to_owned(),
+                    refresh_token: "valid-refresh".to_owned(),
+                    expires_at_unix_secs: 1_900_000_000,
+                    refresh_token_expires_at_unix_secs: None,
+                    scopes: vec!["messages".to_owned()],
+                    never_refresh: false,
+                },
+                created.id.as_bytes(),
+            )
+            .expect("encrypt credential");
+            let stored = UpstreamStore::store_oauth_tokens(
+                storage.as_ref(),
+                created.id,
+                created.revision,
+                encrypted,
+                false,
+            )
+            .await
+            .expect("oauth credential stored");
+            let snapshot =
+                UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, enabled)
+                    .await
+                    .expect("capture pre-failure upstream state");
+            UpstreamStore::set_status(
+                storage.as_ref(),
+                snapshot.id,
+                cc_lb_storage_api::UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_401".to_owned())),
+                    expected_oauth_token_generation: Some(snapshot.oauth_token_generation),
+                    ..cc_lb_storage_api::UpstreamStatusUpdate::default()
+                },
+            )
+            .await
+            .expect("terminal failure arrives after snapshot");
+            let statuses = apply_upstreams(&stores, std::slice::from_ref(&snapshot), &aead, 1)
+                .await
+                .expect("stale view apply succeeds");
+            assert_eq!(
+                statuses.get(&snapshot.name).expect("apply status").status,
+                if enabled {
+                    ApplyStatus::Active
+                } else {
+                    ApplyStatus::Disabled
+                }
+            );
+            let current = UpstreamStore::get_by_id(storage.as_ref(), snapshot.id)
+                .await
+                .expect("load current terminal state")
+                .expect("upstream exists");
+            assert_eq!(current.last_apply_error.as_deref(), Some("status_401"));
+            assert_eq!(
+                current.oauth_token_generation,
+                snapshot.oauth_token_generation
+            );
+        }
+    }
 
     /// Stand-in for a user-uploaded router filter so ordering and dedupe can be
     /// observed without a wasm runtime.

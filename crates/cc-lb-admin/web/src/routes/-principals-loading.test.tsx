@@ -1,7 +1,10 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, render, screen } from '@testing-library/react';
+import type React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { Principal } from '../lib/queries';
 import * as queries from '../lib/queries';
+import * as liveEvents from '../lib/useLiveEventStream';
 import { RecentRequestsCard } from './principals';
 
 vi.mock('../lib/queries', async () => {
@@ -9,28 +12,19 @@ vi.mock('../lib/queries', async () => {
   return {
     ...actual,
     usePrincipalNameMap: vi.fn(),
-    useRecentEvents: vi.fn(),
+    useRecentEventsPage: vi.fn(),
   };
 });
 
-vi.mock('../components/ui/RequestEventsTable', () => ({
-  RequestEventsTable: ({
-    events,
-    loading,
-  }: {
-    events: ReadonlyArray<{ request_id: string }>;
-    loading?: boolean;
-  }) => (
-    <div
-      data-loading={loading ? 'true' : 'false'}
-      data-testid="recent-requests-table"
-    >
-      {events.map((event) => (
-        <span key={event.request_id}>{event.request_id}</span>
-      ))}
-    </div>
-  ),
-}));
+vi.mock('../lib/useLiveEventStream', async () => {
+  const actual = await vi.importActual<typeof liveEvents>(
+    '../lib/useLiveEventStream',
+  );
+  return {
+    ...actual,
+    useLiveEventStream: vi.fn(),
+  };
+});
 
 const principal: Principal = {
   id: 'principal-a',
@@ -61,117 +55,141 @@ function recentEvent(requestId: string, principalId: string) {
   };
 }
 
-describe('principal recent-request polling', () => {
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+
+function renderWithProviders(ui: React.ReactElement) {
+  return render(
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+  );
+}
+
+function liveState() {
+  return {
+    eventsMap: new Map(),
+    version: 0,
+    status: 'live',
+    lastActivityAt: null,
+    lastCursor: null,
+    error: null,
+    malformedFrameCount: 0,
+    permanentFailure: false,
+    permanentFailureSince: null,
+    reconnectAttempts: 0,
+    forceReconnect: vi.fn(),
+  } as never;
+}
+
+function pageState(
+  events: readonly unknown[],
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    data: {
+      events,
+      observed: true,
+      count: events.length,
+      limit: 500,
+    },
+    isFetching: false,
+    isPending: false,
+    isPlaceholderData: false,
+    error: null,
+    ...overrides,
+  } as never;
+}
+
+describe('principal recent-request feed', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    queryClient.clear();
     vi.mocked(queries.usePrincipalNameMap).mockReturnValue(
       new Map([
         [principal.id, principal.name],
         [otherPrincipal.id, otherPrincipal.name],
       ]),
     );
+    vi.mocked(queries.useRecentEventsPage).mockReturnValue({
+      data: undefined,
+      isFetching: true,
+      isPending: true,
+      isPlaceholderData: false,
+      error: null,
+    } as never);
+    vi.mocked(liveEvents.useLiveEventStream).mockReturnValue(liveState());
   });
 
   afterEach(() => cleanup());
 
-  test('keeps the last successful rows visible while the same principal refreshes', () => {
-    const initial = {
-      events: [recentEvent('request-old', principal.id)],
-      observed: true,
-      count: 1,
-      limit: 5,
-    };
-    let recent = {
-      data: initial,
-      isFetching: false,
-      isPending: false,
-      isPlaceholderData: false,
-    };
-    vi.mocked(queries.useRecentEvents).mockImplementation(
+  test('keeps the last successful rows visible while the same principal refreshes', async () => {
+    let recent = pageState([recentEvent('request-old', principal.id)]);
+    vi.mocked(queries.useRecentEventsPage).mockImplementation(
       () => recent as never,
     );
 
-    const view = render(<RecentRequestsCard principal={principal} />);
-
-    expect(screen.getByText('request-old')).toBeDefined();
-    expect(screen.getByTestId('recent-requests-table').dataset.loading).toBe(
-      'false',
+    const view = renderWithProviders(
+      <RecentRequestsCard principal={principal} />,
     );
-    expect(screen.getByText('Last 1 from Ada')).toBeDefined();
 
-    recent = {
-      data: initial,
-      isFetching: true,
-      isPending: false,
-      isPlaceholderData: true,
-    };
-    view.rerender(<RecentRequestsCard principal={principal} />);
-
-    expect(screen.getByText('request-old')).toBeDefined();
-    expect(screen.getByTestId('recent-requests-table').dataset.loading).toBe(
-      'false',
-    );
     expect(
-      screen.queryByTestId('recent-requests-subtitle-skeleton'),
-    ).toBeNull();
+      await screen.findByLabelText('View request request-old'),
+    ).toBeDefined();
 
-    recent = {
-      data: {
-        events: [recentEvent('request-new', principal.id)],
-        observed: true,
-        count: 1,
-        limit: 5,
-      },
-      isFetching: false,
-      isPending: false,
-      isPlaceholderData: false,
-    };
-    view.rerender(<RecentRequestsCard principal={principal} />);
+    recent = pageState([recentEvent('request-old', principal.id)], {
+      isFetching: true,
+      isPlaceholderData: true,
+    });
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <RecentRequestsCard principal={principal} />
+      </QueryClientProvider>,
+    );
 
-    expect(screen.getByText('request-new')).toBeDefined();
-    expect(screen.queryByText('request-old')).toBeNull();
+    expect(screen.getByLabelText('View request request-old')).toBeDefined();
+
+    recent = pageState([
+      recentEvent('request-old', principal.id),
+      recentEvent('request-new', principal.id),
+    ]);
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <RecentRequestsCard principal={principal} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByLabelText('View request request-old')).toBeDefined();
+    expect(screen.getByLabelText('View request request-new')).toBeDefined();
   });
 
-  test('changes query identity with the principal and never retains another principal locally', () => {
-    const states: Record<string, unknown> = {
-      [principal.id]: {
-        data: {
-          events: [recentEvent('ada-request', principal.id)],
-          observed: true,
-          count: 1,
-          limit: 5,
-        },
-        isFetching: false,
-        isPending: false,
-        isPlaceholderData: false,
-      },
-      [otherPrincipal.id]: {
-        data: undefined,
-        isFetching: true,
-        isPending: true,
-        isPlaceholderData: false,
-      },
-    };
-    vi.mocked(queries.useRecentEvents).mockImplementation(
-      (filters) => states[filters.principal_id ?? ''] as never,
+  test('changes feed scope with the principal and never retains another principal locally', async () => {
+    vi.mocked(queries.useRecentEventsPage).mockImplementation((filters) =>
+      filters.principal_id === principal.id
+        ? pageState([recentEvent('ada-request', principal.id)])
+        : ({
+            data: undefined,
+            isFetching: true,
+            isPending: true,
+            isPlaceholderData: false,
+            error: null,
+          } as never),
     );
 
-    const view = render(<RecentRequestsCard principal={principal} />);
-    expect(screen.getByText('ada-request')).toBeDefined();
-
-    view.rerender(<RecentRequestsCard principal={otherPrincipal} />);
-
-    expect(queries.useRecentEvents).toHaveBeenLastCalledWith({
-      principal_id: otherPrincipal.id,
-      limit: '5',
-      event_kind: 'messages',
-    });
-    expect(screen.queryByText('ada-request')).toBeNull();
-    expect(screen.getByTestId('recent-requests-table').dataset.loading).toBe(
-      'true',
+    const view = renderWithProviders(
+      <RecentRequestsCard principal={principal} />,
     );
     expect(
-      screen.getByTestId('recent-requests-subtitle-skeleton'),
+      await screen.findByLabelText('View request ada-request'),
     ).toBeDefined();
+
+    view.rerender(
+      <QueryClientProvider client={queryClient}>
+        <RecentRequestsCard principal={otherPrincipal} />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByLabelText('View request ada-request')).toBeNull();
+    const requestTable = screen.getByText('Timestamp').closest('table');
+    expect(requestTable?.querySelectorAll('tbody tr')).toHaveLength(5);
   });
 });

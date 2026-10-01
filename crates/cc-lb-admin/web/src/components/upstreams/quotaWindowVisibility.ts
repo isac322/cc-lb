@@ -59,9 +59,13 @@ export function seriesHasInRangeData(
   );
 }
 
-function isOverageActive(snap: QuotaSnapshot): boolean {
+export function isOverageActive(snap: QuotaSnapshot): boolean {
+  const budget = snap.extra_usage_monthly_limit;
   return (
-    snap.extra_usage_enabled === true || snap.extra_usage_monthly_limit != null
+    snap.extra_usage_enabled === true &&
+    budget != null &&
+    Number.isFinite(budget) &&
+    budget > 0
   );
 }
 
@@ -69,6 +73,7 @@ function isOverageActive(snap: QuotaSnapshot): boolean {
  * Windows the detail chart should draw for the selected range: a window is
  * visible only when its latest observation lands inside the range AND the
  * series has in-range data. Overage additionally requires an active budget.
+ * Unified is an account restriction envelope, not a numeric quota series.
  */
 export function selectVisibleGraphWindows({
   latestWindows,
@@ -80,6 +85,7 @@ export function selectVisibleGraphWindows({
     latestWindows.map((snap) => [snap.window, snap]),
   );
   return QUOTA_WINDOW_ORDER.filter((window) => {
+    if (window === 'unified') return false;
     const snap = byWindow.get(window);
     if (!snap) return false;
     if (snap.state === 'absent' || snap.state === 'unobserved') return false;
@@ -96,8 +102,8 @@ export function selectVisibleGraphWindows({
  * Windows the Quota rows render, in `QUOTA_WINDOW_ORDER`: every window the
  * API reports for the upstream. Proven-absent windows are hidden. `5h` and
  * `7d` still show an unobserved placeholder before the first successful
- * quota lookup; other windows need an observation. Extra usage shows once
- * its switch has been reported, enabled or not.
+ * quota lookup; other windows need an observation. Extra usage additionally
+ * requires its switch to be enabled and a finite, positive monthly budget.
  */
 export function selectQuotaCardSnapshots({
   latestWindows,
@@ -116,12 +122,7 @@ export function selectQuotaCardSnapshots({
       continue;
     }
     if (snap.state === 'unobserved') continue;
-    if (
-      window === 'overage' &&
-      snap.extra_usage_enabled == null &&
-      snap.extra_usage_monthly_limit == null
-    )
-      continue;
+    if (window === 'overage' && !isOverageActive(snap)) continue;
     result.push(snap);
   }
   return result;

@@ -8,18 +8,17 @@ export interface UpstreamHealth {
 }
 
 /**
- * One status for the list dot and the detail header. A danger reconnect
- * nudge (unreadable, rejected or expired credentials) outranks the runtime
- * status: the pool cannot route to the upstream even while the reconciler
- * still reports it active.
+ * One status for the list dot and the detail header. Reconnect nudges outrank
+ * enabled/disabled and runtime state: disabling traffic does not repair an
+ * OAuth connection or stop its credential-maintenance lifecycle.
  */
 export function upstreamHealth(
   enabled: boolean,
   runtimeStatus: string | undefined,
   nudge: OAuthReconnectNudge | null | undefined,
 ): UpstreamHealth {
+  if (nudge) return { tone: nudge.tone, label: nudge.label };
   if (!enabled) return { tone: 'neutral', label: 'Disabled' };
-  if (nudge?.tone === 'danger') return { tone: 'danger', label: nudge.label };
   if (runtimeStatus === 'error') return { tone: 'danger', label: 'Error' };
   if (runtimeStatus === 'active') return { tone: 'ok', label: 'Active' };
   return { tone: 'neutral', label: 'Status unknown' };

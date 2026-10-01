@@ -179,11 +179,57 @@ describe('classifyOAuthReconnect — refreshing credentials', () => {
       NOW,
     );
     expect(nudge).toMatchObject({
+      reason: 'refresh_token_expired',
       tone: 'danger',
       label: 'Refresh token expired',
       actionLabel: 'Reconnect',
       expiresAt: refreshExpiresAt,
     });
+  });
+
+  it('recognizes the durable refresh_token_expired marker without a provider body', () => {
+    const nudge = classifyOAuthReconnect(
+      oauthStatus({ refresh_token_expires_at_unix_secs: NOW + 10 * DAY }),
+      'refresh_token_expired',
+      NOW,
+    );
+    expect(nudge).toMatchObject({
+      reason: 'refresh_token_expired',
+      tone: 'danger',
+      label: 'Refresh token expired',
+      actionLabel: 'Reconnect',
+      expiresAt: NOW + 10 * DAY,
+    });
+  });
+
+  it('does not turn transient renewal failures into reconnect nudges', () => {
+    expect(classifyOAuthReconnect(oauthStatus(), 'network', NOW)).toBeNull();
+    expect(
+      classifyOAuthReconnect(oauthStatus(), 'status_400_retryable', NOW),
+    ).toBeNull();
+    expect(classifyOAuthReconnect(oauthStatus(), 'status_429', NOW)).toBeNull();
+    expect(classifyOAuthReconnect(oauthStatus(), 'status_500', NOW)).toBeNull();
+  });
+  it('clears a durable reconnect nudge when the refreshed status is healthy', () => {
+    const expired = classifyOAuthReconnect(
+      oauthStatus({ refresh_token_expires_at_unix_secs: NOW + 10 * DAY }),
+      'refresh_token_expired',
+      NOW,
+    );
+    expect(expired?.reason).toBe('refresh_token_expired');
+    expect(
+      classifyOAuthReconnect(
+        oauthStatus({ refresh_token_expires_at_unix_secs: NOW + 60 * DAY }),
+        null,
+        NOW,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not fabricate a nudge while OAuth status is unavailable', () => {
+    expect(
+      classifyOAuthReconnect(undefined, 'refresh_token_expired', NOW),
+    ).toBeNull();
   });
 
   it('reports danger when the latest renewal attempt was rejected', () => {

@@ -1,6 +1,9 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_clock::unix_secs;
-use cc_lb_oauth_protocol::{ExistingTokenParts, refreshed_token_parts};
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, is_terminal_refresh_failure, refresh_requires_reconnect,
+    refreshed_token_parts,
+};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
@@ -11,7 +14,10 @@ use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AnthropicCompatibilityKvStore, UpstreamRecord, UpstreamStore};
+use cc_lb_storage_api::{
+    AnthropicCompatibilityKvStore, StorageError, UpstreamRecord, UpstreamStatusUpdate,
+    UpstreamStore,
+};
 
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_LATEST_VERSION_FALLBACK, CLAUDE_CODE_LATEST_VERSION_KEY, claude_code_user_agent,
@@ -25,7 +31,7 @@ use cc_lb_control::anthropic_metadata::{
 };
 
 use crate::scheduler_dispatch::http::{
-    decrypt_bundle, fetch_usage, request_refresh, upstream_base_url,
+    RefreshRequestError, decrypt_bundle, fetch_usage, request_refresh, upstream_base_url,
 };
 use crate::scheduler_dispatch::storage::{StorageHandle, storage_scheduler_error};
 use crate::scheduler_dispatch::time::now_unix_millis;
@@ -65,6 +71,9 @@ impl SchedulerDispatch {
     }
 
     async fn refresh_upstream(&self, upstream: UpstreamRecord) -> SchedulerResult<RefreshOutcome> {
+        if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
+            return Ok(RefreshOutcome::NotRefreshable);
+        }
         let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
         if bundle.never_refresh {
             // Refreshing a 365-day token makes Anthropic revoke it and issue an
@@ -72,13 +81,41 @@ impl SchedulerDispatch {
             // token endpoint.
             return Ok(RefreshOutcome::NotRefreshable);
         }
-        let response = request_refresh(
+        if bundle
+            .refresh_token_expires_at_unix_secs
+            .is_some_and(|deadline| deadline <= unix_secs(self.clock.now()))
+        {
+            self.record_reconnect_required(&upstream, "refresh_token_expired")
+                .await?;
+            return Ok(RefreshOutcome::NotRefreshable);
+        }
+        let response = match request_refresh(
             &self.http,
             self.oauth_cfg.as_ref(),
             &self.cancel,
             &bundle.refresh_token,
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(RefreshRequestError::Endpoint { status, body })
+                if is_terminal_refresh_failure(status.as_u16(), &body) =>
+            {
+                let reason = if status == http::StatusCode::UNAUTHORIZED {
+                    "status_401"
+                } else {
+                    "status_400"
+                };
+                self.record_reconnect_required(&upstream, reason).await?;
+                return Ok(RefreshOutcome::NotRefreshable);
+            }
+            Err(RefreshRequestError::Endpoint { status, .. }) => {
+                return Err(SchedulerError::Job(format!(
+                    "oauth token endpoint returned {status}"
+                )));
+            }
+            Err(RefreshRequestError::Other(error)) => return Err(error),
+        };
         let refreshed = refreshed_token_parts(
             ExistingTokenParts {
                 refresh_token: bundle.refresh_token,
@@ -103,6 +140,27 @@ impl SchedulerDispatch {
             encrypted_tokens,
             expires_at_unix_secs: updated.expires_at_unix_secs,
         }))
+    }
+
+    async fn record_reconnect_required(
+        &self,
+        upstream: &UpstreamRecord,
+        reason: &str,
+    ) -> SchedulerResult<()> {
+        match UpstreamStore::set_status(
+            self.storage.as_ref(),
+            upstream.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some(reason.to_owned())),
+                expected_oauth_token_generation: Some(upstream.oauth_token_generation),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await
+        {
+            Ok(()) | Err(StorageError::Conflict { .. }) => Ok(()),
+            Err(error) => Err(storage_scheduler_error(error)),
+        }
     }
 
     async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
@@ -145,18 +203,6 @@ impl SchedulerDispatch {
         }
     }
 
-    /// Clears a previously recorded apply error once the credential proves
-    /// usable again, mirroring `complete_refresh` clearing the error on a
-    /// successful token refresh.
-    async fn clear_recorded_apply_error(&self, upstream: &UpstreamRecord) -> SchedulerResult<()> {
-        if upstream.last_apply_error.is_none() {
-            return Ok(());
-        }
-        UpstreamStore::set_last_apply_error(self.storage.as_ref(), upstream.id, None)
-            .await
-            .map_err(storage_scheduler_error)
-    }
-
     async fn push_next_oauth_refresh_task(
         &self,
         upstream_id: uuid::Uuid,
@@ -191,6 +237,9 @@ impl SchedulerDispatch {
             return Ok(OAuthUsagePollObservation::Skip);
         }
         self.ensure_fresh_usage_token(&mut upstream).await?;
+        if !should_poll_oauth_usage(&upstream) {
+            return Ok(OAuthUsagePollObservation::Skip);
+        }
         // The provider gates the `cedar_ember` coupon surface on a recognised
         // Claude Code client, so both the usage GET and the one-time profile
         // fetch present the same stored-version CLI user agent.
@@ -268,7 +317,6 @@ impl SchedulerDispatch {
                     .await;
             }
         }
-        self.clear_recorded_apply_error(&upstream).await?;
         if upstream.oauth_never_refresh {
             self.enqueue_metadata_refresh_for_long_lived(&upstream, traceparent)
                 .await?;
@@ -501,24 +549,34 @@ impl SchedulerDispatch {
     }
 
     async fn ensure_fresh_usage_token(&self, upstream: &mut UpstreamRecord) -> SchedulerResult<()> {
-        let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+        if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
             return Ok(());
-        };
+        }
         let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
         if bundle.never_refresh {
             // Long-lived credentials are never refreshed.
             return Ok(());
         }
         if bundle
-            .expires_at_unix_secs
-            .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
-            > unix_secs(self.clock.now())
+            .refresh_token_expires_at_unix_secs
+            .is_some_and(|deadline| deadline <= unix_secs(self.clock.now()))
         {
-            return Ok(());
-        }
-        if let Err(error) = lazy_refresher.refresh_one(upstream.id).await {
-            tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage proactive refresh failed");
-            return Ok(());
+            self.record_reconnect_required(upstream, "refresh_token_expired")
+                .await?;
+        } else {
+            if bundle
+                .expires_at_unix_secs
+                .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
+                > unix_secs(self.clock.now())
+            {
+                return Ok(());
+            }
+            let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+                return Ok(());
+            };
+            if let Err(error) = lazy_refresher.refresh_one(upstream.id).await {
+                tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage proactive refresh failed");
+            }
         }
         if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
             .await
@@ -533,33 +591,49 @@ impl SchedulerDispatch {
         &self,
         upstream: &mut UpstreamRecord,
     ) -> SchedulerResult<bool> {
+        if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
+            return Ok(false);
+        }
         let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
-        if bundle.never_refresh {
-            // Long-lived credentials are never refreshed; a 401 is terminal and
-            // must be recorded durably so the upstream surfaces as broken.
-            let reason = "status_401".to_owned();
-            UpstreamStore::set_last_apply_error(
-                self.storage.as_ref(),
-                upstream.id,
-                Some(reason.clone()),
-            )
-            .await
-            .map_err(storage_scheduler_error)?;
-            upstream.last_apply_error = Some(reason);
+        let reason = if bundle.never_refresh {
+            // A long-lived credential cannot rotate after a usage endpoint 401.
+            Some("status_401")
+        } else if bundle
+            .refresh_token_expires_at_unix_secs
+            .is_some_and(|deadline| deadline <= unix_secs(self.clock.now()))
+        {
+            Some("refresh_token_expired")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.record_reconnect_required(upstream, reason).await?;
+            if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+                .await
+                .map_err(storage_scheduler_error)?
+            {
+                *upstream = refreshed;
+            }
             return Ok(false);
         }
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(false);
         };
-        lazy_refresher
-            .refresh_one(upstream.id)
-            .await
-            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        let generation = upstream.oauth_token_generation;
+        let result = lazy_refresher.refresh_one(upstream.id).await;
         if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
             .await
             .map_err(storage_scheduler_error)?
         {
             *upstream = refreshed;
+        }
+        if refresh_requires_reconnect(upstream.last_apply_error.as_deref()) {
+            return Ok(false);
+        }
+        if let Err(error) = result
+            && upstream.oauth_token_generation == generation
+        {
+            return Err(SchedulerError::Job(error.to_string()));
         }
         Ok(true)
     }
@@ -574,6 +648,7 @@ fn should_poll_oauth_usage(upstream: &UpstreamRecord) -> bool {
     upstream.kind == UpstreamKind::AnthropicOauth
         && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
+        && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
 }
 
 #[cfg(test)]

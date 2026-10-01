@@ -107,74 +107,159 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-describe('WarmupCardMinimal loading geometry', () => {
-  test('skeletonizes every cold-load warmup value inside its loaded line box', () => {
+describe('WarmupCardMinimal current state', () => {
+  test('does not claim an outcome before the first summary is available', () => {
     setSummaryQuery(undefined, true);
-    setRegistryPending(true);
-
     render(<WarmupCardMinimal upstream={upstream} />);
 
-    for (const testId of [
-      'warmup-status-value',
-      'warmup-next-value',
-      'warmup-last',
-      'warmup-plugin-row',
-      'warmup-failure-slot',
-    ]) {
-      expect(
-        screen.getByTestId(testId).querySelectorAll('.skeleton'),
-      ).toHaveLength(1);
-    }
-
-    expect(screen.getByTestId('warmup-status-value').className).toContain(
-      'min-h-5',
-    );
-    expect(screen.getByTestId('warmup-status-value').className).toContain(
-      'w-24',
-    );
-    expect(screen.getByTestId('warmup-next-value').className).toContain(
-      'min-h-5',
-    );
-    expect(screen.getByTestId('warmup-last').className).toContain('min-h-5');
-    expect(screen.getByTestId('warmup-plugin-row').className).toContain(
-      'min-h-7',
-    );
-    expect(screen.getByTestId('warmup-failure-slot').className).toContain(
-      'min-h-12',
-    );
-    expect(screen.queryByText('Pending')).toBeNull();
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe('');
+    expect(screen.queryByText('Healthy')).toBeNull();
     expect(screen.queryByText('Not scheduled')).toBeNull();
     expect(screen.queryByText('Never')).toBeNull();
   });
 
-  test('keeps the failure callout slot identical for success and failure', () => {
-    const successSummary = makeSummary(makeAttempt());
-    setSummaryQuery(successSummary, false);
+  test.each([
+    { status: 'success', expected: 'Healthy' },
+    { status: 'transient_failure', expected: 'Degraded' },
+    { status: 'permanent_failure', expected: 'Down' },
+    { status: 'skipped', expected: 'Idle' },
+  ] as const)(
+    'reports the observed $status outcome as $expected',
+    ({ status, expected }) => {
+      setSummaryQuery(makeSummary(makeAttempt({ status })), false);
+      render(<WarmupCardMinimal upstream={upstream} />);
+      expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+        expected,
+      );
+    },
+  );
 
-    const view = render(<WarmupCardMinimal upstream={upstream} />);
+  test.each(['transient_failure', 'permanent_failure'] as const)(
+    'does not let a later skip erase an unresolved %s',
+    (status) => {
+      const failure = makeAttempt({
+        status,
+        reason: 'auth_failed',
+        error_detail: 'token rejected',
+      });
+      const skipped = makeAttempt({ id: 'skip', status: 'skipped' });
+      setSummaryQuery(
+        { ...makeSummary(skipped), recent_attempts: [skipped, failure] },
+        false,
+      );
+      render(<WarmupCardMinimal upstream={upstream} />);
 
-    let slot = screen.getByTestId('warmup-failure-slot');
-    const reservedClassName = slot.className;
-    expect(reservedClassName).toContain('min-h-12');
-    expect(slot.textContent).toBe('');
-    expect(slot.querySelectorAll('.skeleton')).toHaveLength(0);
+      expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+        status === 'transient_failure' ? 'Degraded' : 'Down',
+      );
+      expect(screen.getByTestId('warmup-failure-slot').textContent).toContain(
+        'token rejected',
+      );
+    },
+  );
 
+  test('a successful attempt resolves older failures', () => {
+    const failure = makeAttempt({
+      status: 'permanent_failure',
+      reason: 'auth_failed',
+      error_detail: 'token rejected',
+    });
+    const success = makeAttempt({ id: 'recovered' });
     setSummaryQuery(
-      makeSummary(
-        makeAttempt({
-          status: 'permanent_failure',
-          reason: 'auth_failed',
-          http_status: 401,
-          error_detail: 'token rejected',
-        }),
-      ),
+      { ...makeSummary(success), recent_attempts: [success, failure] },
       false,
     );
-    view.rerender(<WarmupCardMinimal upstream={upstream} />);
+    render(<WarmupCardMinimal upstream={upstream} />);
 
-    slot = screen.getByTestId('warmup-failure-slot');
-    expect(slot.className).toBe(reservedClassName);
-    expect(slot.textContent).toContain('token rejected');
-    expect(slot.firstElementChild?.className).toContain('min-h-12');
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Healthy',
+    );
+    expect(screen.getByTestId('warmup-failure-slot').textContent).toBe('');
+  });
+
+  test.each([
+    { enabled: true, warmup_enabled: false },
+    { enabled: false, warmup_enabled: true },
+  ])('shows deliberate pause separately from an earlier failure', (flags) => {
+    const failure = makeAttempt({
+      status: 'permanent_failure',
+      reason: 'auth_failed',
+      error_detail: 'token rejected',
+    });
+    setSummaryQuery(makeSummary(failure), false);
+    render(<WarmupCardMinimal upstream={{ ...upstream, ...flags }} />);
+
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Paused',
+    );
+    expect(screen.getByTestId('warmup-last').textContent).toContain('Failed');
+    expect(screen.getByTestId('warmup-failure-slot').textContent).toContain(
+      'token rejected',
+    );
+  });
+
+  test.each(['status_400', 'status_401', 'refresh_token_expired'])(
+    'an authoritative credential failure %s outranks cached warm-up success',
+    (last_apply_error) => {
+      render(
+        <WarmupCardMinimal
+          upstream={{
+            ...upstream,
+            status: { ...upstream.status, last_apply_error },
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+        'Down',
+      );
+    },
+  );
+
+  test('does not paint cached success as current when the summary failed', () => {
+    vi.mocked(queries.useWarmupSummary).mockReturnValue({
+      data: makeSummary(makeAttempt()),
+      isPending: false,
+      isError: true,
+    } as never);
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Unavailable',
+    );
+  });
+
+  test('a deliberate pause does not hide a status lookup failure', () => {
+    vi.mocked(queries.useWarmupSummary).mockReturnValue({
+      data: undefined,
+      isPending: false,
+      isError: true,
+    } as never);
+    render(
+      <WarmupCardMinimal upstream={{ ...upstream, warmup_enabled: false }} />,
+    );
+
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Paused',
+    );
+    expect(screen.getByTestId('warmup-failure-slot').textContent).toContain(
+      'Warm-up status could not be loaded',
+    );
+  });
+
+  test('no recorded attempts stays pending rather than healthy', () => {
+    setSummaryQuery(
+      {
+        ...makeSummary(makeAttempt()),
+        last_attempt: null,
+        recent_attempts: [],
+      },
+      false,
+    );
+    render(<WarmupCardMinimal upstream={upstream} />);
+
+    expect(screen.getByTestId('warmup-status-value').textContent).toBe(
+      'Pending',
+    );
   });
 });

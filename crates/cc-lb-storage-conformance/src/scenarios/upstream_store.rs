@@ -60,6 +60,9 @@ where
     set_enabled_toggle(Arc::clone(&backend)).await?;
     store_oauth_tokens_roundtrip(Arc::clone(&backend)).await?;
     complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
+    reconnect_rejects_stale_generation_status(Arc::clone(&backend)).await?;
+    terminal_refresh_failure_dominates_late_status(Arc::clone(&backend)).await?;
+    api_key_credential_replacement_can_clear_apply_error(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
     secret_and_token_updates_do_not_bump_spec_revision(Arc::clone(&backend)).await?;
@@ -258,6 +261,261 @@ scenario!(complete_refresh_stores_tokens, |store| async move {
     );
     Ok(())
 });
+
+scenario!(
+    reconnect_rejects_stale_generation_status,
+    |store| async move {
+        let record = create_named(store.as_ref(), "upstream-reconnect-generation").await?;
+        let aead = AeadService::from_master_key([46; 32]);
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("refresh_token_expired".to_owned())),
+                    last_apply_at_unix_secs: Some(Some(1_800_000_000)),
+                    last_warmup_at_unix_secs: Some(Some(1_800_000_001)),
+                    expected_oauth_token_generation: Some(0),
+                },
+            )
+            .await?;
+        let initial_tokens = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("initial-access", "initial-refresh"),
+            record.id.as_bytes(),
+        )?;
+        let connected = store
+            .store_oauth_tokens(record.id, record.revision, initial_tokens, false)
+            .await?;
+        ensure!(
+            connected.oauth_token_generation == 1 && connected.last_apply_error.is_none(),
+            "initial credential write must start generation 1 and clear apply error"
+        );
+        ensure!(
+            connected.revision == record.revision
+                && connected.last_apply_at_unix_secs == Some(1_800_000_000)
+                && connected.last_warmup_at_unix_secs == Some(1_800_000_001),
+            "credential write must preserve spec revision and unrelated status fields"
+        );
+        for (write_token, generation) in [(false, 2), (true, 3)] {
+            store
+                .set_status(
+                    record.id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("status_401".to_owned())),
+                        expected_oauth_token_generation: Some(generation - 1),
+                        ..UpstreamStatusUpdate::default()
+                    },
+                )
+                .await?;
+            let failed = store.get_by_id(record.id).await?.expect("record");
+            ensure!(
+                failed.last_apply_error.as_deref() == Some("status_401"),
+                "current-generation refresh failure must persist"
+            );
+            let replacement = token_bundle("replacement-access", "replacement-refresh");
+            let encrypted =
+                EncryptedOAuthTokens::encrypt(&aead, &replacement, record.id.as_bytes())?;
+            let reconnected = if write_token {
+                store
+                    .store_oauth_tokens(record.id, record.revision, encrypted, false)
+                    .await?
+            } else {
+                store.update_oauth_token(record.id, encrypted).await?
+            };
+            ensure!(
+                reconnected.oauth_token_generation == generation
+                    && reconnected.last_apply_error.is_none(),
+                "reconnect must advance generation and clear terminal refresh failure"
+            );
+            ensure!(
+                reconnected
+                    .oauth_credentials
+                    .as_ref()
+                    .expect("tokens")
+                    .decrypt(&aead, record.id.as_bytes())?
+                    == replacement,
+                "reconnect must store replacement credentials"
+            );
+            ensure!(
+                reconnected.revision == record.revision
+                    && reconnected.last_apply_at_unix_secs == Some(1_800_000_000)
+                    && reconnected.last_warmup_at_unix_secs == Some(1_800_000_001),
+                "reconnect must preserve unrelated status fields"
+            );
+            let error = store
+                .set_status(
+                    record.id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("status_400".to_owned())),
+                        last_apply_at_unix_secs: Some(None),
+                        last_warmup_at_unix_secs: Some(None),
+                        expected_oauth_token_generation: Some(generation - 1),
+                    },
+                )
+                .await
+                .expect_err("stale failure must conflict");
+            ensure!(
+                matches!(error, StorageError::Conflict { .. }),
+                "stale generation must be a storage conflict"
+            );
+            ensure!(
+                store.get_by_id(record.id).await?.expect("record") == reconnected,
+                "stale failure must leave reconnected credentials and all status fields untouched"
+            );
+        }
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_400".to_owned())),
+                    expected_oauth_token_generation: Some(3),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            store
+                .get_by_id(record.id)
+                .await?
+                .expect("record")
+                .last_apply_error
+                .as_deref()
+                == Some("status_400"),
+            "matching reconnect generation must allow subsequent refresh failures"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    terminal_refresh_failure_dominates_late_status,
+    |store| async move {
+        let record = create_named(store.as_ref(), "upstream-terminal-dominance").await?;
+        let aead = AeadService::from_master_key([47; 32]);
+        let encrypted = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("initial-access", "initial-refresh"),
+            record.id.as_bytes(),
+        )?;
+        let connected = store
+            .store_oauth_tokens(record.id, record.revision, encrypted, false)
+            .await?;
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_401".to_owned())),
+                    expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_503".to_owned())),
+                    last_apply_at_unix_secs: Some(Some(1_800_000_010)),
+                    last_warmup_at_unix_secs: Some(Some(1_800_000_011)),
+                    expected_oauth_token_generation: Some(connected.oauth_token_generation),
+                },
+            )
+            .await?;
+        let after_late_failure = store.get_by_id(record.id).await?.expect("record");
+        ensure!(
+            after_late_failure.last_apply_error.as_deref() == Some("status_401"),
+            "late same-generation transient failure must not overwrite terminal refresh failure"
+        );
+        ensure!(
+            after_late_failure.oauth_credentials == connected.oauth_credentials
+                && after_late_failure.oauth_token_generation == connected.oauth_token_generation
+                && after_late_failure.last_apply_at_unix_secs == Some(1_800_000_010)
+                && after_late_failure.last_warmup_at_unix_secs == Some(1_800_000_011),
+            "terminal dominance must preserve credentials and permit unrelated status patches"
+        );
+        store.set_last_apply_error(record.id, None).await?;
+        ensure!(
+            store
+                .get_by_id(record.id)
+                .await?
+                .expect("record")
+                .last_apply_error
+                .as_deref()
+                == Some("status_401"),
+            "unconditional status clear must not reset terminal refresh failure"
+        );
+        let encrypted = EncryptedOAuthTokens::encrypt(
+            &aead,
+            &token_bundle("refreshed-access", "refreshed-refresh"),
+            record.id.as_bytes(),
+        )?;
+        let refreshed = store
+            .complete_refresh(record.id, Uuid::new_v4(), encrypted)
+            .await?;
+        ensure!(
+            refreshed.oauth_token_generation == connected.oauth_token_generation + 1
+                && refreshed.last_apply_error.is_none()
+                && refreshed.last_warmup_at_unix_secs == Some(1_800_000_011),
+            "actual credential write must clear terminal failure without losing warmup status"
+        );
+        store
+            .set_status(
+                record.id,
+                UpstreamStatusUpdate {
+                    last_apply_error: Some(Some("status_503".to_owned())),
+                    expected_oauth_token_generation: Some(refreshed.oauth_token_generation),
+                    ..UpstreamStatusUpdate::default()
+                },
+            )
+            .await?;
+        ensure!(
+            store
+                .get_by_id(record.id)
+                .await?
+                .expect("record")
+                .last_apply_error
+                .as_deref()
+                == Some("status_503"),
+            "fresh credential generation must accept nonterminal failures again"
+        );
+        Ok(())
+    }
+);
+
+scenario!(
+    api_key_credential_replacement_can_clear_apply_error,
+    |store| async move {
+        let record = store
+            .create(UpstreamCreate {
+                name: "api-key-terminal-looking-error".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                ..UpstreamCreate::default()
+            })
+            .await?;
+        store
+            .set_last_apply_error(record.id, Some("status_401".to_owned()))
+            .await?;
+        let replaced = store
+            .update_api_key_secret(record.id, Some(vec![4, 5, 6]))
+            .await?;
+        ensure!(
+            replaced.api_key_ciphertext == Some(vec![4, 5, 6]),
+            "API key credential replacement must remain available"
+        );
+        store.set_last_apply_error(record.id, None).await?;
+        ensure!(
+            store
+                .get_by_id(record.id)
+                .await?
+                .expect("record")
+                .last_apply_error
+                .is_none(),
+            "OAuth terminal dominance must not prevent API key apply-error clearing"
+        );
+        Ok(())
+    }
+);
 
 scenario!(set_last_apply_error_roundtrip, |store| async move {
     let record = create_named(store.as_ref(), "upstream-apply-error").await?;

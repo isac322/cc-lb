@@ -68,6 +68,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
+#[path = "oauth_refresh/lazy_mode.rs"]
+mod lazy_mode;
+#[path = "oauth_refresh/scheduled_mode.rs"]
+mod scheduled_mode;
 #[path = "oauth_refresh/scheduler_restart.rs"]
 mod scheduler_restart;
 

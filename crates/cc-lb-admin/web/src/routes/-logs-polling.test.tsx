@@ -1,16 +1,23 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
+  keepPreviousData,
+  QueryClient,
+  QueryClientProvider,
+} from '@tanstack/react-query';
+import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import type React from 'react';
 import { Suspense, startTransition } from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import type * as RequestEventsTableModule from '../components/ui/RequestEventsTable';
 import type { EventsHistogramPayload, RecentEventsPayload } from '../lib/api';
-import type * as queries from '../lib/queries';
+import * as queries from '../lib/queries';
 import { useEventsHistogram } from '../lib/queries';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import { Route } from './logs';
@@ -46,6 +53,7 @@ const routeState = vi.hoisted(() => ({
     | RecentEventsPayload
     | Promise<RecentEventsPayload>,
   recent: undefined as unknown as RecentResult,
+  renderRealTable: false,
   recentCalls: [] as Array<{
     filters: Record<string, string | undefined>;
     pageParam: queries.RecentEventsPageParam;
@@ -122,32 +130,36 @@ vi.mock('../lib/useLiveEventStream', () => ({
   },
 }));
 
-vi.mock('../components/ui/RequestEventsTable', () => ({
-  RequestEventsTable: ({
-    events,
-    liveFlashIds,
-    loading,
-  }: {
-    events: ReadonlyArray<{ event_id?: string; request_id: string }>;
-    liveFlashIds?: Set<string>;
-    loading?: boolean;
-  }) => (
-    <div data-loading={loading ? 'true' : 'false'} data-testid="logs-table">
-      {events.map((event) => {
-        const id = event.event_id ?? event.request_id;
-        return (
-          <span
-            data-flash={liveFlashIds?.has(id) ? 'true' : 'false'}
-            data-testid="logs-row"
-            key={id}
-          >
-            {id}
-          </span>
-        );
-      })}
-    </div>
-  ),
-}));
+vi.mock('../components/ui/RequestEventsTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof RequestEventsTableModule>();
+  return {
+    ...actual,
+    RequestEventsTable: (
+      props: React.ComponentProps<typeof actual.RequestEventsTable>,
+    ) => {
+      if (routeState.renderRealTable) {
+        return <actual.RequestEventsTable {...props} />;
+      }
+      const { events, liveFlashIds, loading } = props;
+      return (
+        <div data-loading={loading ? 'true' : 'false'} data-testid="logs-table">
+          {events.map((event) => {
+            const id = event.event_id ?? event.request_id;
+            return (
+              <span
+                data-flash={liveFlashIds?.has(id) ? 'true' : 'false'}
+                data-testid="logs-row"
+                key={id}
+              >
+                {id}
+              </span>
+            );
+          })}
+        </div>
+      );
+    },
+  };
+});
 const LogsPage = Route.options.component as React.ComponentType;
 
 const actualQueries = await vi.importActual<typeof queries>('../lib/queries');
@@ -203,10 +215,11 @@ function fullPage(prefix: string, principalId = 'principal-a') {
   );
 }
 
-function renderLogs() {
-  const queryClient = new QueryClient({
+function renderLogs(
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
+  }),
+) {
   const view = render(
     <QueryClientProvider client={queryClient}>
       <Suspense fallback={<div data-testid="logs-suspended" />}>
@@ -249,6 +262,7 @@ describe('logs polling surfaces', () => {
     routeState.liveCalls = [];
     routeState.search = {};
     routeState.suspendInitialForPrincipal = undefined;
+    routeState.renderRealTable = false;
     routeState.suspendedInitialPromise = new Promise<never>(() => {});
     vi.spyOn(Route, 'useSearch').mockImplementation(
       () => routeState.search as never,
@@ -346,52 +360,126 @@ describe('logs polling surfaces', () => {
     expect(screen.queryByTestId('time-range-strip-loading')).toBeNull();
   });
 
-  test('does not cache placeholder pages across a filter identity change', async () => {
-    routeState.recent = {
-      data: page('principal-a-request', 'principal-a'),
-      isPlaceholderData: false,
-      isPending: false,
-      refetch: vi.fn(),
-    };
-    routeState.histogram = {
-      data: { buckets: [], bucket_count: 0, bucket_ms: 60_000 },
-      isError: false,
-      isFetching: false,
-      isPending: false,
-    };
-    const view = renderLogs();
+  test.each(['principal_id', 'upstream_id'] as const)(
+    'does not show placeholder rows or an empty state across a %s change',
+    async (filterKey) => {
+      const scope = filterKey === 'principal_id' ? 'principal' : 'upstream';
+      const firstEvent = {
+        ts: 1_700_000_000,
+        request_id: `${scope}-a-request`,
+        principal_id: 'principal-a',
+        upstream_id: 'upstream-a',
+        status: 200,
+        duration_ms: 25,
+        event_kind: 'messages' as const,
+      };
+      const secondEvent = {
+        ...firstEvent,
+        request_id: `${scope}-b-request`,
+        principal_id: 'principal-b',
+        upstream_id: 'upstream-b',
+      };
+      const requests: Array<{
+        url: URL;
+        resolve: (response: Response) => void;
+      }> = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (input: RequestInfo | URL) =>
+            new Promise<Response>((resolve) => {
+              requests.push({
+                url: new URL(String(input), 'http://localhost'),
+                resolve,
+              });
+            }),
+        ),
+      );
+      vi.spyOn(queries, 'useRecentEventsPage').mockImplementation(
+        actualQueries.useRecentEventsPage,
+      );
+      routeState.renderRealTable = true;
+      routeState.search = { [filterKey]: `${scope}-a` };
+      routeState.histogram = {
+        data: { buckets: [], bucket_count: 0, bucket_ms: 60_000 },
+        isError: false,
+        isFetching: false,
+        isPending: false,
+      };
+      const queryClient = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, placeholderData: keepPreviousData },
+        },
+      });
+      const view = renderLogs(queryClient);
+      const pagination = () =>
+        screen.getByRole('navigation', { name: 'Log pagination' });
+      const emptyHeading = () =>
+        within(screen.getByRole('table')).queryByRole('heading', { level: 2 });
+      const resolvePage = async (
+        request: (typeof requests)[number],
+        events: RecentEventsPayload['events'],
+      ) => {
+        await act(async () => {
+          request.resolve(
+            new Response(JSON.stringify(pageFromEvents(events)), {
+              headers: { 'Content-Type': 'application/json' },
+            }),
+          );
+        });
+      };
 
-    await waitFor(() =>
-      expect(screen.getByText('principal-a-request')).toBeDefined(),
-    );
+      await waitFor(() => expect(requests).toHaveLength(1));
+      expect(pagination().getAttribute('aria-busy')).toBe('true');
+      expect(emptyHeading()).toBeNull();
+      await resolvePage(requests[0], [firstEvent]);
+      await waitFor(() =>
+        expect(
+          screen.getByLabelText(`View request ${firstEvent.request_id}`),
+        ).toBeDefined(),
+      );
 
-    routeState.search = { principal_id: 'principal-b' };
-    routeState.recent = {
-      data: page('principal-a-request', 'principal-a'),
-      isPlaceholderData: true,
-      isPending: false,
-      refetch: vi.fn(),
-    };
-    view.rerenderLogs();
+      // The stream may still expose its old map until its scope-reset effect runs.
+      routeState.live.eventsMap.set(firstEvent.request_id, {
+        phase: 'final',
+        event: firstEvent,
+      });
+      routeState.live.version = 1;
+      routeState.search = { [filterKey]: `${scope}-b` };
+      view.rerenderLogs();
 
-    await waitFor(() =>
-      expect(screen.queryByText('principal-a-request')).toBeNull(),
-    );
-    expect(screen.getByTestId('logs-table').dataset.loading).toBe('true');
+      await waitFor(() => expect(requests).toHaveLength(2));
+      expect(requests[1].url.searchParams.get(filterKey)).toBe(`${scope}-b`);
+      expect(screen.queryAllByLabelText(/^View request /)).toEqual([]);
+      expect(pagination().getAttribute('aria-busy')).toBe('true');
+      expect(emptyHeading()).toBeNull();
 
-    routeState.recent = {
-      data: page('principal-b-request', 'principal-b'),
-      isPlaceholderData: false,
-      isPending: false,
-      refetch: vi.fn(),
-    };
-    view.rerenderLogs();
+      await resolvePage(requests[1], [secondEvent]);
+      await waitFor(() =>
+        expect(
+          screen.getByLabelText(`View request ${secondEvent.request_id}`),
+        ).toBeDefined(),
+      );
+      expect(
+        screen.queryByLabelText(`View request ${firstEvent.request_id}`),
+      ).toBeNull();
+      expect(pagination().getAttribute('aria-busy')).toBe('false');
 
-    await waitFor(() =>
-      expect(screen.getByText('principal-b-request')).toBeDefined(),
-    );
-    expect(screen.queryByText('principal-a-request')).toBeNull();
-  });
+      routeState.search = { [filterKey]: `${scope}-empty` };
+      view.rerenderLogs();
+      await waitFor(() => expect(requests).toHaveLength(3));
+      expect(screen.queryAllByLabelText(/^View request /)).toEqual([]);
+      expect(pagination().getAttribute('aria-busy')).toBe('true');
+      expect(emptyHeading()).toBeNull();
+
+      await resolvePage(requests[2], []);
+      await waitFor(() => expect(emptyHeading()).not.toBeNull());
+      expect(screen.queryAllByLabelText(/^View request /)).toEqual([]);
+      expect(pagination().getAttribute('aria-busy')).toBe('false');
+      view.unmount();
+      queryClient.clear();
+    },
+  );
 
   test('uses the initial cursor and keeps scroll for a changed filter identity', async () => {
     const firstPage = fullPage('principal-a-request');

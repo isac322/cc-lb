@@ -252,7 +252,9 @@ Long-lived credentials still store the refresh token returned with the grant, bu
 
 The system runs a background sweeper every 60 seconds to refresh tokens that expire within 300 seconds. To prevent multiple replicas from refreshing the same token, the replica must claim a 90-second database lease.
 
-If the background refresh fails or a token expires before the sweeper runs, the proxy uses a lazy refresh fallback. When a request is signed, the signer checks if the token is expired or within the 30-second skew window. If so, it triggers an on-demand refresh, updates the database, and retries the request once.
+If the background refresh fails or a token expires before the sweeper runs, the proxy uses a lazy refresh fallback. When a request is signed, the signer checks whether the token is expired or within the 30-second skew window. If so, it triggers an on-demand refresh, updates the database, and retries the request once.
+
+A terminal refresh result (`400 invalid_grant`, `401`, or a known expired refresh token) records a reconnect-required state that scheduled, watchdog, and lazy refresh paths honor until the credential is replaced or the account is reconnected. Other `400` responses, network failures, and `5xx` responses remain transient and retry.
 
 Both refresh paths are disabled end to end for `long_lived_365d` credentials: the sweeper never schedules them and the signer never attempts a lazy refresh.
 
@@ -364,12 +366,12 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: OAuth tokens are not refreshed, and requests fail with expired token errors.
 - **Diagnosis**: Check the `/metrics` endpoint for `cclb_oauth_refresh_total{outcome="..."}` to see the error categorization.
-- **Workaround**: Verify that the network can reach the OAuth provider and that the client credentials in `cc-lb.toml` are correct. The lazy refresh mechanism will automatically retry on signing failures.
+- **Workaround**: Verify that the network can reach the OAuth provider and that the client credentials in `cc-lb.toml` are correct. Transient network, `5xx`, and non-terminal `400` refresh failures retry. For `400 invalid_grant`, `401`, or a known expired refresh token, rerun connect/reconnect to replace the credential; scheduled, watchdog, and lazy refresh paths do not retry while reconnect is required.
 
 ### Long-lived OAuth credential returns 401
 
 - **Symptom**: Requests through an OAuth upstream fail with expired token errors, and no refresh is attempted.
-- **Diagnosis**: Check `GET /admin/v1/upstreams/{id}/oauth/status`; a `long_lived_365d` credential reports `can_refresh: false`. A 401 on a long-lived credential is terminal — cc-lb never rotates it.
+- **Diagnosis**: Check `GET /admin/v1/upstreams/{id}/oauth/status`; the response includes `status`, `has_credentials`, `mode`, `refresh_token_present`, and `can_refresh`. A `long_lived_365d` credential reports `can_refresh: false`. A 401 on a long-lived credential is terminal — cc-lb never rotates it.
 - **Workaround**: Re-run the connect/reconnect flow to reauthorize. The flow requests a long-lived credential again; the upstream ends up in `refreshing` mode only when the provider refuses or clamps the grant.
 
 ### Upstream reports `refreshing` instead of a long-lived credential
