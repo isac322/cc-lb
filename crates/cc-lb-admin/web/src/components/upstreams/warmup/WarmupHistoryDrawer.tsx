@@ -25,14 +25,9 @@ import {
   formatResultNarrative,
   OUTCOME_SEVERITY,
   SEVERITY_DOT_CLASS,
+  SEVERITY_TEXT_CLASS,
 } from './parts/warmupViewModel';
 
-const SEVERITY_TEXT_CLASS = {
-  ok: 'text-text',
-  neutral: 'text-text-muted',
-  warn: 'text-warn-text',
-  danger: 'text-danger-text',
-} as const;
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -76,6 +71,9 @@ function OverviewStrip({
   for (const a of inWindow) counts[a.status]++;
   const total = inWindow.length;
   const failed = counts.transient_failure + counts.permanent_failure;
+  // The merged "failed" count shows the worst unresolved severity: any
+  // permanent failure is danger, transient-only retries stay warn.
+  const failedSeverity = counts.permanent_failure > 0 ? 'danger' : 'warn';
 
   // Dominant failure reason.
   const reasonCounts = new Map<string, number>();
@@ -111,7 +109,19 @@ function OverviewStrip({
               {total} attempts
             </span>
             <span className="text-caption tabular-nums text-text-faint">
-              · {counts.success} success · {failed} failed · {counts.skipped}{' '}
+              · <span className={SEVERITY_TEXT_CLASS.ok}>{counts.success}</span>{' '}
+              success ·{' '}
+              <span
+                className={
+                  failed > 0 ? SEVERITY_TEXT_CLASS[failedSeverity] : undefined
+                }
+              >
+                {failed}
+              </span>{' '}
+              failed ·{' '}
+              <span className={SEVERITY_TEXT_CLASS.neutral}>
+                {counts.skipped}
+              </span>{' '}
               skipped
             </span>
           </>
@@ -126,7 +136,9 @@ function OverviewStrip({
         ) : dominantReason && failed > 0 ? (
           <p className="text-caption text-text-muted">
             Most common failure:{' '}
-            <span className="text-text">{dominantReason}</span> ({maxCount}×)
+            <span className={SEVERITY_TEXT_CLASS[failedSeverity]}>
+              {dominantReason} ({maxCount}×)
+            </span>
           </p>
         ) : null}
       </div>
@@ -399,7 +411,14 @@ function AttemptDetail({
 
       {/* Tier 1: narrative */}
       <div className="space-y-1">
-        <p className="text-body text-text">{formatResultNarrative(attempt)}.</p>
+        <p
+          className={cx(
+            'text-body',
+            SEVERITY_TEXT_CLASS[OUTCOME_SEVERITY[attempt.status]],
+          )}
+        >
+          {formatResultNarrative(attempt)}.
+        </p>
         <p className="text-body-sm text-text-muted">
           {formatFreshnessLine(attempt)}
         </p>

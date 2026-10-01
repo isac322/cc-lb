@@ -457,9 +457,7 @@ function LogsPage() {
           {
             key: 'model' as const,
             label: 'Model',
-            value: (
-              <span className="font-mono text-data">{filters.model}*</span>
-            ),
+            value: <span className="font-mono text-data">{filters.model}</span>,
           },
         ]
       : []),
@@ -666,7 +664,7 @@ function LogsPage() {
               )}
               value={modelDraft}
               onChange={(e) => setModelDraft(e.target.value)}
-              placeholder="Model prefix"
+              placeholder="Search models"
             />
           </Field>
           <Field label="Status">

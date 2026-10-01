@@ -69,8 +69,18 @@ vi.mock('../lib/api', async () => {
 });
 
 vi.mock('../components/upstreams/InlineNameEditor', () => ({
-  InlineNameEditor: ({ upstream }: { upstream: { name: string } }) => (
-    <span>{upstream.name}</span>
+  // Display-mode stub: keeps the name text and the edit affordance contract
+  // (clickable title text) without pulling the mutation hook into this suite.
+  InlineNameEditor: ({
+    upstream,
+    className,
+  }: {
+    upstream: { name: string };
+    className?: string;
+  }) => (
+    <span className={className} title="Click to edit name">
+      {upstream.name}
+    </span>
   ),
 }));
 
@@ -1088,6 +1098,10 @@ describe('/upstreams refresh retention', () => {
         upstream_id: secondOauthUpstream.id,
         event_kind: 'messages',
       },
+      mode: 'infinite',
+      initialHistoryLimit: 500,
+      pageSize: 50,
+      maxRetained: 500,
     });
     expect(
       screen.getByText(

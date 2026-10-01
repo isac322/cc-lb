@@ -165,7 +165,7 @@ const PRINCIPAL_VIEW_DEFAULTS = {
 
 // The table keeps the one flat surface in an otherwise unboxed section.
 const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS =
-  'glass rounded-md overflow-x-auto min-h-48';
+  'glass rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto';
 const PRINCIPAL_KIND_LABEL: Record<Principal['kind'], string> = {
   machine: 'Machine',
   human: 'Human',
@@ -713,6 +713,10 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       principal_id: principal.id,
       event_kind: 'messages',
     },
+    mode: 'infinite',
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    maxRetained: 500,
   });
   return (
     <DetailSection

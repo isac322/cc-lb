@@ -1945,7 +1945,7 @@ function OverviewPage() {
               minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
               showPagination
-              tableContainerClassName="relative min-w-0 overflow-x-auto scroll-fade-right max-md:-mx-4 md:glass md:rounded-md"
+              tableContainerClassName="relative min-w-0 overflow-x-auto max-md:-mx-4 md:glass md:rounded-md"
             />
           </Section>
         </>

@@ -861,6 +861,77 @@ describe('logs polling surfaces', () => {
     ).toBeNull();
   });
 
+  test('sends the typed model needle unchanged to recent, histogram, and live queries', async () => {
+    routeState.search = { model: 'sonnet' };
+    routeState.recent = {
+      data: pageFromEvents([
+        {
+          ts: 1_700_000_001,
+          request_id: 'sonnet-request',
+          model: 'claude-3-5-sonnet-20241022',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'messages',
+        },
+        {
+          ts: 1_700_000_000,
+          request_id: 'opus-request',
+          model: 'claude-opus-4-5-20251101',
+          status: 200,
+          duration_ms: 25,
+          event_kind: 'messages',
+        },
+      ]),
+      isPlaceholderData: false,
+      isPending: false,
+      refetch: vi.fn(),
+    };
+
+    renderLogs();
+
+    await waitFor(() =>
+      expect(screen.getByText('sonnet-request')).toBeDefined(),
+    );
+    // A stale retained row outside the fuzzy match stays hidden.
+    expect(screen.queryByText('opus-request')).toBeNull();
+    // The server owns normalization; the client never prepends `claude-`.
+    for (const calls of [
+      routeState.recentCalls.map(({ filters }) => filters),
+      routeState.histogramCalls,
+      routeState.liveCalls,
+    ]) {
+      expect(calls.length).toBeGreaterThan(0);
+      for (const filters of calls) expect(filters.model).toBe('sonnet');
+    }
+  });
+
+  test('opens on All time even when a shared range preference is stored', () => {
+    localStorage.setItem('cclb.timeRange', '24h');
+    try {
+      routeState.search = {};
+      renderLogs();
+
+      const range = within(
+        screen.getByRole('radiogroup', { name: 'Time range preset' }),
+      );
+      expect(
+        range
+          .getByRole('radio', { name: 'All time' })
+          .getAttribute('aria-checked'),
+      ).toBe('true');
+      for (const filters of [
+        ...routeState.recentCalls.map((call) => call.filters),
+        ...routeState.liveCalls,
+      ]) {
+        expect(filters.since_unix_secs).toBeUndefined();
+        expect(filters.until_unix_secs).toBeUndefined();
+      }
+      expect(routeState.recentCalls.length).toBeGreaterThan(0);
+    } finally {
+      localStorage.removeItem('cclb.timeRange');
+    }
+  });
+
   test('removes a live error row promptly when its partial corrects to 200', async () => {
     routeState.search = { status: 'errors', event_kind: 'all' };
     const partialAt = (status: number) => ({

@@ -78,6 +78,12 @@ pub struct RecentEventsPayload {
     pub observed: bool,
     pub count: usize,
     pub limit: usize,
+    /// Live-stream watermark captured *before* the list query. Every event at
+    /// or below it is visible to the list; every later event is replayed by
+    /// `/events/stream` when this value is sent as `Last-Event-ID`, so a client
+    /// that seeds its live tail with it cannot miss rows committed between the
+    /// history request and the stream connect. Overlap is deduped by event id.
+    pub cursor: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -371,6 +377,7 @@ pub async fn build_recent_events_payload(
     storage: &dyn Storage,
     params: &RecentEventsParams,
 ) -> Result<RecentEventsPayload, EventsError> {
+    let cursor = storage.current_request_event_cursor().await?;
     let events = storage.list_request_events(&params.list_query()).await?;
     let count = events.len();
     let observed = !events.is_empty();
@@ -379,6 +386,7 @@ pub async fn build_recent_events_payload(
         observed,
         count,
         limit: params.limit,
+        cursor,
     })
 }
 

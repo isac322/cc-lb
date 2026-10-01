@@ -153,6 +153,38 @@ export function isErrorLogRow(row: RequestEventWithPhase): boolean {
   return (row.upstream_response_status ?? 0) >= 400;
 }
 
+/** The one vendor prefix the model search ignores. */
+const MODEL_VENDOR_PREFIX = 'claude-';
+
+/**
+ * Whether a row's model satisfies the user-typed model filter. Mirrors
+ * `model_filter_matches` in `cc_lb_storage_api::storage_types_common` and the
+ * pair of left-anchored `LIKE` patterns (`{core}%` or `claude-%{core}%`) the
+ * historical SQL binds, so live rows, retained rows and fetched pages agree.
+ *
+ * The needle normalizes to lowercase without one leading `claude-`; an empty
+ * remainder means the filter is absent, matching the backend's NULL LIKE bind.
+ * `sonnet` therefore matches `claude-sonnet-4-5` and `claude-3-5-sonnet-…`,
+ * while a row without a model never matches a present filter.
+ */
+function modelFilterMatches(
+  needle: string | undefined,
+  model: string | null | undefined,
+): boolean {
+  const trimmed = needle?.trim().toLowerCase() ?? '';
+  const core = trimmed.startsWith(MODEL_VENDOR_PREFIX)
+    ? trimmed.slice(MODEL_VENDOR_PREFIX.length)
+    : trimmed;
+  if (core === '') return true;
+  if (model == null) return false;
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith(core) ||
+    (normalized.startsWith(MODEL_VENDOR_PREFIX) &&
+      normalized.slice(MODEL_VENDOR_PREFIX.length).includes(core))
+  );
+}
+
 export function filterLogRows(
   rows: readonly RequestEventWithPhase[],
   filters: LogRowFilters,
@@ -161,9 +193,7 @@ export function filterLogRows(
     filters.status === 'errors'
       ? rows.filter(isErrorLogRow)
       : filterLogRowsByStatusClass(rows, filters.status);
-  // Case-insensitive prefix, matching `lower(model) LIKE …` in storage and
-  // `model_filter_matches` in the SSE fan-out. A row without a model never matches.
-  const modelPrefix = filters.model?.trim().toLowerCase();
+  // Live partial rows and fetched historical rows share this predicate.
   return statusRows.filter((row) => {
     if (filters.principal_id && row.principal_id !== filters.principal_id) {
       return false;
@@ -174,7 +204,7 @@ export function filterLogRows(
     if (filters.session && row.thread_id !== filters.session) {
       return false;
     }
-    if (modelPrefix && !row.model?.toLowerCase().startsWith(modelPrefix)) {
+    if (!modelFilterMatches(filters.model, row.model)) {
       return false;
     }
     if (

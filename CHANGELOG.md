@@ -4,15 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
+### Removed
 
-- Terminal OAuth refresh failures (`400 invalid_grant`, `401`, or an expired refresh token) now latch reconnect-required state across scheduled, watchdog, and lazy refresh paths until credential replacement or reconnect; transient network, `5xx`, and non-terminal `400` failures still retry.
-- Disabled OAuth upstreams remain visible with reconnect notices, and quota rows distinguish hidden extra-usage budgets from Unified provider restriction state.
+- The admin dashboard no longer shows the Unified account-restriction envelope: it has no quota row, chart series, legend entry or reset fact anywhere, and the web app no longer requests `unified` window data. This is presentation-only — the backend still parses the provider's unified rate-limit headers, stores the window, reports it in admin API payloads, and keeps using it for subscription-preference overage routing.
 
 ### Changed
 
 - Shared request feeds now paginate older history by cursor beyond Overview's initial 500 rows with 50-row pages, while keeping live SSE bounds separate from historical retention.
 - Overview top-principal cost bars use the full result set as their relative maximum, with fixed two-decimal values and exact details; cache-hit thresholds, token unit colors, and positive-only cost breakdowns match the request views.
+- Quota severity is now pace-relative: usage running well ahead of even pace (10+ points warn, 30+ points danger, or 90%+ used) colors the same figure worse than on-pace usage, while windows without a pace reading keep the absolute warn-at-80 rule and 95% is always danger. Quota history charts draw only the 95% danger threshold line, and the upstreams list's needs-attention quota boundary follows it.
+
+### Fixed
+
+- Terminal OAuth refresh failures (`400 invalid_grant`, `401`, or an expired refresh token) now latch reconnect-required state across scheduled, watchdog, and lazy refresh paths until credential replacement or reconnect; transient network, `5xx`, and non-terminal `400` failures still retry.
+- Disabled OAuth upstreams remain visible with reconnect notices, and quota rows hide extra-usage budgets that are switched off or have no positive monthly limit.
 
 ## [1.0.0] - 2026-09-30
 

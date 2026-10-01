@@ -53,33 +53,62 @@ const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   cost_usd_micros: 10_000,
 }));
 
+function applyRecentFilters(
+  events: readonly RequestEvent[],
+  filters: Record<string, string | undefined>,
+): RequestEvent[] {
+  // Mirrors the backend model contract (`model_filter_matches`): lowercase the
+  // needle minus a leading `claude-`; a row matches when its model starts with
+  // the core or is a `claude-*` id containing it. An absent core means no
+  // filter; a present one never matches a model-less row.
+  const core = filters.model
+    ?.trim()
+    .toLowerCase()
+    .replace(/^claude-/, '');
+  return events.filter((event) => {
+    if (filters.thread_id && event.thread_id !== filters.thread_id) {
+      return false;
+    }
+    if (core) {
+      const model = event.model?.toLowerCase() ?? '';
+      const matches =
+        model.startsWith(core) ||
+        (model.startsWith('claude-') && model.slice(7).includes(core));
+      if (!matches) return false;
+    }
+    if (
+      filters.status_class &&
+      filters.status_class !== `${Math.floor(event.status / 100)}xx`
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function makeRecentPage(
   filters: Record<string, string | undefined>,
   pageParam: queries.RecentEventsPageParam,
+  sourceEvents: readonly RequestEvent[] = mockEvents,
 ): RecentEventsPayload {
-  const filtered = mockEvents.filter(
-    (event) =>
-      (!filters.thread_id || event.thread_id === filters.thread_id) &&
-      (!filters.model ||
-        event.model.toLowerCase().startsWith(filters.model.toLowerCase())) &&
-      (!filters.status_class ||
-        filters.status_class === `${Math.floor(event.status / 100)}xx`),
-  );
+  const filtered = applyRecentFilters(sourceEvents, filters);
   const start =
     pageParam.kind === 'initial'
       ? 0
-      : filtered.findIndex(
-          (event) =>
-            event.ts_ms < pageParam.ts_ms ||
-            (event.ts_ms === pageParam.ts_ms &&
-              event.request_id < pageParam.event_id),
-        );
+      : filtered.findIndex((event) => {
+          const eventTsMs = event.ts_ms ?? (event.ts ?? 0) * 1000;
+          return (
+            eventTsMs < pageParam.ts_ms ||
+            (eventTsMs === pageParam.ts_ms &&
+              event.request_id < pageParam.event_id)
+          );
+        });
   const pageStart = start < 0 ? filtered.length : start;
-  const events = filtered.slice(pageStart, pageStart + pageParam.limit);
+  const pageEvents = filtered.slice(pageStart, pageStart + pageParam.limit);
   return {
-    events,
-    observed: events.length > 0,
-    count: events.length,
+    events: pageEvents,
+    observed: pageEvents.length > 0,
+    count: pageEvents.length,
     limit: pageParam.limit,
   };
 }
@@ -297,6 +326,82 @@ describe('LogsPage', () => {
         event_kind: 'renewal',
       }).map((row) => row.request_id),
     ).toEqual(['target']);
+  });
+
+  it.each([
+    ['sonnet', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    ['SONNET', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    [' sonnet-4-5 ', ['sonnet-modern', 'sonnet-bare']],
+    ['3-5-sonnet', ['sonnet-legacy']],
+    ['claude-sonnet', ['sonnet-modern', 'sonnet-legacy', 'sonnet-bare']],
+    ['claude-3-5-sonnet-20241022', ['sonnet-legacy']],
+    ['sonnet-modern', []],
+  ] as const)(
+    'filters models without requiring the vendor prefix: %s',
+    (model, expected) => {
+      const rows = [
+        { request_id: 'sonnet-modern', model: 'claude-sonnet-4-5-20250929' },
+        { request_id: 'sonnet-legacy', model: 'claude-3-5-sonnet-20241022' },
+        { request_id: 'sonnet-bare', model: 'Sonnet-4-5' },
+        { request_id: 'other', model: 'claude-opus-4-5-20251101' },
+        { request_id: 'model-less', model: null },
+      ] as RequestEventWithPhase[];
+
+      expect(
+        filterLogRows(rows, { model }).map((row) => row.request_id),
+      ).toEqual(expected);
+      // A whitespace needle and a bare vendor prefix are both absent filters.
+      for (const absent of ['', '  ', 'claude-', 'CLAUDE- ']) {
+        expect(filterLogRows(rows, { model: absent })).toHaveLength(
+          rows.length,
+        );
+      }
+    },
+  );
+
+  it('filters arriving live rows with the same fuzzy model predicate', async () => {
+    const events = [
+      {
+        ts: 5,
+        ts_ms: 5_000,
+        request_id: 'historical-sonnet',
+        model: 'claude-3-5-sonnet-20241022',
+        status: 200,
+        duration_ms: 10,
+        event_kind: 'messages' as const,
+      },
+    ];
+    queryMocks.fetchRecentEventsPage.mockImplementation((filters, pageParam) =>
+      makeRecentPage(filters, pageParam, events),
+    );
+    await renderLogs({ model: 'sonnet' });
+
+    const table = screen.getByRole('table');
+    await waitFor(() =>
+      expect(rowIds(table)).toEqual(['View request historical-sonnet']),
+    );
+
+    publishLiveEvent({
+      ...mockEvents[0],
+      request_id: 'live-sonnet',
+      model: 'claude-sonnet-4-5-20250929',
+      ts: 6,
+      ts_ms: 6_000,
+    });
+    publishLiveEvent({
+      ...mockEvents[0],
+      request_id: 'live-other',
+      model: 'other-vendor-model',
+      ts: 7,
+      ts_ms: 7_000,
+    });
+
+    await waitFor(() =>
+      expect(rowIds(table)).toEqual([
+        'View request live-sonnet',
+        'View request historical-sonnet',
+      ]),
+    );
   });
 
   it('shows applied filters as removable chips behind a collapsed panel', async () => {

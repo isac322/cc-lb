@@ -18,7 +18,6 @@ const WINDOW_SERIES_TOKEN: Record<string, string> = {
   '7d_sonnet': 'var(--color-series-sonnet)',
   '7d_opus': 'var(--color-series-opus)',
   overage: 'var(--color-series-overage)',
-  unified: 'var(--color-series-unified)',
 };
 
 /** Flat area fill opacity for chart series: 12% dark, 10% light. */
@@ -26,14 +25,13 @@ export const SERIES_FILL_OPACITY = 'var(--chart-fill-opacity)';
 
 /**
  * Stroke and fill for a quota window series, as CSS `var()` references so
- * they follow the theme. Unknown windows fall back to the neutral `unified`
- * series.
+ * they follow the theme. Unknown windows fall back to the neutral gray.
  */
 export function getWindowColor(window: string): {
   stroke: string;
   fill: string;
 } {
-  const token = WINDOW_SERIES_TOKEN[window] ?? WINDOW_SERIES_TOKEN.unified!;
+  const token = WINDOW_SERIES_TOKEN[window] ?? 'var(--color-neutral)';
   return { stroke: token, fill: token };
 }
 

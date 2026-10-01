@@ -53,31 +53,9 @@ function WindowName({ window }: { window: string }) {
         className="size-2.5 shrink-0 rounded-xs"
         style={{ backgroundColor: getWindowColor(window).stroke }}
       />
-      {window === 'unified' ? (
-        <Hint
-          label={
-            <span className="block max-w-72 whitespace-normal leading-5">
-              Unified is the provider's aggregate account restriction envelope,
-              not a separate quota. It reports whether requests are allowed and
-              any restriction or reset the provider observed.
-            </span>
-          }
-        >
-          <button
-            type="button"
-            className={cx(
-              'truncate rounded-xs text-title-card text-text focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent',
-              HINT_TRIGGER_CLASS,
-            )}
-          >
-            {windowLabel(window)}
-          </button>
-        </Hint>
-      ) : (
-        <span className="truncate text-title-card text-text">
-          {windowLabel(window)}
-        </span>
-      )}
+      <span className="truncate text-title-card text-text">
+        {windowLabel(window)}
+      </span>
     </span>
   );
 }
@@ -96,9 +74,11 @@ export function QuotaWindowRow({
   snap: QuotaSnapshot;
   nowUnixSecs: number;
 }) {
+  // `unified` is not a renderable SubscriptionQuotaWindow, but the wire can
+  // still report it (routing/overage) — the row never renders either way.
+  const windowName: string = snap.window;
+  if (windowName === 'unified') return null;
   const isOverage = snap.window === 'overage';
-  const isUnified = snap.window === 'unified';
-  const timed = !isOverage && !isUnified;
   const unobserved = snap.state === 'unobserved';
   if (isOverage && !isOverageActive(snap)) return null;
 
@@ -112,49 +92,23 @@ export function QuotaWindowRow({
     : snap.utilization == null
       ? null
       : snap.utilization * 100;
-  const severity = quotaSeverity(usedPct);
-  const severityClass =
-    severity === 'warn' || severity === 'danger'
-      ? QUOTA_SEVERITY_TEXT_CLASS[severity]
-      : 'text-text';
 
   const notStarted =
-    timed &&
+    !isOverage &&
     !unobserved &&
     (snap.utilization == null ||
       snap.resets_at_unix_secs == null ||
       snap.resets_at_unix_secs <= nowUnixSecs);
-  const started = timed && !unobserved && !notStarted;
-  // Even pace only for a running 5h / 7d window (never Extra usage/Unified).
+  const started = !isOverage && !unobserved && !notStarted;
+  // Even pace only for a running timed window (never Extra usage).
   const pacePct = started
     ? quotaPacePct(snap.window, snap.resets_at_unix_secs, nowUnixSecs)
     : null;
+  const severityClass =
+    QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(usedPct, pacePct)];
 
   let used: ReactNode;
-  if (isUnified) {
-    const status = unobserved ? null : snap.status;
-    used = (
-      <span
-        className={
-          status === 'rejected'
-            ? 'text-danger-text'
-            : status === 'allowed_warning'
-              ? 'text-warn-text'
-              : 'text-text-muted'
-        }
-      >
-        {unobserved
-          ? 'No reading'
-          : status === 'allowed'
-            ? 'Allowed'
-            : status === 'allowed_warning'
-              ? 'Allowed with warning'
-              : status === 'rejected'
-                ? 'Restricted'
-                : status || 'Status not reported'}
-      </span>
-    );
-  } else if (isOverage && overageUsed != null) {
+  if (isOverage && overageUsed != null) {
     used = (
       <span className={severityClass}>
         {usd(overageUsed)}
@@ -187,10 +141,8 @@ export function QuotaWindowRow({
         </span>
       </Hint>,
     );
-  // Unified carries a reset (anthropic-ratelimit-unified-reset) but is never
-  // `timed`: once observed it counts down, without pace or a "Not started".
   if (
-    (started || isOverage || (isUnified && !unobserved)) &&
+    (started || isOverage) &&
     snap.resets_at_unix_secs != null &&
     snap.resets_at_unix_secs > nowUnixSecs
   )
@@ -201,42 +153,16 @@ export function QuotaWindowRow({
         ts={snap.resets_at_unix_secs * 1000}
       />,
     );
-  if (isUnified && !unobserved) {
-    if (usedPct != null && Number.isFinite(usedPct))
-      facts.push(
-        <span key="utilization">{formatQuotaPercent(usedPct)} reported</span>,
-      );
-    if (snap.representative_claim)
-      facts.push(
-        <span key="claim">
-          Applies to {windowLabel(snap.representative_claim)}
-        </span>,
-      );
-    if (snap.surpassed_threshold === true)
-      facts.push(<span key="threshold">Threshold exceeded</span>);
-    if (snap.disabled_reason)
-      facts.push(
-        <span key="disabled" className="max-w-64 break-words">
-          Disabled: {snap.disabled_reason}
-        </span>,
-      );
-  }
 
   return (
     <div role="listitem" data-window={snap.window} className={ROW_CLASS}>
       <WindowName window={snap.window} />
       <div className={METER_CELL_CLASS}>
-        {isUnified ? (
-          <span className="text-body-sm text-text-muted">
-            Account restriction envelope
-          </span>
-        ) : (
-          <UsageMeter
-            label={windowLabel(snap.window)}
-            pacePct={pacePct}
-            usedPct={usedPct}
-          />
-        )}
+        <UsageMeter
+          label={windowLabel(snap.window)}
+          pacePct={pacePct}
+          usedPct={usedPct}
+        />
       </div>
       <span className={USED_CELL_CLASS}>{used}</span>
       {facts.length ? (

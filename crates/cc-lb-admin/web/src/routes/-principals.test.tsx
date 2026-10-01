@@ -369,14 +369,18 @@ test('recent requests scope the shared feed and preserve container-fit columns',
   );
 
   renderWithProviders(<RecentRequestsCard principal={principal} />);
+  const requestTable = screen.getByText('Timestamp').closest('table');
 
   expect(requestEventsFeed.useRequestEventsFeed).toHaveBeenCalledWith({
     filters: {
       principal_id: principal.id,
       event_kind: 'messages',
     },
+    mode: 'infinite',
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    maxRetained: 500,
   });
-  const requestTable = screen.getByText('Timestamp').closest('table');
   expect(requestTable).not.toBeNull();
   expect(requestTable?.querySelectorAll('tbody tr')).toHaveLength(5);
   expect(requestTable?.querySelector('thead')?.textContent).not.toContain(

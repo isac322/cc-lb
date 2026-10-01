@@ -205,13 +205,15 @@ describe('selectVisibleGraphWindows', () => {
     expect(result).toEqual([]);
   });
 
-  it('keeps the Unified account envelope out of independent quota chart series', () => {
+  it('keeps the backend-only unified window out of rows and series', () => {
+    // `unified` is not a SubscriptionQuotaWindow; the backend may still
+    // report it on the wire for routing, but it never reaches the UI.
     const unified = snap({
       window: 'unified',
       observed_at_unix_millis: 1_500_000,
       status: 'allowed',
       representative_claim: '5h',
-    });
+    } as unknown as Partial<QuotaSnapshot>);
     expect(
       selectVisibleGraphWindows({
         latestWindows: [unified],
@@ -219,9 +221,7 @@ describe('selectVisibleGraphWindows', () => {
         sinceUnixSecs,
       }),
     ).toEqual([]);
-    expect(selectQuotaCardSnapshots({ latestWindows: [unified] })).toEqual([
-      unified,
-    ]);
+    expect(selectQuotaCardSnapshots({ latestWindows: [unified] })).toEqual([]);
   });
 
   it('returns visible windows ordered by QUOTA_WINDOW_ORDER', () => {
@@ -269,7 +269,7 @@ describe('selectQuotaCardSnapshots', () => {
     expect(
       windowsOf([
         snap({ window: '7d_opus', state: 'unobserved' }),
-        snap({ window: 'unified', state: 'unobserved' }),
+        snap({ window: '7d_sonnet', state: 'unobserved' }),
         snap({
           window: 'overage',
           state: 'unobserved',
@@ -295,22 +295,13 @@ describe('selectQuotaCardSnapshots', () => {
           extra_usage_enabled: true,
           extra_usage_monthly_limit: 5000,
         }),
-        snap({ window: 'unified', utilization: null, status: 'allowed' }),
         snap({ window: '7d_opus' }),
         snap({ window: '7d_sonnet' }),
         snap({ window: '7d_fable' }),
         snap({ window: '7d' }),
         snap({ window: '5h' }),
       ]),
-    ).toEqual([
-      '5h',
-      '7d',
-      '7d_fable',
-      '7d_sonnet',
-      '7d_opus',
-      'unified',
-      'overage',
-    ]);
+    ).toEqual(['5h', '7d', '7d_fable', '7d_sonnet', '7d_opus', 'overage']);
   });
 });
 

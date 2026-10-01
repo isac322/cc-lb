@@ -661,6 +661,7 @@ export interface RecentEventsPayload {
   observed: boolean;
   count: number;
   limit: number;
+  cursor?: number;
 }
 
 export interface HistogramBucket {
@@ -910,14 +911,19 @@ export interface AuditQueryResponse {
   entries: AuditEntry[];
 }
 
+/**
+ * Quota windows the web UI knows how to present. The backend may report
+ * others — notably `unified`, the account restriction envelope, which still
+ * exists on the wire and in admin payloads — but they are never requested or
+ * rendered here and are filtered out by the visibility selectors.
+ */
 export type SubscriptionQuotaWindow =
   | '5h'
   | '7d'
   | '7d_sonnet'
   | '7d_opus'
   | '7d_fable'
-  | 'overage'
-  | 'unified';
+  | 'overage';
 
 export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '5h': '5h',
@@ -926,7 +932,6 @@ export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
   '7d_opus': '7d (Opus)',
   '7d_fable': '7d (Fable)',
   overage: 'Extra usage',
-  unified: 'Unified',
 };
 
 export type SubscriptionQuotaDataState =

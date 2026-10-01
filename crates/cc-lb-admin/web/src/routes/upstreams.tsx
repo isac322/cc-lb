@@ -1051,6 +1051,10 @@ function DetailView({
       upstream_id: upstream.id,
       event_kind: 'messages',
     },
+    mode: 'infinite',
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    maxRetained: 500,
   });
 
   const metadataPending =
@@ -1720,7 +1724,7 @@ function DetailView({
                 cost: true,
                 tokens: true,
               }}
-              tableContainerClassName="glass min-h-48 overflow-x-auto rounded-md"
+              tableContainerClassName="glass min-h-48 h-96 max-h-[60vh] overflow-auto rounded-md"
               emptyTitle="No recent requests for this upstream"
             />
           </DetailSection>

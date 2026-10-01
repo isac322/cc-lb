@@ -133,4 +133,44 @@ describe('RequestEventDrawer responsive structure', () => {
     expect(badge.className).toContain('break-words');
     expect(badge.className).not.toContain('whitespace-nowrap');
   });
+
+  it('keeps a long cost on one right-aligned line in the Cost section', () => {
+    const event = {
+      _phase: 'final',
+      request_id: 'req_long_cost',
+      ts: Date.now(),
+      status: 200,
+      duration_ms: 150,
+      input_tokens: 100,
+      output_tokens: 200,
+      cost_input_micros: 123_456_789_012,
+      cost_usd_micros: 123_456_789_012,
+    } satisfies RequestEventWithPhase;
+
+    render(
+      <RequestEventDrawer
+        event={event}
+        principalName={null}
+        onClose={() => {}}
+      />,
+    );
+
+    const costSections = screen
+      .getAllByText('Cost')
+      .map((heading) => heading.parentElement)
+      .filter((section): section is HTMLElement => section !== null);
+    expect(
+      costSections.every((section) => section.className.includes('min-w-0')),
+    ).toBe(true);
+    // The Input row and the Total both carry the full amount.
+    const values = screen.getAllByText('$123,456.7890');
+    expect(values).toHaveLength(2);
+    for (const value of values) {
+      expect(costSections.some((section) => section.contains(value))).toBe(
+        true,
+      );
+      expect(value.className).toContain('whitespace-nowrap');
+      expect(value.className).toContain('text-right');
+    }
+  });
 });

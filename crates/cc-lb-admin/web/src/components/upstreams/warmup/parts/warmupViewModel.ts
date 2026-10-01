@@ -15,10 +15,22 @@ export const OUTCOME_SEVERITY: Record<WarmupAttemptStatus, Severity> = {
 };
 
 export const SEVERITY_DOT_CLASS: Record<Severity, string> = {
-  ok: 'bg-[color:var(--color-ok)]',
+  ok: 'bg-[color:var(--color-traffic-success)]',
   warn: 'bg-[color:var(--color-warn)]',
   danger: 'bg-[color:var(--color-danger)]',
   neutral: 'bg-[color:var(--color-neutral)]',
+};
+
+/**
+ * Text color for an explicit warm-up outcome. These surfaces opt in to the
+ * traffic-light scale, so a real success renders green instead of the muted
+ * "healthy by omission" `--color-ok`.
+ */
+export const SEVERITY_TEXT_CLASS: Record<Severity, string> = {
+  ok: 'text-traffic-success-text',
+  warn: 'text-warn-text',
+  danger: 'text-danger-text',
+  neutral: 'text-text-muted',
 };
 
 /** Compact human duration: 12s, 5m, 5m 12s, 1h 47m, 3d 4h. */
