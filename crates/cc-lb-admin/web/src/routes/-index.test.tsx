@@ -8,8 +8,15 @@ import {
   within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ComponentType, ReactNode } from 'react';
+import {
+  type ComponentProps,
+  type ComponentType,
+  createContext,
+  type ReactNode,
+  useContext,
+} from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as RequestEventsTableModule from '../components/ui/RequestEventsTable';
 import type {
   AggregateResponse,
   DashboardSummaryResponse,
@@ -62,6 +69,51 @@ vi.mock('../components/upstreams/UpstreamUsageTable', () => ({
   }),
   UpstreamUsageTable: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
 }));
+
+// Every test renders the real table unless it opts into the row-only table.
+// The context is read only while the mocked table renders, after module init.
+vi.mock('../components/ui/RequestEventsTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof RequestEventsTableModule>();
+  return {
+    ...actual,
+    RequestEventsTable: (
+      props: ComponentProps<typeof actual.RequestEventsTable>,
+    ) => {
+      if (!useContext(RowOnlyRequestEventsTableContext)) {
+        return <actual.RequestEventsTable {...props} />;
+      }
+      return (
+        <table>
+          <tbody>
+            {props.events.map((event) => {
+              const eventKey = event.event_id ?? event.request_id;
+              return (
+                <tr aria-label={`View request ${eventKey}`} key={eventKey}>
+                  <td>{eventKey}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      );
+    },
+  };
+});
+
+const RowOnlyRequestEventsTableContext = createContext(false);
+
+/**
+ * Swaps only the table leaf for bare rows. The feed, its paging and live merge
+ * stay real, so a test that walks hundreds of rows asserts which rows show
+ * without paying for each row's full presentation.
+ */
+function RowOnlyRequestEventsTable({ children }: { children: ReactNode }) {
+  return (
+    <RowOnlyRequestEventsTableContext.Provider value={true}>
+      {children}
+    </RowOnlyRequestEventsTableContext.Provider>
+  );
+}
 
 // The Overview links to other routes and keeps its range in the URL; render
 // router links as plain anchors and back the search params with a tiny store
@@ -1556,18 +1608,45 @@ describe('Overview loading geometry', () => {
     expect(status?.textContent).toBe('Live');
   });
 
+  const RETAINED_HISTORY = Array.from({ length: 500 }, (_, index) => ({
+    duration_ms: 10,
+    event_kind: 'messages' as const,
+    model: 'test-model',
+    request_id: `request-${500 - index}`,
+    status: 200,
+    ts: 500 - index,
+  }));
+
+  it('mounts only the newest 50 retained requests in the real table', () => {
+    mockResolvedKpiQueries();
+    mockRequestEventsFeed(RETAINED_HISTORY);
+    render(<OverviewPage />);
+
+    const table = screen
+      .getByLabelText('View request request-500')
+      .closest('table');
+    if (table === null) throw new Error('Expected latest requests table');
+    expect(
+      Array.from(
+        table.querySelectorAll<HTMLTableRowElement>(
+          'tbody tr[aria-label^="View request "]',
+        ),
+        (row) => row.getAttribute('aria-label'),
+      ),
+    ).toEqual(
+      RETAINED_HISTORY.slice(0, 50).map(
+        (event) => `View request ${event.request_id}`,
+      ),
+    );
+  });
+
   it('renders the first 50 latest requests and pages through retained history', () => {
     mockResolvedKpiQueries();
-    const history = Array.from({ length: 500 }, (_, index) => ({
-      duration_ms: 10,
-      event_kind: 'messages' as const,
-      model: 'test-model',
-      request_id: `request-${500 - index}`,
-      status: 200,
-      ts: 500 - index,
-    }));
+    const history = RETAINED_HISTORY;
     mockRequestEventsFeed(history);
-    const { rerender } = render(<OverviewPage />);
+    const { rerender } = render(<OverviewPage />, {
+      wrapper: RowOnlyRequestEventsTable,
+    });
 
     const table = screen
       .getByLabelText('View request request-500')
