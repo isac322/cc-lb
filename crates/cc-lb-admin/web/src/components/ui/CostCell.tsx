@@ -1,6 +1,7 @@
 import { formatCostMicros } from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover } from './BreakdownPopover';
+import { CostFigure } from './CostFigure';
 import { EmptyMetricCell, MetricCell } from './MetricCell';
 import {
   type CostComponentMicros,
@@ -57,7 +58,6 @@ export function CostCell({
   const popover = (
     <BreakdownPopover
       title={isPartial ? 'Estimated cost' : 'Cost'}
-      showZeroRows={true}
       isPartial={isPartial}
       rows={segments.map((segment) => ({
         label: segment.label,
@@ -81,9 +81,7 @@ export function CostCell({
       total={c.total}
       pulse={isPartial}
     >
-      <span data-slot="cost" className="text-text">
-        {text}
-      </span>
+      <CostFigure text={text} />
     </MetricCell>
   );
 }

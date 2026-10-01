@@ -8,9 +8,11 @@ import {
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { LatestResponse, QuotaSnapshot } from '../../lib/api';
+import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
 import type { Upstream } from '../../lib/queries';
 import {
   buildUpstreamUsageRows,
+  sortUpstreamRowsByUsage,
   type UpstreamUsageData,
   UpstreamUsageTable,
 } from './UpstreamUsageTable';
@@ -93,7 +95,10 @@ type Spec = [
   number | null,
 ];
 
-function data(specs: Spec[]): UpstreamUsageData {
+function data(
+  specs: Spec[],
+  nudges: ReadonlyMap<string, OAuthReconnectNudge> = new Map(),
+): UpstreamUsageData {
   const upstreams = specs.map(([id, kind, enabled]) =>
     upstream(id, kind, enabled),
   );
@@ -118,7 +123,7 @@ function data(specs: Spec[]): UpstreamUsageData {
         status,
         last_apply_error: null,
       })),
-      nudges: new Map(),
+      nudges,
       usageByUpstreamId: new Map(),
     }),
     isLoading: false,
@@ -126,7 +131,7 @@ function data(specs: Spec[]): UpstreamUsageData {
     statusPending: false,
     usagePending: false,
     quotaError: false,
-    reconnectCount: 0,
+    reconnectCount: nudges.size,
   };
 }
 
@@ -184,6 +189,81 @@ describe('UpstreamUsageTable', () => {
         '[data-window="7d_fable"] [data-slot="pace-marker"]',
       ),
     ).toBeNull();
+  });
+
+  it('keeps a disabled expired OAuth warning above quota danger and disabled healthy rows', () => {
+    const nudge: OAuthReconnectNudge = {
+      reason: 'refresh_token_expired',
+      tone: 'danger',
+      label: 'Refresh token expired',
+      description: 'Reconnect the account.',
+      actionLabel: 'Reconnect',
+      expiresAt: NOW - 1,
+    };
+    const rows = buildUpstreamUsageRows({
+      upstreams: [
+        upstream('disabled-expired', 'anthropic_oauth', false),
+        upstream('quota-danger', 'anthropic_oauth', true),
+        upstream('disabled-healthy', 'anthropic_oauth', false),
+      ],
+      latest: {
+        now_unix_secs: NOW,
+        max_staleness_secs: 300,
+        upstreams: [
+          {
+            upstream_id: 'quota-danger',
+            upstream_name: 'quota-danger',
+            windows: [snap('5h', 0.99)],
+          },
+          {
+            upstream_id: 'disabled-healthy',
+            upstream_name: 'disabled-healthy',
+            windows: [snap('5h', 0.99)],
+          },
+        ],
+      },
+      status: [
+        { id: 'disabled-expired', status: 'active', last_apply_error: null },
+        { id: 'quota-danger', status: 'active', last_apply_error: null },
+        { id: 'disabled-healthy', status: 'active', last_apply_error: null },
+      ],
+      nudges: new Map([['disabled-expired', nudge]]),
+      usageByUpstreamId: new Map(),
+    });
+
+    expect(sortUpstreamRowsByUsage(rows).map((row) => row.upstream.id)).toEqual(
+      ['disabled-expired', 'quota-danger', 'disabled-healthy'],
+    );
+
+    render(<UpstreamUsageTable data={{ ...data([]), rows }} />);
+    const firstRow = screen.getAllByTestId('upstream-usage-row')[0]!;
+    expect(
+      within(firstRow).getByTestId('usage-row-status').textContent,
+    ).toContain('Refresh token expired');
+    expect(
+      within(firstRow).getByTestId('usage-row-status').textContent,
+    ).toContain('Disabled');
+  });
+  it('keeps a disabled rejected credential above a healthy enabled 96% quota row', () => {
+    const nudge: OAuthReconnectNudge = {
+      reason: 'renewal_rejected',
+      tone: 'danger',
+      label: 'Token renewal failed',
+      description: 'Reconnect the account.',
+      actionLabel: 'Reconnect',
+      expiresAt: null,
+    };
+    const rows = data(
+      [
+        ['disabled-rejected', 'anthropic_oauth', false, 'active', null, null],
+        ['enabled-quota', 'anthropic_oauth', true, 'active', 0.96, null],
+      ],
+      new Map([['disabled-rejected', nudge]]),
+    ).rows;
+
+    expect(sortUpstreamRowsByUsage(rows).map((row) => row.upstream.id)).toEqual(
+      ['disabled-rejected', 'enabled-quota'],
+    );
   });
 
   it('shows every row up to the limit, then the rest behind Show all N', () => {

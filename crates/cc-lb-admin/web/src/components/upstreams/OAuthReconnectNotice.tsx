@@ -5,6 +5,7 @@
 import { useNavigate } from '@tanstack/react-router';
 import { useMemo } from 'react';
 import {
+  isTerminalOAuthReconnectReason,
   type OAuthReconnectNudge,
   useOAuthReconnectNudges,
 } from '../../lib/oauthReconnect';
@@ -45,29 +46,30 @@ export function OAuthReconnectNotice({
 }
 
 /**
- * Global banner for OAuth upstreams that need attention. Self-contained: runs
- * its own queries, excludes disabled upstreams from global attention, and
- * renders nothing when every OAuth connection is healthy or still loading.
+ * Global banner for OAuth upstreams that need attention, including disabled
+ * accounts. Self-contained: runs its own queries and renders nothing when
+ * every OAuth connection is healthy or still loading.
  * One line: a count title, the affected names as a sentence, one action.
  */
 export function OAuthReconnectSummary() {
   const navigate = useNavigate();
   const upstreams = useUpstreams();
-  const { nudges, isError } = useOAuthReconnectNudges(
+  const { nudges, isError: nudgeError } = useOAuthReconnectNudges(
     upstreams.data?.upstreams,
   );
+  const isError = upstreams.isError || nudgeError;
 
   const entries = useMemo(() => {
     const list: { id: string; name: string; nudge: OAuthReconnectNudge }[] = [];
     for (const u of upstreams.data?.upstreams ?? []) {
-      // Disabled accounts keep their detail nudge but stay out of global
-      // attention — they are not serving traffic anyway.
-      if (!u.enabled) continue;
       const nudge = nudges.get(u.id);
       if (nudge) list.push({ id: u.id, name: u.name, nudge });
     }
-    // Danger first, then soonest deadline.
+    // Terminal credential failures first, then danger and the soonest deadline.
     list.sort((a, b) => {
+      const terminalA = isTerminalOAuthReconnectReason(a.nudge.reason);
+      const terminalB = isTerminalOAuthReconnectReason(b.nudge.reason);
+      if (terminalA !== terminalB) return terminalA ? -1 : 1;
       if (a.nudge.tone !== b.nudge.tone)
         return a.nudge.tone === 'danger' ? -1 : 1;
       return (a.nudge.expiresAt ?? Infinity) - (b.nudge.expiresAt ?? Infinity);
@@ -97,7 +99,7 @@ export function OAuthReconnectSummary() {
   const named = entries.slice(0, MAX_NAMED_ENTRIES).map((e) => e.name);
   const hiddenCount = entries.length - named.length;
   // One shared reason reads as the sentence; mixed reasons stay on /upstreams.
-  const reasons = new Set(entries.map((e) => e.nudge.label));
+  const reasons = new Set(entries.map((e) => e.nudge.reason));
   const summary = [
     reasons.size === 1 ? `${entries[0]?.nudge.label}: ` : '',
     named.join(', '),

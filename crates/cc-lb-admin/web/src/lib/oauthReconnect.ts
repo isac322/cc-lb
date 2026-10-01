@@ -21,13 +21,37 @@ import {
 import { qk } from './queries';
 import { useVisibility } from './visibilityManager';
 
+export type OAuthReconnectReason =
+  | 'credentials_unreadable'
+  | 'not_connected'
+  | 'long_lived_rejected'
+  | 'long_lived_expired'
+  | 'long_lived_expiring'
+  | 'refresh_token_expired'
+  | 'renewal_rejected'
+  | 'refresh_token_expiring'
+  | 'access_token_expired'
+  | 'refresh_token_missing';
+
 export interface OAuthReconnectNudge {
+  reason: OAuthReconnectReason;
   tone: 'warn' | 'danger';
   label: string;
   description: string;
   actionLabel: 'Connect' | 'Reconnect';
   /** Relevant deadline (unix secs) when one is known; null when unknown. */
   expiresAt: number | null;
+}
+
+/** Terminal credential failures outrank quota and ordinary health danger. */
+export function isTerminalOAuthReconnectReason(
+  reason: OAuthReconnectReason,
+): boolean {
+  return (
+    reason === 'refresh_token_expired' ||
+    reason === 'renewal_rejected' ||
+    reason === 'long_lived_rejected'
+  );
 }
 
 const OAUTH_STATUS_POLL_MS = 30_000;
@@ -43,11 +67,9 @@ export const REFRESH_EXPIRING_SOON_SECS = 3 * 24 * 60 * 60;
 // to schedule the yearly reauthorization without an outage.
 export const LONG_LIVED_EXPIRING_SOON_SECS = 14 * 24 * 60 * 60;
 
-// The refresh worker records failures in last_apply_error via reason_for():
-// "status_<code>" for token-endpoint rejections, plus network/parse/cancelled/
-// decrypt/encrypt/storage/missing_credentials. Only an exact 400/401 is
-// treated as an authoritative renewal failure; every other reason is
-// transient or local and must not be presented as a reconnect requirement.
+// The refresh worker persists status_400 only for invalid_grant, status_401
+// for unauthorized credentials, and refresh_token_expired for a known lapsed
+// deadline. Other HTTP, network and local failures remain transient.
 
 export function classifyOAuthReconnect(
   status: UpstreamOAuthStatusResponse | undefined,
@@ -65,6 +87,7 @@ export function classifyOAuthReconnect(
   // backend reports has_credentials for it.
   if (status.status === 'corrupted') {
     return {
+      reason: 'credentials_unreadable',
       tone: 'danger',
       label: 'Stored credentials unreadable',
       description:
@@ -76,6 +99,7 @@ export function classifyOAuthReconnect(
 
   if (status.status === 'missing' || !status.has_credentials) {
     return {
+      reason: 'not_connected',
       tone: 'warn',
       label: 'OAuth not connected',
       description:
@@ -92,6 +116,7 @@ export function classifyOAuthReconnect(
   if (status.mode === 'long_lived_365d') {
     if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
       return {
+        reason: 'long_lived_rejected',
         tone: 'danger',
         label: 'Long-lived credential rejected',
         description:
@@ -108,6 +133,7 @@ export function classifyOAuthReconnect(
     if (accessExpiresAt == null) return null;
     if (accessExpiresAt <= nowSecs) {
       return {
+        reason: 'long_lived_expired',
         tone: 'danger',
         label: 'Long-lived token expired',
         description:
@@ -118,6 +144,7 @@ export function classifyOAuthReconnect(
     }
     if (accessExpiresAt - nowSecs <= LONG_LIVED_EXPIRING_SOON_SECS) {
       return {
+        reason: 'long_lived_expiring',
         tone: 'warn',
         label: 'Long-lived token expiring soon',
         description:
@@ -130,8 +157,12 @@ export function classifyOAuthReconnect(
   }
 
   const refreshExpiresAt = status.refresh_token_expires_at_unix_secs;
-  if (refreshExpiresAt != null && refreshExpiresAt <= nowSecs) {
+  if (
+    lastApplyError === 'refresh_token_expired' ||
+    (refreshExpiresAt != null && refreshExpiresAt <= nowSecs)
+  ) {
     return {
+      reason: 'refresh_token_expired',
       tone: 'danger',
       label: 'Refresh token expired',
       description:
@@ -143,6 +174,7 @@ export function classifyOAuthReconnect(
 
   if (lastApplyError === 'status_400' || lastApplyError === 'status_401') {
     return {
+      reason: 'renewal_rejected',
       tone: 'danger',
       label: 'Token renewal failed',
       description:
@@ -157,6 +189,7 @@ export function classifyOAuthReconnect(
     refreshExpiresAt - nowSecs <= REFRESH_EXPIRING_SOON_SECS
   ) {
     return {
+      reason: 'refresh_token_expiring',
       tone: 'warn',
       label: 'Refresh token expiring soon',
       description:
@@ -173,6 +206,7 @@ export function classifyOAuthReconnect(
     const accessExpiresAt = status.expires_at_unix_secs;
     if (accessExpiresAt != null && accessExpiresAt <= nowSecs) {
       return {
+        reason: 'access_token_expired',
         tone: 'danger',
         label: 'Access token expired',
         description:
@@ -182,6 +216,7 @@ export function classifyOAuthReconnect(
       };
     }
     return {
+      reason: 'refresh_token_missing',
       tone: 'warn',
       label: 'No refresh token',
       description:
@@ -205,9 +240,9 @@ export interface OAuthReconnectNudgesResult {
 const NO_UPSTREAMS: readonly Upstream[] = [];
 
 /**
- * Polls /oauth/status for every OAuth-kind upstream in the list (enabled and
- * disabled alike — callers decide which to surface). Shares query keys with
- * useUpstreamOAuthStatus, so completion invalidation refreshes both.
+ * Polls /oauth/status for every OAuth-kind upstream, enabled and disabled.
+ * Shares query keys with useUpstreamOAuthStatus, so completion invalidation
+ * refreshes every reconnect surface.
  */
 export function useOAuthReconnectNudges(
   upstreams: readonly Upstream[] = NO_UPSTREAMS,

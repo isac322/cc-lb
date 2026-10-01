@@ -390,23 +390,30 @@ function WarmupCardMinimalInner({
   let statusTone: 'ok' | 'warn' | 'danger' | 'neutral' = 'neutral';
   let statusLabel = 'Paused';
 
-  if (upstream.warmup_enabled) {
-    if (incident) {
+  const credentialRequiresReconnect =
+    upstream.status.last_apply_error === 'status_400' ||
+    upstream.status.last_apply_error === 'status_401' ||
+    upstream.status.last_apply_error === 'refresh_token_expired';
+  if (upstream.enabled && upstream.warmup_enabled) {
+    if (credentialRequiresReconnect) {
       statusTone = 'danger';
       statusLabel = 'Down';
+    } else if (summaryQ.isError) {
+      statusTone = 'danger';
+      statusLabel = 'Unavailable';
     } else {
-      const last = summary?.last_attempt;
-      if (!last) {
-        statusTone = 'neutral';
+      // Skips do not resolve a prior failure. The newest unresolved attempt
+      // determines severity: transient retries are degraded, not down.
+      const currentAttempt = incident?.lastFailure ?? summary?.last_attempt;
+      if (!currentAttempt) {
         statusLabel = 'Pending';
       } else {
-        switch (last.status) {
+        switch (currentAttempt.status) {
           case 'success':
             statusTone = 'ok';
             statusLabel = 'Healthy';
             break;
           case 'skipped':
-            statusTone = 'neutral';
             statusLabel = 'Idle';
             break;
           case 'transient_failure':
@@ -430,10 +437,13 @@ function WarmupCardMinimalInner({
         className="ml-1 inline-flex min-h-5 w-24 items-center"
         data-testid="warmup-status-value"
       >
-        {summaryPending && upstream.warmup_enabled ? (
+        {summaryPending &&
+        upstream.enabled &&
+        upstream.warmup_enabled &&
+        !credentialRequiresReconnect ? (
           <Skeleton className="h-4 w-full rounded-sm" />
         ) : (
-          <StatusBadge tone={statusTone} label={statusLabel} />
+          <StatusBadge trafficLight tone={statusTone} label={statusLabel} />
         )}
       </span>
     </span>
@@ -474,6 +484,12 @@ function WarmupCardMinimalInner({
   );
 
   const lastAttempt = summary?.last_attempt;
+  const failureAttempt =
+    incident?.lastFailure ??
+    (lastAttempt?.status === 'permanent_failure' ||
+    lastAttempt?.status === 'transient_failure'
+      ? lastAttempt
+      : null);
 
   return (
     <>
@@ -636,41 +652,48 @@ function WarmupCardMinimalInner({
             <div className="min-h-12" data-testid="warmup-failure-slot">
               {summaryPending ? (
                 <Skeleton className="h-12 w-full rounded-sm" />
-              ) : lastAttempt?.error_detail ? (
+              ) : summaryQ.isError ? (
+                <p className="text-body-sm text-danger-text">
+                  Warm-up status could not be loaded. Refresh this page to try
+                  again.
+                </p>
+              ) : failureAttempt ? (
                 <div
                   className={cx(
                     'min-h-12',
-                    lastAttempt.status === 'permanent_failure'
+                    failureAttempt.status === 'permanent_failure'
                       ? DANGER_PANEL_CLASS
                       : WARN_PANEL_CLASS,
                   )}
                 >
                   <p>
-                    {lastAttempt.status === 'permanent_failure'
-                      ? 'Last warm-up failed'
-                      : 'Last warm-up hit an error'}
-                    {lastAttempt.reason
-                      ? `: ${REASON_LABEL[lastAttempt.reason]}.`
+                    {failureAttempt.status === 'permanent_failure'
+                      ? 'Last warm-up failure'
+                      : 'Last warm-up retry error'}
+                    {failureAttempt.reason
+                      ? `: ${REASON_LABEL[failureAttempt.reason]}.`
                       : '.'}
                     {credentialNoticeShown &&
-                    lastAttempt.reason &&
-                    CREDENTIAL_FAILURE_REASONS[lastAttempt.reason]
+                    failureAttempt.reason &&
+                    CREDENTIAL_FAILURE_REASONS[failureAttempt.reason]
                       ? ' Reconnect from the notice above.'
                       : null}
                   </p>
-                  <details className="group mt-1">
-                    <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
-                      <ChevronRight
-                        aria-hidden="true"
-                        strokeWidth={1.75}
-                        className="size-3 transition-transform group-open:rotate-90"
-                      />
-                      Details
-                    </summary>
-                    <code className="mt-1 block break-words font-mono text-data text-text-muted">
-                      {lastAttempt.error_detail}
-                    </code>
-                  </details>
+                  {failureAttempt.error_detail ? (
+                    <details className="group mt-1">
+                      <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-caption text-text-muted transition-colors hover:text-text max-md:min-h-10 focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 [&::-webkit-details-marker]:hidden">
+                        <ChevronRight
+                          aria-hidden="true"
+                          strokeWidth={1.75}
+                          className="size-3 transition-transform group-open:rotate-90"
+                        />
+                        Details
+                      </summary>
+                      <code className="mt-1 block break-words font-mono text-data text-text-muted">
+                        {failureAttempt.error_detail}
+                      </code>
+                    </details>
+                  ) : null}
                 </div>
               ) : null}
             </div>

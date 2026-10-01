@@ -1,3 +1,4 @@
+use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
@@ -71,8 +72,13 @@ impl WatchdogUpstreamFilter {
         }
         match self {
             Self::Warmup => upstream.warmup_enabled,
-            Self::OAuth => !upstream.oauth_never_refresh,
-            Self::OAuthUsagePoll => true,
+            Self::OAuth => {
+                !upstream.oauth_never_refresh
+                    && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+            }
+            Self::OAuthUsagePoll => {
+                !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+            }
         }
     }
 }

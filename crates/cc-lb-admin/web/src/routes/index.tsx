@@ -5,7 +5,7 @@ import {
   useNavigate,
   useSearch,
 } from '@tanstack/react-router';
-import { AlertTriangle, ArrowDown, ArrowUp } from 'lucide-react';
+import { ArrowDown, ArrowUp } from 'lucide-react';
 import { memo, type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   Area,
@@ -17,12 +17,12 @@ import {
   YAxis,
 } from 'recharts';
 import * as z from 'zod';
-import { LiveTailFailureBanner } from '../components/LiveTailFailureBanner';
 import {
   FirstRunChecklist,
   useFirstRunIncomplete,
 } from '../components/onboarding/FirstRunChecklist';
 import { BreakdownPopover, fmtTokens } from '../components/ui/BreakdownPopover';
+import { CostFigure } from '../components/ui/CostFigure';
 import {
   CHART_AXIS,
   CHART_CURSOR,
@@ -46,7 +46,7 @@ import {
   SegmentedControl,
   Skeleton,
 } from '../components/ui/primitives';
-import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
 import {
   EmptyValue,
   Table,
@@ -69,11 +69,10 @@ import {
   useUpstreamUsageData,
 } from '../components/upstreams/UpstreamUsageTable';
 import { type AggregateResponse, WINDOW_LABELS } from '../lib/api';
-import { getWindowColor } from '../lib/colors';
+import { categoricalColor, getWindowColor } from '../lib/colors';
 import {
   cacheHitRatio,
   cacheMissRatio,
-  formatCostMicros,
   formatCount,
   formatRate,
   formatUsdAmount,
@@ -82,13 +81,7 @@ import {
 } from '../lib/format';
 import { useTimezone } from '../lib/locale';
 import {
-  isMessagesRequestEvent,
-  mergeLogRows,
-  newestLiveEventIds,
-} from '../lib/logRows';
-import {
   usePrincipalNameMap,
-  useRecentEventsInfinite,
   useSubscriptionQuotaAggregate,
   useSubscriptionQuotaPoolHistory,
   useSummary,
@@ -109,7 +102,7 @@ import {
   type TimePreset,
 } from '../lib/timePresets';
 import { formatInTimezone } from '../lib/timezone';
-import { useLiveEventStream } from '../lib/useLiveEventStream';
+import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
 import {
   buildPoolQuotaChartData,
   formatAgo,
@@ -143,11 +136,9 @@ type Range = TimePreset;
 const RANGE_OPTIONS = TIME_PRESET_OPTIONS;
 const RANGE_SECONDS = TIME_PRESET_SECONDS;
 const OVERVIEW_TABLE_COLUMNS = { cost: true, tokens: true } as const;
-/** The Overview previews the newest requests; Logs holds the full history. */
-const OVERVIEW_LATEST_ROWS = 10;
-// The overview previews real user requests only: renewals and non-messages
-// endpoints are excluded server-side, and merged rows are re-checked against
-// the same effective-kind rule so retained data cannot leak other categories.
+// The overview shows real user requests only: renewals and non-messages
+// endpoints are excluded server-side, and the shared feed re-checks the same
+// effective-kind rule so retained data cannot leak other categories.
 const OVERVIEW_EVENT_FILTERS = { event_kind: 'messages' } as const;
 
 const stepFor = (r: Range): 'hour' | 'minute' =>
@@ -558,6 +549,81 @@ function fmtCacheHit(ratio: number): string {
   return `${Math.floor(ratio * 100)}%`;
 }
 
+const PRINCIPAL_USD_FORMATTER = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+const PRINCIPAL_EXACT_COST_FORMATTER = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 6,
+});
+
+function formatPrincipalCostMicros(micros: number): string {
+  const usd = micros / 1_000_000;
+  if (
+    !Number.isFinite(micros) ||
+    micros < 0 ||
+    micros > Number.MAX_SAFE_INTEGER ||
+    !Number.isFinite(usd) ||
+    usd > Number.MAX_SAFE_INTEGER
+  ) {
+    return '—';
+  }
+  return `$${PRINCIPAL_EXACT_COST_FORMATTER.format(usd)}`;
+}
+
+function fmtPrincipalCost(totalMicros: number): string {
+  const usd = totalMicros / 1_000_000;
+  if (
+    !Number.isFinite(totalMicros) ||
+    totalMicros < 0 ||
+    totalMicros > Number.MAX_SAFE_INTEGER ||
+    !Number.isFinite(usd) ||
+    usd > Number.MAX_SAFE_INTEGER
+  ) {
+    return '—';
+  }
+  return `$${PRINCIPAL_USD_FORMATTER.format(usd)}`;
+}
+
+/**
+ * Cache efficiency cue, not a quota or SLO: misses increase cost, so lower
+ * ratios receive stronger attention while missing prompt data stays neutral.
+ */
+function principalCacheHitClass(ratio: number | null): string {
+  if (ratio == null || !Number.isFinite(ratio)) return 'text-text-muted';
+  if (ratio >= 0.9) return 'text-text';
+  if (ratio >= 0.8) return 'text-warn-text';
+  return 'text-danger-text';
+}
+
+/**
+ * Unit-only hues are categorical, not severity signals. Keep the numeric
+ * value in primary ink so scale is read from the figure first.
+ */
+const PRINCIPAL_TOKEN_UNIT_COLORS = {
+  k: categoricalColor(200).text,
+  M: categoricalColor(255).text,
+  B: categoricalColor(305).text,
+} as const;
+
+function PrincipalTokenFigure({ tokens }: { tokens: number }) {
+  const { value, unit } = splitNum(tokens);
+  const unitColor = unit ? PRINCIPAL_TOKEN_UNIT_COLORS[unit] : undefined;
+  return (
+    <span className="inline-flex w-[5.5ch] shrink-0 justify-end tabular-nums">
+      <span className="text-text">{value}</span>
+      <span
+        className="w-[1.5ch] shrink-0 text-left"
+        style={unitColor ? { color: unitColor } : undefined}
+      >
+        {unit}
+      </span>
+    </span>
+  );
+}
+
 const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
 
 /**
@@ -568,7 +634,13 @@ const PRINCIPAL_COST_NOTE = 'Per-category cost not recorded for this window';
  * draws as the neutral Unattributed tail; a window with no split at all
  * leaves bare track and says so in the breakdown.
  */
-function PrincipalCostCell({ principal }: { principal: TopPrincipal }) {
+function PrincipalCostCell({
+  principal,
+  maxTotalMicros,
+}: {
+  principal: TopPrincipal;
+  maxTotalMicros: number;
+}) {
   const totalMicros = principal.cost_micros;
   const components = principal.cost_components_micros;
   const unattributedMicros = components
@@ -577,36 +649,39 @@ function PrincipalCostCell({ principal }: { principal: TopPrincipal }) {
   const segments = components
     ? costCategorySegments(components, unattributedMicros)
     : [];
-  const text = formatUsdAmount(totalMicros / 1_000_000);
+  // Keep the ranking scannable at two decimals; the trigger and breakdown
+  // retain the full micros value, up to six fractional digits.
+  const text = fmtPrincipalCost(totalMicros);
+  const exactText = formatPrincipalCostMicros(totalMicros);
 
   return (
     <MetricCell
       className="@4xl/principals:w-36"
-      label={`${principal.name} cost ${text}, show breakdown`}
+      label={`${principal.name} cost ${exactText}, show breakdown`}
       popover={
         <div data-testid="top-principal-cost-details">
           <BreakdownPopover
             title="Cost"
-            showZeroRows={true}
             note={components ? undefined : PRINCIPAL_COST_NOTE}
             rows={segments.map((segment) => ({
               label: segment.label,
               value: segment.value,
               color: segment.color,
-              fmt: formatCostMicros,
+              fmt: formatPrincipalCostMicros,
             }))}
             footer={{
               label: 'Total',
               value: totalMicros,
-              fmt: formatCostMicros,
+              fmt: formatPrincipalCostMicros,
             }}
           />
         </div>
       }
       segments={segments}
       total={totalMicros}
+      maxTotal={maxTotalMicros}
     >
-      <span className="text-text">{text}</span>
+      <CostFigure text={text} />
     </MetricCell>
   );
 }
@@ -685,6 +760,19 @@ export function TopPrincipalsSection({
   const [direction, setDirection] = useState<SortDirection>('desc');
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState('');
+
+  // Keep the reference over the whole active dataset: sorting, expanding and
+  // filtering change the visible rows, never the meaning of their bar width.
+  const maxTotalMicros = useMemo(
+    () =>
+      principals.reduce((max, principal) => {
+        const cost = Number.isFinite(principal.cost_micros)
+          ? Math.max(0, principal.cost_micros)
+          : 0;
+        return Math.max(max, cost);
+      }, 0),
+    [principals],
+  );
 
   const sorted = useMemo(
     () => sortTopPrincipals(principals, sortKey, direction),
@@ -782,7 +870,10 @@ export function TopPrincipalsSection({
                   {principal.name}
                 </Link>
                 <span
-                  className="block text-caption text-text-muted tabular-nums sm:hidden"
+                  className={cx(
+                    'block text-caption tabular-nums sm:hidden',
+                    principalCacheHitClass(principal.cache_hit_ratio),
+                  )}
                   data-slot="principal-cache-hit"
                 >
                   {principal.cache_hit_ratio == null
@@ -794,16 +885,25 @@ export function TopPrincipalsSection({
                 {formatCount(principal.requests)}
               </TableCell>
               <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
-                {fmtTokens(principal.tokens)}
+                <PrincipalTokenFigure tokens={principal.tokens} />
               </TableCell>
               <TableCell className={TOP_PRINCIPAL_OPTIONAL_CELL} numeric>
                 {principal.cache_hit_ratio == null ? (
                   <EmptyValue label="No prompt tokens" />
                 ) : (
-                  fmtCacheHit(principal.cache_hit_ratio)
+                  <span
+                    className={principalCacheHitClass(
+                      principal.cache_hit_ratio,
+                    )}
+                  >
+                    {fmtCacheHit(principal.cache_hit_ratio)}
+                  </span>
                 )}
               </TableCell>
-              <PrincipalCostCell principal={principal} />
+              <PrincipalCostCell
+                principal={principal}
+                maxTotalMicros={maxTotalMicros}
+              />
               <TableCell className="text-text-muted" numeric>
                 {fmtPercent(principal.share_pct)}
               </TableCell>
@@ -1458,7 +1558,12 @@ function OverviewPage() {
     undefined,
     'totals',
   );
-  const events = useRecentEventsInfinite(OVERVIEW_EVENT_FILTERS);
+  const feed = useRequestEventsFeed({
+    filters: OVERVIEW_EVENT_FILTERS,
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    live: true,
+  });
   const principalNameMap = usePrincipalNameMap();
 
   const quotaAggregate = useSubscriptionQuotaAggregate({
@@ -1476,29 +1581,6 @@ function OverviewPage() {
   const quotaLoading =
     (quotaAggregate.data === undefined && quotaAggregate.isPending) ||
     (quotaPoolHistory.data === undefined && quotaPoolHistory.isPending);
-
-  const live = useLiveEventStream(OVERVIEW_EVENT_FILTERS);
-  const streamStatus = live.status;
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: live.eventsMap is a stable Map ref mutated in place by useLiveEventStream; live.version is bumped on every upsert so it is the real re-run trigger.
-  const recentRows = useMemo(
-    () =>
-      mergeLogRows(
-        live.eventsMap,
-        events.data?.pages.flatMap((page) => page.events) ?? [],
-      ).filter(isMessagesRequestEvent),
-    [live.eventsMap, live.version, events.data],
-  );
-  const latestRows = useMemo(
-    () => recentRows.slice(0, OVERVIEW_LATEST_ROWS),
-    [recentRows],
-  );
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: live.version is the mutation counter for the stable eventsMap ref.
-  const recentLiveIds = useMemo(
-    () => newestLiveEventIds(live.eventsMap),
-    [live.eventsMap, live.version],
-  );
 
   // KPI Data
   const totals = summary.data?.totals;
@@ -1523,9 +1605,9 @@ function OverviewPage() {
   // With zero requests, averages and ratios are undefined, not zero.
   const noTraffic = totals?.request_count === 0;
   const requestSeen =
-    recentRows.length > 0 || (totals?.request_count ?? 0) > 0
+    feed.rows.length > 0 || (totals?.request_count ?? 0) > 0
       ? true
-      : events.isPending
+      : feed.loading
         ? undefined
         : false;
   const firstRunIncomplete = useFirstRunIncomplete(requestSeen);
@@ -1681,12 +1763,6 @@ function OverviewPage() {
 
   return (
     <PageContainer>
-      <LiveTailFailureBanner
-        permanentFailure={live.permanentFailure}
-        permanentFailureSince={live.permanentFailureSince}
-        reconnectAttempts={live.reconnectAttempts}
-        onRetry={live.forceReconnect}
-      />
       <OAuthReconnectSummary />
       <PageHeader title="Overview" />
 
@@ -1853,33 +1929,7 @@ function OverviewPage() {
             subtitle={
               <span>
                 Newest first, not limited to the usage range — full view on Logs
-                page{streamStatus === 'live' ? ' · ' : ' '}
-                {/* The dot and its word wrap as one unit, so the status never
-                lands alone at the end of a wrapped line. */}
-                <span className="inline-flex items-center gap-1.5 whitespace-nowrap align-middle">
-                  {live.permanentFailure ? (
-                    <AlertTriangle
-                      aria-hidden="true"
-                      strokeWidth={1.75}
-                      className="w-3 h-3 text-danger-text"
-                    />
-                  ) : (
-                    <span
-                      className={cx(
-                        'status-dot',
-                        streamStatus === 'live'
-                          ? 'live'
-                          : streamStatus === 'error'
-                            ? 'danger'
-                            : streamStatus === 'connecting' ||
-                                streamStatus === 'reconnecting'
-                              ? 'warn animate-pulse'
-                              : 'neutral',
-                      )}
-                    />
-                  )}
-                  {streamStatus === 'live' ? 'streaming' : null}
-                </span>
+                page
               </span>
             }
             action={
@@ -1888,22 +1938,15 @@ function OverviewPage() {
               </Link>
             }
           >
-            {/* A preview, not a feed: the newest rows at their natural
-            height, with the full history one click away on Logs. A card
-            from `md`; on phones the rows run to the screen edges. */}
-            <div className="min-w-0 max-md:-mx-4 md:glass md:rounded-md">
-              <div className="relative overflow-x-auto scroll-fade-right">
-                <RequestEventsTable
-                  events={latestRows}
-                  principalNameMap={principalNameMap}
-                  loading={events.isLoading}
-                  liveFlashIds={recentLiveIds}
-                  columns={OVERVIEW_TABLE_COLUMNS}
-                  minWidthClass="min-w-[1080px]"
-                  emptyTitle="No recent requests"
-                />
-              </div>
-            </div>
+            <RequestEventsFeed
+              feed={feed}
+              principalNameMap={principalNameMap}
+              columns={OVERVIEW_TABLE_COLUMNS}
+              minWidthClass="min-w-[1080px]"
+              emptyTitle="No recent requests"
+              showPagination
+              tableContainerClassName="relative min-w-0 overflow-x-auto scroll-fade-right max-md:-mx-4 md:glass md:rounded-md"
+            />
           </Section>
         </>
       )}

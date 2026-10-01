@@ -2,6 +2,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use cc_lb_aead::EncryptedOAuthTokens;
+use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use serde::{Deserialize, Serialize};
@@ -77,10 +78,7 @@ pub struct RefreshedOAuthTokens {
 #[derive(Debug)]
 pub enum RefreshOutcome {
     Refreshed(RefreshedOAuthTokens),
-    /// Credential is long-lived; refreshing it would destroy it.
-    ///
-    /// Refreshing a 365-day Anthropic access token revokes it and downgrades
-    /// the upstream to an 8-hour credential, so it must never be attempted.
+    /// Credential is long-lived or requires reconnecting before another refresh.
     NotRefreshable,
 }
 
@@ -172,4 +170,5 @@ fn is_refreshable(upstream: &UpstreamRecord) -> bool {
     upstream.kind == UpstreamKind::AnthropicOauth
         && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
+        && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
 }

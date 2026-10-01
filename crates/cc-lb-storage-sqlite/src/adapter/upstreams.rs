@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_clock::{Clock, unix_secs};
+use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_storage_api::upstream::{
     UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
@@ -440,11 +441,12 @@ async fn update_split_oauth_token(
         ensure_split_spec_active_in_tx(&mut tx, id).await?;
     }
     sqlx::query(
-        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, created_at, updated_at)
-         VALUES (?, ?, ?, unixepoch(), unixepoch())
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, oauth_token_generation, created_at, updated_at)
+         VALUES (?, ?, ?, 1, unixepoch(), unixepoch())
          ON CONFLICT (upstream_id) DO UPDATE
          SET oauth_credentials_ciphertext = excluded.oauth_credentials_ciphertext,
              never_refresh = excluded.never_refresh,
+             oauth_token_generation = upstream_oauth_token_v1.oauth_token_generation + 1,
              updated_at = unixepoch()",
     )
     .bind(id.to_string())
@@ -453,6 +455,7 @@ async fn update_split_oauth_token(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
+    clear_split_apply_error_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     get_split_by_id(storage.pool(), id)
         .await?
@@ -501,15 +504,7 @@ async fn complete_split_refresh(
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
-    set_split_status_in_tx(
-        &mut tx,
-        id,
-        UpstreamStatusUpdate {
-            last_apply_error: Some(None),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
+    clear_split_apply_error_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)
 }
 
@@ -530,6 +525,24 @@ async fn read_split_oauth_token_generation(
     generation
         .map(|value| i64_to_u64(value, "oauth token generation"))
         .transpose()
+}
+
+async fn clear_split_apply_error_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, updated_at)
+         VALUES (?, NULL, unixepoch())
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET last_apply_error = NULL,
+             updated_at = unixepoch()",
+    )
+    .bind(id.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 async fn ensure_split_spec_revision_in_tx(
@@ -575,16 +588,43 @@ async fn set_split_status_in_tx(
     status: UpstreamStatusUpdate,
 ) -> StorageResult<()> {
     let id = patch;
+    if let Some(expected_generation) = status.expected_oauth_token_generation {
+        let generation: Option<i64> = sqlx::query_scalar(
+            "SELECT oauth_token_generation FROM upstream_oauth_token_v1 WHERE upstream_id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if i64_to_u64(generation.unwrap_or_default(), "oauth token generation")?
+            != expected_generation
+        {
+            return Err(conflict("stale oauth token generation"));
+        }
+    }
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = ?",
+        "SELECT spec.kind, status.last_apply_error, status.last_apply_at, status.last_warmup_at
+           FROM upstream_spec_v1 spec
+           LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id
+          WHERE spec.id = ?",
     )
     .bind(id.to_string())
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
 
+    let is_oauth = row
+        .as_ref()
+        .map(|row| row.try_get::<&str, _>("kind"))
+        .transpose()
+        .map_err(map_sqlx_error)?
+        == Some(UpstreamKind::AnthropicOauth.as_str());
     let mut current = StatusFields::from_row(row.as_ref())?;
-    if let Some(value) = status.last_apply_error {
+    if let Some(value) = status.last_apply_error
+        && (!is_oauth
+            || !refresh_requires_reconnect(current.last_apply_error.as_deref())
+            || refresh_requires_reconnect(value.as_deref()))
+    {
         current.last_apply_error = value;
     }
     if let Some(value) = status.last_apply_at_unix_secs {

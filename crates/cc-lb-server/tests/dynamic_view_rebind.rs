@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
-use cc_lb_aead::EncryptedOAuthTokens;
+use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_control::{ApplyStatus, DynamicView};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
     MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore, PlanTierStore,
     PrincipalCreate, PrincipalKind, PrincipalStore, TierResolutionSource, UpstreamCreate,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+    UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamSubscriptionMetadataStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -256,6 +257,126 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
         .expect("load corrupt")
         .expect("corrupt exists");
     assert!(persisted.last_apply_error.is_some());
+}
+
+#[tokio::test]
+async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token_replacement() {
+    let (dir, storage) = storage_fixture().await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let aead = AeadService::from_master_key([1; 32]);
+    let bundle = OAuthTokenBundle {
+        access_token: "access-before-reconnect".to_owned(),
+        refresh_token: "refresh-before-reconnect".to_owned(),
+        expires_at_unix_secs: 1_900_000_000,
+        refresh_token_expires_at_unix_secs: None,
+        scopes: vec!["messages".to_owned()],
+        never_refresh: false,
+    };
+    let mut upstreams = Vec::new();
+    for reason in ["status_400", "status_401", "refresh_token_expired"] {
+        let created = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                name: format!("reconnect-{reason}"),
+                kind: UpstreamKind::AnthropicOauth,
+                ..UpstreamCreate::default()
+            },
+        )
+        .await
+        .expect("oauth upstream created");
+        let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, created.id.as_bytes())
+            .expect("encrypt oauth credential");
+        let upstream = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            created.id,
+            created.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("oauth credential stored");
+        UpstreamStore::set_status(
+            storage.as_ref(),
+            upstream.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some(reason.to_owned())),
+                expected_oauth_token_generation: Some(upstream.oauth_token_generation),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await
+        .expect("terminal renewal error stored");
+        upstreams.push((upstream, reason));
+    }
+
+    let initial = build(&stores, 0, &runtime, dir.path()).await;
+    for (upstream, reason) in &upstreams {
+        let status = initial
+            .upstream_status_snapshot
+            .entries
+            .get(&upstream.name)
+            .expect("initial oauth status");
+        assert_eq!(status.status, ApplyStatus::Active);
+        assert_eq!(status.last_apply_error.as_deref(), Some(*reason));
+        UpstreamStore::set_enabled(storage.as_ref(), upstream.id, upstream.revision, false)
+            .await
+            .expect("disable routing without reconnecting");
+    }
+    let disabled = build(&stores, initial.generation, &runtime, dir.path()).await;
+    let rebuilt = build(&stores, disabled.generation, &runtime, dir.path()).await;
+    for (upstream, reason) in &upstreams {
+        let status = rebuilt
+            .upstream_status_snapshot
+            .entries
+            .get(&upstream.name)
+            .expect("disabled oauth status");
+        assert_eq!(status.status, ApplyStatus::Disabled);
+        assert_eq!(status.last_apply_error.as_deref(), Some(*reason));
+        let current = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+            .await
+            .expect("load terminal state")
+            .expect("upstream exists");
+        assert_eq!(current.last_apply_error.as_deref(), Some(*reason));
+        assert_eq!(
+            current.oauth_token_generation,
+            upstream.oauth_token_generation
+        );
+        let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, upstream.id.as_bytes())
+            .expect("encrypt replacement credential");
+        let replaced = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            current.id,
+            current.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("actual credential replacement");
+        assert_eq!(replaced.last_apply_error, None);
+        assert_eq!(
+            replaced.oauth_token_generation,
+            upstream.oauth_token_generation + 1
+        );
+        UpstreamStore::set_enabled(storage.as_ref(), replaced.id, replaced.revision, true)
+            .await
+            .expect("enable reconnected upstream");
+    }
+    let reconnected = build(&stores, rebuilt.generation, &runtime, dir.path()).await;
+    for (upstream, _) in &upstreams {
+        let status = reconnected
+            .upstream_status_snapshot
+            .entries
+            .get(&upstream.name)
+            .expect("reconnected oauth status");
+        assert_eq!(status.status, ApplyStatus::Active);
+        assert_eq!(status.last_apply_error, None);
+        let current = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+            .await
+            .expect("load reconnected state")
+            .expect("upstream exists");
+        assert_eq!(current.last_apply_error, None);
+    }
 }
 
 #[tokio::test]

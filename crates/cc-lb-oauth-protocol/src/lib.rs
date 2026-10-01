@@ -48,6 +48,32 @@ pub fn parse_token_endpoint_response(
     serde_json::from_slice(body).map_err(|source| TokenEndpointParseError::Json { source })
 }
 
+#[derive(Deserialize)]
+struct RefreshErrorResponse<'a> {
+    #[serde(borrow)]
+    error: Option<&'a str>,
+}
+
+pub fn is_terminal_refresh_failure(status: u16, body: &[u8]) -> bool {
+    match status {
+        401 => true,
+        400 => {
+            serde_json::from_slice::<RefreshErrorResponse<'_>>(body)
+                .ok()
+                .and_then(|response| response.error)
+                == Some("invalid_grant")
+        }
+        _ => false,
+    }
+}
+
+pub fn refresh_requires_reconnect(reason: Option<&str>) -> bool {
+    matches!(
+        reason,
+        Some("status_400" | "status_401" | "refresh_token_expired")
+    )
+}
+
 pub fn refreshed_token_parts(
     existing: ExistingTokenParts,
     response: TokenEndpointResponse,
@@ -94,6 +120,50 @@ mod tests {
                 ("refresh_token".into(), "rt+/=".into()),
             ]
         );
+    }
+
+    #[test]
+    fn terminal_refresh_failure_classifies_oauth_error_responses() {
+        assert!(is_terminal_refresh_failure(401, b""));
+        assert!(is_terminal_refresh_failure(
+            400,
+            br#"{"error":"invalid_grant"}"#
+        ));
+        assert!(is_terminal_refresh_failure(
+            400,
+            br#"{"error":"invalid_grant","error_description":"expired"}"#
+        ));
+
+        assert!(!is_terminal_refresh_failure(
+            400,
+            br#"{"error":"invalid_client"}"#
+        ));
+        assert!(!is_terminal_refresh_failure(
+            400,
+            br#"{"error":"invalid_grant"#
+        ));
+        assert!(!is_terminal_refresh_failure(
+            400,
+            b"<html>bad request</html>"
+        ));
+        assert!(!is_terminal_refresh_failure(
+            429,
+            br#"{"error":"invalid_grant"}"#
+        ));
+        assert!(!is_terminal_refresh_failure(
+            500,
+            br#"{"error":"invalid_grant"}"#
+        ));
+    }
+
+    #[test]
+    fn refresh_reconnect_reasons_are_terminal_only() {
+        for reason in ["status_400", "status_401", "refresh_token_expired"] {
+            assert!(refresh_requires_reconnect(Some(reason)));
+        }
+        for reason in [None, Some("network"), Some("status_429"), Some("parse")] {
+            assert!(!refresh_requires_reconnect(reason));
+        }
     }
 
     #[test]

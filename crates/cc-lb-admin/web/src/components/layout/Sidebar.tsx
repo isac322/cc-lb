@@ -15,7 +15,7 @@ import {
 } from './navItems';
 
 /**
- * Reconnect nudges for enabled OAuth upstreams: the one source for the
+ * Reconnect nudges for all OAuth upstreams: the one source for the
  * sidebar badge and the document-title count. Shares query keys with every
  * other OAuth status consumer, so extra callers add no requests.
  */
@@ -27,7 +27,7 @@ export function useUpstreamOAuthAttention(): {
   const oauthUpstreams = useMemo(
     () =>
       (upstreams.data?.upstreams ?? []).filter(
-        (u) => u.enabled && u.kind === 'anthropic_oauth',
+        (u) => u.kind === 'anthropic_oauth',
       ),
     [upstreams.data],
   );
@@ -39,7 +39,7 @@ export function useUpstreamOAuthAttention(): {
 }
 
 /**
- * Count of enabled OAuth upstreams whose reconnect nudge is active. An empty
+ * Count of OAuth upstreams whose reconnect nudge is active. An empty
  * nudge set means healthy or unknown (pending/failed queries with no cached
  * rows): render nothing rather than fabricate a zero. Known nudges keep
  * their badge through a refetch or failed poll, with a stale-status note for

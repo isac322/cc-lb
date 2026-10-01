@@ -75,7 +75,7 @@ mod jobs {
                 .handle(
                     OAuthRefreshJob::new(upstream_id),
                     1_000,
-                    |_| async { Err(SchedulerError::Job("token endpoint 401".to_owned())) },
+                    |_| async { Err(SchedulerError::Job("token endpoint 503".to_owned())) },
                     |_| async { Ok(()) },
                     |_, _| async { Ok(()) },
                 )

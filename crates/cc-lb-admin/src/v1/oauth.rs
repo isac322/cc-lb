@@ -951,7 +951,9 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &updated).await {
+    if let Err(error) =
+        seed_oauth_reconnect_tasks(&state, &updated, bundle.expires_at_unix_secs).await
+    {
         return scheduler_error_response(&error);
     }
 
@@ -1248,6 +1250,62 @@ fn storage_error_response(error: &StorageError) -> Response {
 fn scheduler_error_response(error: &SchedulerError) -> Response {
     tracing::error!(%error, "admin oauth scheduler seed failed");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+async fn seed_oauth_reconnect_tasks(
+    state: &AdminState,
+    upstream: &UpstreamRecord,
+    expires_at_unix_secs: u64,
+) -> Result<(), SchedulerError> {
+    let Some(scheduler) = state.scheduler.as_ref() else {
+        return Ok(());
+    };
+    let seed_secs = cc_lb_clock::unix_secs(state.clock.now());
+    // Reconnect must not immediately refresh the token just exchanged. Seed
+    // the next refresh at the same cadence used by the refresh worker. The
+    // generation suffix keeps a stale task for an older credential from
+    // suppressing this replacement task.
+    if !upstream.oauth_never_refresh {
+        let task = oauth_reconnect_refresh_task(
+            upstream.id,
+            expires_at_unix_secs,
+            upstream.oauth_token_generation,
+        );
+        match scheduler.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if upstream.kind == UpstreamKind::AnthropicOauth
+        && upstream.warmup_enabled
+        && upstream.oauth_credentials.is_some()
+        && upstream.deleted_at_unix_secs.is_none()
+    {
+        let task = super::upstreams::warmup_bootstrap_task(upstream.id, seed_secs);
+        match scheduler.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn oauth_reconnect_refresh_task(
+    upstream_id: Uuid,
+    expires_at_unix_secs: u64,
+    generation: u64,
+) -> SchedulerPushTask<AdaptiveJob> {
+    let job = OAuthRefreshJob::new(upstream_id);
+    let idempotency_key = format!(
+        "{}:generation:{generation}",
+        job.idempotency_key(expires_at_unix_secs)
+    );
+    SchedulerPushTask {
+        args: AdaptiveJob::OAuthRefresh(job),
+        idempotency_key: Some(idempotency_key),
+        run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
+        max_attempts: None,
+    }
 }
 
 async fn seed_oauth_bootstrap_tasks(

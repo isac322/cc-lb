@@ -16,6 +16,7 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, UpstreamCreate, UpstreamStore};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
@@ -783,6 +784,99 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
     assert_ne!(
         before_expires, after_expires,
         "expiry must change once new tokens land"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_state() {
+    let (fixture, scheduler) = Fixture::with_oauth_state_and_scheduler(
+        MockOAuthState::default().with_expires_in_cap(28_800),
+    )
+    .await;
+    let upstream = fixture
+        .create_upstream("reconnect-scheduled", UpstreamKind::AnthropicOauth)
+        .await;
+    let seeded = fixture.seed_expired_credentials(&upstream).await;
+    let disabled = fixture
+        .storage
+        .set_enabled(seeded.id, seeded.revision, false)
+        .await
+        .expect("disable upstream");
+
+    let (status, start) = fixture.start(disabled.id).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let state_token = start["state_token"].as_str().expect("state_token");
+    let (status, _complete) = fixture.complete(disabled.id, state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let stored = fixture
+        .storage
+        .get_by_id(disabled.id)
+        .await
+        .expect("get reconnected upstream")
+        .expect("reconnected upstream exists");
+    assert!(
+        !stored.enabled,
+        "reconnect must not enable a disabled upstream"
+    );
+    assert!(
+        stored.oauth_token_generation > disabled.oauth_token_generation,
+        "reconnect must advance the credential generation"
+    );
+    let bundle = fixture.decrypt_bundle(disabled.id).await;
+    let expected_run_at = OAuthRefreshJob::run_at_for_expires_at(bundle.expires_at_unix_secs);
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(disabled.id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(expected_run_at).expect("run timestamp fits")),
+        "reconnect refresh must wait for the new access-token cadence"
+    );
+    assert!(
+        expected_run_at > TEST_NOW_UNIX_SECS,
+        "reconnect must not seed an immediate refresh"
+    );
+    assert_eq!(
+        fixture.oauth_state.requested_expires_in().len(),
+        1,
+        "reconnect must not issue a redundant token request"
+    );
+
+    let (status, oauth_status) = fixture.get_oauth_status(disabled.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(oauth_status["status"], "active");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn long_lived_oauth_reconnect_skips_refresh_task() {
+    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
+    let upstream = fixture
+        .create_upstream("reconnect-long-lived", UpstreamKind::AnthropicOauth)
+        .await;
+    let seeded = fixture.seed_expired_credentials(&upstream).await;
+
+    let (status, start) = fixture.start(seeded.id).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let state_token = start["state_token"].as_str().expect("state_token");
+    let (status, _complete) = fixture.complete(seeded.id, state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert!(
+        fixture.decrypt_bundle(seeded.id).await.never_refresh,
+        "long-lived reconnect credentials must remain non-refreshable"
+    );
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(seeded.id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        None,
+        "long-lived reconnect must not seed an oauth refresh task"
     );
 }
 

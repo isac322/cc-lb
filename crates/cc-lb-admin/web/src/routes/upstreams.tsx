@@ -56,7 +56,7 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
-import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
 import { PaceLegend } from '../components/ui/UsageMeter';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
@@ -104,10 +104,10 @@ import {
 import { getWindowColor } from '../lib/colors';
 import { fmtChartTooltipTs, formatCount } from '../lib/format';
 import { useTimezone } from '../lib/locale';
-import { isMessagesRequestEvent } from '../lib/logRows';
 import {
   classifyOAuthReconnect,
-  LONG_LIVED_EXPIRING_SOON_SECS,
+  isTerminalOAuthReconnectReason,
+  type OAuthReconnectNudge,
   REFRESH_EXPIRING_SOON_SECS,
 } from '../lib/oauthReconnect';
 import {
@@ -116,7 +116,6 @@ import {
   type Upstream,
   useDeleteUpstream,
   usePrincipalNameMap,
-  useRecentEvents,
   useStatus,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
@@ -139,6 +138,7 @@ import {
   TIME_PRESETS,
   type TimePreset,
 } from '../lib/timePresets';
+import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
 
 const UPSTREAM_FILTERS = [
   'all',
@@ -227,15 +227,19 @@ function peakUsedPct(row: UpstreamUsageRow): number | null {
 function rowProblem(
   row: UpstreamUsageRow,
 ): { tone: 'warn' | 'danger'; label: string } | null {
-  if (!row.upstream.enabled) return null;
   if (row.nudge) return { tone: row.nudge.tone, label: row.nudge.label };
-  if (row.health.tone === 'danger' || row.health.tone === 'warn')
+  if (
+    row.upstream.enabled &&
+    (row.health.tone === 'danger' || row.health.tone === 'warn')
+  )
     return { tone: row.health.tone, label: row.health.label };
   return null;
 }
 
 function needsAttention(row: UpstreamUsageRow): boolean {
-  if (!row.upstream.enabled) return false;
+  // Disabled rows stay out of quota attention, but a confirmed OAuth nudge
+  // still needs the same recovery path as an enabled row.
+  if (!row.upstream.enabled) return row.nudge != null;
   return rowProblem(row) !== null || (peakUsedPct(row) ?? 0) >= QUOTA_WARN_PCT;
 }
 
@@ -257,17 +261,19 @@ function compareByUsage(a: UpstreamUsageRow, b: UpstreamUsageRow): number {
 }
 
 /**
- * Most urgent first: danger (a danger status such as unreadable credentials,
- * or a window at 95%+ used), then warn (a warn status or 80%+ used), then
- * healthy, then disabled. Ties fall back to usage, then name.
+ * Most urgent first: terminal credential failures, then danger (a danger
+ * status such as unreadable credentials or a 95%+ window), then warn,
+ * healthy, and disabled. Ties fall back to usage, then name.
  */
 function attentionRank(row: UpstreamUsageRow): number {
-  if (!row.upstream.enabled) return 3;
+  if (!row.upstream.enabled && row.nudge == null) return 4;
+  if (row.nudge != null && isTerminalOAuthReconnectReason(row.nudge.reason))
+    return 0;
   const problem = rowProblem(row);
   const peak = peakUsedPct(row) ?? 0;
-  if (problem?.tone === 'danger' || peak >= QUOTA_DANGER_PCT) return 0;
-  if (problem || peak >= QUOTA_WARN_PCT) return 1;
-  return 2;
+  if (problem?.tone === 'danger' || peak >= QUOTA_DANGER_PCT) return 1;
+  if (problem || peak >= QUOTA_WARN_PCT) return 2;
+  return row.upstream.enabled ? 3 : 4;
 }
 
 function upstreamRowId(row: UpstreamUsageRow): string {
@@ -463,7 +469,8 @@ function UpstreamsPage() {
             muted: !upstream.enabled,
             title: [
               upstream.name,
-              !upstream.enabled ? 'Disabled' : problem?.label,
+              !upstream.enabled ? 'Disabled' : null,
+              problem?.label,
               factsText ? `${factsText} used` : null,
               row.runtimeError,
             ]
@@ -481,10 +488,11 @@ function UpstreamsPage() {
                 <span className="sr-only"> used</span>
               </>
             ) : null,
-            caption: !upstream.enabled ? (
-              <span className="text-text-muted">Disabled</span>
-            ) : problem ? (
+            caption: problem ? (
               <>
+                {!upstream.enabled ? (
+                  <span className="text-text-muted">Disabled · </span>
+                ) : null}
                 <span
                   aria-hidden="true"
                   className={cx('status-dot shrink-0', problem.tone)}
@@ -500,6 +508,8 @@ function UpstreamsPage() {
                   {problem.label}
                 </span>
               </>
+            ) : !upstream.enabled ? (
+              <span className="text-text-muted">Disabled</span>
             ) : (
               <UpstreamPlanCaption upstream={upstream} />
             ),
@@ -723,30 +733,51 @@ function refreshTokenExpiryTone(
   return 'ok';
 }
 
-// This badge describes the login lifecycle, not the access token. For a
-// refreshing credential a lapsed access token is routine and renews silently
-// while a refresh token exists, so the refresh-token deadline drives the badge.
-// A long-lived credential never refreshes, so its own access-token expiry IS
-// the login deadline and the refresh token is ignored entirely.
-function oauthBadge(entry: UpstreamOAuthStatusResponse): OAuthBadge {
+// The reconnect classifier owns terminal failures and the mode-specific login
+// deadline. A usable credential can be green; an observed retry or a lapsed
+// renewable access token remains yellow, never a new reconnect requirement.
+function oauthBadge(
+  entry: UpstreamOAuthStatusResponse | undefined,
+  reconnect: OAuthReconnectNudge | null,
+  lastApplyError: string | null | undefined,
+  nowUnixSecs: number,
+): OAuthBadge {
+  if (!entry || entry.status === 'wrong_kind')
+    return { tone: 'neutral', label: 'Unknown' };
   if (entry.status === 'corrupted')
     return { tone: 'danger', label: 'Reconnect required' };
-  const now = Math.floor(Date.now() / 1000);
-  if (entry.mode === 'long_lived_365d') {
-    const exp = entry.expires_at_unix_secs;
-    if (exp == null) return { tone: 'neutral', label: 'Unknown' };
-    if (exp <= now) return { tone: 'danger', label: 'Login expired' };
-    if (exp - now < LONG_LIVED_EXPIRING_SOON_SECS)
-      return { tone: 'warn', label: 'Login expiring' };
+  if (reconnect?.tone === 'danger')
+    return {
+      tone: 'danger',
+      label:
+        reconnect.reason === 'long_lived_expired' ||
+        reconnect.reason === 'refresh_token_expired' ||
+        reconnect.reason === 'access_token_expired'
+          ? 'Login expired'
+          : 'Reconnect required',
+    };
+  if (!entry.has_credentials || entry.status === 'missing')
+    return { tone: 'neutral', label: 'Not connected' };
+  if (lastApplyError)
+    return {
+      tone: 'warn',
+      label: entry.mode === 'long_lived_365d' ? 'Degraded' : 'Retrying',
+    };
+  if (reconnect?.tone === 'warn')
+    return {
+      tone: 'warn',
+      label:
+        reconnect.reason === 'refresh_token_missing'
+          ? 'Refresh missing'
+          : 'Login expiring',
+    };
+  if (entry.mode == null || entry.expires_at_unix_secs == null)
+    return { tone: 'neutral', label: 'Unknown' };
+  if (entry.mode === 'long_lived_365d')
     return { tone: 'ok', label: 'Long-lived' };
-  }
-  if (!entry.refresh_token_present)
-    return { tone: 'warn', label: 'Refresh missing' };
-  const refreshExp = entry.refresh_token_expires_at_unix_secs;
-  if (refreshExp == null) return { tone: 'ok', label: 'Connected' };
-  if (refreshExp <= now) return { tone: 'danger', label: 'Login expired' };
-  if (refreshExp - now < REFRESH_EXPIRING_SOON_SECS)
-    return { tone: 'warn', label: 'Login expiring' };
+  if (!entry.can_refresh) return { tone: 'warn', label: 'Renewal unavailable' };
+  if (entry.expires_at_unix_secs <= nowUnixSecs)
+    return { tone: 'warn', label: 'Renewing' };
   return { tone: 'ok', label: 'Connected' };
 }
 
@@ -1015,19 +1046,12 @@ function DetailView({
     [seriesSinceUnixSecs, seriesUntilUnixSecs],
   );
 
-  const recent = useRecentEvents({
-    upstream_id: upstream.id,
-    limit: '5',
-    event_kind: 'messages',
+  const feed = useRequestEventsFeed({
+    filters: {
+      upstream_id: upstream.id,
+      event_kind: 'messages',
+    },
   });
-  const recentForUpstream = useMemo(() => {
-    return (recent.data?.events ?? [])
-      .filter(isMessagesRequestEvent)
-      .map((e) => ({
-        ...e,
-        _phase: 'final' as const,
-      }));
-  }, [recent.data]);
 
   const metadataPending =
     isOauth &&
@@ -1040,16 +1064,12 @@ function DetailView({
     (quotaSeries.data === undefined && quotaSeries.isPending);
   const oauthStatusPending =
     isOauth && upstreamOAuthQ.data === undefined && upstreamOAuthQ.isPending;
-  const recentPending = recent.data === undefined && recent.isPending;
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
   const principalEntry = upstreamOAuthQ.data?.has_credentials
     ? upstreamOAuthQ.data
     : null;
   const hasBoundToken = Boolean(principalEntry);
-  const oauthStatusBadge: OAuthBadge = principalEntry
-    ? oauthBadge(principalEntry)
-    : { tone: 'neutral', label: 'Not connected' };
   const reconnectNudge = isOauth
     ? classifyOAuthReconnect(
         upstreamOAuthQ.data,
@@ -1057,6 +1077,15 @@ function DetailView({
         nowUnixSecs,
       )
     : null;
+  const oauthStatusBadge: OAuthBadge =
+    upstreamOAuthQ.isError && reconnectNudge?.tone !== 'danger'
+      ? { tone: 'danger', label: 'Unavailable' }
+      : oauthBadge(
+          upstreamOAuthQ.data,
+          reconnectNudge,
+          upstream.status.last_apply_error,
+          nowUnixSecs,
+        );
   const headerHealth = upstreamHealth(
     upstream.enabled,
     upstreamRuntimeStatus?.status,
@@ -1683,22 +1712,17 @@ function DetailView({
             // subtitle only says what the list is.
             description="Latest requests routed here"
           >
-            <div
-              data-testid="recent-requests-table-slot"
-              className="glass min-h-48 overflow-x-auto rounded-md"
-            >
-              <RequestEventsTable
-                events={recentForUpstream}
-                principalNameMap={principalNameMap}
-                loading={recentPending}
-                columns={{
-                  upstream: false,
-                  cost: true,
-                  tokens: true,
-                }}
-                emptyTitle="No recent requests for this upstream"
-              />
-            </div>
+            <RequestEventsFeed
+              feed={feed}
+              principalNameMap={principalNameMap}
+              columns={{
+                upstream: false,
+                cost: true,
+                tokens: true,
+              }}
+              tableContainerClassName="glass min-h-48 overflow-x-auto rounded-md"
+              emptyTitle="No recent requests for this upstream"
+            />
           </DetailSection>
 
           {isOauth ? (
@@ -1708,6 +1732,8 @@ function DetailView({
                 description={
                   oauthStatusPending ? (
                     <Skeleton className="h-3 w-32" />
+                  ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
+                    'Credential status unavailable'
                   ) : hasBoundToken ? (
                     'OAuth token bound on this upstream'
                   ) : (
@@ -1722,13 +1748,13 @@ function DetailView({
                     </>
                   ) : (
                     <>
-                      {/* The reconnect notice already names a problem. */}
-                      {reconnectNudge ? null : (
+                      <span data-testid="oauth-current-status">
                         <StatusBadge
+                          trafficLight
                           tone={oauthStatusBadge.tone}
                           label={oauthStatusBadge.label}
                         />
-                      )}
+                      </span>
                       <Button
                         size="sm"
                         iconLeft={<KeyRound />}
@@ -1762,6 +1788,11 @@ function DetailView({
                         <Skeleton className="mt-1 h-3 w-full max-w-56" />
                       </div>
                     </div>
+                  ) : upstreamOAuthQ.isError || !upstreamOAuthQ.data ? (
+                    <p className="text-body-sm text-danger-text">
+                      Credential status could not be loaded. Refresh this page
+                      to try again.
+                    </p>
                   ) : !hasBoundToken ? (
                     <p className="text-body-sm text-text-muted">
                       Use Connect to authorize this upstream with a Claude

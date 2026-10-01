@@ -90,6 +90,8 @@
   --color-danger-solid-hover: var(--color-danger-solid-hover);
   --color-neutral: var(--color-neutral);
   --color-success-text: var(--color-success-text);
+  --color-traffic-success: var(--color-traffic-success);
+  --color-traffic-success-text: var(--color-traffic-success-text);
   --color-warn-text: var(--color-warn-text);
   --color-danger-text: var(--color-danger-text);
   --color-hover-bg: var(--color-hover-bg);
@@ -177,13 +179,15 @@
     --color-accent-dim: rgb(204 221 238 / 0.14);
     --color-accent-text: #779cc2;
     --color-accent-ink: #181a1c;
-    /* Healthy is neutral: warn and danger are the only other hues. */
+    /* Healthy stays neutral except explicitly opted-in traffic-light states. */
     --color-ok: #c0c1c3;
     --color-warn: #f0b429;
     --color-danger: #ff6f61;
     --color-danger-solid: #c7372c;
     --color-danger-solid-hover: #b02f25;
     --color-success-text: #c0c1c3;
+    --color-traffic-success: #67d69c;
+    --color-traffic-success-text: #67d69c;
     --color-warn-text: #f0b429;
     --color-danger-text: #ff8a7e;
     --color-neutral: #939495;
@@ -259,6 +263,8 @@
     --color-danger-solid: #a61e30;
     --color-danger-solid-hover: #8e1828;
     --color-success-text: #484a4e;
+    --color-traffic-success: #136942;
+    --color-traffic-success-text: #136942;
     --color-warn-text: #7a4f00;
     --color-danger-text: #a61e30;
     --color-neutral: #6d6f72;
@@ -325,6 +331,8 @@
       --color-danger-solid: #a61e30;
       --color-danger-solid-hover: #8e1828;
       --color-success-text: #484a4e;
+      --color-traffic-success: #136942;
+      --color-traffic-success-text: #136942;
       --color-warn-text: #7a4f00;
       --color-danger-text: #a61e30;
       --color-neutral: #6d6f72;
@@ -488,6 +496,7 @@
 .status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
 .status-dot.lg { width: 8px; height: 8px; }
 .status-dot.ok { background: var(--color-ok); }
+.status-dot.traffic-light.ok { background: var(--color-traffic-success); }
 .status-dot.warn { background: var(--color-warn); }
 .status-dot.danger { background: var(--color-danger); }
 .status-dot.neutral { background: var(--color-neutral); }
