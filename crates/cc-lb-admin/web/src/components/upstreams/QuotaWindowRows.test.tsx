@@ -61,7 +61,7 @@ describe('QuotaWindowRow', () => {
     expect(Number(marker?.dataset.pacePct)).toBeCloseTo((2 / 7) * 100, 6);
   });
 
-  it('colors a window ahead of pace as danger even below 95% used', () => {
+  it('colors a window 30+ points ahead of pace as danger', () => {
     // 55% used of a 5h window resetting in 4h: 1h elapsed is a 20% pace,
     // so usage runs 35 points ahead — past the 30-point danger gap.
     renderRow(snap({ utilization: 0.55, resets_at_unix_secs: NOW + 4 * 3600 }));

@@ -21,48 +21,44 @@ describe('quotaSeverity', () => {
       expect(quotaSeverity(used, 50)).toBe('none');
     },
   );
-
-  it('is danger from 95% used regardless of pace', () => {
-    expect(quotaSeverity(99, 99)).toBe('danger');
-    expect(quotaSeverity(95, 0)).toBe('danger');
+  it('is neutral however high when pace is unavailable', () => {
+    expect(quotaSeverity(80, null)).toBe('ok');
+    expect(quotaSeverity(95, null)).toBe('ok');
+    expect(quotaSeverity(99)).toBe('ok');
+    expect(quotaSeverity(99, undefined)).toBe('ok');
+    expect(quotaSeverity(100, null)).toBe('ok');
+    expect(quotaSeverity(100)).toBe('ok');
   });
 
-  it.each([null, 0, 50, 99])('100 used is danger at pace %s', (pace) => {
-    expect(quotaSeverity(100, pace)).toBe('danger');
-  });
-
-  it('warns from 80% when pace is unavailable', () => {
-    expect(quotaSeverity(79.9, null)).toBe('ok');
-    expect(quotaSeverity(80, null)).toBe('warn');
-    expect(quotaSeverity(80)).toBe('warn');
-    expect(quotaSeverity(94, null)).toBe('warn');
-    expect(quotaSeverity(95, null)).toBe('danger');
+  it('stays ok on even or behind pace, however high the reading', () => {
+    expect(quotaSeverity(99, 99)).toBe('ok');
+    expect(quotaSeverity(100, 100)).toBe('ok');
+    expect(quotaSeverity(80, 80)).toBe('ok');
+    expect(quotaSeverity(50, 80)).toBe('ok');
+    expect(quotaSeverity(0, 0)).toBe('ok');
+    expect(quotaSeverity(89, 85)).toBe('ok'); // gap under 10
   });
 
   it('is danger when used runs 30+ points ahead of pace', () => {
     expect(quotaSeverity(80, 50)).toBe('danger');
+    expect(quotaSeverity(100, 70)).toBe('danger');
     expect(quotaSeverity(30, 0)).toBe('danger');
-    expect(quotaSeverity(79, 50)).toBe('warn');
+    expect(quotaSeverity(99, 69)).toBe('danger');
   });
 
-  it('warns at 90%+ used or 10+ points ahead of pace', () => {
-    expect(quotaSeverity(94, 99)).toBe('warn');
-    expect(quotaSeverity(90, 99)).toBe('warn');
+  it('warns only when used runs 10-29 points ahead of pace', () => {
     expect(quotaSeverity(10, 0)).toBe('warn');
     expect(quotaSeverity(89, 79)).toBe('warn');
+    expect(quotaSeverity(94, 84)).toBe('warn');
+    expect(quotaSeverity(39, 29)).toBe('warn');
     expect(quotaSeverity(20, 10)).toBe('warn');
-  });
-
-  it('is ok on or behind pace below the warn bar', () => {
-    expect(quotaSeverity(80, 80)).toBe('ok');
-    expect(quotaSeverity(50, 80)).toBe('ok');
-    expect(quotaSeverity(0, 0)).toBe('ok');
-    expect(quotaSeverity(89, 85)).toBe('ok'); // below 90, gap under 10
+    expect(quotaSeverity(39, 30)).toBe('ok'); // gap under 10
   });
 
   it('treats a non-finite pace as no pace', () => {
-    expect(quotaSeverity(80, Number.NaN)).toBe('warn');
-    expect(quotaSeverity(79, Number.NaN)).toBe('ok');
+    expect(quotaSeverity(100, Number.NaN)).toBe('ok');
+    expect(quotaSeverity(80, Number.NaN)).toBe('ok');
+    expect(quotaSeverity(80, Number.POSITIVE_INFINITY)).toBe('ok');
   });
 });
 
@@ -131,9 +127,9 @@ describe('snapshotQuotaSeverity', () => {
     ['an unobserved snapshot', reading(0.8, NOW + 3600, 'unobserved')],
     ['an expired reset', reading(0.8, NOW - 1)],
     ['no reset', reading(0.8, null)],
-  ])('falls back to the absolute rule for %s', (_label, snap) => {
-    expect(snapshotQuotaSeverity(snap, NOW)).toBe('warn');
-    expect(snapshotQuotaSeverity({ ...snap, utilization: 0.79 }, NOW)).toBe(
+  ])('stays neutral for %s', (_label, snap) => {
+    expect(snapshotQuotaSeverity(snap, NOW)).toBe('ok');
+    expect(snapshotQuotaSeverity({ ...snap, utilization: 0.99 }, NOW)).toBe(
       'ok',
     );
   });

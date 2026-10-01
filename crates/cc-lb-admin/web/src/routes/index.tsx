@@ -10,7 +10,6 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
-  ReferenceLine,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
@@ -26,7 +25,6 @@ import {
   CHART_AXIS,
   CHART_CURSOR,
   CHART_GRID,
-  CHART_THRESHOLD,
   SeriesFillGradient,
   SPARKLINE_SECONDARY_DASH,
   Sparkline,
@@ -88,7 +86,6 @@ import {
 } from '../lib/queries';
 import {
   formatQuotaPercent,
-  QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
   type QuotaSeverity,
   quotaPacePct,
@@ -1352,16 +1349,6 @@ export function PoolQuotaThemedChart({
           ticks={[0, 25, 50, 75, 100]}
           allowDataOverflow={false}
         />
-        <ReferenceLine
-          y={QUOTA_DANGER_PCT}
-          {...CHART_THRESHOLD.danger}
-          label={{
-            position: 'insideTopRight',
-            value: `${QUOTA_DANGER_PCT}%`,
-            fill: 'var(--color-danger-text)',
-            fontSize: 12,
-          }}
-        />
         <RTooltip
           cursor={CHART_CURSOR}
           content={({ active, payload, label }) => {
@@ -1435,8 +1422,7 @@ export function PoolQuotaThemedChart({
 /**
  * The chart's header row: per window its swatch, current `N% used` in the
  * pace-relative severity ink (pace from the window's reset at the server's
- * `now`) and when it resets (absolute time in the `title`), then the
- * danger rule the chart draws.
+ * `now`) and when it resets (absolute time in the `title`).
  */
 function PoolQuotaLegend({
   latest,
@@ -1503,10 +1489,6 @@ function PoolQuotaLegend({
           </span>
         );
       })}
-      <span className="inline-flex min-h-5 items-center gap-1.5 text-caption">
-        <LegendSwatch {...CHART_THRESHOLD.danger} />
-        {`Danger at ${QUOTA_DANGER_PCT}% used`}
-      </span>
     </div>
   );
 }
@@ -1552,8 +1534,10 @@ function OverviewPage() {
   );
   const feed = useRequestEventsFeed({
     filters: OVERVIEW_EVENT_FILTERS,
+    mode: 'infinite',
     initialHistoryLimit: 500,
     pageSize: 50,
+    maxRetained: 500,
     live: true,
   });
   const principalNameMap = usePrincipalNameMap();
@@ -1936,8 +1920,7 @@ function OverviewPage() {
               columns={OVERVIEW_TABLE_COLUMNS}
               minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
-              showPagination
-              tableContainerClassName="relative min-w-0 overflow-x-auto max-md:-mx-4 md:glass md:rounded-md"
+              tableContainerClassName="relative min-w-0 max-md:-mx-4 md:glass md:rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto"
             />
           </Section>
         </>
