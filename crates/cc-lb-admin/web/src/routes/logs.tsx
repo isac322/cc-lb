@@ -547,11 +547,7 @@ function LogsPage() {
                 aria-hidden
                 className={cx(
                   'status-dot',
-                  effectiveTailing === false
-                    ? 'neutral'
-                    : tailStatus === 'live'
-                      ? 'live'
-                      : statusColor,
+                  effectiveTailing === false ? 'neutral' : statusColor,
                 )}
               />
               Live tail

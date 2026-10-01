@@ -119,13 +119,12 @@ function lastRunBadge(label: string) {
   return { badge, dot };
 }
 describe('WarmupCardMinimal last-run status colors', () => {
-  test('success renders the green traffic-light outcome', () => {
+  test('success renders the green outcome', () => {
     setSummaryQuery(makeSummary(makeAttempt({ status: 'success' })), false);
     render(<WarmupCardMinimal upstream={upstream} />);
 
     const { badge, dot } = lastRunBadge('Success');
     expect(dot?.classList.contains('ok')).toBe(true);
-    expect(dot?.classList.contains('traffic-light')).toBe(true);
     expect(badge?.classList.contains('text-traffic-success-text')).toBe(true);
   });
 

@@ -10,7 +10,13 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- Shared non-Logs time controls persist the selected `1h`, `6h`, `24h` or `7d` preset in local storage, default to `7d`, and update other mounted consumers; Logs keeps its independent `All` default.
+- Model filtering is case-insensitive and accepts an optional leading `claude-`: `sonnet` matches both `claude-sonnet-4-5` and model IDs such as `claude-3-5-sonnet-…`, while live, retained and historical rows use the same match.
+- Warm-up status, last-run details, history counts and outcome filters now use explicit tones: success is green, transient failure is warning, permanent failure is danger, and skipped or idle states are neutral.
+- Live indicators now use the shared semantic status colors: Admin connection and request-feed `Live` are green, while pending warm-up remains the accent `live` tone.
+- Request-table costs stay right-aligned without a latest-value shadow, Top principals bars use the full result set for their maximum, plugin pages remove the redundant explanatory copy, and upstream renaming uses an inline borderless title editor.
 - Shared request feeds now paginate older history by cursor beyond Overview's initial 500 rows with 50-row pages, while keeping live SSE bounds separate from historical retention.
+- Entity-scoped request feeds now use bounded infinite history: they retain at most 500 rows, load older records in 50-row pages as the bounded scroll slot reaches its end, and keep live status and failure/retry state in the shared feed.
 - Overview top-principal cost bars use the full result set as their relative maximum, with fixed two-decimal values and exact details; cache-hit thresholds, token unit colors, and positive-only cost breakdowns match the request views.
 - Quota severity is now pace-relative: usage running well ahead of even pace (10+ points warn, 30+ points danger, or 90%+ used) colors the same figure worse than on-pace usage, while windows without a pace reading keep the absolute warn-at-80 rule and 95% is always danger. Quota history charts draw only the 95% danger threshold line, and the upstreams list's needs-attention quota boundary follows it.
 

@@ -23,7 +23,11 @@ export type RequestEventsFeedTableProps = Omit<
 
 export interface RequestEventsFeedProps extends RequestEventsFeedTableProps {
   readonly feed: RequestEventsFeedState;
-  /** Show the live-tail status line. Off unless a surface opts in. */
+  /**
+   * Show the feed's own Live/Paused/Offline/reconnecting status line. On by
+   * default so every embedded feed reports its tail; Logs owns a single
+   * toolbar status and opts out.
+   */
   readonly showStatus?: boolean;
   readonly showLiveFailureBanner?: boolean;
   /**
@@ -43,7 +47,7 @@ export interface RequestEventsFeedProps extends RequestEventsFeedTableProps {
 
 const STATUS_TEXT_CLASS = {
   neutral: 'text-text-muted',
-  ok: 'text-success-text',
+  ok: 'text-traffic-success-text',
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 } as const;
@@ -53,7 +57,7 @@ const LOAD_MORE_MARGIN_PX = 160;
 
 export function RequestEventsFeed({
   feed,
-  showStatus = false,
+  showStatus = true,
   showLiveFailureBanner = true,
   showPagination = true,
   onPageChange,

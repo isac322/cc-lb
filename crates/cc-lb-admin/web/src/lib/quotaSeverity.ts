@@ -84,3 +84,57 @@ export function quotaPacePct(
   if (nowUnixSecs <= start || resetsAtUnixSecs <= nowUnixSecs) return null;
   return Math.min(100, ((nowUnixSecs - start) / length) * 100);
 }
+
+/** The fields of a `/latest` quota snapshot that decide its severity. */
+export interface QuotaReading {
+  window: string;
+  state: string;
+  /** 0-1 as reported; `null` without a reading. */
+  utilization: number | null;
+  resets_at_unix_secs: number | null;
+}
+
+/**
+ * Even pace for a snapshot's window at `atUnixSecs`, from that window's own
+ * reset. `null` when the snapshot was never observed or `atUnixSecs` lies
+ * outside the window that ends at the reset (expired, not yet opened), so
+ * severity falls back to the absolute rule. A past `atUnixSecs` inside the
+ * same window gives that moment's pace, never the current one.
+ */
+export function snapshotQuotaPacePct(
+  snap: QuotaReading,
+  atUnixSecs: number,
+): number | null {
+  if (snap.state === 'unobserved') return null;
+  return quotaPacePct(snap.window, snap.resets_at_unix_secs, atUnixSecs);
+}
+
+/** `quotaSeverity` of a snapshot's used% against its pace at `nowUnixSecs`. */
+export function snapshotQuotaSeverity(
+  snap: QuotaReading,
+  nowUnixSecs: number,
+): QuotaSeverity {
+  const used =
+    snap.utilization == null || !Number.isFinite(snap.utilization)
+      ? null
+      : snap.utilization * 100;
+  return quotaSeverity(used, snapshotQuotaPacePct(snap, nowUnixSecs));
+}
+
+const SEVERITY_ORDER: Record<QuotaSeverity, number> = {
+  none: 0,
+  ok: 1,
+  warn: 2,
+  danger: 3,
+};
+
+/** The most severe of `severities`; `none` when empty. */
+export function worstQuotaSeverity(
+  severities: Iterable<QuotaSeverity>,
+): QuotaSeverity {
+  let worst: QuotaSeverity = 'none';
+  for (const severity of severities) {
+    if (SEVERITY_ORDER[severity] > SEVERITY_ORDER[worst]) worst = severity;
+  }
+  return worst;
+}

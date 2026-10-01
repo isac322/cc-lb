@@ -321,7 +321,7 @@ function ConnectionStatus({ connection }: { connection: Connection }) {
         className={cx(
           'status-dot',
           connection === 'live'
-            ? 'live'
+            ? 'ok'
             : connection === 'down'
               ? 'danger'
               : 'neutral',
@@ -329,7 +329,10 @@ function ConnectionStatus({ connection }: { connection: Connection }) {
       />
       {connection === 'live' ? (
         <>
-          <span aria-hidden="true" className="hidden md:inline text-text-muted">
+          <span
+            aria-hidden="true"
+            className="hidden md:inline text-traffic-success-text"
+          >
             {copy.label}
           </span>
           <span className="sr-only">{copy.a11y}</span>

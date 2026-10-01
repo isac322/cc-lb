@@ -19,7 +19,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { useSyncExternalStore } from 'react';
+import { createContext, useContext, useSyncExternalStore } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RecentEventsPayload, RequestEvent } from '../lib/api';
 import { filterLogRows } from '../lib/logRows';
@@ -32,13 +32,52 @@ const queryMocks = vi.hoisted(() => ({
   fetchRecentEventsPage: vi.fn(),
 }));
 
-const liveState = vi.hoisted(() => ({
-  eventsMap: new Map() as LiveEventMap,
-  listeners: new Set<() => void>(),
-  version: 0,
-}));
+type LiveStore = {
+  readonly eventsMap: LiveEventMap;
+  readonly listeners: Set<() => void>;
+  version: number;
+  readonly subscribe: (listener: () => void) => () => void;
+  readonly getSnapshot: () => number;
+};
+
+// Each renderLogs call owns one LiveStore and provides it to its own React
+// tree. The mocked hook reads the store from context at call time only, so a
+// late publisher from an earlier render can only mutate the store it owns.
+const LiveStoreContext = createContext<LiveStore | null>(null);
+
+const liveStores: LiveStore[] = [];
 
 const queryClients: QueryClient[] = [];
+
+function createLiveStore(): LiveStore {
+  const store: LiveStore = {
+    eventsMap: new Map() as LiveEventMap,
+    listeners: new Set<() => void>(),
+    version: 0,
+    subscribe: (listener) => {
+      store.listeners.add(listener);
+      return () => {
+        store.listeners.delete(listener);
+      };
+    },
+    getSnapshot: () => store.version,
+  };
+  liveStores.push(store);
+  return store;
+}
+
+function createLivePublisher(store: LiveStore) {
+  return (event: RequestEvent) => {
+    act(() => {
+      store.eventsMap.set(event.event_id ?? event.request_id, {
+        phase: 'final',
+        event,
+      });
+      store.version += 1;
+      for (const listener of store.listeners) listener();
+    });
+  };
+}
 
 const mockEvents = Array.from({ length: 120 }, (_, i) => ({
   request_id: `req-${i}`,
@@ -127,21 +166,26 @@ vi.mock('../lib/queries', async () => {
   };
 });
 
-vi.mock('../lib/useLiveEventStream', () => {
-  const subscribe = (listener: () => void) => {
-    liveState.listeners.add(listener);
-    return () => liveState.listeners.delete(listener);
-  };
-  const getSnapshot = () => liveState.version;
-  return {
-    useLiveEventStream: () => ({
-      eventsMap: liveState.eventsMap,
-      version: useSyncExternalStore(subscribe, getSnapshot, getSnapshot),
+vi.mock('../lib/useLiveEventStream', () => ({
+  useLiveEventStream: () => {
+    const store = useContext(LiveStoreContext);
+    if (store === null) {
+      throw new Error(
+        'useLiveEventStream mock rendered outside a renderLogs LiveStoreContext',
+      );
+    }
+    return {
+      eventsMap: store.eventsMap,
+      version: useSyncExternalStore(
+        store.subscribe,
+        store.getSnapshot,
+        store.getSnapshot,
+      ),
       status: 'idle',
       permanentFailure: false,
-    }),
-  };
-});
+    };
+  },
+}));
 
 global.URL.createObjectURL = vi.fn(() => 'blob:test');
 global.URL.revokeObjectURL = vi.fn();
@@ -180,13 +224,16 @@ async function renderLogs(search: Record<string, string> = {}) {
     }),
   });
   await router.load();
+  const liveStore = createLiveStore();
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
-    </QueryClientProvider>,
+    <LiveStoreContext.Provider value={liveStore}>
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    </LiveStoreContext.Provider>,
   );
   await screen.findByRole('heading', { name: 'Logs', level: 1 });
-  return { ...view, router };
+  return { ...view, router, publishLiveEvent: createLivePublisher(liveStore) };
 }
 
 function rowIds(table: HTMLElement) {
@@ -200,17 +247,6 @@ function rowIds(table: HTMLElement) {
 
 function expectedRows(events: readonly RequestEvent[]) {
   return events.map((event) => `View request ${event.request_id}`);
-}
-
-function publishLiveEvent(event: RequestEvent) {
-  act(() => {
-    liveState.eventsMap.set(event.event_id ?? event.request_id, {
-      phase: 'final',
-      event,
-    });
-    liveState.version += 1;
-    for (const listener of liveState.listeners) listener();
-  });
 }
 
 describe('LogsPage', () => {
@@ -251,9 +287,11 @@ describe('LogsPage', () => {
     queryMocks.fetchRecentEventsPage.mockReset();
     for (const queryClient of queryClients) queryClient.clear();
     queryClients.length = 0;
-    liveState.eventsMap.clear();
-    liveState.listeners.clear();
-    liveState.version = 0;
+    for (const store of liveStores) {
+      store.eventsMap.clear();
+      store.listeners.clear();
+    }
+    liveStores.length = 0;
     vi.useRealTimers();
   });
 
@@ -374,7 +412,7 @@ describe('LogsPage', () => {
     queryMocks.fetchRecentEventsPage.mockImplementation((filters, pageParam) =>
       makeRecentPage(filters, pageParam, events),
     );
-    await renderLogs({ model: 'sonnet' });
+    const { publishLiveEvent } = await renderLogs({ model: 'sonnet' });
 
     const table = screen.getByRole('table');
     await waitFor(() =>
@@ -525,7 +563,7 @@ describe('LogsPage', () => {
   }, 30_000);
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
-    await renderLogs();
+    const { publishLiveEvent } = await renderLogs();
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),
@@ -544,7 +582,7 @@ describe('LogsPage', () => {
   });
 
   it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
-    await renderLogs();
+    const { publishLiveEvent } = await renderLogs();
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),

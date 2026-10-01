@@ -98,42 +98,34 @@ describe('WarmupHistoryDrawer outcome colors', () => {
       reason: 'cycle_advanced' as const,
       label: 'Success',
       textClass: 'text-traffic-success-text',
-      dotClass: 'bg-[color:var(--color-traffic-success)]',
     },
     {
       status: 'transient_failure' as const,
       reason: 'upstream_5xx' as const,
       label: 'Retrying',
       textClass: 'text-warn-text',
-      dotClass: 'bg-[color:var(--color-warn)]',
     },
     {
       status: 'permanent_failure' as const,
       reason: 'auth_failed' as const,
       label: 'Failed',
       textClass: 'text-danger-text',
-      dotClass: 'bg-[color:var(--color-danger)]',
     },
     {
       status: 'skipped' as const,
       reason: 'upstream_disabled' as const,
       label: 'Skipped',
       textClass: 'text-text-muted',
-      dotClass: 'bg-[color:var(--color-neutral)]',
     },
   ])(
     '$status rows use the matching semantic tokens',
-    ({ status, reason, label, textClass, dotClass }) => {
+    ({ status, reason, label, textClass }) => {
       setAttemptsQuery([makeAttempt({ status, reason })]);
       renderDrawer();
 
       const list = screen.getByRole('list');
       const labelEl = within(list).getByText(label);
       expect(labelEl.classList.contains(textClass)).toBe(true);
-      const row = labelEl.closest('button');
-      expect(
-        row?.querySelector('.status-dot')?.classList.contains(dotClass),
-      ).toBe(true);
     },
   );
 
@@ -152,21 +144,6 @@ describe('WarmupHistoryDrawer outcome colors', () => {
       }
     }
   });
-
-  test.each([
-    { name: 'Success', dotClass: 'bg-[color:var(--color-traffic-success)]' },
-    { name: 'Retrying', dotClass: 'bg-[color:var(--color-warn)]' },
-    { name: 'Failed', dotClass: 'bg-[color:var(--color-danger)]' },
-    { name: 'Skipped', dotClass: 'bg-[color:var(--color-neutral)]' },
-  ])(
-    'the $name filter chip carries the matching status dot',
-    ({ name, dotClass }) => {
-      renderDrawer();
-
-      const { dot } = filterChip(name);
-      expect(dot?.classList.contains(dotClass)).toBe(true);
-    },
-  );
 
   test('the All filter chip stays plain — it is not an outcome', () => {
     renderDrawer();

@@ -178,7 +178,7 @@
     --color-accent-dim: rgb(204 221 238 / 0.14);
     --color-accent-text: #779cc2;
     --color-accent-ink: #181a1c;
-    /* Healthy stays neutral except explicitly opted-in traffic-light states. */
+    /* `--color-ok` is the graphite healthy metric fill; status success uses `--color-traffic-success`. */
     --color-ok: #c0c1c3;
     --color-warn: #f0b429;
     --color-danger: #ff6f61;
@@ -491,8 +491,7 @@
    no glow; state is also carried by text. */
 .status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
 .status-dot.lg { width: 8px; height: 8px; }
-.status-dot.ok { background: var(--color-ok); }
-.status-dot.traffic-light.ok { background: var(--color-traffic-success); }
+.status-dot.ok { background: var(--color-traffic-success); }
 .status-dot.warn { background: var(--color-warn); }
 .status-dot.danger { background: var(--color-danger); }
 .status-dot.neutral { background: var(--color-neutral); }

@@ -233,7 +233,7 @@ export type BadgeTone =
 const BADGE_TONES: Record<BadgeTone, string> = {
   neutral: 'bg-overlay-5 text-text-muted text-caption font-medium',
   accent: 'border border-accent text-accent-text text-caption font-medium',
-  ok: 'bg-overlay-5 text-success-text text-caption font-medium',
+  ok: 'bg-overlay-5 text-traffic-success-text text-caption font-medium',
   warn: 'bg-warn/12 text-warn-text text-caption font-medium',
   danger: 'bg-danger/12 text-danger-text text-caption font-medium',
   mono: 'bg-overlay-4 text-text font-mono text-data',
@@ -265,36 +265,28 @@ const STATUS_TEXT: Record<
   'ok' | 'warn' | 'danger' | 'neutral' | 'live',
   string
 > = {
-  ok: 'text-text-muted',
+  ok: 'text-traffic-success-text',
   neutral: 'text-text-muted',
   live: 'text-text-muted',
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 };
-/** Dot + phrase; only explicit traffic-light surfaces render healthy in green. */
+/** Dot + phrase. Success renders green, warn amber, danger red. */
 export function StatusBadge({
   tone,
   label,
-  trafficLight = false,
 }: {
   tone: 'ok' | 'warn' | 'danger' | 'neutral' | 'live';
   label: ReactNode;
-  /** Opt in only where the current state requires red/yellow/green emphasis. */
-  trafficLight?: boolean;
 }) {
   return (
     <span
       className={cx(
         'inline-flex h-5 shrink-0 items-center gap-1.5 whitespace-nowrap text-label',
-        trafficLight && tone === 'ok'
-          ? 'text-traffic-success-text'
-          : STATUS_TEXT[tone],
+        STATUS_TEXT[tone],
       )}
     >
-      <span
-        aria-hidden="true"
-        className={cx('status-dot', tone, trafficLight && 'traffic-light lg')}
-      />
+      <span aria-hidden="true" className={cx('status-dot', tone)} />
       <span>{label}</span>
     </span>
   );
@@ -1234,7 +1226,7 @@ const NOTICE_ICON: Record<
   { Icon: typeof Info; className: string }
 > = {
   info: { Icon: Info, className: 'text-text-muted' },
-  success: { Icon: CircleCheck, className: 'text-success-text' },
+  success: { Icon: CircleCheck, className: 'text-traffic-success-text' },
   warning: { Icon: TriangleAlert, className: 'text-warn-text' },
   danger: { Icon: CircleAlert, className: 'text-danger-text' },
 };

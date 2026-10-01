@@ -166,6 +166,8 @@ function cardNamed(title: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The list's request counts follow the shared persisted range; reset it.
+  window.localStorage.clear();
   navigateMock.mockReset();
   queryClient.clear();
   Object.assign(Route, { useSearch: () => ({}) });

@@ -433,7 +433,7 @@ function WarmupCardMinimalInner({
         !credentialRequiresReconnect ? (
           <Skeleton className="h-4 w-full rounded-sm" />
         ) : (
-          <StatusBadge trafficLight tone={statusTone} label={statusLabel} />
+          <StatusBadge tone={statusTone} label={statusLabel} />
         )}
       </span>
     </span>
@@ -562,7 +562,6 @@ function WarmupCardMinimalInner({
                     >
                       <span className="flex flex-wrap items-center gap-2">
                         <StatusBadge
-                          trafficLight
                           tone={OUTCOME_SEVERITY[lastAttempt.status]}
                           label={OUTCOME_LABEL[lastAttempt.status]}
                         />

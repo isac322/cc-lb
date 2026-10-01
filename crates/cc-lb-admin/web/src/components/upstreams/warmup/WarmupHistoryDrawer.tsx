@@ -24,7 +24,6 @@ import {
   formatFreshnessLine,
   formatResultNarrative,
   OUTCOME_SEVERITY,
-  SEVERITY_DOT_CLASS,
   SEVERITY_TEXT_CLASS,
 } from './parts/warmupViewModel';
 
@@ -242,12 +241,7 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
               )}
             >
               {f.key !== 'all' && (
-                <span
-                  className={cx(
-                    'status-dot',
-                    SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[f.key]],
-                  )}
-                />
+                <span className={cx('status-dot', OUTCOME_SEVERITY[f.key])} />
               )}
               {f.label}
             </button>
@@ -338,7 +332,7 @@ function AttemptListRow({
           <span
             className={cx(
               'status-dot shrink-0',
-              SEVERITY_DOT_CLASS[OUTCOME_SEVERITY[attempt.status]],
+              OUTCOME_SEVERITY[attempt.status],
             )}
             aria-hidden
           />

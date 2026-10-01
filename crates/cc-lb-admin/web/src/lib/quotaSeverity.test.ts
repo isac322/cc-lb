@@ -4,6 +4,9 @@ import {
   formatQuotaPercent,
   quotaPacePct,
   quotaSeverity,
+  snapshotQuotaPacePct,
+  snapshotQuotaSeverity,
+  worstQuotaSeverity,
 } from './quotaSeverity';
 
 const NOW = 1_800_000_000;
@@ -102,6 +105,64 @@ describe('quotaPacePct', () => {
     // 1s before reset the pace is effectively 100, never past it.
     expect(quotaPacePct('5h', NOW + 1, NOW)).toBeLessThanOrEqual(100);
     expect(quotaPacePct('5h', NOW + 1, NOW)).toBeGreaterThan(99);
+  });
+});
+
+describe('snapshotQuotaSeverity', () => {
+  const reading = (
+    utilization: number | null,
+    resetsAt: number | null,
+    state = 'fresh',
+  ) => ({ window: '5h', state, utilization, resets_at_unix_secs: resetsAt });
+
+  it('is ok for 80% used exactly on pace', () => {
+    // 5h window resetting in 1h: pace 80.
+    expect(snapshotQuotaSeverity(reading(0.8, NOW + 3600), NOW)).toBe('ok');
+  });
+
+  it('is danger for 30%+ used right after the window opens', () => {
+    // One minute into the window: pace ~0.3, used 31 runs 30+ points ahead.
+    expect(snapshotQuotaSeverity(reading(0.31, NOW + H5 - 60), NOW)).toBe(
+      'danger',
+    );
+  });
+
+  it.each([
+    ['an unobserved snapshot', reading(0.8, NOW + 3600, 'unobserved')],
+    ['an expired reset', reading(0.8, NOW - 1)],
+    ['no reset', reading(0.8, null)],
+  ])('falls back to the absolute rule for %s', (_label, snap) => {
+    expect(snapshotQuotaSeverity(snap, NOW)).toBe('warn');
+    expect(snapshotQuotaSeverity({ ...snap, utilization: 0.79 }, NOW)).toBe(
+      'ok',
+    );
+  });
+
+  it('has no reading without utilization', () => {
+    expect(snapshotQuotaSeverity(reading(null, NOW + 3600), NOW)).toBe('none');
+  });
+});
+
+describe('snapshotQuotaPacePct', () => {
+  it("reads a past moment's pace inside the snapshot's window, not today's", () => {
+    const snap = {
+      window: '5h',
+      state: 'fresh',
+      utilization: 0.5,
+      resets_at_unix_secs: NOW + 3600,
+    };
+    // Window opened 4h ago; 2h ago it was 2h of 5h in → 40.
+    expect(snapshotQuotaPacePct(snap, NOW - 7200)).toBeCloseTo(40, 10);
+    // Before that window opened the reset is unknown: no pace.
+    expect(snapshotQuotaPacePct(snap, NOW - 5 * 3600)).toBeNull();
+  });
+});
+
+describe('worstQuotaSeverity', () => {
+  it('picks the most severe reading', () => {
+    expect(worstQuotaSeverity(['ok', 'danger', 'warn'])).toBe('danger');
+    expect(worstQuotaSeverity(['none', 'ok'])).toBe('ok');
+    expect(worstQuotaSeverity([])).toBe('none');
   });
 });
 

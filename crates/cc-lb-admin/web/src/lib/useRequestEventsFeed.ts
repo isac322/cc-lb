@@ -7,11 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type {
-  RecentEventsPayload,
-  RequestEvent,
-  RequestEventKind,
-} from './api';
+import type { RequestEvent, RequestEventKind } from './api';
 import {
   filterLiveEventsByUnixSeconds,
   filterLogRows,
@@ -121,9 +117,6 @@ const MAX_PAGE_SIZE = 50;
 const DEFAULT_MAX_RETAINED = 500;
 /** Mirrors `MAX_RECENT_EVENTS_LIMIT` on `/admin/v1/events/recent`. */
 const MAX_HISTORY_REQUEST = 500;
-
-/** Watermark returned by `/admin/v1/events/recent`; absent on older servers. */
-type RecentEventsWatermark = RecentEventsPayload & { readonly cursor?: number };
 
 type OrderedEvent = {
   readonly event_id?: string;
@@ -374,8 +367,7 @@ export function useRequestEventsFeed(
   // resume it from that history's watermark: every event committed after the
   // history snapshot is replayed, so none fall between the two.
   const historySettled = recent.data !== undefined || recent.isError;
-  const historyWatermark = (recent.data as RecentEventsWatermark | undefined)
-    ?.cursor;
+  const historyWatermark = recent.data?.cursor;
   const live = useLiveEventStream(liveFilters, {
     enabled: liveEnabled && historySettled,
     seedCursor:

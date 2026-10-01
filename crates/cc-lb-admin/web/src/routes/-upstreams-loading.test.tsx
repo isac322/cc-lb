@@ -463,6 +463,8 @@ beforeEach(() => {
   });
   vi.clearAllMocks();
   queryClient.clear();
+  // The quota-history range is the shared persisted preset; reset it.
+  window.localStorage.clear();
   searchState = { selectedId: upstream.id };
 
   vi.mocked(queries.useUpstreams).mockReturnValue({
@@ -588,6 +590,27 @@ describe('/upstreams quota request cadence', () => {
       rangeSecs: 3600,
       bucketSecs: 60,
     });
+  });
+
+  test('reads the shared persisted preset and writes it on selection', () => {
+    window.localStorage.setItem('cclb.timeRange', '24h');
+    const first = renderRoute();
+    expect(
+      vi.mocked(queries.useSubscriptionQuotaSeries).mock.calls.at(-1)?.[0],
+    ).toMatchObject({ rangeSecs: 86400, bucketSecs: 300 });
+
+    fireEvent.click(screen.getByRole('radio', { name: '6h' }));
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('6h');
+
+    // A reload (fresh mount) restores the selection from storage.
+    first.unmount();
+    renderRoute();
+    expect(
+      screen.getByRole('radio', { name: '6h' }).getAttribute('aria-checked'),
+    ).toBe('true');
+    expect(
+      vi.mocked(queries.useSubscriptionQuotaSeries).mock.calls.at(-1)?.[0],
+    ).toMatchObject({ rangeSecs: 21600, bucketSecs: 60 });
   });
 });
 
@@ -982,7 +1005,8 @@ describe('/upstreams refresh retention', () => {
     });
 
     isPlaceholderData = true;
-    fireEvent.click(screen.getByRole('radio', { name: '7d' }));
+    // The shared preset starts at 7d; moving to 24h is a real range change.
+    fireEvent.click(screen.getByRole('radio', { name: '24h' }));
 
     expect(screen.getByText('old-usage-model')).toBeDefined();
     expect(screen.getByText('old-request-model')).toBeDefined();
@@ -1001,7 +1025,7 @@ describe('/upstreams refresh retention', () => {
     expect(screen.getByText('new-request-model')).toBeDefined();
   });
 
-  test('resets detail-local state and never renders the previous OAuth identity after selection changes', () => {
+  test('resets detail-local state but keeps the shared range after selection changes', () => {
     vi.mocked(queries.useUpstreams).mockReturnValue(
       queryResult({ upstreams: [upstream, secondOauthUpstream] }),
     );
@@ -1067,15 +1091,16 @@ describe('/upstreams refresh retention', () => {
     searchState = { selectedId: secondOauthUpstream.id };
     view.rerender(routeElement());
 
-    const resetRangeControl = screen.getByTestId('quota-history-range-control');
+    // The range is the shared preset, not detail-local: it carries over.
+    const keptRangeControl = screen.getByTestId('quota-history-range-control');
     expect(
-      within(resetRangeControl)
-        .getByRole('radio', { name: '7d' })
+      within(keptRangeControl)
+        .getByRole('radio', { name: '1h' })
         .getAttribute('aria-checked'),
     ).toBe('true');
     expect(
-      within(resetRangeControl)
-        .getByRole('radio', { name: '1h' })
+      within(keptRangeControl)
+        .getByRole('radio', { name: '7d' })
         .getAttribute('aria-checked'),
     ).toBe('false');
     expect(screen.queryByText(/identity-old@example\.com/)).toBeNull();
