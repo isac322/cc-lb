@@ -4,6 +4,7 @@ import type { ReactNode } from 'react';
 import { eventTime } from '../../lib/api';
 import {
   getRequestOutcome,
+  httpStatusTextClass,
   type RequestOutcome,
   requestOutcomeTone,
 } from '../../lib/format';
@@ -384,7 +385,12 @@ export function RequestEventIdentity({
           <KvRow
             label="Status code"
             value={
-              <span className="tabular-nums break-all min-w-0">
+              <span
+                className={cx(
+                  'tabular-nums break-all min-w-0',
+                  httpStatusTextClass(outcome.status),
+                )}
+              >
                 {outcome.status}
               </span>
             }
@@ -394,7 +400,12 @@ export function RequestEventIdentity({
           <KvRow
             label="HTTP status"
             value={
-              <span className="tabular-nums break-all min-w-0">
+              <span
+                className={cx(
+                  'tabular-nums break-all min-w-0',
+                  httpStatusTextClass(outcome.status),
+                )}
+              >
                 {outcome.status}
               </span>
             }

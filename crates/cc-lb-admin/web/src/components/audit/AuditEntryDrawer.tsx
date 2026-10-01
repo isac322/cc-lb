@@ -1,6 +1,7 @@
 import { ChevronRight } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { eventTime } from '../../lib/api';
+import { httpStatusTextClass } from '../../lib/format';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import { cx, Drawer } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
@@ -15,7 +16,6 @@ import {
   type NameMaps,
   parseAuditAction,
   readableValue,
-  statusTextClass,
 } from './auditEntry';
 
 const SECTION_TITLE_CLASS = 'text-title-card text-text';
@@ -141,7 +141,10 @@ export function AuditEntryDrawer({
               </DetailRow>
               <DetailRow label="Status">
                 <span
-                  className={cx('tabular-nums', statusTextClass(entry.status))}
+                  className={cx(
+                    'tabular-nums',
+                    httpStatusTextClass(entry.status),
+                  )}
                 >
                   {entry.status}
                 </span>

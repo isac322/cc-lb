@@ -30,7 +30,6 @@ import {
   type ParsedAction,
   parseAuditAction,
   readableRoute,
-  statusTextClass,
 } from '../components/audit/auditEntry';
 import {
   Button,
@@ -55,6 +54,7 @@ import {
 } from '../components/ui/Table';
 import { TimeRangeBounds } from '../components/ui/TimeRangeBounds';
 import { eventTime } from '../lib/api';
+import { httpStatusTextClass } from '../lib/format';
 import { useLocale, useTimezone } from '../lib/locale';
 import {
   useAudit,
@@ -745,7 +745,7 @@ function AuditPage() {
                           <span
                             className={cx(
                               'shrink-0 tabular-nums',
-                              statusTextClass(entry.status),
+                              httpStatusTextClass(entry.status),
                             )}
                           >
                             {entry.status}
@@ -848,7 +848,7 @@ function AuditPage() {
                         <span
                           className={cx(
                             'shrink-0 tabular-nums',
-                            statusTextClass(entry.status),
+                            httpStatusTextClass(entry.status),
                           )}
                         >
                           {entry.status}

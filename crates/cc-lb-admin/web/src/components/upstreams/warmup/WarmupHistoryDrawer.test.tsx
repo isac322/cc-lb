@@ -145,6 +145,47 @@ describe('WarmupHistoryDrawer outcome colors', () => {
     }
   });
 
+  test.each([
+    {
+      status: 'success' as const,
+      reason: 'cycle_advanced' as const,
+      httpStatus: 200,
+      textClass: 'text-traffic-success-text',
+    },
+    {
+      status: 'transient_failure' as const,
+      reason: 'rate_limited_cycle_key_missing' as const,
+      httpStatus: 429,
+      textClass: 'text-warn-text',
+    },
+    {
+      status: 'transient_failure' as const,
+      reason: 'upstream_5xx' as const,
+      httpStatus: 503,
+      textClass: 'text-danger-text',
+    },
+  ])(
+    'HTTP $httpStatus carries its semantic color in list and detail',
+    ({ status, reason, httpStatus, textClass }) => {
+      setAttemptsQuery([
+        makeAttempt({ status, reason, http_status: httpStatus }),
+      ]);
+      renderDrawer();
+
+      const list = screen.getByRole('list');
+      const rowFigure = within(list).getByText(String(httpStatus));
+      expect(rowFigure.classList.contains(textClass)).toBe(true);
+      const row = rowFigure.closest('button');
+      if (!row) throw new Error('expected the attempt row button');
+
+      fireEvent.click(row);
+      const term = screen.getByText('HTTP', { selector: 'dt' });
+      const detailFigure = term.nextElementSibling;
+      expect(detailFigure?.textContent).toBe(String(httpStatus));
+      expect(detailFigure?.classList.contains(textClass)).toBe(true);
+    },
+  );
+
   test('the All filter chip stays plain — it is not an outcome', () => {
     renderDrawer();
 

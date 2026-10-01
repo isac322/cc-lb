@@ -171,6 +171,22 @@ export function statusTone(s: number): 'ok' | 'warn' | 'danger' | 'neutral' {
   return 'neutral';
 }
 
+/** Text ink for an explicit status tone (`*-text` tokens only). */
+export const STATUS_TONE_TEXT_CLASS: Record<
+  'ok' | 'warn' | 'danger' | 'neutral',
+  string
+> = {
+  ok: 'text-traffic-success-text',
+  warn: 'text-warn-text',
+  danger: 'text-danger-text',
+  neutral: 'text-text-muted',
+};
+
+/** Text ink for an explicit HTTP status; null/unknown stays neutral. */
+export function httpStatusTextClass(status: number | null | undefined): string {
+  return STATUS_TONE_TEXT_CLASS[statusTone(status ?? 0)];
+}
+
 export function requestOutcomeTone(
   outcome: RequestOutcome,
 ): 'ok' | 'warn' | 'danger' | 'neutral' {
