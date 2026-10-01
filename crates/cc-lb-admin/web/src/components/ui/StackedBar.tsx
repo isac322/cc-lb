@@ -54,7 +54,6 @@ export function StackedBar({
       aria-hidden={ariaLabel ? undefined : true}
       className={cx(
         'flex w-full gap-px overflow-hidden rounded-xs bg-progress-track',
-        relativeScale != null ? 'ml-auto' : undefined,
         HEIGHTS[size],
         className,
       )}

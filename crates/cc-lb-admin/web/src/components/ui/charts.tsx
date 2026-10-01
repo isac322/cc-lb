@@ -9,7 +9,7 @@ import { SERIES_FILL_OPACITY } from '../../lib/colors';
 // Spread into Recharts parts so every chart shares the instrument-cluster
 // chrome: 1px crisp horizontal gridlines in the line color (index.css
 // enforces the stroke too), 12px sans tick labels in `text-faint`, a 1px
-// strong-line hover cursor, and 1px dashed warn / danger threshold rules.
+// strong-line hover cursor.
 export const CHART_GRID = {
   vertical: false,
   stroke: 'var(--color-border)',
@@ -22,14 +22,6 @@ export const CHART_AXIS = {
 export const CHART_CURSOR = {
   stroke: 'var(--color-border-strong)',
   strokeWidth: 1,
-} as const;
-export const CHART_THRESHOLD = {
-  warn: { stroke: 'var(--color-warn)', strokeWidth: 1, strokeDasharray: '3 3' },
-  danger: {
-    stroke: 'var(--color-danger)',
-    strokeWidth: 1,
-    strokeDasharray: '3 3',
-  },
 } as const;
 
 /**
