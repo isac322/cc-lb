@@ -8,8 +8,15 @@ import {
   within,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ComponentType, ReactNode } from 'react';
+import {
+  type ComponentProps,
+  type ComponentType,
+  createContext,
+  type ReactNode,
+  useContext,
+} from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as RequestEventsTableModule from '../components/ui/RequestEventsTable';
 import type {
   AggregateResponse,
   DashboardSummaryResponse,
@@ -62,6 +69,51 @@ vi.mock('../components/upstreams/UpstreamUsageTable', () => ({
   }),
   UpstreamUsageTable: ({ empty }: { empty?: ReactNode }) => <>{empty}</>,
 }));
+
+// Every test renders the real table unless it opts into the row-only table.
+// The context is read only while the mocked table renders, after module init.
+vi.mock('../components/ui/RequestEventsTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof RequestEventsTableModule>();
+  return {
+    ...actual,
+    RequestEventsTable: (
+      props: ComponentProps<typeof actual.RequestEventsTable>,
+    ) => {
+      if (!useContext(RowOnlyRequestEventsTableContext)) {
+        return <actual.RequestEventsTable {...props} />;
+      }
+      return (
+        <table>
+          <tbody>
+            {props.events.map((event) => {
+              const eventKey = event.event_id ?? event.request_id;
+              return (
+                <tr aria-label={`View request ${eventKey}`} key={eventKey}>
+                  <td>{eventKey}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      );
+    },
+  };
+});
+
+const RowOnlyRequestEventsTableContext = createContext(false);
+
+/**
+ * Swaps only the table leaf for bare rows. The feed, its paging and live merge
+ * stay real, so a test that walks hundreds of rows asserts which rows show
+ * without paying for each row's full presentation.
+ */
+function RowOnlyRequestEventsTable({ children }: { children: ReactNode }) {
+  return (
+    <RowOnlyRequestEventsTableContext.Provider value={true}>
+      {children}
+    </RowOnlyRequestEventsTableContext.Provider>
+  );
+}
 
 // The Overview links to other routes and keeps its range in the URL; render
 // router links as plain anchors and back the search params with a tiny store
@@ -631,6 +683,8 @@ function mockManyPrincipals() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The shared range persists in storage; start every test from its default.
+  window.localStorage.clear();
   routerMock.search = { range: '24h' };
   rechartsMock.areaChartRenderCount = 0;
   rechartsMock.tooltip = null;
@@ -705,11 +759,6 @@ describe('Overview pool quota usage', () => {
       '7d · 83% used · resets in 1h',
       '7d (Fable) · 97% used · resets in 1h',
     ]);
-    const value = (index: number) =>
-      within(slots[index]!).getByText(/% used$/).className;
-    expect(value(0)).toContain('text-text');
-    expect(value(1)).toContain('text-warn-text');
-    expect(value(2)).toContain('text-danger-text');
 
     const captions = screen.getByTestId('pool-quota-captions');
     expect(captions.textContent).toContain('Plan-weighted across upstreams');
@@ -1493,18 +1542,111 @@ describe('Overview loading geometry', () => {
     expect(screen.getByTestId('top-principal-row')).toBe(principalRow);
   });
 
+  it('without a URL range follows the shared 7d default and a stored preset, and a selection writes both', () => {
+    mockResolvedKpiQueries();
+    routerMock.search = {};
+    const first = render(<OverviewPage />);
+    // No `?range=` and nothing stored: the shared 7d default scopes the group.
+    expect(rangeOption('Usage range', '7d').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('7d');
+    first.unmount();
+
+    // A preset chosen on another non-Logs surface (persisted) governs a
+    // fresh Overview load that carries no URL range.
+    window.localStorage.setItem('cclb.timeRange', '6h');
+    mockResolvedKpiQueries();
+    render(<OverviewPage />);
+    expect(rangeOption('Usage range', '6h').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('6h');
+    expect(
+      vi.mocked(queries.useSubscriptionQuotaPoolHistory),
+    ).toHaveBeenLastCalledWith(expect.objectContaining({ rangeSecs: 21600 }));
+
+    // Choosing a preset updates the shared store and keeps the URL explicit.
+    fireEvent.click(rangeOption('Usage range', '1h'));
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('1h');
+    expect(routerMock.search).toEqual({ range: '1h' });
+    expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('1h');
+  });
+
+  it('lets an explicit URL range own the view over the shared preset', () => {
+    mockResolvedKpiQueries();
+    window.localStorage.setItem('cclb.timeRange', '7d');
+    routerMock.search = { range: '1h' };
+    render(<OverviewPage />);
+    expect(rangeOption('Usage range', '1h').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(vi.mocked(queries.useSummary)).toHaveBeenLastCalledWith('1h');
+    // Reading the URL range never writes the shared store back.
+    expect(window.localStorage.getItem('cclb.timeRange')).toBe('7d');
+  });
+
+  it('shows the latest-requests feed its own live tail status', () => {
+    mockResolvedKpiQueries();
+    vi.mocked(liveEvents.useLiveEventStream).mockReturnValue({
+      error: null,
+      eventsMap: new Map(),
+      forceReconnect: vi.fn(),
+      lastActivityAt: null,
+      lastCursor: null,
+      malformedFrameCount: 0,
+      permanentFailure: false,
+      permanentFailureSince: null,
+      reconnectAttempts: 0,
+      status: 'live',
+      version: 0,
+    });
+    render(<OverviewPage />);
+    const status = document.querySelector('[data-feed-status]');
+    expect(status?.getAttribute('role')).toBe('status');
+    expect(status?.getAttribute('data-feed-status')).toBe('live');
+    expect(status?.textContent).toBe('Live');
+  });
+
+  const RETAINED_HISTORY = Array.from({ length: 500 }, (_, index) => ({
+    duration_ms: 10,
+    event_kind: 'messages' as const,
+    model: 'test-model',
+    request_id: `request-${500 - index}`,
+    status: 200,
+    ts: 500 - index,
+  }));
+
+  it('mounts only the newest 50 retained requests in the real table', () => {
+    mockResolvedKpiQueries();
+    mockRequestEventsFeed(RETAINED_HISTORY);
+    render(<OverviewPage />);
+
+    const table = screen
+      .getByLabelText('View request request-500')
+      .closest('table');
+    if (table === null) throw new Error('Expected latest requests table');
+    expect(
+      Array.from(
+        table.querySelectorAll<HTMLTableRowElement>(
+          'tbody tr[aria-label^="View request "]',
+        ),
+        (row) => row.getAttribute('aria-label'),
+      ),
+    ).toEqual(
+      RETAINED_HISTORY.slice(0, 50).map(
+        (event) => `View request ${event.request_id}`,
+      ),
+    );
+  });
+
   it('renders the first 50 latest requests and pages through retained history', () => {
     mockResolvedKpiQueries();
-    const history = Array.from({ length: 500 }, (_, index) => ({
-      duration_ms: 10,
-      event_kind: 'messages' as const,
-      model: 'test-model',
-      request_id: `request-${500 - index}`,
-      status: 200,
-      ts: 500 - index,
-    }));
+    const history = RETAINED_HISTORY;
     mockRequestEventsFeed(history);
-    const { rerender } = render(<OverviewPage />);
+    const { rerender } = render(<OverviewPage />, {
+      wrapper: RowOnlyRequestEventsTable,
+    });
 
     const table = screen
       .getByLabelText('View request request-500')

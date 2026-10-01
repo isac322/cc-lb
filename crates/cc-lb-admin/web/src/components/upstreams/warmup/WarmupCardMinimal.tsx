@@ -30,29 +30,18 @@ import {
 } from '../../ui/primitives';
 import { RelativeTime } from '../../ui/RelativeTime';
 import { Select } from '../../ui/Select';
-import { REASON_LABEL } from './parts/copy';
+import { OUTCOME_LABEL, REASON_LABEL } from './parts/copy';
 import { WarmupConfigModal } from './parts/WarmupConfigModal';
-import { detectActiveIncident } from './parts/warmupViewModel';
+import {
+  detectActiveIncident,
+  OUTCOME_SEVERITY,
+} from './parts/warmupViewModel';
 import { WarmupHistoryDrawer } from './WarmupHistoryDrawer';
 
 const WARN_PANEL_CLASS =
   'rounded-sm bg-warn/8 px-3 py-2 text-body-sm text-warn-text';
 const DANGER_PANEL_CLASS =
   'rounded-sm bg-danger/8 px-3 py-2 text-body-sm text-danger-text';
-
-const LAST_OUTCOME_LABEL = {
-  success: 'Success',
-  transient_failure: 'Retrying',
-  permanent_failure: 'Failed',
-  skipped: 'Skipped',
-} as const;
-
-const LAST_OUTCOME_TONE = {
-  success: 'ok',
-  transient_failure: 'warn',
-  permanent_failure: 'danger',
-  skipped: 'neutral',
-} as const;
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
@@ -387,7 +376,7 @@ function WarmupCardMinimalInner({
         }
       : null);
 
-  let statusTone: 'ok' | 'warn' | 'danger' | 'neutral' = 'neutral';
+  let statusTone: 'ok' | 'warn' | 'danger' | 'neutral' | 'live' = 'neutral';
   let statusLabel = 'Paused';
 
   const credentialRequiresReconnect =
@@ -406,6 +395,7 @@ function WarmupCardMinimalInner({
       // determines severity: transient retries are degraded, not down.
       const currentAttempt = incident?.lastFailure ?? summary?.last_attempt;
       if (!currentAttempt) {
+        statusTone = 'live';
         statusLabel = 'Pending';
       } else {
         switch (currentAttempt.status) {
@@ -443,7 +433,7 @@ function WarmupCardMinimalInner({
         !credentialRequiresReconnect ? (
           <Skeleton className="h-4 w-full rounded-sm" />
         ) : (
-          <StatusBadge trafficLight tone={statusTone} label={statusLabel} />
+          <StatusBadge tone={statusTone} label={statusLabel} />
         )}
       </span>
     </span>
@@ -572,8 +562,8 @@ function WarmupCardMinimalInner({
                     >
                       <span className="flex flex-wrap items-center gap-2">
                         <StatusBadge
-                          tone={LAST_OUTCOME_TONE[lastAttempt.status]}
-                          label={LAST_OUTCOME_LABEL[lastAttempt.status]}
+                          tone={OUTCOME_SEVERITY[lastAttempt.status]}
+                          label={OUTCOME_LABEL[lastAttempt.status]}
                         />
                         <RelativeTime
                           compact

@@ -101,6 +101,7 @@ import {
   PRINCIPAL_LIMITS_ANCHOR,
   PRINCIPAL_ROUTER_ANCHOR,
 } from '../lib/requestErrorCodes';
+import { useSharedTimeRange } from '../lib/timePresets';
 import { undoToast } from '../lib/undoToast';
 import { useCopyButton } from '../lib/useCopyButton';
 import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
@@ -142,7 +143,7 @@ const PRINCIPAL_SORT_OPTIONS: readonly {
   label: string;
 }[] = [
   { value: 'name', label: 'Name' },
-  { value: 'active', label: 'Most active (24h)' },
+  { value: 'active', label: 'Most active' },
 ];
 const EMPTY_PRINCIPALS: readonly Principal[] = [];
 
@@ -165,7 +166,7 @@ const PRINCIPAL_VIEW_DEFAULTS = {
 
 // The table keeps the one flat surface in an otherwise unboxed section.
 const PRINCIPAL_RECENT_REQUESTS_TABLE_SLOT_CLASS =
-  'glass rounded-md overflow-x-auto min-h-48';
+  'glass rounded-md min-h-48 h-96 max-h-[60vh] overflow-auto';
 const PRINCIPAL_KIND_LABEL: Record<Principal['kind'], string> = {
   machine: 'Machine',
   human: 'Human',
@@ -340,14 +341,22 @@ function PrincipalsPage() {
   };
   const navigate = useNavigate({ from: Route.fullPath });
   const principals = usePrincipals();
-  // Same key as Overview's Top principals at 24h: one request for the list.
-  const usage24h = useUsage('24h', 'hour', 'principal', undefined, 'totals');
+  // The shared, persisted range (Overview/Upstream preset; default 7d) sizes
+  // the per-principal request count; the step mirrors Overview's bucketing.
+  const { range: usageRange } = useSharedTimeRange();
+  const usage = useUsage(
+    usageRange,
+    usageRange === '7d' || usageRange === '24h' ? 'hour' : 'minute',
+    'principal',
+    undefined,
+    'totals',
+  );
   const [createOpen, setCreateOpen] = useState(false);
 
   const all = principals.data?.principals ?? EMPTY_PRINCIPALS;
-  const requests24h = useMemo(() => {
+  const requestsInRange = useMemo(() => {
     const byId = new Map<string, number>();
-    for (const series of usage24h.data?.series ?? []) {
+    for (const series of usage.data?.series ?? []) {
       if (!series.key) continue;
       let requests = 0;
       for (const bucket of series.buckets)
@@ -355,8 +364,8 @@ function PrincipalsPage() {
       byId.set(series.key, requests);
     }
     return byId;
-  }, [usage24h.data]);
-  const usagePending = usage24h.data === undefined && usage24h.isPending;
+  }, [usage.data]);
+  const usagePending = usage.data === undefined && usage.isPending;
 
   const viewConfig = useMemo<
     EntityListViewConfig<Principal, PrincipalFilter, PrincipalSort>
@@ -375,11 +384,11 @@ function PrincipalsPage() {
       sorts: {
         name: compareNames,
         active: (a, b) =>
-          (requests24h.get(b.id) ?? 0) - (requests24h.get(a.id) ?? 0) ||
+          (requestsInRange.get(b.id) ?? 0) - (requestsInRange.get(a.id) ?? 0) ||
           compareNames(a, b),
       },
     }),
-    [requests24h],
+    [requestsInRange],
   );
   const listView = useEntityListView(all, view, viewConfig);
 
@@ -468,7 +477,7 @@ function PrincipalsPage() {
         }}
         getId={principalId}
         renderRow={(p) => {
-          const requests = requests24h.get(p.id) ?? 0;
+          const requests = requestsInRange.get(p.id) ?? 0;
           const facts = [
             PRINCIPAL_KIND_LABEL[p.kind],
             p.allowed_models.length === 0
@@ -487,10 +496,10 @@ function PrincipalsPage() {
             ) : requests > 0 ? (
               <span className="text-text-muted">
                 {formatCount(requests)}
-                <span className="sr-only"> requests in 24h</span>
+                <span className="sr-only"> requests in {usageRange}</span>
               </span>
             ) : (
-              <EmptyValue label="No requests in 24h" />
+              <EmptyValue label={`No requests in ${usageRange}`} />
             ),
             caption: (
               <span className="truncate">
@@ -713,6 +722,10 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       principal_id: principal.id,
       event_kind: 'messages',
     },
+    mode: 'infinite',
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    maxRetained: 500,
   });
   return (
     <DetailSection
@@ -2598,7 +2611,7 @@ export function ApiKeysCard({ principal }: { principal: Principal }) {
                       {revoked ? (
                         <StatusBadge tone="neutral" label="Revoked" />
                       ) : (
-                        <EmptyValue label="Active" />
+                        <StatusBadge tone="ok" label="Active" />
                       )}
                     </TableCell>
                     <TableCell

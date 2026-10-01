@@ -3,6 +3,7 @@ import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { BreakdownPopover } from './BreakdownPopover';
 import { CostFigure } from './CostFigure';
 import { EmptyMetricCell, MetricCell } from './MetricCell';
+import { cx } from './primitives';
 import {
   type CostComponentMicros,
   costCategorySegments,
@@ -33,11 +34,21 @@ function costBreakdown(e: RequestEventWithPhase): CostBreakdownT {
   return { components, total, hasComponents };
 }
 
+/*
+ * Cost is the request table's last column, so the cell already carries the
+ * table's right inset; the trigger's own right padding would push the figure
+ * a further 12px in from the right-aligned "Cost" header. Dropping it ends
+ * the last digit (and the bar) on the same edge as the header in the full,
+ * scrolling and pane-band layouts. The trigger keeps its left padding, so it
+ * stays a full-size button.
+ */
+const COST_EDGE_CLASS = '*:pr-0!';
+
 /**
  * Request cost over a bar of what it paid for, in the token bar's categories
  * and order (`USAGE_CATEGORIES`). Cost no category accounts for is left as
- * bare track. The figure is right-aligned in the cell, so every row's cost
- * ends on the same edge.
+ * bare track. The figure is right-aligned on the column's edge, so every
+ * row's cost ends where the header does.
  */
 export function CostCell({
   event,
@@ -51,8 +62,10 @@ export function CostCell({
   const c = costBreakdown(event);
   const segments = costCategorySegments(c.components);
 
+  const cellClassName = cx(className, COST_EDGE_CLASS);
+
   if (!isPartial && event.cost_usd_micros == null && !c.hasComponents) {
-    return <EmptyMetricCell className={className} />;
+    return <EmptyMetricCell className={cellClassName} />;
   }
 
   const popover = (
@@ -74,7 +87,7 @@ export function CostCell({
 
   return (
     <MetricCell
-      className={className}
+      className={cellClassName}
       label={`Cost ${text}, show breakdown`}
       popover={popover}
       segments={segments}

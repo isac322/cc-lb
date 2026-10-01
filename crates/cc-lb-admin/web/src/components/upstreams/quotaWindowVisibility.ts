@@ -2,8 +2,9 @@ import type { QuotaSnapshot, SeriesResponseItem } from '../../lib/api';
 
 /**
  * Canonical window order everywhere a window list is shown: the shared
- * windows, the live model window, the legacy model windows, the unified
- * status, then extra usage.
+ * windows, the live model window, the legacy model windows, then extra
+ * usage. The backend's `unified` account-restriction envelope is not a
+ * web-visible window: snapshots for it are neither requested nor rendered.
  */
 export const QUOTA_WINDOW_ORDER = [
   '5h',
@@ -11,7 +12,6 @@ export const QUOTA_WINDOW_ORDER = [
   '7d_fable',
   '7d_sonnet',
   '7d_opus',
-  'unified',
   'overage',
 ] as const;
 
@@ -73,7 +73,6 @@ export function isOverageActive(snap: QuotaSnapshot): boolean {
  * Windows the detail chart should draw for the selected range: a window is
  * visible only when its latest observation lands inside the range AND the
  * series has in-range data. Overage additionally requires an active budget.
- * Unified is an account restriction envelope, not a numeric quota series.
  */
 export function selectVisibleGraphWindows({
   latestWindows,
@@ -85,7 +84,6 @@ export function selectVisibleGraphWindows({
     latestWindows.map((snap) => [snap.window, snap]),
   );
   return QUOTA_WINDOW_ORDER.filter((window) => {
-    if (window === 'unified') return false;
     const snap = byWindow.get(window);
     if (!snap) return false;
     if (snap.state === 'absent' || snap.state === 'unobserved') return false;

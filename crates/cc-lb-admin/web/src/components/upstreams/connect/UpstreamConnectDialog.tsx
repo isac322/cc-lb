@@ -737,7 +737,7 @@ function StepRail({
               className={cx(
                 'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-caption font-medium tabular-nums',
                 done
-                  ? 'border-ok/50 bg-ok/15 text-success-text'
+                  ? 'border-ok/50 bg-ok/15 text-traffic-success-text'
                   : active
                     ? 'border-accent text-accent-text'
                     : 'border-subtle-strong text-text-faint',

@@ -112,7 +112,6 @@
   --color-series-sonnet: var(--color-series-sonnet);
   --color-series-opus: var(--color-series-opus);
   --color-series-overage: var(--color-series-overage);
-  --color-series-unified: var(--color-series-unified);
   --color-series-latency-downstream: var(--color-series-latency-downstream);
   --color-series-latency-cclb: var(--color-series-latency-cclb);
   --color-series-latency-net: var(--color-series-latency-net);
@@ -179,7 +178,7 @@
     --color-accent-dim: rgb(204 221 238 / 0.14);
     --color-accent-text: #779cc2;
     --color-accent-ink: #181a1c;
-    /* Healthy stays neutral except explicitly opted-in traffic-light states. */
+    /* `--color-ok` is the graphite healthy metric fill; status success uses `--color-traffic-success`. */
     --color-ok: #c0c1c3;
     --color-warn: #f0b429;
     --color-danger: #ff6f61;
@@ -228,7 +227,6 @@
     --color-series-sonnet: #629092;
     --color-series-opus: #91745d;
     --color-series-overage: #a3a5a8;
-    --color-series-unified: #777a80;
     --color-series-latency-downstream: #c56f9b;
     --color-series-latency-cclb: #5d98f4;
     --color-series-latency-net: #6f9436;
@@ -295,7 +293,6 @@
     --color-series-sonnet: #39555c;
     --color-series-opus: #6a5647;
     --color-series-overage: #616366;
-    --color-series-unified: #83868c;
     --color-series-latency-downstream: #6b2f57;
     --color-series-latency-cclb: #234f99;
     --color-series-latency-net: #547d2b;
@@ -363,7 +360,6 @@
       --color-series-sonnet: #39555c;
       --color-series-opus: #6a5647;
       --color-series-overage: #616366;
-      --color-series-unified: #83868c;
       --color-series-latency-downstream: #6b2f57;
       --color-series-latency-cclb: #234f99;
       --color-series-latency-net: #547d2b;
@@ -495,8 +491,7 @@
    no glow; state is also carried by text. */
 .status-dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; vertical-align: middle; }
 .status-dot.lg { width: 8px; height: 8px; }
-.status-dot.ok { background: var(--color-ok); }
-.status-dot.traffic-light.ok { background: var(--color-traffic-success); }
+.status-dot.ok { background: var(--color-traffic-success); }
 .status-dot.warn { background: var(--color-warn); }
 .status-dot.danger { background: var(--color-danger); }
 .status-dot.neutral { background: var(--color-neutral); }

@@ -5,7 +5,7 @@ use cc_lb_storage_api::{
     RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
     RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
     RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
-    model_filter_like_pattern, model_filter_matches, normalize_usage_rollup_dimension,
+    model_filter_like_patterns, model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
@@ -535,10 +535,20 @@ async fn request_event_histogram(
         builder.push(" AND r.principal_id = ");
         builder.push_bind(principal_id);
     }
-    if let Some(model) = query.filters.model.as_deref() {
-        builder.push(" AND lower(r.model) LIKE ");
-        builder.push_bind(model_filter_like_pattern(model));
-        builder.push(" ESCAPE '\\'");
+    // Model filter: identical disjunction to the SQLite histogram — see
+    // `model_filter_like_patterns`. Both arms stay left-anchored so the
+    // `lower(r.model) text_pattern_ops` index remains usable on each.
+    if let Some([prefix_pattern, contains_pattern]) = query
+        .filters
+        .model
+        .as_deref()
+        .and_then(model_filter_like_patterns)
+    {
+        builder.push(" AND (lower(r.model) LIKE ");
+        builder.push_bind(prefix_pattern);
+        builder.push(" ESCAPE '\\' OR lower(r.model) LIKE ");
+        builder.push_bind(contains_pattern);
+        builder.push(" ESCAPE '\\')");
     }
     if let Some(upstream_id) = query.filters.upstream_id {
         builder.push(" AND r.upstream_id = ");

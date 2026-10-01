@@ -1,7 +1,6 @@
 import {
   createFileRoute,
   Link,
-  stripSearchParams,
   useNavigate,
   useSearch,
 } from '@tanstack/react-router';
@@ -91,8 +90,8 @@ import {
   formatQuotaPercent,
   QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
-  QUOTA_WARN_PCT,
   type QuotaSeverity,
+  quotaPacePct,
   quotaSeverity,
 } from '../lib/quotaSeverity';
 import {
@@ -100,6 +99,7 @@ import {
   TIME_PRESET_SECONDS,
   TIME_PRESETS,
   type TimePreset,
+  useSharedTimeRange,
 } from '../lib/timePresets';
 import { formatInTimezone } from '../lib/timezone';
 import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
@@ -119,16 +119,13 @@ import {
 } from './-overviewPoolQuota';
 
 const overviewSearchSchema = z.object({
-  // The one range behind the Usage group (pool quota, traffic, principals).
-  range: z.enum(TIME_PRESETS).default('24h').catch('24h'),
+  // An explicit `?range=` owns the view; without it the shared, persisted
+  // range governs, so `range` stays optional rather than URL-defaulted.
+  range: z.enum(TIME_PRESETS).optional().catch(undefined),
 });
-
-const OVERVIEW_SEARCH_DEFAULTS = { range: '24h' } as const;
 
 export const Route = createFileRoute('/')({
   validateSearch: overviewSearchSchema,
-  // The default range stays out of the address bar.
-  search: { middlewares: [stripSearchParams(OVERVIEW_SEARCH_DEFAULTS)] },
   component: OverviewPage,
 });
 
@@ -1082,7 +1079,7 @@ function formatMonthDayTime(unixSecs: number, timeZone: string): string {
     .replace('T', ' ');
 }
 
-/** Numeral ink for a quota figure: default ink until warn / danger by used. */
+/** Numeral ink for a quota figure: default ink until pace-relative warn / danger. */
 const QUOTA_VALUE_CLASS: Record<QuotaSeverity, string> = {
   ...QUOTA_SEVERITY_TEXT_CLASS,
   none: 'text-text-faint',
@@ -1356,18 +1353,6 @@ export function PoolQuotaThemedChart({
           allowDataOverflow={false}
         />
         <ReferenceLine
-          y={QUOTA_WARN_PCT}
-          {...CHART_THRESHOLD.warn}
-          // Both labels sit under their lines: with one above and one below
-          // they collide at the 200px phone chart height.
-          label={{
-            position: 'insideTopRight',
-            value: `${QUOTA_WARN_PCT}%`,
-            fill: 'var(--color-warn-text)',
-            fontSize: 12,
-          }}
-        />
-        <ReferenceLine
           y={QUOTA_DANGER_PCT}
           {...CHART_THRESHOLD.danger}
           label={{
@@ -1449,8 +1434,9 @@ export function PoolQuotaThemedChart({
 
 /**
  * The chart's header row: per window its swatch, current `N% used` in the
- * severity ink and when it resets (absolute time in the `title`), then the
- * two threshold rules.
+ * pace-relative severity ink (pace from the window's reset at the server's
+ * `now`) and when it resets (absolute time in the `title`), then the
+ * danger rule the chart draws.
  */
 function PoolQuotaLegend({
   latest,
@@ -1474,6 +1460,8 @@ function PoolQuotaLegend({
           reset != null && nowUnixSecs != null
             ? formatResetIn(reset, nowUnixSecs)
             : null;
+        const pace =
+          nowUnixSecs != null ? quotaPacePct(window, reset, nowUnixSecs) : null;
         return (
           <span
             key={window}
@@ -1491,7 +1479,7 @@ function PoolQuotaLegend({
                 <span
                   className={cx(
                     'font-medium tabular-nums',
-                    QUOTA_VALUE_CLASS[quotaSeverity(value)],
+                    QUOTA_VALUE_CLASS[quotaSeverity(value, pace)],
                   )}
                 >
                   {`${formatQuotaPercent(value)} used`}
@@ -1516,10 +1504,6 @@ function PoolQuotaLegend({
         );
       })}
       <span className="inline-flex min-h-5 items-center gap-1.5 text-caption">
-        <LegendSwatch {...CHART_THRESHOLD.warn} />
-        {`Warn at ${QUOTA_WARN_PCT}% used`}
-      </span>
-      <span className="inline-flex min-h-5 items-center gap-1.5 text-caption">
         <LegendSwatch {...CHART_THRESHOLD.danger} />
         {`Danger at ${QUOTA_DANGER_PCT}% used`}
       </span>
@@ -1528,9 +1512,13 @@ function PoolQuotaLegend({
 }
 
 function OverviewPage() {
-  // One range, in the URL, governs the whole Usage group: pool quota usage,
-  // Traffic and Top principals.
-  const { range } = useSearch({ from: '/' });
+  // One range governs the whole Usage group: pool quota usage, Traffic and
+  // Top principals. An explicit `?range=` in the URL owns the view; without
+  // it the shared, persisted range applies, so a preset chosen on another
+  // surface follows the reader here.
+  const { range: urlRange } = useSearch({ from: '/' });
+  const shared = useSharedTimeRange();
+  const range = urlRange ?? shared.range;
   const navigate = useNavigate({ from: '/' });
   const rangeWords = `last ${range}`;
   // One hover index shared by every KPI chart so all five read the same bucket.
@@ -1539,6 +1527,10 @@ function OverviewPage() {
   // the previous window would address unrelated data: drop it with the range.
   const selectRange = (next: Range) => {
     setActiveKpiIndex(null);
+    // The selection writes the shared store directly (not via an effect) so
+    // every non-Logs surface follows it, and the URL keeps its explicit
+    // `?range=` so the link still encodes the view.
+    shared.setRange(next);
     // `resetScroll: false`: the router's scroll restoration would otherwise
     // snap the page to the top, and the control sits above what it scopes —
     // the reader changing the range from Traffic or Top principals keeps
@@ -1945,7 +1937,7 @@ function OverviewPage() {
               minWidthClass="min-w-[1080px]"
               emptyTitle="No recent requests"
               showPagination
-              tableContainerClassName="relative min-w-0 overflow-x-auto scroll-fade-right max-md:-mx-4 md:glass md:rounded-md"
+              tableContainerClassName="relative min-w-0 overflow-x-auto max-md:-mx-4 md:glass md:rounded-md"
             />
           </Section>
         </>

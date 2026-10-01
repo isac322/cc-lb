@@ -326,12 +326,12 @@ function WindowCell({
     snap?.utilization == null || !Number.isFinite(snap.utilization)
       ? null
       : snap.utilization * 100;
-  const severity = quotaSeverity(used);
   // Even pace only while the window runs (a reading and a reset ahead).
   const pace =
     used == null
       ? null
       : quotaPacePct(windowName, snap?.resets_at_unix_secs, nowUnixSecs);
+  const severity = quotaSeverity(used, pace);
   const reset = snap
     ? resetCaption(snap.resets_at_unix_secs, nowUnixSecs, timeZone)
     : { text: 'No reading' };
@@ -359,11 +359,7 @@ function WindowCell({
             <span
               className={cx(
                 'text-body font-medium',
-                used == null
-                  ? 'text-text-faint'
-                  : severity === 'warn' || severity === 'danger'
-                    ? QUOTA_SEVERITY_TEXT_CLASS[severity]
-                    : 'text-text',
+                QUOTA_SEVERITY_TEXT_CLASS[severity],
               )}
             >
               {formatQuotaPercent(used)}

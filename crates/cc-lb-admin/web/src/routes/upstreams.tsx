@@ -130,13 +130,16 @@ import {
   formatQuotaPercent,
   QUOTA_DANGER_PCT,
   QUOTA_SEVERITY_TEXT_CLASS,
-  QUOTA_WARN_PCT,
+  type QuotaSeverity,
   quotaSeverity,
+  snapshotQuotaPacePct,
+  snapshotQuotaSeverity,
+  worstQuotaSeverity,
 } from '../lib/quotaSeverity';
 import {
   TIME_PRESET_OPTIONS,
   TIME_PRESETS,
-  type TimePreset,
+  useSharedTimeRange,
 } from '../lib/timePresets';
 import { useRequestEventsFeed } from '../lib/useRequestEventsFeed';
 
@@ -212,15 +215,40 @@ const PEAK_WINDOWS: ReadonlySet<string> = new Set([
   '7d_fable',
 ]);
 
-/** Highest used% (0-100) across the subscription windows; null without one. */
-function peakUsedPct(row: UpstreamUsageRow): number | null {
-  let peak: number | null = null;
+type RowSnapshot = UpstreamUsageRow['windows'][number];
+
+/** The subscription window with the highest used%; null without a reading. */
+function peakSnapshot(row: UpstreamUsageRow): RowSnapshot | null {
+  let peak: RowSnapshot | null = null;
   for (const snap of row.windows) {
     if (!PEAK_WINDOWS.has(snap.window) || snap.utilization == null) continue;
-    const used = snap.utilization * 100;
-    if (peak === null || used > peak) peak = used;
+    if (peak === null || snap.utilization > (peak.utilization ?? -1))
+      peak = snap;
   }
   return peak;
+}
+
+/** Highest used% (0-100) across the subscription windows; null without one. */
+function peakUsedPct(row: UpstreamUsageRow): number | null {
+  const utilization = peakSnapshot(row)?.utilization;
+  return utilization == null ? null : utilization * 100;
+}
+
+/**
+ * The row's quota severity: the worst pace-relative severity across its
+ * subscription windows at `nowUnixSecs`, the same rule each figure is
+ * inked by. Disabled rows carry no quota severity.
+ */
+function rowQuotaSeverity(
+  row: UpstreamUsageRow,
+  nowUnixSecs: number,
+): QuotaSeverity {
+  if (!row.upstream.enabled) return 'none';
+  return worstQuotaSeverity(
+    row.windows
+      .filter((snap) => PEAK_WINDOWS.has(snap.window))
+      .map((snap) => snapshotQuotaSeverity(snap, nowUnixSecs)),
+  );
 }
 
 /** A status problem worth a phrase: reconnect nudges and danger health. */
@@ -236,11 +264,12 @@ function rowProblem(
   return null;
 }
 
-function needsAttention(row: UpstreamUsageRow): boolean {
+function needsAttention(row: UpstreamUsageRow, nowUnixSecs: number): boolean {
   // Disabled rows stay out of quota attention, but a confirmed OAuth nudge
   // still needs the same recovery path as an enabled row.
   if (!row.upstream.enabled) return row.nudge != null;
-  return rowProblem(row) !== null || (peakUsedPct(row) ?? 0) >= QUOTA_WARN_PCT;
+  const quota = rowQuotaSeverity(row, nowUnixSecs);
+  return rowProblem(row) !== null || quota === 'warn' || quota === 'danger';
 }
 
 function compareUpstreamNames(
@@ -262,17 +291,18 @@ function compareByUsage(a: UpstreamUsageRow, b: UpstreamUsageRow): number {
 
 /**
  * Most urgent first: terminal credential failures, then danger (a danger
- * status such as unreadable credentials or a 95%+ window), then warn,
- * healthy, and disabled. Ties fall back to usage, then name.
+ * status such as unreadable credentials, or a window in pace-relative
+ * danger), then warn, healthy, and disabled. Ties fall back to usage, then
+ * name.
  */
-function attentionRank(row: UpstreamUsageRow): number {
+function attentionRank(row: UpstreamUsageRow, nowUnixSecs: number): number {
   if (!row.upstream.enabled && row.nudge == null) return 4;
   if (row.nudge != null && isTerminalOAuthReconnectReason(row.nudge.reason))
     return 0;
   const problem = rowProblem(row);
-  const peak = peakUsedPct(row) ?? 0;
-  if (problem?.tone === 'danger' || peak >= QUOTA_DANGER_PCT) return 1;
-  if (problem || peak >= QUOTA_WARN_PCT) return 2;
+  const quota = rowQuotaSeverity(row, nowUnixSecs);
+  if (problem?.tone === 'danger' || quota === 'danger') return 1;
+  if (problem || quota === 'warn') return 2;
   return row.upstream.enabled ? 3 : 4;
 }
 
@@ -320,6 +350,9 @@ function UpstreamsPage() {
     });
   }, [action, navigate, openCreate]);
 
+  // One clock for every quota judgment on this render: the row figures, the
+  // attention filter and the attention sort.
+  const nowUnixSecs = Math.floor(Date.now() / 1000);
   const viewConfig = useMemo<
     EntityListViewConfig<UpstreamUsageRow, UpstreamFilter, UpstreamSort>
   >(
@@ -344,19 +377,20 @@ function UpstreamsPage() {
       defaultFilter: 'all',
       filters: {
         all: () => true,
-        attention: needsAttention,
+        attention: (row) => needsAttention(row, nowUnixSecs),
         disabled: (row) => !row.upstream.enabled,
         oauth: (row) => row.upstream.kind === 'anthropic_oauth',
         api_key: (row) => row.upstream.kind !== 'anthropic_oauth',
       },
       sorts: {
         attention: (a, b) =>
-          attentionRank(a) - attentionRank(b) || compareByUsage(a, b),
+          attentionRank(a, nowUnixSecs) - attentionRank(b, nowUnixSecs) ||
+          compareByUsage(a, b),
         usage: compareByUsage,
         name: compareUpstreamNames,
       },
     }),
-    [queryClient],
+    [queryClient, nowUnixSecs],
   );
   const listView = useEntityListView(upstreamUsage.rows, view, viewConfig);
 
@@ -445,7 +479,9 @@ function UpstreamsPage() {
           const { upstream } = row;
           const oauth = upstream.kind === 'anthropic_oauth';
           const quotaPending = oauth && upstreamUsage.quotaPending;
-          const peak = oauth ? peakUsedPct(row) : null;
+          const peakSnap = oauth ? peakSnapshot(row) : null;
+          const peak =
+            peakSnap?.utilization == null ? null : peakSnap.utilization * 100;
           const problem = rowProblem(row);
           const facts = oauth
             ? ROW_WINDOWS.flatMap(([windowName, label]) => {
@@ -457,6 +493,7 @@ function UpstreamsPage() {
                         window: windowName,
                         label,
                         used: snap.utilization * 100,
+                        severity: snapshotQuotaSeverity(snap, nowUnixSecs),
                       },
                     ];
               })
@@ -478,10 +515,14 @@ function UpstreamsPage() {
               .join('\n'),
             trailing: quotaPending ? (
               <Skeleton as="span" className="inline-block h-4 w-8" />
-            ) : peak != null ? (
+            ) : peakSnap != null && peak != null ? (
               <>
                 <span
-                  className={QUOTA_SEVERITY_TEXT_CLASS[quotaSeverity(peak)]}
+                  className={
+                    QUOTA_SEVERITY_TEXT_CLASS[
+                      snapshotQuotaSeverity(peakSnap, nowUnixSecs)
+                    ]
+                  }
                 >
                   {formatQuotaPercent(peak)}
                 </span>
@@ -522,7 +563,7 @@ function UpstreamsPage() {
               >
                 {ROW_WINDOWS.map(([windowName, label]) => {
                   const fact = facts.find((f) => f.window === windowName);
-                  const severity = quotaSeverity(fact?.used ?? null);
+                  const severity = fact?.severity ?? 'none';
                   return (
                     <span
                       key={windowName}
@@ -612,11 +653,8 @@ const QUOTA_HISTORY_RANGE_GROUP_CLASS =
 const QUOTA_HISTORY_RANGE_ITEM_CLASS =
   'h-9 md:h-[1.625rem] px-2.5 text-xs rounded-sm';
 const QUOTA_CHART_HEIGHT = 280;
-/** Usage thresholds on the chart: warn at 80% used, danger at 95% used. */
-const USAGE_THRESHOLDS = [
-  { y: QUOTA_WARN_PCT, tone: 'warn' },
-  { y: QUOTA_DANGER_PCT, tone: 'danger' },
-] as const;
+/** The usage threshold on the chart: danger at 95% used, pace or not. */
+const USAGE_THRESHOLDS = [{ y: QUOTA_DANGER_PCT, tone: 'danger' }] as const;
 
 /**
  * Windows that keep a gradient fill in the quota-history chart: the three
@@ -886,7 +924,9 @@ function DetailView({
     enabled: false,
   });
   const confirmEnabled = enabledConfirm.enabled;
-  const [range, setRange] = useState<TimePreset>('7d');
+  // The quota-history range is the shared, persisted preset: choosing it on
+  // any non-Logs surface re-scopes this chart and vice versa.
+  const { range, setRange } = useSharedTimeRange();
   const [isolatedWindow, setIsolatedWindow] = useState<string | null>(null);
   const chartId = useChartId();
   const isOauth = upstream.kind === 'anthropic_oauth';
@@ -990,13 +1030,14 @@ function DetailView({
     quotaSeries.data?.since_unix_secs ?? nowUnixSecs - rangeSecs;
   const seriesUntilUnixSecs = quotaSeries.data?.until_unix_secs ?? nowUnixSecs;
 
-  const [apiUsageRange, setApiUsageRange] = useState<'24h' | '7d'>('24h');
+  // API usage follows the same shared preset as the quota history; 1h/6h
+  // bucket by minute so the chart has more than one point (as on Overview).
   const [apiUsageMetric, setApiUsageMetric] = useState<'tokens' | 'cost'>(
     'tokens',
   );
   const apiUsageQ = useUsage(
-    apiUsageRange,
-    'hour',
+    range,
+    range === '7d' || range === '24h' ? 'hour' : 'minute',
     'model',
     upstream.kind === 'anthropic_oauth' ? undefined : upstream.id,
   );
@@ -1051,6 +1092,10 @@ function DetailView({
       upstream_id: upstream.id,
       event_kind: 'messages',
     },
+    mode: 'infinite',
+    initialHistoryLimit: 500,
+    pageSize: 50,
+    maxRetained: 500,
   });
 
   const metadataPending =
@@ -1286,9 +1331,13 @@ function DetailView({
                 const dimmed =
                   effectiveIsolatedWindow !== null &&
                   effectiveIsolatedWindow !== windowName;
-                const current = selectedLatest?.windows.find(
+                const currentSnap = selectedLatest?.windows.find(
                   (w) => w.window === windowName,
-                )?.utilization;
+                );
+                const current = currentSnap?.utilization;
+                const currentSeverity = currentSnap
+                  ? snapshotQuotaSeverity(currentSnap, nowUnixSecs)
+                  : 'none';
                 return (
                   <button
                     key={windowName}
@@ -1322,9 +1371,7 @@ function DetailView({
                           'tabular-nums',
                           dimmed
                             ? 'text-text-faint'
-                            : QUOTA_SEVERITY_TEXT_CLASS[
-                                quotaSeverity(current * 100)
-                              ],
+                            : QUOTA_SEVERITY_TEXT_CLASS[currentSeverity],
                         )}
                       >
                         {formatQuotaPercent(current * 100)} used
@@ -1333,24 +1380,12 @@ function DetailView({
                   </button>
                 );
               })}
-              {/* Threshold entries wrap to the next line as one unit so a
-                  lone "Danger at 95% used" never dangles under the series. */}
-              <span className="flex flex-wrap items-center gap-x-5 gap-y-1">
-                {USAGE_THRESHOLDS.map(({ y, tone }) => (
-                  <span
-                    key={tone}
-                    className="flex items-center gap-1.5 whitespace-nowrap text-body-sm text-text-muted"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={cx(
-                        'w-3 border-t border-dashed',
-                        tone === 'warn' ? 'border-warn' : 'border-danger',
-                      )}
-                    />
-                    {tone === 'warn' ? 'Warn' : 'Danger'} at {y}% used
-                  </span>
-                ))}
+              <span className="flex items-center gap-1.5 whitespace-nowrap text-body-sm text-text-muted">
+                <span
+                  aria-hidden="true"
+                  className="w-3 border-t border-dashed border-danger"
+                />
+                Danger at {QUOTA_DANGER_PCT}% used
               </span>
             </>
           ) : null}
@@ -1418,6 +1453,16 @@ function DetailView({
                         </div>
                         {payload.map((p, i) => {
                           const key = String(p.dataKey);
+                          // A sample's pace comes from its own moment inside
+                          // the latest snapshot's window; samples from earlier
+                          // windows have no known reset and use the absolute
+                          // fallback rather than today's pace.
+                          const sampleSnap = selectedLatest?.windows.find(
+                            (w) => w.window === key,
+                          );
+                          const samplePace = sampleSnap
+                            ? snapshotQuotaPacePct(sampleSnap, Number(label))
+                            : null;
                           return (
                             <div
                               key={i}
@@ -1438,7 +1483,7 @@ function DetailView({
                                   'tabular-nums',
                                   typeof p.value === 'number' &&
                                     QUOTA_SEVERITY_TEXT_CLASS[
-                                      quotaSeverity(p.value)
+                                      quotaSeverity(p.value, samplePace)
                                     ],
                                 )}
                               >
@@ -1697,8 +1742,8 @@ function DetailView({
             <ApiUsageCard
               data={apiUsageQ.data}
               isLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
-              range={apiUsageRange}
-              onRangeChange={setApiUsageRange}
+              range={range}
+              onRangeChange={setRange}
               metric={apiUsageMetric}
               onMetricChange={setApiUsageMetric}
             />
@@ -1720,7 +1765,7 @@ function DetailView({
                 cost: true,
                 tokens: true,
               }}
-              tableContainerClassName="glass min-h-48 overflow-x-auto rounded-md"
+              tableContainerClassName="glass min-h-48 h-96 max-h-[60vh] overflow-auto rounded-md"
               emptyTitle="No recent requests for this upstream"
             />
           </DetailSection>
@@ -1750,7 +1795,6 @@ function DetailView({
                     <>
                       <span data-testid="oauth-current-status">
                         <StatusBadge
-                          trafficLight
                           tone={oauthStatusBadge.tone}
                           label={oauthStatusBadge.label}
                         />

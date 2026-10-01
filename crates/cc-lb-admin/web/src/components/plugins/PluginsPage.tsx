@@ -168,10 +168,7 @@ export function PluginsPage() {
           />
         </div>
       ) : (
-        <PageHeader
-          title="Plugins"
-          description="Upload and manage WebAssembly plugins. Apply them to Principals or Upstreams to customize behavior."
-        />
+        <PageHeader title="Plugins" />
       )}
       {detailLoading ? (
         <PluginDetailSkeleton />

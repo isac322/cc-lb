@@ -203,18 +203,31 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
             upstream_id,
         );
 
+        let mut legacy = decoy(&base, "event-legacy", 4_500);
+        legacy.model = Some("claude-3-5-sonnet-20241022".to_owned());
         let mut dated = decoy(&base, "event-dated", 4_000);
         dated.model = Some("claude-sonnet-4-5-20250929".to_owned());
         let mut upper = decoy(&base, "event-upper", 3_000);
         upper.model = Some("CLAUDE-SONNET-4-5-PREVIEW".to_owned());
         let mut other_family = decoy(&base, "event-opus", 2_000);
         other_family.model = Some("claude-opus-4-1".to_owned());
+        let mut non_vendor = decoy(&base, "event-local", 1_500);
+        non_vendor.model = Some("local-sonnet".to_owned());
         let mut wildcard = decoy(&base, "event-wildcard", 1_000);
         wildcard.model = Some("claude%sonnet".to_owned());
         let mut model_less = decoy(&base, "event-model-less", 500);
         model_less.model = None;
 
-        for event in [&base, &dated, &upper, &other_family, &wildcard, &model_less] {
+        for event in [
+            &base,
+            &legacy,
+            &dated,
+            &upper,
+            &other_family,
+            &non_vendor,
+            &wildcard,
+            &model_less,
+        ] {
             storage.append_request_event(event).await?;
         }
 
@@ -222,21 +235,31 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
             model: Some(model.to_owned()),
             ..RequestEventStreamFilters::default()
         };
+        let sonnet_family = ["event-base", "event-legacy", "event-dated", "event-upper"];
 
-        // A shortened prefix keeps the exact match and picks up the dated and
-        // mixed-case variants; other families and model-less rows stay out.
-        let prefix_page = storage
-            .list_request_events(&list_query(by_model("claude-sonnet"), None, 10, None, None))
-            .await?;
-        assert_event_ids(&prefix_page, &["event-base", "event-dated", "event-upper"]);
+        // The `claude-` vendor prefix on the needle is optional: with or
+        // without it, any case, the needle matches the start of the model or
+        // anywhere after a stored `claude-` prefix. Other families,
+        // non-`claude-*` models containing the needle mid-name, and
+        // model-less rows stay out.
+        for needle in ["claude-sonnet", "Claude-Sonnet", "sonnet", "  SONNET  "] {
+            let page = storage
+                .list_request_events(&list_query(by_model(needle), None, 10, None, None))
+                .await?;
+            assert_event_ids(&page, &sonnet_family);
+        }
 
-        let upper_needle_page = storage
-            .list_request_events(&list_query(by_model("Claude-Sonnet"), None, 10, None, None))
-            .await?;
-        assert_event_ids(
-            &upper_needle_page,
-            &["event-base", "event-dated", "event-upper"],
-        );
+        // A version-qualified fragment matches mid-name inside `claude-*`.
+        for needle in [
+            "3-5-sonnet",
+            "claude-3-5-sonnet",
+            "claude-3-5-sonnet-20241022",
+        ] {
+            let page = storage
+                .list_request_events(&list_query(by_model(needle), None, 10, None, None))
+                .await?;
+            assert_event_ids(&page, &["event-legacy"]);
+        }
 
         let exact_page = storage
             .list_request_events(&list_query(
@@ -249,6 +272,12 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
             .await?;
         assert_event_ids(&exact_page, &["event-dated"]);
 
+        // Non-vendor model names still match on their own literal prefix.
+        let non_vendor_page = storage
+            .list_request_events(&list_query(by_model("local"), None, 10, None, None))
+            .await?;
+        assert_event_ids(&non_vendor_page, &["event-local"]);
+
         // `%` is a literal in the needle, not a wildcard.
         let wildcard_page = storage
             .list_request_events(&list_query(by_model("claude%"), None, 10, None, None))
@@ -259,6 +288,27 @@ pub async fn request_event_list_model_filter_matches_case_insensitive_prefix<
             .list_request_events(&list_query(by_model("gpt"), None, 10, None, None))
             .await?;
         assert_event_ids(&miss_page, &[]);
+
+        // Blank or bare-prefix needles are an absent filter: every row,
+        // including model-less ones, passes.
+        for needle in ["", "   ", "claude-", "CLAUDE-"] {
+            let page = storage
+                .list_request_events(&list_query(by_model(needle), None, 10, None, None))
+                .await?;
+            assert_event_ids(
+                &page,
+                &[
+                    "event-base",
+                    "event-legacy",
+                    "event-dated",
+                    "event-upper",
+                    "event-opus",
+                    "event-local",
+                    "event-wildcard",
+                    "event-model-less",
+                ],
+            );
+        }
 
         Ok(())
     })

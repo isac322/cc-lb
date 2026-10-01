@@ -41,6 +41,15 @@ export interface LiveEventStreamState {
 
 export type LiveEventStreamOptions = {
   readonly enabled?: boolean;
+  /**
+   * Stream cursor to resume from on a fresh connection (mount or filter
+   * change) when no cursor has been observed yet. Pass the `cursor`
+   * watermark of the history payload the live rows are merged with: the
+   * server replays every event after it, so nothing committed between the
+   * history request and the stream connect is lost. Ignored once the stream
+   * has delivered its own cursor, and after a server `reset`.
+   */
+  readonly seedCursor?: string;
 };
 
 const PERMANENT_FAILURE_THRESHOLD_MS = 300_000;
@@ -80,6 +89,8 @@ export function useLiveEventStream(
   visibleRef.current = visibility.visible;
   const clientRef = useRef<EventSourceClient | null>(null);
   const lastCursorRef = useRef<string | null>(null);
+  const seedCursorRef = useRef(options.seedCursor);
+  seedCursorRef.current = options.seedCursor;
   const lastActivityAtRef = useRef<number | null>(null);
   const statusRef = useRef<ConnectionStatus>('idle');
   const malformedFrameCountRef = useRef(0);
@@ -271,7 +282,8 @@ export function useLiveEventStream(
     clientRef.current = createEventSource({
       url,
       headers: token ? { Authorization: `Bearer ${token}` } : {},
-      initialLastEventId: lastCursorRef.current ?? undefined,
+      initialLastEventId:
+        lastCursorRef.current ?? seedCursorRef.current ?? undefined,
       onConnect: () => {
         if (!isCurrentConnection()) return;
         updateStatus('connecting');

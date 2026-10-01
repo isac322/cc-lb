@@ -1,4 +1,10 @@
-import type { ComponentProps, RefObject } from 'react';
+import {
+  type ComponentProps,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+} from 'react';
 import type { RequestEventsFeedState } from '../../lib/useRequestEventsFeed';
 import { LiveTailFailureBanner } from '../LiveTailFailureBanner';
 import { LogsPagination } from './LogsPagination';
@@ -17,20 +23,37 @@ export type RequestEventsFeedTableProps = Omit<
 
 export interface RequestEventsFeedProps extends RequestEventsFeedTableProps {
   readonly feed: RequestEventsFeedState;
+  /**
+   * Show the feed's own Live/Paused/Offline/reconnecting status line. On by
+   * default so every embedded feed reports its tail; Logs owns a single
+   * toolbar status and opts out.
+   */
   readonly showStatus?: boolean;
   readonly showLiveFailureBanner?: boolean;
+  /**
+   * Show page controls. Only `paged` feeds have pages, so this defaults to on
+   * for them and is ignored for `infinite` and `preview` feeds.
+   */
   readonly showPagination?: boolean;
   readonly onPageChange?: (page: number) => void;
+  /**
+   * Scroll container around the table. `infinite` feeds load more when the
+   * end of the table scrolls into view inside it, so give it a bounded height
+   * and overflow for an in-place scroll slot.
+   */
   readonly tableContainerRef?: RefObject<HTMLDivElement | null>;
   readonly tableContainerClassName?: string;
 }
 
 const STATUS_TEXT_CLASS = {
   neutral: 'text-text-muted',
-  ok: 'text-success-text',
+  ok: 'text-traffic-success-text',
   warn: 'text-warn-text',
   danger: 'text-danger-text',
 } as const;
+
+/** Start loading a little before the end of the table is visible. */
+const LOAD_MORE_MARGIN_PX = 160;
 
 export function RequestEventsFeed({
   feed,
@@ -42,6 +65,58 @@ export function RequestEventsFeed({
   tableContainerClassName = 'flex-1 overflow-auto min-h-0 scroll-mt-16',
   ...tableProps
 }: RequestEventsFeedProps) {
+  const infinite = feed.mode === 'infinite';
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLTableRowElement | null>(null);
+  const setContainer = useCallback(
+    (node: HTMLDivElement | null) => {
+      containerRef.current = node;
+      if (tableContainerRef) tableContainerRef.current = node;
+    },
+    [tableContainerRef],
+  );
+
+  const { hasMore, loadingNext, loadMore } = feed;
+  const visibleRowCount = feed.pageRows.length;
+  // The observer only reports transitions, so after each growth step check
+  // again whether the sentinel is still in view and keep filling the slot.
+  const loadMoreIfSentinelVisible = useCallback(() => {
+    const sentinel = sentinelRef.current;
+    const container = containerRef.current;
+    if (!infinite || !hasMore || loadingNext || !sentinel || !container) {
+      return;
+    }
+    const slot = container.getBoundingClientRect();
+    const end = sentinel.getBoundingClientRect();
+    if (
+      end.top <= slot.bottom + LOAD_MORE_MARGIN_PX &&
+      end.bottom >= slot.top - LOAD_MORE_MARGIN_PX
+    ) {
+      void loadMore();
+    }
+  }, [hasMore, infinite, loadMore, loadingNext]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The sentinel row mounts and moves as rows render; re-observe when their count changes.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const container = containerRef.current;
+    if (!infinite || !sentinel || !container) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      loadMoreIfSentinelVisible();
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadMoreIfSentinelVisible();
+        }
+      },
+      { root: container, rootMargin: `${LOAD_MORE_MARGIN_PX}px 0px` },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [infinite, loadMoreIfSentinelVisible, visibleRowCount]);
+
   const movePrevious = () => {
     const nextPage = Math.max(0, feed.page - 1);
     onPageChange?.(nextPage);
@@ -88,15 +163,18 @@ export function RequestEventsFeed({
           {feed.error.message}
         </Notice>
       )}
-      <div ref={tableContainerRef} className={tableContainerClassName}>
+      <div ref={setContainer} className={tableContainerClassName}>
         <RequestEventsTable
           {...tableProps}
           events={feed.pageRows}
           loading={feed.loading}
           liveFlashIds={feed.liveFlashIds}
+          sentinelRef={infinite ? sentinelRef : undefined}
+          loadingMore={infinite && loadingNext}
+          hasMore={infinite && hasMore}
         />
       </div>
-      {showPagination && (
+      {showPagination && feed.mode === 'paged' && (
         <LogsPagination
           page={feed.page}
           pageCount={feed.pageCount}

@@ -299,7 +299,7 @@ export function CodePasteField({
     );
   } else if (parsed.kind === 'code') {
     feedback = (
-      <span className="text-success-text inline-flex items-center gap-1">
+      <span className="text-traffic-success-text inline-flex items-center gap-1">
         <CheckCircle2 className="w-3.5 h-3.5" />
         {match === 'match'
           ? 'Code recognized for this sign-in'
@@ -379,7 +379,7 @@ export function AccountCard({
 }) {
   const labelTone =
     tone === 'ok'
-      ? 'text-success-text'
+      ? 'text-traffic-success-text'
       : tone === 'danger'
         ? 'text-danger-text'
         : 'text-text-muted';
@@ -433,7 +433,7 @@ export function IdentityVerdictNotice({
 }) {
   if (outcome.verdict === 'same') {
     return (
-      <div className="flex items-center gap-2 text-body-sm text-success-text">
+      <div className="flex items-center gap-2 text-body-sm text-traffic-success-text">
         <ShieldCheck className="size-4" strokeWidth={1.75} />
         Same account as before — nothing else changed.
       </div>

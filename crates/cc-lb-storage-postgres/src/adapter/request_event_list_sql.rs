@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
     RequestEvent, RequestEventKind, RequestEventListItem, RequestEventListQuery, StatusClass,
-    StorageError, StorageResult, model_filter_like_pattern,
+    StorageError, StorageResult, model_filter_like_patterns,
 };
 use sqlx::{FromRow, Postgres, QueryBuilder};
 
@@ -109,10 +109,17 @@ pub(super) async fn list_request_events(
         builder.push(" AND r.principal_id = ");
         builder.push_bind(principal_id);
     }
-    if let Some(model) = query.filters.model.as_deref() {
-        builder.push(" AND lower(r.model) LIKE ");
-        builder.push_bind(model_filter_like_pattern(model));
-        builder.push(" ESCAPE '\\'");
+    if let Some([prefix_pattern, contains_pattern]) = query
+        .filters
+        .model
+        .as_deref()
+        .and_then(model_filter_like_patterns)
+    {
+        builder.push(" AND (lower(r.model) LIKE ");
+        builder.push_bind(prefix_pattern);
+        builder.push(" ESCAPE '\\' OR lower(r.model) LIKE ");
+        builder.push_bind(contains_pattern);
+        builder.push(" ESCAPE '\\')");
     }
     if let Some(upstream_id) = query.filters.upstream_id {
         builder.push(" AND r.upstream_id = ");

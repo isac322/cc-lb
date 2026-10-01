@@ -1,5 +1,6 @@
 import type { QuotaSnapshot } from '../../lib/api';
 import type { OAuthReconnectNudge } from '../../lib/oauthReconnect';
+import { cx } from '../ui/primitives';
 import { QuotaObservedAt } from './QuotaObservedAt';
 
 export interface UpstreamHealth {
@@ -63,7 +64,10 @@ export function QuotaFreshnessCaption({
   return (
     <div
       data-testid="quota-freshness"
-      className="flex items-center gap-1.5 text-caption text-text-faint"
+      className={cx(
+        'flex items-center gap-1.5 text-caption',
+        isStale ? 'text-warn-text' : 'text-text-faint',
+      )}
     >
       {isStale ? (
         <>

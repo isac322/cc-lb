@@ -35,36 +35,110 @@ pub struct RequestEventStreamFilters {
     pub event_kind: Option<cc_lb_request_log::RequestEventKind>,
 }
 
-/// Case-insensitive ASCII prefix match for the request-log model filter.
+/// Shared contract for the request-log `model` filter.
 ///
-/// Historical SQL, the in-memory live tail, the SSE fan-out and the admin UI all
-/// filter on `model` independently; they must agree on the exact predicate or the
-/// same row shows up in one path and is silently dropped in another.
-/// A row without a model never matches, mirroring `lower(model) LIKE …` which is
-/// NULL (and therefore false) for `model IS NULL`.
+/// Historical SQL (list and histogram), the in-memory live tail, the SSE
+/// fan-out and the admin UI all filter on `model` independently; they must
+/// agree on the exact predicate or the same row shows up in one path and is
+/// silently dropped in another.
+///
+/// Normalization: the needle is trimmed and matched case-insensitively
+/// (ASCII). One leading `claude-` vendor prefix on the needle is ignored, so
+/// `sonnet`, `3-5-sonnet` and `claude-3-5-sonnet` all compare on the same
+/// core. An empty or whitespace-only needle — or one that reduces to nothing
+/// after the prefix strip (`claude-`) — means "no model filter": it behaves
+/// exactly like an absent filter and every row passes, mirroring the
+/// `? IS NULL` optional-clause shape in SQL.
+///
+/// Match rule for a present filter with lowercased core `c` against a
+/// lowercased model `m`: `m` starts with `c`, OR `m` starts with `claude-`
+/// and the remainder contains `c`. The second arm is what makes the filter
+/// vendor-prefix-agnostic: `sonnet` finds `claude-sonnet-4-5` and
+/// `claude-3-5-sonnet-20241022`, while non-`claude-*` models still only match
+/// on their own literal prefix. A row without a model never matches a present
+/// filter, mirroring `lower(model) LIKE …` which is NULL (and therefore
+/// false) for `model IS NULL`.
+///
+/// SQL form: bind both patterns from [`model_filter_like_patterns`] as a
+/// disjunction — `lower(model) LIKE <p1> ESCAPE '\' OR lower(model) LIKE
+/// <p2> ESCAPE '\'`. Every pattern is left-anchored on a literal prefix
+/// (`c%` and `claude-%c%`), never a bare `%c%` contains, so the clause stays
+/// index-safe: Postgres can range-seek `request_events_v1_lower_model_list_
+/// order_idx` (`lower(model) text_pattern_ops`) on either arm, and SQLite's
+/// equivalent predicate keeps the same shape. `claude-` is the only vendor
+/// prefix modeled; stored model names in this system are `claude-*` or
+/// literal non-vendor names.
 pub fn model_filter_matches(needle: &str, model: Option<&str>) -> bool {
+    let Some(core) = model_filter_core(needle) else {
+        // Absent filter: no restriction — every row passes, including
+        // model-less rows (the SQL `? IS NULL` arm).
+        return true;
+    };
     let Some(model) = model else {
         return false;
     };
-    let needle = needle.trim().as_bytes();
     let model = model.as_bytes();
-    model.len() >= needle.len() && model[..needle.len()].eq_ignore_ascii_case(needle)
+    let core = core.as_bytes();
+    if model.len() >= core.len() && model[..core.len()].eq_ignore_ascii_case(core) {
+        return true;
+    }
+    if model.len() > CLAUDE_PREFIX.len()
+        && model[..CLAUDE_PREFIX.len()].eq_ignore_ascii_case(CLAUDE_PREFIX.as_bytes())
+    {
+        return model[CLAUDE_PREFIX.len()..]
+            .windows(core.len())
+            .any(|window| window.eq_ignore_ascii_case(core));
+    }
+    false
 }
 
-/// `LIKE` pattern equivalent to [`model_filter_matches`], to be bound against
-/// `lower(model)` with `ESCAPE '\'`. Wildcards in the needle are escaped so a
+/// `LIKE` pattern pair equivalent to [`model_filter_matches`]:
+/// `[c%, claude-%c%]` where `c` is the normalized core (see
+/// [`model_filter_core`]). Bind both against `lower(model)` with
+/// `ESCAPE '\'` as a disjunction. Wildcards in the needle are escaped so a
 /// user-typed `%` or `_` matches literally.
-pub fn model_filter_like_pattern(needle: &str) -> String {
-    let needle = needle.trim();
-    let mut pattern = String::with_capacity(needle.len() + 4);
-    for ch in needle.chars() {
+///
+/// Returns `None` when the needle normalizes to an absent filter; callers
+/// then bind `NULL`/omit the predicate so the row passes unfiltered.
+pub fn model_filter_like_patterns(needle: &str) -> Option<[String; 2]> {
+    let core = model_filter_core(needle)?;
+    let mut prefix = String::with_capacity(core.len() + 4);
+    let mut contains = String::with_capacity(core.len() + 4 + CLAUDE_PREFIX.len());
+    contains.push_str(CLAUDE_PREFIX);
+    contains.push('%');
+    for ch in core.chars() {
         if matches!(ch, '%' | '_' | '\\') {
-            pattern.push('\\');
+            prefix.push('\\');
+            contains.push('\\');
         }
-        pattern.push(ch.to_ascii_lowercase());
+        let ch = ch.to_ascii_lowercase();
+        prefix.push(ch);
+        contains.push(ch);
     }
-    pattern.push('%');
-    pattern
+    prefix.push('%');
+    contains.push('%');
+    Some([prefix, contains])
+}
+
+/// The one vendor prefix the model filter hides: model names stored without
+/// it still match on their literal prefix, and names stored with it are
+/// searched inside the remainder.
+const CLAUDE_PREFIX: &str = "claude-";
+
+/// Normalizes the model-filter needle to its match core.
+///
+/// Trims surrounding whitespace and removes one leading `claude-`
+/// (case-insensitive). `None` means the filter is absent: empty/whitespace
+/// input, or nothing left after the prefix strip.
+fn model_filter_core(needle: &str) -> Option<&str> {
+    let needle = needle.trim();
+    let core = match needle.get(..CLAUDE_PREFIX.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(CLAUDE_PREFIX) => {
+            &needle[CLAUDE_PREFIX.len()..]
+        }
+        _ => needle,
+    };
+    if core.is_empty() { None } else { Some(core) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,10 +347,11 @@ pub struct UsageRollupRun {
 
 #[cfg(test)]
 mod tests {
-    use super::{model_filter_like_pattern, model_filter_matches};
+    use super::{model_filter_like_patterns, model_filter_matches};
 
     #[test]
-    fn model_filter_matches_case_insensitive_prefix() {
+    fn model_filter_matches_case_insensitive() {
+        // Literal prefix on the stored name, case-insensitive.
         assert!(model_filter_matches(
             "claude-sonnet",
             Some("claude-sonnet-4-5-20250929")
@@ -289,7 +364,8 @@ mod tests {
             "claude-sonnet-4-5",
             Some("CLAUDE-SONNET-4-5")
         ));
-        assert!(!model_filter_matches("sonnet", Some("claude-sonnet-4-5")));
+        assert!(model_filter_matches("gpt", Some("gpt-4o")));
+        assert!(!model_filter_matches("4o", Some("gpt-4o")));
         assert!(!model_filter_matches(
             "claude-sonnet-4-5-2025",
             Some("claude-sonnet-4-5")
@@ -297,15 +373,58 @@ mod tests {
     }
 
     #[test]
-    fn model_filter_never_matches_a_model_less_row() {
-        assert!(!model_filter_matches("claude", None));
-        assert!(!model_filter_matches("", None));
+    fn model_filter_matches_without_the_claude_prefix() {
+        // The vendor prefix is hidden both on the needle and on stored names:
+        // the core must appear at the start of a non-claude name, or anywhere
+        // inside the `claude-` remainder.
+        assert!(model_filter_matches("sonnet", Some("claude-sonnet-4-5")));
+        assert!(model_filter_matches(
+            "sonnet",
+            Some("claude-3-5-sonnet-20241022")
+        ));
+        assert!(model_filter_matches(
+            "3-5-sonnet",
+            Some("claude-3-5-sonnet-20241022")
+        ));
+        assert!(model_filter_matches(
+            "claude-3-5-sonnet",
+            Some("claude-3-5-sonnet-20241022")
+        ));
+        // Removing `claude-` makes the filter prefix-independent for every
+        // stored model name; it does not require the stored name to carry the
+        // vendor prefix.
+        assert!(model_filter_matches("claude-opus", Some("opus-x")));
+        assert!(!model_filter_matches("sonnet", Some("other-sonnet-1")));
     }
 
     #[test]
-    fn model_filter_like_pattern_escapes_wildcards() {
-        assert_eq!(model_filter_like_pattern("Claude-Opus"), "claude-opus%");
-        assert_eq!(model_filter_like_pattern("  claude  "), "claude%");
-        assert_eq!(model_filter_like_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d%");
+    fn model_filter_never_matches_a_model_less_row() {
+        assert!(!model_filter_matches("claude", None));
+        // …but an absent filter passes every row, like `? IS NULL` in SQL.
+        assert!(model_filter_matches("", None));
+        assert!(model_filter_matches("   ", Some("claude-opus-4-1")));
+        assert!(model_filter_matches("claude-", None));
+    }
+
+    #[test]
+    fn model_filter_like_patterns_normalize_and_escape() {
+        assert_eq!(
+            model_filter_like_patterns("Claude-Opus"),
+            Some(["opus%".to_owned(), "claude-%opus%".to_owned()])
+        );
+        assert_eq!(
+            model_filter_like_patterns("  claude  "),
+            Some(["claude%".to_owned(), "claude-%claude%".to_owned()])
+        );
+        assert_eq!(
+            model_filter_like_patterns("a%b_c\\d"),
+            Some([
+                "a\\%b\\_c\\\\d%".to_owned(),
+                "claude-%a\\%b\\_c\\\\d%".to_owned(),
+            ])
+        );
+        assert_eq!(model_filter_like_patterns(""), None);
+        assert_eq!(model_filter_like_patterns("  "), None);
+        assert_eq!(model_filter_like_patterns("claude-"), None);
     }
 }
