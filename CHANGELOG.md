@@ -24,7 +24,7 @@ All notable changes to this project will be documented in this file.
 
 - Terminal OAuth refresh failures (`400 invalid_grant`, `401`, or an expired refresh token) now latch reconnect-required state across scheduled, watchdog, and lazy refresh paths until credential replacement or reconnect; transient network, `5xx`, and non-terminal `400` failures still retry.
 - Disabled OAuth upstreams remain visible with reconnect notices, and quota rows hide extra-usage budgets that are switched off or have no positive monthly limit.
-- Dashboard pagination regression tests isolate repeated row presentation while retaining all 500-record traversal and live-page anchoring checks; a separate real-table check verifies the newest 50 rendered rows.
+- Dashboard history regression tests isolate repeated row presentation from paging and live-page anchoring; real-table checks retain the 500-record/50-row boundary and live-row cursor movement.
 
 ## [1.0.0] - 2026-09-30
 

@@ -19,7 +19,14 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { createContext, useContext, useSyncExternalStore } from 'react';
+import {
+  type ComponentProps,
+  type ComponentType,
+  createContext,
+  type ReactNode,
+  useContext,
+  useSyncExternalStore,
+} from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RecentEventsPayload, RequestEvent } from '../lib/api';
 import { filterLogRows } from '../lib/logRows';
@@ -27,6 +34,7 @@ import type * as queries from '../lib/queries';
 import type { RequestEventWithPhase } from '../lib/RequestEventTypes';
 import type { LiveEventMap } from '../lib/upsertReducer';
 import { Route } from '../routes/logs';
+import type * as RequestEventsTableModule from './ui/RequestEventsTable';
 
 const queryMocks = vi.hoisted(() => ({
   fetchRecentEventsPage: vi.fn(),
@@ -187,6 +195,51 @@ vi.mock('../lib/useLiveEventStream', () => ({
   },
 }));
 
+// Every test renders the real table unless it opts into the row-only table.
+// The context is read only while the mocked table renders, after module init.
+vi.mock('./ui/RequestEventsTable', async (importOriginal) => {
+  const actual = await importOriginal<typeof RequestEventsTableModule>();
+  return {
+    ...actual,
+    RequestEventsTable: (
+      props: ComponentProps<typeof actual.RequestEventsTable>,
+    ) => {
+      if (!useContext(RowOnlyRequestEventsTableContext)) {
+        return <actual.RequestEventsTable {...props} />;
+      }
+      return (
+        <table>
+          <tbody>
+            {props.events.map((event) => {
+              const eventKey = event.event_id ?? event.request_id;
+              return (
+                <tr aria-label={`View request ${eventKey}`} key={eventKey}>
+                  <td>{eventKey}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      );
+    },
+  };
+});
+
+const RowOnlyRequestEventsTableContext = createContext(false);
+
+/**
+ * Swaps only the table leaf for bare rows. The feed, its paging and live merge
+ * stay real, so a test that walks hundreds of rows asserts which rows show
+ * without paying for each row's full presentation.
+ */
+function RowOnlyRequestEventsTable({ children }: { children: ReactNode }) {
+  return (
+    <RowOnlyRequestEventsTableContext.Provider value={true}>
+      {children}
+    </RowOnlyRequestEventsTableContext.Provider>
+  );
+}
+
 global.URL.createObjectURL = vi.fn(() => 'blob:test');
 global.URL.revokeObjectURL = vi.fn();
 
@@ -196,7 +249,10 @@ global.IntersectionObserver = class IntersectionObserver {
   disconnect() {}
 } as unknown as typeof global.IntersectionObserver;
 
-async function renderLogs(search: Record<string, string> = {}) {
+async function renderLogs(
+  search: Record<string, string> = {},
+  options: { wrapper?: ComponentType<{ children: ReactNode }> } = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
@@ -231,6 +287,7 @@ async function renderLogs(search: Record<string, string> = {}) {
         <RouterProvider router={router} />
       </QueryClientProvider>
     </LiveStoreContext.Provider>,
+    { wrapper: options.wrapper },
   );
   await screen.findByRole('heading', { name: 'Logs', level: 1 });
   return { ...view, router, publishLiveEvent: createLivePublisher(liveStore) };
@@ -563,7 +620,10 @@ describe('LogsPage', () => {
   }, 30_000);
 
   it('keeps historical pages stable while live rows continue arriving', async () => {
-    const { publishLiveEvent } = await renderLogs();
+    const { publishLiveEvent } = await renderLogs(
+      {},
+      { wrapper: RowOnlyRequestEventsTable },
+    );
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),
