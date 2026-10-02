@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-02
+
 ### Removed
 
 - The admin dashboard no longer shows the Unified account-restriction envelope: it has no quota row, chart series, legend entry or reset fact anywhere, and the web app no longer requests `unified` window data. This is presentation-only — the backend still parses the provider's unified rate-limit headers, stores the window, reports it in admin API payloads, and keeps using it for subscription-preference overage routing.
@@ -358,7 +360,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.1...HEAD
+[1.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...cc-lb-v1.0.1
 [1.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.1...cc-lb-v1.0.0
 [0.8.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.0...cc-lb-v0.8.1
 [0.8.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.7.0...cc-lb-v0.8.0
