@@ -2449,9 +2449,29 @@ impl Lifecycle {
         headers: &http::HeaderMap,
     ) -> Result<crate::authn_rail::Authenticated, BuiltinAuthError> {
         let view = self.dynamic_view.load();
-        crate::authn_rail::authenticate_first(&self.authn, headers, &view.principal_view)
-            .instrument(tracing::info_span!("proxy.authenticate"))
-            .await
+        let span = tracing::info_span!(
+            "proxy.authenticate",
+            cc_lb.auth.outcome = tracing::field::Empty,
+            cc_lb.auth.duration_ms = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        );
+        let result =
+            crate::authn_rail::authenticate_first(&self.authn, headers, &view.principal_view)
+                .instrument(span.clone())
+                .await;
+        match &result {
+            Ok(auth) => {
+                span.record("cc_lb.auth.outcome", "success");
+                span.record("cc_lb.auth.duration_ms", auth.auth_ms());
+            }
+            Err(_) => {
+                span.record("cc_lb.auth.outcome", "error");
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error_codes::AUTHENTICATION_FAILED);
+            }
+        }
+        result
     }
 
     /// Handle a request that has already been authenticated. `auth` is the
@@ -2472,6 +2492,26 @@ impl Lifecycle {
             cc_lb.upstream.id = tracing::field::Empty,
             cc_lb.request.finalize_ms = tracing::field::Empty,
             cc_lb.request.unaccounted_ms = tracing::field::Empty,
+            cc_lb.request.outcome = tracing::field::Empty,
+            cc_lb.request.duration_ms = tracing::field::Empty,
+            cc_lb.request.retry_count = tracing::field::Empty,
+            http.response.status_code = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            cc_lb.upstream.bulkhead_wait_ms = tracing::field::Empty,
+            cc_lb.upstream.dns_ms = tracing::field::Empty,
+            cc_lb.upstream.connect_ms = tracing::field::Empty,
+            cc_lb.upstream.connection_reused = tracing::field::Empty,
+            cc_lb.upstream.shape_ms = tracing::field::Empty,
+            cc_lb.upstream.sign_ms = tracing::field::Empty,
+            cc_lb.upstream.ttfb_ms = tracing::field::Empty,
+            cc_lb.response.first_body_chunk_ms = tracing::field::Empty,
+            cc_lb.response.first_content_delta_ms = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            cc_lb.usage.completeness = tracing::field::Empty,
         )
     )]
     pub async fn handle(
@@ -2760,7 +2800,14 @@ impl Lifecycle {
         )
         .await;
         // Synchronous routing region: no .await is permitted while `route_guard` is held.
-        let route_span = tracing::info_span!("proxy.route");
+        let route_span = tracing::info_span!(
+            "proxy.route",
+            cc_lb.route.outcome = tracing::field::Empty,
+            cc_lb.route.candidate_count = tracing::field::Empty,
+            cc_lb.route.duration_ms = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        );
         let route_guard = route_span.enter();
         let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
             &view,
@@ -2786,7 +2833,14 @@ impl Lifecycle {
             router_pipeline.terminal.clone(),
             &pipeline_result.candidates,
         );
+        route_span.record(
+            "cc_lb.route.candidate_count",
+            pipeline_result.candidates.len() as u64,
+        );
         if pipeline_result.candidates.is_empty() {
+            route_span.record("cc_lb.route.outcome", "error");
+            route_span.record("otel.status_code", "ERROR");
+            route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
             let message = "no upstream candidates remain after routing filters";
             self.emit_routing_failure_event(
                 observer.as_ref(),
@@ -2813,6 +2867,9 @@ impl Lifecycle {
             .iter()
             .find(|record| record.id == resolved_upstream_id)
         else {
+            route_span.record("cc_lb.route.outcome", "error");
+            route_span.record("otel.status_code", "ERROR");
+            route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
             let response = anthropic_error_response(
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
@@ -2853,6 +2910,9 @@ impl Lifecycle {
         let route_upstream = match upstream_for_record(resolved_record) {
             Ok(upstream) => upstream,
             Err(reason) => {
+                route_span.record("cc_lb.route.outcome", "error");
+                route_span.record("otel.status_code", "ERROR");
+                route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
@@ -2885,6 +2945,8 @@ impl Lifecycle {
         };
         drop(route_guard);
         let route_ms = duration_to_ms(route_start.elapsed());
+        route_span.record("cc_lb.route.outcome", "success");
+        route_span.record("cc_lb.route.duration_ms", route_ms);
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
         let selected_quota_candidate =
             resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
@@ -3348,7 +3410,16 @@ impl Lifecycle {
     }
 
     #[allow(clippy::result_large_err)]
-    #[tracing::instrument(name = "proxy.reserve_limit", skip_all)]
+    #[tracing::instrument(
+        name = "proxy.reserve_limit",
+        skip_all,
+        fields(
+            cc_lb.limit.decision = tracing::field::Empty,
+            cc_lb.limit.violation = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn reserve_limit(
         &self,
         view: &PrincipalView,
@@ -3362,12 +3433,14 @@ impl Lifecycle {
             self.limit_engine.as_ref(),
             self.limit_subject_provider.as_ref(),
         ) else {
+            tracing::Span::current().record("cc_lb.limit.decision", "not_configured");
             return Ok(None);
         };
         let Some(subject) = subject_provider
             .limit_subject(ctx, principal, authn_success)
             .await
         else {
+            tracing::Span::current().record("cc_lb.limit.decision", "not_applicable");
             return Ok(None);
         };
         let limit_request = body_view.limit_request();
@@ -3390,13 +3463,23 @@ impl Lifecycle {
             max_input_estimate,
             cost_estimate,
         ) {
-            Ok(reservation) => Ok(Some(ActiveLimit {
-                subject,
-                request: limit_request,
-                reservation: Some(reservation),
-            })),
+            Ok(reservation) => {
+                tracing::Span::current().record("cc_lb.limit.decision", "allowed");
+                Ok(Some(ActiveLimit {
+                    subject,
+                    request: limit_request,
+                    reservation: Some(reservation),
+                }))
+            }
             Err(reason) => {
                 let limit_violation = limit_violation_name(&reason).map(|v| v.to_owned());
+                let span = tracing::Span::current();
+                span.record("cc_lb.limit.decision", "rejected");
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error_codes::LIMIT_REJECTED);
+                if let Some(violation) = limit_violation.as_deref() {
+                    span.record("cc_lb.limit.violation", violation);
+                }
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(
@@ -3499,6 +3582,13 @@ impl Lifecycle {
                     if let Ok(data) = frame.into_data() {
                         if first_body_chunk_at.is_none() {
                             first_body_chunk_at = Some(Instant::now());
+                            if let Some(o) = observer.as_ref() {
+                                o.set_termination_timings(
+                                    None,
+                                    None,
+                                    Some(duration_to_ms(body_collect_started.elapsed())),
+                                );
+                            }
                         }
                         body_chunk_count = body_chunk_count.saturating_add(1);
                         body_buf.extend_from_slice(&data);
@@ -3739,6 +3829,7 @@ impl Lifecycle {
         }
 
         let finalize_ms = if let Some(o) = observer.as_ref() {
+            o.set_usage_counts(&usage, true);
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                 event_id: o.event_id().to_owned(),
                 usage: to_usage_snapshot(&usage),
@@ -3944,6 +4035,14 @@ impl Lifecycle {
             cc_lb.upstream.id = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
+            http.response.status_code = tracing::field::Empty,
+            cc_lb.upstream.bulkhead_wait_ms = tracing::field::Empty,
+            cc_lb.upstream.dns_ms = tracing::field::Empty,
+            cc_lb.upstream.connect_ms = tracing::field::Empty,
+            cc_lb.upstream.connection_reused = tracing::field::Empty,
+            cc_lb.upstream.shape_ms = tracing::field::Empty,
+            cc_lb.upstream.sign_ms = tracing::field::Empty,
+            cc_lb.upstream.ttfb_ms = tracing::field::Empty,
         )
     )]
     async fn attempt(
@@ -3988,6 +4087,9 @@ impl Lifecycle {
             }
         };
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
+        if let Some(shape_ms) = timings.shape_ms {
+            tracing::Span::current().record("cc_lb.upstream.shape_ms", shape_ms);
+        }
         if capture_shaped_body {
             *shaped_body_out = Some(shaped.body().clone());
         }
@@ -4000,9 +4102,18 @@ impl Lifecycle {
             .map_err(|source| {
                 tracing::error!(%source, "sign_request failed");
                 timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
+                let span = tracing::Span::current();
+                span.record("otel.status_code", "ERROR");
+                span.record("error.type", error_codes::SIGNER_FAILED);
+                if let Some(sign_ms) = timings.sign_ms {
+                    span.record("cc_lb.upstream.sign_ms", sign_ms);
+                }
                 AttemptFailure::Sign(source)
             })?;
         timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
+        if let Some(sign_ms) = timings.sign_ms {
+            tracing::Span::current().record("cc_lb.upstream.sign_ms", sign_ms);
+        }
 
         let signed_header_names: Vec<String> = signed
             .headers()
@@ -4028,6 +4139,22 @@ impl Lifecycle {
         timings.dns_ms = connection_snapshot.dns_ms;
         timings.connect_ms = connection_snapshot.connect_ms;
         timings.connection_reused = connection_snapshot.connection_reused;
+        if let Some(o) = observer {
+            o.set_attempt_bulkhead_wait_ms(timings.bulkhead_wait_ms);
+        }
+        let attempt_span = tracing::Span::current();
+        for (field, value) in [
+            ("cc_lb.upstream.bulkhead_wait_ms", timings.bulkhead_wait_ms),
+            ("cc_lb.upstream.dns_ms", timings.dns_ms),
+            ("cc_lb.upstream.connect_ms", timings.connect_ms),
+        ] {
+            if let Some(value) = value {
+                attempt_span.record(field, value);
+            }
+        }
+        if let Some(reused) = timings.connection_reused {
+            attempt_span.record("cc_lb.upstream.connection_reused", reused);
+        }
         let response = dispatch_result.map_err(|source| {
             let attempt_span = tracing::Span::current();
             attempt_span.record("otel.status_code", "ERROR");
@@ -4044,6 +4171,24 @@ impl Lifecycle {
         })?;
         // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
         timings.upstream_ttfb_ms = Some(duration_to_ms(dispatch_start.elapsed()));
+        if let Some(ttfb_ms) = timings.upstream_ttfb_ms {
+            attempt_span.record("cc_lb.upstream.ttfb_ms", ttfb_ms);
+        }
+        attempt_span.record(
+            "http.response.status_code",
+            u64::from(response.status().as_u16()),
+        );
+        if response.status().is_client_error() || response.status().is_server_error() {
+            attempt_span.record("otel.status_code", "ERROR");
+            attempt_span.record(
+                "error.type",
+                if response.status().is_client_error() {
+                    error_codes::UPSTREAM_4XX
+                } else {
+                    error_codes::UPSTREAM_5XX
+                },
+            );
+        }
         Ok(response)
     }
 
@@ -4137,7 +4282,29 @@ impl Lifecycle {
             ping_count = tracing::field::Empty,
             inter_token_avg_ms = tracing::field::Empty,
             total_bytes = tracing::field::Empty,
+            cc_lb.request.outcome = tracing::field::Empty,
+            cc_lb.request.duration_ms = tracing::field::Empty,
+            cc_lb.request.retry_count = tracing::field::Empty,
+            cc_lb.request.unaccounted_ms = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            cc_lb.upstream.bulkhead_wait_ms = tracing::field::Empty,
+            cc_lb.upstream.dns_ms = tracing::field::Empty,
+            cc_lb.upstream.connect_ms = tracing::field::Empty,
+            cc_lb.upstream.connection_reused = tracing::field::Empty,
+            cc_lb.upstream.shape_ms = tracing::field::Empty,
+            cc_lb.upstream.sign_ms = tracing::field::Empty,
+            cc_lb.upstream.ttfb_ms = tracing::field::Empty,
+            cc_lb.response.first_body_chunk_ms = tracing::field::Empty,
+            cc_lb.response.first_content_delta_ms = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            cc_lb.usage.completeness = tracing::field::Empty,
         );
+        if let Some(o) = observer.as_ref() {
+            o.set_response_stream_span(stream_span.clone());
+        }
         let stream_latency_log_dispatch = tracing::enabled!(
             target: "cc_lb_engine::lifecycle",
             tracing::Level::INFO
@@ -4207,6 +4374,13 @@ impl Lifecycle {
                             let now = Instant::now();
                             if first_chunk_at.is_none() {
                                 first_chunk_at = Some(now);
+                                if let Some(o) = observer.as_ref() {
+                                    o.set_termination_timings(
+                                        None,
+                                        None,
+                                        Some(duration_to_ms(now.saturating_duration_since(relay_start))),
+                                    );
+                                }
                             }
                             last_chunk_at = Some(now);
                             total_bytes = total_bytes.saturating_add(data.len() as u64);
@@ -4530,6 +4704,11 @@ impl Lifecycle {
                                     Some(b"content_block_delta") => {
                                         if first_content_delta_at.is_none() {
                                             first_content_delta_at = Some(now);
+                                            if let Some(o) = observer.as_ref() {
+                                                o.set_first_content_delta_ms(duration_to_ms(
+                                                    now.saturating_duration_since(relay_start),
+                                                ));
+                                            }
                                         }
                                         last_content_delta_at = Some(now);
                                         content_delta_count = content_delta_count.saturating_add(1);
@@ -4579,12 +4758,14 @@ impl Lifecycle {
                                 }
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
+                                        o.set_usage_counts(&usage, false);
                                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
                                             source: cc_lb_lifecycle::UsageSource::MessageStart,
                                         });
                                     } else if usage_update.message_stop {
+                                        o.set_usage_counts(&usage, true);
                                         o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                             event_id: o.event_id().to_owned(),
                                             usage: to_usage_snapshot(&usage),
@@ -4604,6 +4785,7 @@ impl Lifecycle {
                                         || tokens_since_last >= 100;
                                     if force_publish || throttle_ok {
                                         if !usage_update.message_start_usage && !usage_update.message_stop {
+                                            o.set_usage_counts(&usage, false);
                                             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UsageObserved {
                                                 event_id: o.event_id().to_owned(),
                                                 usage: to_usage_snapshot(&usage),
@@ -5403,6 +5585,10 @@ impl Lifecycle {
                 downstream_drop_guard.mark_proxy_error(StreamTerminationCause::TransformError);
             }
             let finalize_ms = if let Some(o) = observer.as_ref() {
+                o.set_usage_counts(&usage, message_stop_at.is_some());
+                if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
+                    o.set_first_content_delta_ms(first_content_delta_ms);
+                }
                 if let Some(error) = stream_affinity_error.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
                         event_id: o.event_id().to_owned(),

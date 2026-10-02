@@ -187,6 +187,8 @@ pub enum LifecycleEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         connection_reused: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_content_delta_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         first_body_chunk_ms: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         finalize_ms: Option<u64>,

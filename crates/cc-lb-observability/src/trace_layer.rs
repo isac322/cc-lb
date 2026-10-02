@@ -80,10 +80,10 @@ impl<B> OnRequest<B> for ProxyOnRequest {
     fn on_request(&mut self, request: &Request<B>, span: &Span) {
         let request_id = header_value(request, "request-id")
             .or_else(|| header_value(request, "x-request-id"))
-            .unwrap_or_default();
-        let user_agent = header_value(request, "user-agent");
+            .unwrap_or("");
+        let user_agent = header_value(request, "user-agent").unwrap_or("");
         if !request_id.is_empty() {
-            span.record("cc_lb.request.id", request_id.as_str());
+            span.record("cc_lb.request.id", request_id);
         }
 
         tracing::info!(
@@ -91,8 +91,8 @@ impl<B> OnRequest<B> for ProxyOnRequest {
             method = %request.method(),
             path = request.uri().path(),
             query_present = request.uri().query().is_some(),
-            request_id = request_id.as_str(),
-            downstream_user_agent = user_agent.as_deref().unwrap_or(""),
+            request_id,
+            downstream_user_agent = user_agent,
             "request_started"
         );
     }
@@ -111,20 +111,23 @@ impl<B> OnResponse<B> for ProxyOnResponse {
         let duration_seconds = latency.as_secs_f64();
         let status_label = status.as_u16().to_string();
 
+        // Observe proxy response headers, including local responses inside this layer.
+        // Drain rejections bypass this hook before authentication and are not counted by
+        // the started/header or terminal lifecycle metrics.
+        // This is not terminal completion of a response.
         metrics::counter!(
-            "cc_lb_requests_total",
-            "principal" => "unknown",
-            "upstream" => "unknown",
-            "model" => "unknown",
-            "status" => status_label.clone()
-        )
-        .increment(1);
-        metrics::histogram!(
-            "cc_lb_request_duration_seconds",
+            "cc_lb_requests_started_total",
             "principal" => "unknown",
             "upstream" => "unknown",
             "model" => "unknown",
             "status" => status_label
+        )
+        .increment(1);
+        metrics::histogram!(
+            "cc_lb_request_headers_duration_seconds",
+            "principal" => "unknown",
+            "upstream" => "unknown",
+            "model" => "unknown"
         )
         .record(duration_seconds);
 
@@ -132,7 +135,7 @@ impl<B> OnResponse<B> for ProxyOnResponse {
             target: "cc_lb_observability::http",
             status = status.as_u16(),
             latency_ms = latency.as_millis(),
-            "response_finished"
+            "response_headers_started"
         );
     }
 }
@@ -147,10 +150,12 @@ where
     fn on_body_chunk(&mut self, chunk: &B, latency: Duration, _span: &Span) {
         let chunk_bytes = chunk.as_ref().len();
 
+        // Transport body chunks are not SSE events and are intentionally observed
+        // without creating per-chunk child spans or parsing the chunk contents.
+        // Provider attribution is unavailable here, so upstream is always "unknown".
         metrics::counter!(
-            "cc_lb_sse_events_total",
-            "upstream" => "unknown",
-            "event_type" => "body_chunk"
+            "cc_lb_response_body_chunks_total",
+            "upstream" => "unknown"
         )
         .increment(1);
 
@@ -158,15 +163,14 @@ where
             target: "cc_lb_observability::http",
             chunk_bytes,
             latency_ms = latency.as_millis(),
-            "response_body_chunk"
+            "response_transport_body_chunk"
         );
     }
 }
 
-fn header_value<B>(request: &Request<B>, name: &'static str) -> Option<String> {
+fn header_value<'a, B>(request: &'a Request<B>, name: &'static str) -> Option<&'a str> {
     request
         .headers()
         .get(name)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
 }

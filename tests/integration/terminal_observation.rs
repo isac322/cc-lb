@@ -353,7 +353,8 @@ async fn terminal_upstream_dispatch_failed() -> Result<(), Box<dyn std::error::E
     let dir = tempfile::tempdir()?;
     ensure_env();
 
-    let closed_addr = free_addr();
+    let closed_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let closed_addr = closed_listener.local_addr()?;
     let closed_url = format!("http://{closed_addr}");
     let litellm = start_price_mock().await;
 
@@ -363,6 +364,7 @@ async fn terminal_upstream_dispatch_failed() -> Result<(), Box<dyn std::error::E
     let config = base_config(sqlite_path.clone(), litellm.uri());
     let server = StartedServer::start(config).await?;
     wait_for_price_catalog().await?;
+    drop(closed_listener);
 
     let response = send_messages(&server, &plaintext_key, false).await?;
     assert!(

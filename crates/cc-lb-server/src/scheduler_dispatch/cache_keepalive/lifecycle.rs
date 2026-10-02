@@ -142,6 +142,7 @@ pub(super) fn publish_renewal_lifecycle(
         setup_timings: Default::default(),
         upstream_body_ms: None,
         first_body_chunk_ms: None,
+        first_content_delta_ms: None,
         dns_ms: None,
         connect_ms: None,
         connection_reused: None,

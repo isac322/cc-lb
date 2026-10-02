@@ -2191,12 +2191,18 @@ fn admin_router(
     if let Some(state) = internal_partials_state {
         admin_router = admin_router.merge(cc_lb_admin::internal_partials::router(state));
     }
-    let admin_router = admin_router
+    let admin_router = cc_lb_admin::routes::with_request_tracing(admin_router)
         // Admin surface only — proxy_router stays uncompressed to keep SSE
         // bodies streaming and skip CPU on the hot data plane. ETagged
         // static assets skip dynamic compression to keep strong ETags valid.
         // Defaults (gzip 6, brotli 4) are deliberate; avoid Best/level 11.
-        .layer(crate::admin_compression::layer());
+        .layer(crate::admin_compression::layer())
+        // Reuse the existing request-id seam on the separate admin listener so
+        // admin spans and responses carry the same correlation identifier.
+        .layer(middleware::from_fn_with_state(
+            RequestIdState::with_prefix("req_admin_"),
+            request_id_middleware,
+        ));
 
     crate::admin_security::with_browser_security_headers(admin_router)
 }
@@ -2237,6 +2243,7 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
             Some("/v1/files/{id}/content")
         }
         _ if path.starts_with("/v1/files/") => Some("/v1/files/{id}"),
+        "/api/oauth/usage" => Some("/api/oauth/usage"),
         _ if path.starts_with("/api/") => Some("/api/{*path}"),
         _ if path.starts_with("/v1/") => Some("/v1/{*path}"),
         _ => None,
@@ -2673,9 +2680,25 @@ fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct RequestIdState {
     counter: Arc<AtomicU64>,
+    prefix: &'static str,
+}
+
+impl RequestIdState {
+    fn with_prefix(prefix: &'static str) -> Self {
+        Self {
+            counter: Arc::new(AtomicU64::new(0)),
+            prefix,
+        }
+    }
+}
+
+impl Default for RequestIdState {
+    fn default() -> Self {
+        Self::with_prefix("req_server_")
+    }
 }
 
 async fn request_id_middleware(
@@ -2690,7 +2713,7 @@ async fn request_id_middleware(
         .or_else(|| request.headers().get("x-request-id").cloned())
         .unwrap_or_else(|| {
             let id = state.counter.fetch_add(1, Ordering::Relaxed);
-            match HeaderValue::from_str(&server_request_id(id)) {
+            match HeaderValue::from_str(&server_request_id(state.prefix, id)) {
                 Ok(value) => value,
                 Err(_) => HeaderValue::from_static("req_server"),
             }
@@ -2703,6 +2726,13 @@ async fn request_id_middleware(
         .headers_mut()
         .insert(HeaderName::from_static("request-id"), request_id);
     response
+}
+
+fn server_request_id(prefix: &str, id: u64) -> String {
+    let mut request_id = String::with_capacity(prefix.len() + 20);
+    request_id.push_str(prefix);
+    let _ = write!(&mut request_id, "{id}");
+    request_id
 }
 
 async fn lifecycle_middleware(
@@ -2744,13 +2774,6 @@ async fn lifecycle_middleware(
         }
     }
     response
-}
-
-fn server_request_id(id: u64) -> String {
-    let mut request_id = String::with_capacity("req_server_".len() + 20);
-    request_id.push_str("req_server_");
-    let _ = write!(&mut request_id, "{id}");
-    request_id
 }
 
 fn server_join_result(result: Result<Result<(), io::Error>, JoinError>) -> Result<(), BuildError> {

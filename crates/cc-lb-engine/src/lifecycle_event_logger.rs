@@ -15,7 +15,9 @@ use std::{
     sync::Arc,
 };
 
-use cc_lb_lifecycle::{LifecycleEvent, RequestIoTimings, TerminationReason};
+use cc_lb_lifecycle::{
+    LifecycleEvent, LimitDecisionKind, RequestIoTimings, RouteFailure, TerminationReason,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -89,9 +91,17 @@ struct RequestTiming {
     shape_ms: Option<u64>,
     sign_ms: Option<u64>,
     upstream_ttfb_ms: Option<u64>,
+    bulkhead_wait_ms: Option<u64>,
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+    first_body_chunk_ms: Option<u64>,
+    first_content_delta_ms: Option<u64>,
     stream_total_ms: Option<u64>,
     upstream_body_ms: Option<u64>,
     finalize_ms: Option<u64>,
+    max_attempt_num: Option<u32>,
+    route_decision: Option<&'static str>,
+    limit_decision: Option<&'static str>,
 }
 
 impl RequestTiming {
@@ -183,20 +193,61 @@ impl RequestTimingAggregator {
                     },
                 );
             }
+            LifecycleEvent::RouteCompleted {
+                event_id, result, ..
+            } => {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
+                    return;
+                };
+                active.timing.route_decision = Some(match result {
+                    Ok(_) => "success",
+                    Err(RouteFailure::RouterPipelineUnavailable) => "router_pipeline_unavailable",
+                    Err(RouteFailure::RouteNoUpstreamAfterFilter) => {
+                        "route_no_upstream_after_filter"
+                    }
+                    Err(RouteFailure::RouteNotConfigured) => "route_not_configured",
+                    Err(_) => "unknown",
+                });
+            }
+            LifecycleEvent::LimitDecision {
+                event_id, decision, ..
+            } => {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
+                    return;
+                };
+                active.timing.limit_decision = Some(match decision {
+                    LimitDecisionKind::Reserved { .. } => "reserved",
+                    LimitDecisionKind::Rejected { .. } => "rejected",
+                    _ => "unknown",
+                });
+            }
             LifecycleEvent::UpstreamAttempt {
                 event_id,
                 attempt_num,
                 ..
-            } if *attempt_num > 1 => {
+            } => {
                 let Some(active) = self.active.get_mut(event_id.as_str()) else {
                     return;
                 };
+                active.timing.max_attempt_num = Some(
+                    active
+                        .timing
+                        .max_attempt_num
+                        .unwrap_or_default()
+                        .max(*attempt_num),
+                );
                 active.timing.shape_ms = None;
                 active.timing.sign_ms = None;
                 active.timing.upstream_ttfb_ms = None;
+                active.timing.bulkhead_wait_ms = None;
+                active.timing.dns_ms = None;
+                active.timing.connect_ms = None;
             }
             LifecycleEvent::UpstreamResponseStarted {
                 event_id,
+                bulkhead_wait_ms,
+                dns_ms,
+                connect_ms,
                 shape_ms,
                 sign_ms,
                 upstream_ttfb_ms,
@@ -205,6 +256,9 @@ impl RequestTimingAggregator {
                 let Some(active) = self.active.get_mut(event_id.as_str()) else {
                     return;
                 };
+                active.timing.bulkhead_wait_ms = *bulkhead_wait_ms;
+                active.timing.dns_ms = *dns_ms;
+                active.timing.connect_ms = *connect_ms;
                 active.timing.shape_ms = *shape_ms;
                 active.timing.sign_ms = *sign_ms;
                 active.timing.upstream_ttfb_ms = *upstream_ttfb_ms;
@@ -215,6 +269,7 @@ impl RequestTimingAggregator {
                 };
                 if let Ok(success) = result {
                     active.timing.stream_total_ms = success.stream_total_ms;
+                    active.timing.first_content_delta_ms = success.stream_first_content_delta_ms;
                 }
             }
             LifecycleEvent::RequestTerminated {
@@ -226,7 +281,11 @@ impl RequestTimingAggregator {
                 request_body_bytes,
                 proxy_setup_ms,
                 upstream_body_ms,
+                first_content_delta_ms,
+                first_body_chunk_ms,
                 finalize_ms,
+                dns_ms,
+                connect_ms,
                 io_timings,
                 ..
             } => {
@@ -240,11 +299,17 @@ impl RequestTimingAggregator {
                 timing.request_body_bytes = *request_body_bytes;
                 timing.proxy_setup_ms = *proxy_setup_ms;
                 timing.upstream_body_ms = *upstream_body_ms;
+                timing.first_content_delta_ms =
+                    (*first_content_delta_ms).or(timing.first_content_delta_ms);
+                timing.first_body_chunk_ms = *first_body_chunk_ms;
                 timing.finalize_ms = *finalize_ms;
+                timing.dns_ms = (*dns_ms).or(timing.dns_ms);
+                timing.connect_ms = (*connect_ms).or(timing.connect_ms);
                 timing.io_timings = *io_timings;
                 emit_terminal_metrics(
                     &timing,
                     RequestOutcome::from_terminal(reason, *client_status),
+                    *client_status,
                     *duration_ms,
                 );
             }
@@ -266,10 +331,54 @@ impl RequestTimingAggregator {
         self.active_order.clear();
     }
 }
-
-fn emit_terminal_metrics(timing: &RequestTiming, outcome: RequestOutcome, duration_ms: u64) {
+fn emit_terminal_metrics(
+    timing: &RequestTiming,
+    outcome: RequestOutcome,
+    client_status: u16,
+    duration_ms: u64,
+) {
     let source_kind = timing.source_kind.as_str();
     let outcome_label = outcome.as_str();
+    let status_class = client_status_class(client_status);
+
+    metrics::counter!(
+        "cc_lb_requests_completed_total",
+        "source_kind" => source_kind,
+        "terminal_outcome" => outcome_label,
+        "client_status_class" => status_class
+    )
+    .increment(1);
+    metrics::histogram!(
+        "cc_lb_request_completion_duration_seconds",
+        "source_kind" => source_kind,
+        "terminal_outcome" => outcome_label
+    )
+    .record(milliseconds_to_seconds(duration_ms));
+
+    if let Some(outcome) = timing.route_decision {
+        metrics::counter!(
+            "cc_lb_request_decisions_total",
+            "stage" => "route",
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
+    if let Some(outcome) = timing.limit_decision {
+        metrics::counter!(
+            "cc_lb_request_decisions_total",
+            "stage" => "limit",
+            "outcome" => outcome
+        )
+        .increment(1);
+    }
+    metrics::histogram!(
+        "cc_lb_request_retry_attempts",
+        "source_kind" => source_kind,
+        "terminal_outcome" => outcome_label
+    )
+    .record(timing.max_attempt_num.map_or(0.0, |max_attempt_num| {
+        max_attempt_num.saturating_sub(1) as f64
+    }));
 
     if timing.source_kind == SourceKind::Renewal {
         record_stage(source_kind, outcome_label, "renewal_cycle", duration_ms);
@@ -305,6 +414,26 @@ fn emit_terminal_metrics(timing: &RequestTiming, outcome: RequestOutcome, durati
         outcome_label,
         "upstream_ttfb",
         timing.upstream_ttfb_ms,
+    );
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "bulkhead_wait",
+        timing.bulkhead_wait_ms,
+    );
+    record_optional_stage(source_kind, outcome_label, "dns", timing.dns_ms);
+    record_optional_stage(source_kind, outcome_label, "connect", timing.connect_ms);
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "first_body_chunk",
+        timing.first_body_chunk_ms,
+    );
+    record_optional_stage(
+        source_kind,
+        outcome_label,
+        "first_content_delta",
+        timing.first_content_delta_ms,
     );
     record_optional_stage(
         source_kind,
@@ -383,6 +512,17 @@ fn emit_terminal_metrics(timing: &RequestTiming, outcome: RequestOutcome, durati
             "outcome" => outcome_label
         )
         .increment(1);
+    }
+}
+
+fn client_status_class(status: u16) -> &'static str {
+    match status {
+        100..=199 => "1xx",
+        200..=299 => "2xx",
+        300..=399 => "3xx",
+        400..=499 => "4xx",
+        500..=599 => "5xx",
+        _ => "other",
     }
 }
 
@@ -515,6 +655,7 @@ mod tests {
         request_body_bytes: Option<u64>,
         proxy_setup_ms: Option<u64>,
         upstream_body_ms: Option<u64>,
+        first_content_delta_ms: Option<u64>,
         finalize_ms: Option<u64>,
         io_timings: RequestIoTimings,
     }
@@ -554,6 +695,41 @@ mod tests {
             upstream_ttfb_ms,
         }
     }
+    fn upstream_started_with_attempt_stages(
+        event_id: &str,
+        bulkhead_wait_ms: Option<u64>,
+        dns_ms: Option<u64>,
+        connect_ms: Option<u64>,
+        upstream_ttfb_ms: Option<u64>,
+    ) -> LifecycleEvent {
+        LifecycleEvent::UpstreamResponseStarted {
+            event_id: event_id.to_owned(),
+            status: 200,
+            headers: Default::default(),
+            bulkhead_wait_ms,
+            dns_ms,
+            connect_ms,
+            connection_reused: None,
+            shape_ms: None,
+            sign_ms: None,
+            upstream_ttfb_ms,
+        }
+    }
+
+    fn stream_completed_with_first_delta(
+        event_id: &str,
+        stream_total_ms: u64,
+        first_content_delta_ms: u64,
+    ) -> LifecycleEvent {
+        LifecycleEvent::StreamCompleted {
+            event_id: event_id.to_owned(),
+            result: Ok(StreamSuccess {
+                stream_total_ms: Some(stream_total_ms),
+                stream_first_content_delta_ms: Some(first_content_delta_ms),
+                ..Default::default()
+            }),
+        }
+    }
 
     fn upstream_attempt(event_id: &str, attempt_num: u32) -> LifecycleEvent {
         LifecycleEvent::UpstreamAttempt {
@@ -590,6 +766,7 @@ mod tests {
             setup_timings: Default::default(),
             io_timings: timing.io_timings,
             upstream_body_ms: timing.upstream_body_ms,
+            first_content_delta_ms: timing.first_content_delta_ms,
             first_body_chunk_ms: None,
             finalize_ms: timing.finalize_ms,
             dns_ms: None,
@@ -620,6 +797,7 @@ mod tests {
                     request_body_bytes: Some(1_024),
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(8),
+                    first_content_delta_ms: None,
                     finalize_ms: Some(9),
                     io_timings: RequestIoTimings::default(),
                 },
@@ -811,6 +989,7 @@ mod tests {
                 request_body_bytes: Some(1_024),
                 proxy_setup_ms: Some(4),
                 upstream_body_ms: Some(8),
+                first_content_delta_ms: None,
                 finalize_ms: Some(9),
                 io_timings: RequestIoTimings::default(),
             },
@@ -877,6 +1056,48 @@ mod tests {
         );
     }
     #[test]
+    fn terminal_first_content_delta_is_recorded_for_non_success_outcomes() {
+        let (_, samples) = capture_metrics([
+            started("cancel-delta", Some("proxy")),
+            terminated(
+                "cancel-delta",
+                TerminationReason::Dropped,
+                499,
+                TerminalTiming {
+                    duration_ms: 17,
+                    first_content_delta_ms: Some(17),
+                    ..Default::default()
+                },
+            ),
+            started("error-delta", Some("proxy")),
+            terminated(
+                "error-delta",
+                TerminationReason::ErrorCode("upstream_error".to_owned()),
+                500,
+                TerminalTiming {
+                    duration_ms: 19,
+                    first_content_delta_ms: Some(19),
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let deltas = named(&samples, "cc_lb_request_stage_duration_seconds")
+            .into_iter()
+            .filter(|sample| {
+                sample.labels.get("stage").map(String::as_str) == Some("first_content_delta")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas.len(), 2);
+        for (outcome, expected_ms) in [("client_cancelled", 17), ("error", 19)] {
+            let sample = deltas
+                .iter()
+                .find(|sample| sample.labels.get("outcome").map(String::as_str) == Some(outcome))
+                .unwrap_or_else(|| panic!("missing first-content sample for {outcome}"));
+            assert_histogram(sample, &[expected_ms]);
+        }
+    }
+    #[test]
     fn io_children_stay_excluded_while_retry_parent_closes_residual() {
         let event_id = "io-timing-stages";
         let mut io_timings = RequestIoTimings {
@@ -924,6 +1145,7 @@ mod tests {
                     request_body_bytes: Some(1_024),
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(8),
+                    first_content_delta_ms: None,
                     finalize_ms: Some(9),
                     io_timings,
                 },
@@ -984,6 +1206,7 @@ mod tests {
                     request_body_bytes: Some(1_024),
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: None,
+                    first_content_delta_ms: None,
                     finalize_ms: None,
                     io_timings: RequestIoTimings {
                         retry_overhead_ms: Some(8.625),
@@ -1029,6 +1252,7 @@ mod tests {
                     request_body_bytes: Some(1_024),
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(25),
+                    first_content_delta_ms: None,
                     finalize_ms: Some(9),
                     io_timings: RequestIoTimings::default(),
                 },
@@ -1052,6 +1276,122 @@ mod tests {
         );
         assert_histogram(response_body[0], &[25]);
     }
+    #[test]
+    fn terminal_metrics_use_final_attempt_and_observed_decisions() {
+        let event_id = "terminal-metrics";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            LifecycleEvent::RouteCompleted {
+                event_id: event_id.to_owned(),
+                result: Err(RouteFailure::RouteNotConfigured),
+                routing_trace: None,
+            },
+            LifecycleEvent::LimitDecision {
+                event_id: event_id.to_owned(),
+                decision: LimitDecisionKind::Reserved {
+                    reservation_id: "reservation".to_owned(),
+                    amount: 1,
+                    limit_reserve_ms: Some(2),
+                },
+            },
+            upstream_attempt(event_id, 1),
+            upstream_started_with_attempt_stages(event_id, Some(1), Some(2), Some(3), Some(20)),
+            upstream_attempt(event_id, 3),
+            upstream_started_with_attempt_stages(event_id, Some(2), Some(3), Some(5), Some(20)),
+            stream_completed_with_first_delta(event_id, 100, 30),
+            LifecycleEvent::RequestTerminated {
+                event_id: event_id.to_owned(),
+                reason: TerminationReason::Success,
+                client_status: 200,
+                duration_ms: 240,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                io_timings: RequestIoTimings::default(),
+                upstream_body_ms: Some(100),
+                first_content_delta_ms: None,
+                dns_ms: Some(3),
+                connect_ms: Some(5),
+                connection_reused: None,
+                first_body_chunk_ms: Some(90),
+                finalize_ms: None,
+                internal_errors: Vec::new(),
+                event_kind: None,
+            },
+        ]);
+
+        let completed = named(&samples, "cc_lb_requests_completed_total");
+        assert_eq!(completed.len(), 1);
+        assert_labels(
+            completed[0],
+            &[
+                ("source_kind", "proxy"),
+                ("terminal_outcome", "success"),
+                ("client_status_class", "2xx"),
+            ],
+        );
+        assert_eq!(completed[0].value, MetricValue::Counter(1));
+
+        let completion = named(&samples, "cc_lb_request_completion_duration_seconds");
+        assert_eq!(completion.len(), 1);
+        assert_labels(
+            completion[0],
+            &[("source_kind", "proxy"), ("terminal_outcome", "success")],
+        );
+        assert_histogram(completion[0], &[240]);
+
+        let retry = named(&samples, "cc_lb_request_retry_attempts");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].value, MetricValue::Histogram(vec![2.0]));
+
+        let decisions = named(&samples, "cc_lb_request_decisions_total");
+        assert_eq!(decisions.len(), 2);
+        for (stage, outcome) in [("route", "route_not_configured"), ("limit", "reserved")] {
+            let sample = decisions
+                .iter()
+                .find(|sample| sample.labels.get("stage").map(String::as_str) == Some(stage))
+                .unwrap_or_else(|| panic!("missing observed {stage} decision"));
+            assert_labels(sample, &[("stage", stage), ("outcome", outcome)]);
+            assert_eq!(sample.value, MetricValue::Counter(1));
+        }
+
+        let stages = named(&samples, "cc_lb_request_stage_duration_seconds");
+        for (stage, duration_ms) in [
+            ("bulkhead_wait", 2),
+            ("dns", 3),
+            ("connect", 5),
+            ("first_body_chunk", 90),
+            ("first_content_delta", 30),
+        ] {
+            let sample = stages
+                .iter()
+                .find(|sample| sample.labels.get("stage").map(String::as_str) == Some(stage))
+                .unwrap_or_else(|| panic!("missing final-attempt stage {stage}"));
+            assert_histogram(sample, &[duration_ms]);
+        }
+    }
+
+    #[test]
+    fn terminal_metrics_record_zero_retries_without_upstream_attempt() {
+        let event_id = "terminal-metrics-no-attempt";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("rate_limited".to_owned()),
+                429,
+                TerminalTiming {
+                    duration_ms: 12,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let retry = named(&samples, "cc_lb_request_retry_attempts");
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].value, MetricValue::Histogram(vec![0.0]));
+    }
 
     #[test]
     fn renewal_records_only_the_source_specific_cycle() {
@@ -1070,6 +1410,7 @@ mod tests {
                     request_body_bytes: Some(1_024),
                     proxy_setup_ms: Some(4),
                     upstream_body_ms: Some(8),
+                    first_content_delta_ms: None,
                     finalize_ms: Some(9),
                     io_timings: RequestIoTimings::default(),
                 },
@@ -1078,7 +1419,7 @@ mod tests {
 
         let request_samples = samples
             .iter()
-            .filter(|sample| sample.name.starts_with("cc_lb_request_"))
+            .filter(|sample| sample.name == "cc_lb_request_stage_duration_seconds")
             .collect::<Vec<_>>();
         assert_eq!(request_samples.len(), 1);
         assert_eq!(

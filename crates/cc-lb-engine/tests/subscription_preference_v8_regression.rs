@@ -263,7 +263,10 @@ fn hard_rejected_incumbent_switches_despite_high_reprime_cost() {
         ),
         warm_cache_score(516_000),
     );
-    let cold_peer = with_cache_score(example_secondary_clean_snapshot(), cold_reprime_score(516_000));
+    let cold_peer = with_cache_score(
+        example_secondary_clean_snapshot(),
+        cold_reprime_score(516_000),
+    );
 
     let second = filter
         .filter(

@@ -1049,8 +1049,7 @@ fn short_reset_underuse_has_greater_pressure_and_share() {
     );
     let output = filter_for_model(&[example_org.clone(), example_peer.clone()], MODEL_AGNOSTIC);
     let trace = output.subscription_preference.expect("trace present");
-    let example_org_pressure =
-        candidate_urgency_for(&trace, example_org.upstream_id).quota_urgency;
+    let example_org_pressure = candidate_urgency_for(&trace, example_org.upstream_id).quota_urgency;
     let example_peer_pressure =
         candidate_urgency_for(&trace, example_peer.upstream_id).quota_urgency;
     assert!(example_org_pressure > example_peer_pressure);

@@ -331,6 +331,7 @@ mod tests {
             client_status: status,
             duration_ms: 42,
             first_body_chunk_ms: None,
+            first_content_delta_ms: None,
             dns_ms: None,
             connect_ms: None,
             connection_reused: None,
