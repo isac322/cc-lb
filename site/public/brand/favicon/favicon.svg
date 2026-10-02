@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <style>
+    .ink { fill: #18191c; }
+    .accent { fill: #1f2c3d; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #edeeee; }
+      .accent { fill: #ccddee; }
+    }
+  </style>
+  <path class="ink" d="M1 3H6V5H3V11H6V13H1Z"/>
+  <path class="ink" d="M15 3H10V5H13V11H10V13H15Z"/>
+  <rect class="accent" x="7" y="1" width="2" height="14"/>
+</svg>

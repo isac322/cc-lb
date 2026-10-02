@@ -1,0 +1,1419 @@
+---
+const siteUrl = 'https://cc-lb.bhyoo.com';
+const title = 'cc-lb | Anthropic-compatible load balancer for Claude Code';
+const description =
+  'Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#161719" />
+    <link rel="canonical" href={siteUrl} />
+    <link rel="icon" href="/brand/favicon/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/brand/favicon/favicon.ico" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/brand/favicon/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="cc-lb" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={siteUrl} />
+    <meta property="og:image" content={`${siteUrl}/brand/social/cc-lb-social-preview.png`} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={`${siteUrl}/brand/social/cc-lb-social-preview.png`} />
+    <title>{title}</title>
+    <script is:inline>
+      try {
+        if (localStorage.getItem('cc-lb:star-note') === 'hidden') {
+          document.documentElement.dataset.starNote = 'hidden';
+        }
+      } catch {}
+    </script>
+    <script type="application/ld+json" set:html={JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'SoftwareApplication',
+      name: 'cc-lb',
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'Linux',
+      description,
+      url: siteUrl,
+      codeRepository: 'https://github.com/isac322/cc-lb',
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+    })} />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="cc-lb home">
+        <img class="brand-light" src="/brand/lockup/cc-lb-lockup-horizontal-on-light.svg" alt="cc-lb" />
+        <img class="brand-dark" src="/brand/lockup/cc-lb-lockup-horizontal-on-dark.svg" alt="cc-lb" />
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="/docs/">Docs</a>
+        <a href="/docs/getting-started/">Install</a>
+        <a class="nav-star" href="https://github.com/isac322/cc-lb" target="_blank" rel="noopener noreferrer" aria-label="Star cc-lb on GitHub (opens in a new tab)">
+          <svg class="star-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" />
+          </svg>
+          <span>Star<span class="nav-star-long"> on GitHub</span></span>
+        </a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <h1 id="hero-title">One endpoint for pooled Anthropic traffic.</h1>
+          <p class="hero-lede">
+            cc-lb is a self-hosted reverse proxy and load balancer for API-key and OAuth upstreams.
+            You control accounts, quota pressure, cache continuity, and runtime changes; your clients
+            keep the standard Messages API contract.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="/docs/getting-started/">Run cc-lb</a>
+            <a class="button button-secondary" href="/docs/concepts/">Read the model</a>
+          </div>
+          <p class="hero-boundary">
+            Independent project. Anthropic and Claude Code are trademarks of Anthropic; cc-lb is not
+            affiliated with or endorsed by Anthropic.
+          </p>
+        </div>
+
+        <div class="request-panel" aria-label="Anthropic Messages API request path">
+          <div class="panel-topline">
+            <span>Request contract</span>
+            <span>POST /v1/messages</span>
+          </div>
+          <pre><code><span class="code-muted">x-api-key:</span> $CC_LB_PROXY_KEY
+<span class="code-muted">anthropic-version:</span> 2023-06-01
+<span class="code-muted">content-type:</span> application/json
+
+<span class="code-accent">authenticate principal</span>
+<span class="code-muted">→</span> select an enabled upstream
+<span class="code-muted">→</span> route the request
+<span class="code-muted">→</span> stream the response</code></pre>
+          <div class="panel-caption">
+            Clients send an Anthropic Messages API request. You own what happens behind the endpoint.
+          </div>
+        </div>
+      </section>
+
+      <section id="star-note" class="star-note shell" aria-labelledby="star-note-title">
+        <svg class="star-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path pathLength="1" d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" />
+        </svg>
+        <div class="star-note-copy">
+          <h2 id="star-note-title">Star cc-lb on GitHub</h2>
+          <p>
+            If cc-lb fits how you run Claude Code traffic, star the repository. Stars help other
+            operators find cc-lb. The button opens GitHub, where you star it with your own account.
+          </p>
+        </div>
+        <div class="star-note-actions">
+          <a class="button button-star" href="https://github.com/isac322/cc-lb" target="_blank" rel="noopener noreferrer">
+            <svg class="star-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" />
+            </svg>
+            Star on GitHub<span class="sr-only"> (opens in a new tab)</span>
+          </a>
+          <span class="star-note-repo">github.com/isac322/cc-lb</span>
+        </div>
+        <button class="star-note-hide" type="button" data-star-note-hide hidden aria-label="Hide the GitHub star note">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+          <span>Hide</span>
+        </button>
+      </section>
+
+      <section class="operator-shell shell" aria-labelledby="operator-title">
+        <div class="section-heading">
+          <p class="section-label">Operator control</p>
+          <h2 id="operator-title">You run the pool. Clients keep their request shape.</h2>
+        </div>
+        <div class="operator-body">
+          <p>
+            Pool compatible accounts behind a managed endpoint. Configure upstreams, principals, proxy
+            keys, storage, and plugin chains from database-backed runtime state.
+          </p>
+          <p>
+            Each client keeps its existing Messages API calls and points them at <code>/v1/messages</code>
+            with a proxy key you issue. Routing stays behind that request boundary.
+          </p>
+          <div class="operator-links">
+            <a class="text-link" href="/docs/operations/">Open the operator guide</a>
+            <a class="text-link" href="/docs/getting-started/install/">Issue a key and send the first request</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="install-shell shell" aria-labelledby="install-title">
+        <div class="section-heading install-heading">
+          <div>
+            <p class="section-label">Start locally</p>
+            <h2 id="install-title" tabindex="-1">Choose the runtime that fits your host.</h2>
+          </div>
+          <p>
+            The source build and the published image use the same server contract. Use the path that
+            matches your deployment boundary.
+          </p>
+        </div>
+        <div class="install-grid">
+          <article class="install-option">
+            <div class="option-header">
+              <h3>Build the binary</h3>
+              <span class="option-meta">Rust + Bun</span>
+            </div>
+            <p>Build the server from the repository with the pinned toolchain and bundled admin app.</p>
+            <pre><code>rustup target add wasm32-unknown-unknown
+cargo build --release -p cc-lb-server
+./target/release/cc-lb serve \
+  --config cc-lb.toml \
+  --data-dir ./data/runtime</code></pre>
+            <a class="text-link" href="/docs/getting-started/">Read binary prerequisites</a>
+          </article>
+          <article class="install-option">
+            <div class="option-header">
+              <h3>Run the image</h3>
+              <span class="option-meta">GHCR · 1.0.0</span>
+            </div>
+            <p>Run the published multi-architecture image and mount your config and durable data.</p>
+            <pre><code>docker run --rm --name cc-lb \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  -p 8080:8080 -p 9090:9090 \
+  -v "$PWD/cc-lb.container.toml:/etc/cc-lb/cc-lb.toml:ro" \
+  -v "$PWD/data:/var/lib/cc-lb" \
+  ghcr.io/isac322/cc-lb:1.0.0</code></pre>
+            <a class="text-link" href="/docs/getting-started/#run-the-published-container">Read container setup</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="proof-shell shell" aria-labelledby="proof-title">
+        <div class="section-heading">
+          <p class="section-label">Mechanism proof</p>
+          <h2 id="proof-title">The routing model is explicit.</h2>
+          <p>
+            These are the shipped contracts behind the landing page. Each one links to the source-backed
+            explanation rather than a benchmark or a promise.
+          </p>
+        </div>
+        <div class="proof-grid">
+          <article class="proof-item">
+            <h3>Pool API-key and OAuth upstreams</h3>
+            <p>Route Messages API traffic through the two supported upstream kinds.</p>
+            <a class="text-link" href="/docs/concepts/upstreams/">Read upstreams</a>
+          </article>
+          <article class="proof-item">
+            <h3>Preserve active session cache continuity</h3>
+            <p>Use best-effort keepalive scheduling before configured cache TTLs expire.</p>
+            <a class="text-link" href="/docs/concepts/prompt-cache/">Read cache continuity</a>
+          </article>
+          <article class="proof-item">
+            <h3>Pace quota across rolling windows</h3>
+            <p>Apply cost-first, deterministic candidate selection under weekly pacing rules.</p>
+            <a class="text-link" href="/docs/concepts/quota-routing/">Read quota routing</a>
+          </article>
+          <article class="proof-item">
+            <h3>Extend with Wasmtime hooks</h3>
+            <p>Add filter and request, response, or SSE shaping behavior without editing the core proxy.</p>
+            <a class="text-link" href="/docs/plugins/">Read the plugin contract</a>
+          </article>
+          <article class="proof-item">
+            <h3>Manage runtime state from the database</h3>
+            <p>Update upstreams, principals, keys, and plugin chains without rebuilding the binary.</p>
+            <a class="text-link" href="/docs/operations/runtime-management/">Read runtime management</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="flow-shell shell" aria-labelledby="flow-title">
+        <div class="section-heading">
+          <p class="section-label">Operator flow</p>
+          <h2 id="flow-title">From secret setup to the first request.</h2>
+        </div>
+        <ol class="flow-list">
+          <li>
+            <strong>Set the boundary.</strong>
+            <p>Provide the master key, admin token, and upstream credential through your deployment environment.</p>
+          </li>
+          <li>
+            <strong>Create runtime state.</strong>
+            <p>Use the authenticated admin API to create an upstream, principal, and proxy key.</p>
+          </li>
+          <li>
+            <strong>Send standard traffic.</strong>
+            <p>Point an Anthropic-compatible client at the proxy and inspect the response or stream diagnostics.</p>
+          </li>
+        </ol>
+        <a class="text-link" href="/docs/getting-started/install/">Follow the complete setup</a>
+      </section>
+
+      <section class="scope-shell shell" aria-labelledby="scope-title">
+        <div class="scope-copy">
+          <p class="section-label">Scope and trust</p>
+          <h2 id="scope-title">Open source with explicit limits.</h2>
+          <p>
+            cc-lb is built for self-hosting teams operating Anthropic-compatible traffic. The current
+            public upstream contract is intentionally bounded; read the trust notes before deploying.
+          </p>
+        </div>
+        <div class="scope-list">
+          <div>
+            <span>Supported</span>
+            <strong>Anthropic API-key and OAuth upstreams</strong>
+          </div>
+          <div>
+            <span>Runtime</span>
+            <strong>SQLite for local single-node use; PostgreSQL for shared durable state</strong>
+          </div>
+          <div>
+            <span>Extension</span>
+            <strong>Wasmtime filter and request, response, or SSE shaping hooks</strong>
+          </div>
+        </div>
+        <a class="text-link" href="/docs/trust/">Read trust and scope notes</a>
+      </section>
+
+      <section class="support-shell shell" aria-labelledby="support-title">
+        <div class="support-copy">
+          <p class="section-label">Support the project</p>
+          <h2 id="support-title">Running cc-lb? Star it and report what breaks.</h2>
+          <p>
+            Stars help other operators find cc-lb. Issues with a reproduction help fix what you hit in
+            your own deployment.
+          </p>
+        </div>
+        <div class="support-actions">
+          <a class="button button-secondary" href="https://github.com/isac322/cc-lb" target="_blank" rel="noopener noreferrer">
+            <svg class="star-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 2.8l2.8 5.9 6.4.8-4.7 4.4 1.2 6.4L12 17.2l-5.7 3.1 1.2-6.4-4.7-4.4 6.4-.8z" />
+            </svg>
+            Star on GitHub<span class="sr-only"> (opens in a new tab)</span>
+          </a>
+          <a class="text-link" href="https://github.com/isac322/cc-lb/issues" target="_blank" rel="noopener noreferrer">Open an issue<span class="sr-only"> (opens in a new tab)</span></a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">
+      <span>cc-lb · Apache-2.0 · <a class="footer-link" href="https://github.com/isac322/cc-lb" target="_blank" rel="noopener noreferrer">Source on GitHub<span class="sr-only"> (opens in a new tab)</span></a></span>
+      <span>Anthropic-compatible load balancer for Claude Code</span>
+      <span>Independent project, not affiliated with Anthropic.</span>
+    </footer>
+
+    <script is:inline>
+      (() => {
+        const hide = document.querySelector('[data-star-note-hide]');
+        if (!hide) return;
+        hide.hidden = false;
+        hide.addEventListener('click', () => {
+          document.documentElement.dataset.starNote = 'hidden';
+          try {
+            localStorage.setItem('cc-lb:star-note', 'hidden');
+          } catch {}
+          document.getElementById('install-title')?.focus({ preventScroll: true });
+        });
+      })();
+    </script>
+  </body>
+</html>
+
+<style>
+  :global(*) {
+    box-sizing: border-box;
+  }
+
+  :global(html) {
+    background: #161719;
+    color: #e9eaeb;
+    scroll-behavior: smooth;
+  }
+
+  :global(body) {
+    margin: 0;
+    min-width: 320px;
+    background: #161719;
+    color: #e9eaeb;
+    font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+  }
+
+  :global(a) {
+    color: inherit;
+  }
+
+  :global(code),
+  :global(pre) {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+
+  .shell {
+    width: min(1160px, calc(100% - 48px));
+    margin: 0 auto;
+  }
+
+  .site-header {
+    width: min(1160px, calc(100% - 48px));
+    min-height: 76px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    border-bottom: 1px solid #2f3033;
+  }
+
+  .brand {
+    display: block;
+    width: 128px;
+  }
+
+  .brand img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .brand-light {
+    display: none !important;
+  }
+
+  .brand-dark {
+    display: block !important;
+  }
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    color: #b4b6b9;
+    font-size: 0.84rem;
+  }
+
+  nav a,
+  .text-link {
+    text-decoration: underline;
+    text-decoration-color: #5f6267;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+
+  nav a:hover,
+  .text-link:hover {
+    color: #ffffff;
+    text-decoration-color: #ccddee;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .nav-star {
+    display: inline-flex;
+    min-height: 36px;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border: 1px solid #ccddee;
+    color: #f4f5f5;
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 160ms ease-out, color 160ms ease-out;
+  }
+
+  .nav-star .star-icon {
+    color: #ccddee;
+  }
+
+  .nav-star:hover {
+    background: #ccddee;
+    color: #161719;
+  }
+
+  .nav-star:hover .star-icon {
+    color: #161719;
+  }
+
+  .star-icon {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linejoin: round;
+  }
+
+  .button .star-icon {
+    margin-right: 8px;
+  }
+
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+    align-items: center;
+    gap: clamp(48px, 8vw, 112px);
+    padding-top: 112px;
+    padding-bottom: 72px;
+  }
+
+  .hero-copy {
+    animation: arrive 560ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  h1,
+  h2,
+  h3,
+  p {
+    margin-top: 0;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: #f4f5f5;
+    letter-spacing: -0.035em;
+  }
+
+  h1 {
+    max-width: 720px;
+    margin-bottom: 28px;
+    font-size: clamp(3.1rem, 7vw, 6.4rem);
+    line-height: 0.94;
+    font-weight: 760;
+  }
+
+  h2 {
+    margin-bottom: 18px;
+    font-size: clamp(2rem, 4vw, 3.7rem);
+    line-height: 1;
+    font-weight: 720;
+  }
+
+  h3 {
+    margin-bottom: 12px;
+    font-size: 1.06rem;
+    line-height: 1.2;
+    font-weight: 680;
+  }
+
+  .hero-lede {
+    max-width: 680px;
+    margin-bottom: 32px;
+    color: #c1c3c6;
+    font-size: clamp(1.05rem, 1.5vw, 1.28rem);
+    line-height: 1.52;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+
+  .button {
+    display: inline-flex;
+    min-height: 46px;
+    align-items: center;
+    justify-content: center;
+    padding: 0 18px;
+    border: 1px solid #6e747c;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .button:focus-visible,
+  nav a:focus-visible,
+  .text-link:focus-visible,
+  .brand:focus-visible {
+    outline: 2px solid #ccddee;
+    outline-offset: 4px;
+  }
+
+  .button-primary {
+    border-color: #ccddee;
+    background: #ccddee;
+    color: #161719;
+  }
+
+  .button-primary:hover {
+    border-color: #f4f5f5;
+    background: #f4f5f5;
+  }
+
+  .button-secondary {
+    color: #e9eaeb;
+  }
+
+  .button-secondary:hover {
+    border-color: #e9eaeb;
+    background: #232528;
+  }
+
+  .hero-boundary {
+    max-width: 620px;
+    margin-bottom: 0;
+    color: #888b90;
+    font-size: 0.78rem;
+    line-height: 1.5;
+  }
+
+  .request-panel {
+    border: 1px solid #45484d;
+    background: #1e2023;
+    animation: arrive 560ms 90ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  .panel-topline,
+  .option-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .panel-topline {
+    padding: 16px 18px;
+    border-bottom: 1px solid #45484d;
+    color: #a7abb0;
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .request-panel pre,
+  .install-option pre {
+    margin: 0;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .request-panel pre {
+    padding: 28px 22px 24px;
+    color: #e9eaeb;
+    font-size: clamp(0.84rem, 1.25vw, 0.98rem);
+    line-height: 1.8;
+  }
+
+  .code-muted {
+    color: #a7abb0;
+  }
+
+  .code-accent {
+    color: #d8e8f7;
+  }
+
+  .panel-caption {
+    padding: 18px 22px 22px;
+    border-top: 1px solid #45484d;
+    color: #a7abb0;
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+
+  .operator-shell,
+  .support-shell,
+  .install-shell,
+  .proof-shell,
+  .flow-shell,
+  .scope-shell {
+    border-top: 1px solid #2f3033;
+    padding-top: 88px;
+    padding-bottom: 112px;
+  }
+
+  .section-heading {
+    max-width: 780px;
+    margin-bottom: 44px;
+  }
+
+  .section-label {
+    margin-bottom: 14px;
+    color: #9ea2a8;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .section-heading > p:last-child,
+  .install-heading > p {
+    max-width: 680px;
+    margin-bottom: 0;
+    color: #aeb1b5;
+    font-size: 1rem;
+  }
+
+  .star-note {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 32px;
+    margin-bottom: 72px;
+    padding: 48px 40px 40px;
+    background: #ccddee;
+    color: #161719;
+  }
+
+  :global(html[data-star-note='hidden']) .star-note {
+    display: none;
+  }
+
+  .star-mark {
+    width: 64px;
+    height: 64px;
+    fill: none;
+    stroke: #161719;
+    stroke-width: 1.3;
+    stroke-linejoin: round;
+  }
+
+  .star-mark path {
+    stroke-dasharray: 1;
+    animation: star-draw 1100ms 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .star-note-copy h2 {
+    margin-bottom: 10px;
+    color: #161719;
+    font-size: clamp(1.7rem, 3vw, 2.5rem);
+    line-height: 1.05;
+    letter-spacing: -0.03em;
+  }
+
+  .star-note-copy p {
+    max-width: 60ch;
+    margin-bottom: 0;
+    color: #2b3138;
+    font-size: 1rem;
+    line-height: 1.5;
+  }
+
+  .star-note-actions {
+    display: grid;
+    justify-items: start;
+    gap: 10px;
+  }
+
+  .button-star {
+    min-height: 56px;
+    padding: 0 26px;
+    border-color: #161719;
+    background: #161719;
+    color: #f4f5f5;
+    font-size: 1.05rem;
+  }
+
+  .button-star .star-icon {
+    width: 20px;
+    height: 20px;
+    color: #ccddee;
+  }
+
+  .button-star:hover {
+    border-color: #2b2e33;
+    background: #2b2e33;
+  }
+
+  .button-star:focus-visible,
+  .star-note-hide:focus-visible {
+    outline: 2px solid #161719;
+    outline-offset: 3px;
+  }
+
+  .star-note-repo {
+    color: #3a414a;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.74rem;
+  }
+
+  .star-note-hide {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    gap: 6px;
+    padding: 0 12px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #161719;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .star-note-hide[hidden] {
+    display: none;
+  }
+
+  .star-note-hide svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+  }
+
+  .star-note-hide:hover {
+    border-color: rgba(22, 23, 25, 0.45);
+  }
+
+  .operator-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 72px;
+  }
+
+  .operator-shell .section-heading {
+    margin-bottom: 0;
+  }
+
+  .operator-body p {
+    max-width: 62ch;
+    margin-bottom: 18px;
+    color: #b6b9bd;
+  }
+
+  .operator-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 28px;
+    padding-top: 8px;
+    font-size: 0.92rem;
+  }
+
+  .support-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+    align-items: end;
+    gap: 48px;
+  }
+
+  .support-copy p:last-of-type {
+    max-width: 56ch;
+    margin-bottom: 0;
+    color: #aeb1b5;
+  }
+
+  .support-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 16px 24px;
+  }
+
+  .footer-link {
+    text-decoration: underline;
+    text-decoration-color: #5f6267;
+    text-underline-offset: 3px;
+  }
+
+  .footer-link:hover {
+    color: #e9eaeb;
+  }
+
+  .option-meta {
+    color: #8d9197;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .install-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.7fr);
+    align-items: end;
+    gap: 48px;
+  }
+
+  .install-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+
+  .install-option {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    border: 1px solid #45484d;
+    background: #1e2023;
+  }
+
+  .install-option > p {
+    min-height: 50px;
+    margin: 22px 22px 18px;
+    color: #b6b9bd;
+  }
+
+  .option-header {
+    padding: 20px 22px 0;
+  }
+
+  .option-header h3 {
+    margin-bottom: 0;
+  }
+
+  .install-option pre {
+    margin: 0 22px 24px;
+    padding: 18px;
+    border: 1px solid #45484d;
+    background: #161719;
+    color: #dfe3e6;
+    font-size: 0.76rem;
+    line-height: 1.65;
+  }
+
+  .install-option .text-link {
+    margin: auto 22px 24px;
+    align-self: flex-start;
+    font-size: 0.9rem;
+  }
+
+  .proof-grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    border-top: 1px solid #45484d;
+    border-bottom: 1px solid #45484d;
+  }
+
+  .proof-item {
+    min-width: 0;
+    min-height: 280px;
+    padding: 24px 20px 28px 0;
+  }
+
+  .proof-item + .proof-item {
+    padding-left: 20px;
+    border-left: 1px solid #45484d;
+  }
+
+  .proof-item p {
+    min-height: 96px;
+    margin-bottom: 28px;
+    color: #aeb1b5;
+    font-size: 0.92rem;
+  }
+
+  .proof-item .text-link,
+  .flow-shell .text-link,
+  .scope-shell .text-link {
+    font-size: 0.88rem;
+  }
+
+  .flow-list {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0;
+    margin: 0 0 28px;
+    padding: 0;
+    list-style: none;
+    border-top: 1px solid #45484d;
+    border-bottom: 1px solid #45484d;
+    counter-reset: flow;
+  }
+
+  .flow-list li {
+    min-height: 210px;
+    padding: 26px 24px 28px 0;
+    counter-increment: flow;
+  }
+
+  .flow-list li + li {
+    padding-left: 24px;
+    border-left: 1px solid #45484d;
+  }
+
+  .flow-list li::before {
+    display: block;
+    margin-bottom: 28px;
+    color: #8d9197;
+    content: counter(flow, decimal-leading-zero);
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.72rem;
+  }
+
+  .flow-list strong {
+    display: block;
+    margin-bottom: 12px;
+    color: #f4f5f5;
+    font-size: 1.02rem;
+  }
+
+  .flow-list p {
+    margin-bottom: 0;
+    color: #aeb1b5;
+    font-size: 0.92rem;
+  }
+
+  .scope-shell {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    gap: 72px;
+    padding-bottom: 96px;
+  }
+
+  .scope-copy p:last-of-type {
+    max-width: 520px;
+    color: #aeb1b5;
+  }
+
+  .scope-list {
+    border-top: 1px solid #45484d;
+    border-bottom: 1px solid #45484d;
+  }
+
+  .scope-list div {
+    display: grid;
+    grid-template-columns: minmax(110px, 0.4fr) minmax(0, 1fr);
+    gap: 18px;
+    padding: 18px 0;
+  }
+
+  .scope-list div + div {
+    border-top: 1px solid #45484d;
+  }
+
+  .scope-list span {
+    color: #8d9197;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .scope-list strong {
+    color: #d8dade;
+    font-size: 0.92rem;
+    font-weight: 600;
+  }
+
+  .scope-shell .text-link {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .site-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 12px 24px;
+    padding-top: 24px;
+    padding-bottom: 40px;
+    border-top: 1px solid #2f3033;
+    color: #8d9197;
+    font-size: 0.76rem;
+  }
+
+  @keyframes arrive {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes star-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  @media (max-width: 1050px) {
+    .hero {
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.82fr);
+      gap: 48px;
+    }
+
+    .proof-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .proof-item:nth-child(4) {
+      border-left: 0;
+      padding-left: 0;
+      border-top: 1px solid #45484d;
+    }
+
+    .proof-item:nth-child(5) {
+      border-top: 1px solid #45484d;
+    }
+  }
+
+  @media (max-width: 800px) {
+    .hero,
+    .install-heading,
+    .operator-shell,
+    .support-shell,
+    .scope-shell {
+      grid-template-columns: 1fr;
+    }
+
+    .hero {
+      padding-top: 80px;
+      padding-bottom: 80px;
+    }
+
+    .install-heading {
+      gap: 18px;
+    }
+
+    .scope-shell {
+      gap: 44px;
+    }
+
+    .scope-shell .text-link {
+      grid-column: 1;
+    }
+
+    .operator-shell,
+    .support-shell {
+      gap: 32px;
+    }
+
+    .star-note {
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 24px 28px;
+      padding: 64px 28px 32px;
+    }
+
+    .star-note-actions {
+      grid-column: 2;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .shell,
+    .site-header {
+      width: min(100% - 32px, 560px);
+    }
+
+    .site-header {
+      min-height: 68px;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+    }
+
+    .brand {
+      width: 104px;
+    }
+
+    nav {
+      gap: 12px;
+      font-size: 0.76rem;
+    }
+
+    .nav-star {
+      min-height: 36px;
+      padding: 0 10px;
+    }
+
+    .star-note {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 18px;
+      margin-bottom: 56px;
+      padding: 60px 20px 24px;
+    }
+
+    .star-mark {
+      width: 44px;
+      height: 44px;
+    }
+
+    .star-note-actions {
+      grid-column: 1;
+      justify-items: stretch;
+    }
+
+    .button-star {
+      width: 100%;
+    }
+
+    .star-note-repo {
+      text-align: center;
+    }
+
+    h1 {
+      font-size: clamp(2.8rem, 14vw, 4.8rem);
+    }
+
+    .install-grid,
+    .proof-grid,
+    .flow-list {
+      grid-template-columns: 1fr;
+    }
+
+    .proof-item,
+    .proof-item + .proof-item,
+    .flow-list li,
+    .flow-list li + li {
+      padding: 24px 0;
+      border-left: 0;
+    }
+
+    .proof-item + .proof-item,
+    .flow-list li + li {
+      border-top: 1px solid #45484d;
+    }
+
+    .proof-item p,
+    .install-option > p {
+      min-height: 0;
+    }
+
+    .proof-item:nth-child(4),
+    .proof-item:nth-child(5) {
+      border-top: 1px solid #45484d;
+    }
+
+    .flow-list li::before {
+      margin-bottom: 18px;
+    }
+
+    .scope-list div {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+
+    .operator-shell,
+    .support-shell,
+    .install-shell,
+    .proof-shell,
+    .flow-shell,
+    .scope-shell {
+      padding-top: 64px;
+      padding-bottom: 76px;
+    }
+
+    .site-footer {
+      flex-direction: column;
+      padding-bottom: 28px;
+    }
+  }
+
+  @media (max-width: 420px) {
+    .nav-star-long {
+      display: none;
+    }
+  }
+
+  @media (prefers-color-scheme: light) {
+    :global(html),
+    :global(body) {
+      background: #f0f1f2;
+      color: #18191c;
+    }
+
+    .brand-light {
+      display: block !important;
+    }
+
+    .brand-dark {
+      display: none !important;
+    }
+
+    .site-header,
+    .operator-shell,
+    .support-shell,
+    .install-shell,
+    .proof-shell,
+    .flow-shell,
+    .scope-shell,
+    .site-footer {
+      border-color: #c8cace;
+    }
+
+    h1,
+    h2,
+    h3,
+    .flow-list strong {
+      color: #18191c;
+    }
+
+    nav,
+    .hero-lede,
+    .operator-body p,
+    .support-copy p:last-of-type,
+    .section-heading > p:last-child,
+    .install-heading > p,
+    .proof-item p,
+    .flow-list p,
+    .scope-copy p:last-of-type {
+      color: #484a4e;
+    }
+
+    .hero-boundary,
+    .option-meta,
+    .section-label,
+    .flow-list li::before,
+    .scope-list span,
+    .site-footer {
+      color: #686b70;
+    }
+
+    .button-secondary {
+      color: #18191c;
+    }
+
+    .button-secondary:hover {
+      border-color: #18191c;
+      background: #e1e3e5;
+    }
+
+    .request-panel,
+    .install-option {
+      border-color: #c8cace;
+      background: #e3e5e7;
+    }
+
+    .panel-topline,
+    .panel-caption,
+    .install-option pre,
+    .proof-grid,
+    .flow-list,
+    .scope-list,
+    .proof-item + .proof-item,
+    .flow-list li + li,
+    .scope-list div + div {
+      border-color: #c8cace;
+    }
+
+    .request-panel pre {
+      color: #18191c;
+    }
+
+    .panel-topline,
+    .panel-caption {
+      color: #484a4e;
+    }
+
+    .install-option pre {
+      border-color: #c8cace;
+      background: #f0f1f2;
+      color: #18191c;
+    }
+
+    .code-muted {
+      color: #686b70;
+    }
+
+    .code-accent {
+      color: #1f2c3d;
+    }
+
+    .nav-star {
+      border-color: #18191c;
+      color: #18191c;
+    }
+
+    .nav-star .star-icon {
+      color: #18191c;
+    }
+
+    .nav-star:hover {
+      background: #18191c;
+      color: #f0f1f2;
+    }
+
+    .nav-star:hover .star-icon {
+      color: #f0f1f2;
+    }
+
+    .star-note {
+      background: #18191c;
+      color: #f0f1f2;
+    }
+
+    .star-note-copy h2 {
+      color: #f4f5f5;
+    }
+
+    .star-note-copy p {
+      color: #c9ccd0;
+    }
+
+    .star-mark {
+      stroke: #ccddee;
+    }
+
+    .button-star {
+      border-color: #ccddee;
+      background: #ccddee;
+      color: #161719;
+    }
+
+    .button-star .star-icon {
+      color: #161719;
+    }
+
+    .button-star:hover {
+      border-color: #f4f5f5;
+      background: #f4f5f5;
+    }
+
+    .button-star:focus-visible,
+    .star-note-hide:focus-visible {
+      outline-color: #ccddee;
+    }
+
+    .star-note-repo {
+      color: #a7abb0;
+    }
+
+    .star-note-hide {
+      color: #f0f1f2;
+    }
+
+    .star-note-hide:hover {
+      border-color: rgba(240, 241, 242, 0.45);
+    }
+
+    .footer-link:hover {
+      color: #18191c;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(html) {
+      scroll-behavior: auto;
+    }
+
+    .hero-copy,
+    .request-panel,
+    .star-mark path {
+      animation: none;
+    }
+  }
+</style>

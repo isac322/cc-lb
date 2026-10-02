@@ -12,13 +12,15 @@ Warm-up is opt-out for `anthropic_oauth`: `warmup_enabled` defaults to `true` fo
 
 To turn warm-up back on for an upstream you previously disabled, send a PATCH request to the admin API. Set the `warmup_enabled` field to `true` in the request body. PATCH requires an `If-Match` ETag from a prior GET to prevent lost updates. The upstream must already hold OAuth credentials; otherwise the request returns `400 warmup_requires_oauth_credentials`.
 
+These examples use the default admin listener at `http://[::1]:9090` (`[::1]:9090`). Use your configured admin address if you changed the listener.
+
 ```bash
 # 1. fetch current revision
-ETAG=$(curl -sI http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+ETAG=$(curl -sI http://[::1]:9090/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
 
 # 2. PATCH with If-Match
-curl -X PATCH http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+curl -X PATCH http://[::1]:9090/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -H "If-Match: $ETAG" \
@@ -30,10 +32,10 @@ curl -X PATCH http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-5
 To disable warm-up for a specific upstream, send a PATCH request to the admin API with `If-Match` from a prior GET.
 
 ```bash
-ETAG=$(curl -sI http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+ETAG=$(curl -sI http://[::1]:9090/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
 
-curl -X PATCH http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+curl -X PATCH http://[::1]:9090/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -H "If-Match: $ETAG" \

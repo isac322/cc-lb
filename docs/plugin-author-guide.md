@@ -59,7 +59,7 @@ can reach it:
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-plugin-wire = "0.6"
+cc-lb-plugin-wire = "0.8"
 cc-lb-pdk-wasmtime = "0.1"
 ```
 

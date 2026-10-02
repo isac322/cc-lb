@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router';
-import { MoreHorizontal, PanelLeft } from 'lucide-react';
+import { ArrowUpRight, MoreHorizontal, PanelLeft, Star } from 'lucide-react';
 import { useId, useMemo } from 'react';
 import {
   type OAuthReconnectNudge,
@@ -264,7 +264,57 @@ export function SidebarNav({
   );
 }
 
-/** Version at the foot of the rail and the phone sheet. */
+const REPO_URL = 'https://github.com/isac322/cc-lb';
+const STAR_A11Y = 'Star cc-lb on GitHub (opens in a new tab)';
+
+/**
+ * One quiet external link above the version line: muted 12px ink, no fill,
+ * no count, no dismiss. It stays weaker than every nav item, and only the
+ * star glyph picks up `accent-text` on hover or focus. 44px tall at every
+ * width; collapsed, the star alone in a 44px square with the same
+ * accessible name and a tooltip.
+ */
+function StarOnGitHubLink({ collapsed }: { collapsed: boolean }) {
+  return (
+    <a
+      href={REPO_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={collapsed ? STAR_A11Y : undefined}
+      title={collapsed ? 'Star on GitHub' : undefined}
+      className={cx(
+        'group inline-flex h-11 shrink-0 items-center rounded-sm text-caption font-medium text-text-muted transition-colors hover:bg-overlay-2 hover:text-text',
+        'focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2',
+        collapsed ? 'w-11 justify-center' : '-mx-2 gap-2 self-stretch px-2',
+      )}
+    >
+      <Star
+        className="size-3.5 shrink-0 text-text-faint transition-colors group-hover:text-accent-text group-focus-visible:text-accent-text"
+        strokeWidth={1.75}
+        aria-hidden="true"
+      />
+      {!collapsed ? (
+        <>
+          <span className={cx('min-w-0 truncate', LABEL_FADE)}>
+            Star on GitHub
+          </span>
+          <span className="sr-only">(opens in a new tab)</span>
+          <ArrowUpRight
+            className="ml-auto size-3 shrink-0 text-text-faint"
+            strokeWidth={1.75}
+            aria-hidden="true"
+          />
+        </>
+      ) : null}
+    </a>
+  );
+}
+
+/**
+ * The GitHub star link and the version at the foot of the rail and the
+ * phone sheet. Collapsed, the inset narrows to 6px so the 44px link fits
+ * the 56px rail.
+ */
 export function SidebarFooter({
   collapsed,
   version,
@@ -276,10 +326,11 @@ export function SidebarFooter({
   return (
     <div
       className={cx(
-        'py-4 flex min-w-0 flex-col gap-2',
-        collapsed ? 'items-center px-2 text-center' : 'items-start px-5',
+        'pt-2 pb-4 flex min-w-0 flex-col gap-2',
+        collapsed ? 'items-center px-1.5 text-center' : 'items-start px-5',
       )}
     >
+      <StarOnGitHubLink collapsed={collapsed} />
       <div
         className="text-2xs max-md:text-caption text-text-faint truncate"
         title={collapsed ? label : undefined}

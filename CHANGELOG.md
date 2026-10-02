@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The website now presents setup and runtime control in one operator-focused flow, with GitHub star links and a dismissible support notice.
+- The admin sidebar now includes a "Star on GitHub" link in expanded, collapsed, and mobile navigation.
+
+### Fixed
+
+- The plugin author guide now uses the published 0.8 wire dependency required by the compatible Wasmtime PDK.
+
 ## [1.0.1] - 2026-10-02
 
 ### Removed
