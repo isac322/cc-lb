@@ -730,7 +730,6 @@ function LogsPage() {
 
       <RequestEventsFeed
         feed={feed}
-        showStatus={false}
         onPageChange={() => resetRowsScroll(scrollContainerRef.current)}
         tableContainerRef={scrollContainerRef}
         onAnchorRange={focusAround}

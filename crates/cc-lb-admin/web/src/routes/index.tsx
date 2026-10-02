@@ -43,7 +43,10 @@ import {
   SegmentedControl,
   Skeleton,
 } from '../components/ui/primitives';
-import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
+import {
+  FeedLiveStatus,
+  RequestEventsFeed,
+} from '../components/ui/RequestEventsFeed';
 import {
   EmptyValue,
   Table,
@@ -1903,9 +1906,12 @@ function OverviewPage() {
           <Section
             title="Latest requests (any time)"
             subtitle={
-              <span>
-                Newest first, not limited to the usage range — full view on Logs
-                page
+              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                <FeedLiveStatus feed={feed} />
+                <span>
+                  Newest first, not limited to the usage range — full view on
+                  Logs page
+                </span>
               </span>
             }
             action={

@@ -55,7 +55,10 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
-import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
+import {
+  FeedLiveStatus,
+  RequestEventsFeed,
+} from '../components/ui/RequestEventsFeed';
 import { PaceLegend } from '../components/ui/UsageMeter';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
@@ -1732,6 +1735,7 @@ function DetailView({
             span="full"
             data-testid="recent-requests-card"
             title="Recent requests"
+            action={<FeedLiveStatus feed={feed} />}
             // The table names an empty result and shows the count; the
             // subtitle only says what the list is.
             description="Latest requests routed here"
