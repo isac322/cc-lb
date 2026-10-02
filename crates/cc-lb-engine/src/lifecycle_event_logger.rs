@@ -1379,7 +1379,7 @@ mod tests {
             started(event_id, Some("proxy")),
             terminated(
                 event_id,
-                TerminationReason::RateLimited,
+                TerminationReason::ErrorCode("rate_limited".to_owned()),
                 429,
                 TerminalTiming {
                     duration_ms: 12,
