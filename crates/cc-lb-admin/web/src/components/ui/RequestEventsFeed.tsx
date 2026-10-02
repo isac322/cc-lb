@@ -8,7 +8,7 @@ import {
 import type { RequestEventsFeedState } from '../../lib/useRequestEventsFeed';
 import { LiveTailFailureBanner } from '../LiveTailFailureBanner';
 import { LogsPagination } from './LogsPagination';
-import { Notice } from './primitives';
+import { Notice, StatusBadge } from './primitives';
 import { RequestEventsTable } from './RequestEventsTable';
 
 export type RequestEventsFeedTableProps = Omit<
@@ -23,12 +23,6 @@ export type RequestEventsFeedTableProps = Omit<
 
 export interface RequestEventsFeedProps extends RequestEventsFeedTableProps {
   readonly feed: RequestEventsFeedState;
-  /**
-   * Show the feed's own Live/Paused/Offline/reconnecting status line. On by
-   * default so every embedded feed reports its tail; Logs owns a single
-   * toolbar status and opts out.
-   */
-  readonly showStatus?: boolean;
   readonly showLiveFailureBanner?: boolean;
   /**
    * Show page controls. Only `paged` feeds have pages, so this defaults to on
@@ -45,19 +39,29 @@ export interface RequestEventsFeedProps extends RequestEventsFeedTableProps {
   readonly tableContainerClassName?: string;
 }
 
-const STATUS_TEXT_CLASS = {
-  neutral: 'text-text-muted',
-  ok: 'text-traffic-success-text',
-  warn: 'text-warn-text',
-  danger: 'text-danger-text',
-} as const;
+/**
+ * The feed's tail state as a `StatusBadge` with a polite live region, for the
+ * owning page to place in its own section heading or toolbar. The feed table
+ * never renders it itself.
+ */
+export function FeedLiveStatus({ feed }: { feed: RequestEventsFeedState }) {
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      data-feed-status={feed.tailStatus}
+      className="inline-flex items-center"
+    >
+      <StatusBadge tone={feed.statusColor} label={feed.statusLabel} />
+    </span>
+  );
+}
 
 /** Start loading a little before the end of the table is visible. */
 const LOAD_MORE_MARGIN_PX = 160;
 
 export function RequestEventsFeed({
   feed,
-  showStatus = true,
   showLiveFailureBanner = true,
   showPagination = true,
   onPageChange,
@@ -130,22 +134,6 @@ export function RequestEventsFeed({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {showStatus && (
-        <div
-          className="flex shrink-0 items-center gap-2 px-4 py-2 text-caption"
-          data-feed-status={feed.tailStatus}
-          role="status"
-          aria-live="polite"
-        >
-          <span
-            aria-hidden="true"
-            className={`size-1.5 rounded-full bg-current ${STATUS_TEXT_CLASS[feed.statusColor]}`}
-          />
-          <span className={STATUS_TEXT_CLASS[feed.statusColor]}>
-            {feed.statusLabel}
-          </span>
-        </div>
-      )}
       {showLiveFailureBanner && feed.liveEnabled && (
         <LiveTailFailureBanner
           permanentFailure={feed.live.permanentFailure}

@@ -311,13 +311,6 @@ export function auditActorLabel(entry: AuditEntryLike): string {
   return entry.actor_email || entry.actor || '—';
 }
 
-/** Healthy by omission: only failures carry a tone; successes stay muted. */
-export function statusTextClass(status: number): string {
-  if (status >= 500) return 'text-danger-text';
-  if (status >= 400) return 'text-warn-text';
-  return 'text-text-muted';
-}
-
 const RAW_DROP: Record<string, true> = {
   model: true,
   input_tokens: true,

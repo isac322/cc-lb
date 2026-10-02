@@ -1,7 +1,11 @@
 import type React from 'react';
 import { memo, useState } from 'react';
 import { eventTime } from '../../lib/api';
-import { getRequestOutcome, requestOutcomeTone } from '../../lib/format';
+import {
+  getRequestOutcome,
+  requestOutcomeTone,
+  STATUS_TONE_TEXT_CLASS,
+} from '../../lib/format';
 import type { RequestEventWithPhase } from '../../lib/RequestEventTypes';
 import { serviceTierBadgeText } from '../../lib/reasoningTier';
 import { CostCell } from './CostCell';
@@ -23,14 +27,6 @@ const REQUEST_EVENT_ROW_HEIGHT_REM = 2.5;
 const REQUEST_EVENT_ROW_STYLE = {
   height: `${REQUEST_EVENT_ROW_HEIGHT_REM}rem`,
 } satisfies React.CSSProperties;
-
-/** Healthy by omission: a 2xx reads in muted ink; only exceptions carry tone. */
-const STATUS_TONE_TEXT: Record<'ok' | 'warn' | 'danger' | 'neutral', string> = {
-  ok: 'text-text-muted',
-  warn: 'text-warn-text',
-  danger: 'text-danger-text',
-  neutral: 'text-text',
-};
 
 /*
  * Layout follows the table's own wrapper (`@container/events`), not the
@@ -453,7 +449,7 @@ const RequestEventRow = memo(function RequestEventRow({
           fit.band.status,
           outcome.type === 'partial'
             ? 'text-text-faint'
-            : STATUS_TONE_TEXT[tone],
+            : STATUS_TONE_TEXT_CLASS[tone],
         )}
       >
         <RequestOutcomeTableCell outcome={outcome} />

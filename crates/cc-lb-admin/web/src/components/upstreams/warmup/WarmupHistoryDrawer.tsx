@@ -1,6 +1,9 @@
 import { ChevronRight, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { formatRelativeUnixSeconds } from '../../../lib/format';
+import {
+  formatRelativeUnixSeconds,
+  httpStatusTextClass,
+} from '../../../lib/format';
 import {
   type Upstream,
   useWarmupAttempts,
@@ -354,7 +357,10 @@ function AttemptListRow({
           )}
           {attempt.http_status != null && (
             <span className="text-caption tabular-nums text-text-faint">
-              · HTTP {attempt.http_status}
+              · HTTP{' '}
+              <span className={httpStatusTextClass(attempt.http_status)}>
+                {attempt.http_status}
+              </span>
             </span>
           )}
         </div>
@@ -447,7 +453,14 @@ function AttemptDetail({
         </dd>
 
         <dt className="text-label text-text-faint">HTTP</dt>
-        <dd className="tabular-nums text-text">{attempt.http_status ?? '—'}</dd>
+        <dd
+          className={cx(
+            'tabular-nums',
+            httpStatusTextClass(attempt.http_status),
+          )}
+        >
+          {attempt.http_status ?? '—'}
+        </dd>
 
         <dt className="text-label text-text-faint">Cycle</dt>
         <dd className="text-text font-mono text-data break-all">

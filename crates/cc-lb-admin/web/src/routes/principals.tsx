@@ -58,7 +58,10 @@ import {
   ToggleSwitch,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
-import { RequestEventsFeed } from '../components/ui/RequestEventsFeed';
+import {
+  FeedLiveStatus,
+  RequestEventsFeed,
+} from '../components/ui/RequestEventsFeed';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { Select } from '../components/ui/Select';
 import {
@@ -732,6 +735,7 @@ export function RecentRequestsCard({ principal }: { principal: Principal }) {
       span="full"
       className={PRINCIPAL_DETAIL_CARD_CLASS_NAMES.recentRequests}
       title="Recent requests"
+      action={<FeedLiveStatus feed={feed} />}
       description={`Latest requests from ${principal.name}`}
     >
       <RequestEventsFeed
