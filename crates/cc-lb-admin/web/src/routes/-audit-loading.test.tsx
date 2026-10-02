@@ -274,7 +274,9 @@ test('audit rows open their entry from the keyboard and name entities', async ()
   expect(dialog.textContent).toContain(
     'This entry records which fields changed, not their previous or new values.',
   );
-  expect(dialog.textContent).toContain(`example-upstream (${upstreamId.slice(0, 8)})`);
+  expect(dialog.textContent).toContain(
+    `example-upstream (${upstreamId.slice(0, 8)})`,
+  );
 });
 
 test('audit details leave out the target and unbounded query limits', () => {

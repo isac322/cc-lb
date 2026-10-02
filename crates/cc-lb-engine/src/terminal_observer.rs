@@ -396,6 +396,11 @@ struct TerminalState {
     error_code: Option<&'static str>,
     internal_errors: Vec<InternalError>,
     request_span: Option<tracing::Span>,
+    response_stream_span: Option<tracing::Span>,
+    retry_count: Option<u32>,
+    bulkhead_wait_ms: Option<u64>,
+    first_content_delta_ms: Option<u64>,
+    usage: Option<TerminalUsage>,
     request_body_read_ms: Option<u64>,
     request_body_bytes: Option<u64>,
     proxy_setup_ms: Option<u64>,
@@ -419,6 +424,15 @@ struct TerminalState {
     /// Flushed to the bus in order by `mark_authn_reached`, or discarded if
     /// the request terminates first.
     pending_events: Vec<LifecycleEvent>,
+}
+
+#[derive(Clone, Copy)]
+struct TerminalUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+    complete: bool,
 }
 
 impl LifecycleContext {
@@ -451,6 +465,34 @@ impl LifecycleContext {
     }
     pub(crate) fn set_request_span(&self, span: tracing::Span) {
         self.lock_state().request_span.get_or_insert(span);
+    }
+    pub(crate) fn set_response_stream_span(&self, span: tracing::Span) {
+        self.lock_state().response_stream_span.get_or_insert(span);
+    }
+
+    pub(crate) fn set_first_content_delta_ms(&self, elapsed_ms: u64) {
+        self.lock_state()
+            .first_content_delta_ms
+            .get_or_insert(elapsed_ms);
+    }
+
+    pub(crate) fn set_usage_counts(
+        &self,
+        usage: &crate::usage_parser::UsageCounts,
+        complete: bool,
+    ) {
+        if !usage.present {
+            return;
+        }
+        let mut state = self.lock_state();
+        let complete = complete || state.usage.is_some_and(|usage| usage.complete);
+        state.usage = Some(TerminalUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+            complete,
+        });
     }
 
     /// Record the endpoint classification resolved from the ingress path at
@@ -510,6 +552,13 @@ impl LifecycleContext {
         state.dns_ms = None;
         state.connect_ms = None;
         state.connection_reused = None;
+        state.bulkhead_wait_ms = None;
+    }
+
+    pub(crate) fn set_attempt_bulkhead_wait_ms(&self, elapsed_ms: Option<u64>) {
+        if let Some(elapsed_ms) = elapsed_ms {
+            self.lock_state().bulkhead_wait_ms = Some(elapsed_ms);
+        }
     }
 
     /// Record an upstream-returned terminal outcome. Upstream error codes are
@@ -734,6 +783,25 @@ impl LifecycleContext {
     /// This is fire-and-forget: overflow drops the event and increments the
     /// bus-side drop counter.
     pub(crate) fn emit_lifecycle(&self, event: LifecycleEvent) {
+        match &event {
+            LifecycleEvent::UpstreamAttempt { attempt_num, .. } => {
+                self.lock_state().retry_count = Some(attempt_num.saturating_sub(1));
+            }
+            LifecycleEvent::UpstreamResponseStarted {
+                bulkhead_wait_ms,
+                dns_ms,
+                connect_ms,
+                connection_reused,
+                ..
+            } => {
+                let mut state = self.lock_state();
+                state.bulkhead_wait_ms = *bulkhead_wait_ms;
+                state.dns_ms = *dns_ms;
+                state.connect_ms = *connect_ms;
+                state.connection_reused = *connection_reused;
+            }
+            _ => {}
+        }
         self.inner.emit_or_buffer(event);
     }
 
@@ -755,6 +823,80 @@ impl LifecycleContext {
             .state
             .lock()
             .expect("terminal observer state mutex poisoned")
+    }
+}
+
+fn record_terminal_span(
+    span: &tracing::Span,
+    state: &TerminalState,
+    error_code: Option<&'static str>,
+    duration_ms: u64,
+    unaccounted_ms: u64,
+) {
+    let outcome = match state.status {
+        499 => "client_cancelled",
+        408 | 504 => "timeout",
+        _ if error_code.is_some() => "error",
+        _ => "success",
+    };
+    span.record("cc_lb.request.outcome", outcome);
+    if state.status != 0 {
+        span.record("http.response.status_code", u64::from(state.status));
+    }
+    if let Some(code) = error_code {
+        span.record("error.type", code);
+        if code != error_codes::CLIENT_CLOSED_REQUEST {
+            span.record("otel.status_code", "ERROR");
+        }
+    }
+    span.record("cc_lb.request.duration_ms", duration_ms);
+    span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
+    for (field, value) in [
+        ("cc_lb.request.finalize_ms", state.finalize_ms),
+        ("cc_lb.upstream.bulkhead_wait_ms", state.bulkhead_wait_ms),
+        ("cc_lb.upstream.dns_ms", state.dns_ms),
+        ("cc_lb.upstream.connect_ms", state.connect_ms),
+        ("cc_lb.upstream.shape_ms", state.shape_ms),
+        ("cc_lb.upstream.sign_ms", state.sign_ms),
+        ("cc_lb.upstream.ttfb_ms", state.upstream_ttfb_ms),
+        (
+            "cc_lb.response.first_body_chunk_ms",
+            state.first_body_chunk_ms,
+        ),
+        (
+            "cc_lb.response.first_content_delta_ms",
+            state.first_content_delta_ms,
+        ),
+    ] {
+        if let Some(value) = value {
+            span.record(field, value);
+        }
+    }
+    if let Some(reused) = state.connection_reused {
+        span.record("cc_lb.upstream.connection_reused", reused);
+    }
+    if let Some(retry_count) = state.retry_count {
+        span.record("cc_lb.request.retry_count", u64::from(retry_count));
+    }
+    if let Some(usage) = state.usage {
+        span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+        span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+        span.record(
+            "gen_ai.usage.cache_creation_input_tokens",
+            usage.cache_creation_input_tokens,
+        );
+        span.record(
+            "gen_ai.usage.cache_read_input_tokens",
+            usage.cache_read_input_tokens,
+        );
+        span.record(
+            "cc_lb.usage.completeness",
+            if usage.complete && error_code.is_none() {
+                "complete"
+            } else {
+                "partial"
+            },
+        );
     }
 }
 
@@ -862,11 +1004,20 @@ impl Inner {
         // Retry overhead is a disjoint parent interval and is accounted once.
         let accounted_ms = terminal_accounted_ms(&state);
         let unaccounted_ms = duration_ms.saturating_sub(accounted_ms);
-        if let Some(span) = state.request_span.as_ref() {
-            if let Some(finalize_ms) = state.finalize_ms {
-                span.record("cc_lb.request.finalize_ms", finalize_ms);
-            }
-            span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
+        for span in [
+            state.request_span.as_ref(),
+            state.response_stream_span.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            record_terminal_span(
+                span,
+                &state,
+                effective_error_code,
+                duration_ms,
+                unaccounted_ms,
+            );
         }
         if publish_terminated {
             for event in pending {
@@ -887,6 +1038,7 @@ impl Inner {
                     dns_ms: state.dns_ms,
                     connect_ms: state.connect_ms,
                     connection_reused: state.connection_reused,
+                    first_content_delta_ms: state.first_content_delta_ms,
                     first_body_chunk_ms: state.first_body_chunk_ms,
                     finalize_ms: state.finalize_ms,
                     internal_errors: state.internal_errors.clone(),
@@ -996,6 +1148,218 @@ mod tests {
         (span, values)
     }
 
+    type TerminalSpanValues = Arc<Mutex<HashMap<Id, HashMap<String, String>>>>;
+
+    #[derive(Clone, Default)]
+    struct TerminalSpanLayer {
+        values: TerminalSpanValues,
+    }
+
+    impl<S: Subscriber> Layer<S> for TerminalSpanLayer {
+        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: LayerContext<'_, S>) {
+            let mut recorded = self.values.lock().expect("terminal span values lock");
+            values.record(&mut TerminalSpanVisitor {
+                values: recorded.entry(id.clone()).or_default(),
+            });
+        }
+    }
+
+    struct TerminalSpanVisitor<'a> {
+        values: &'a mut HashMap<String, String>,
+    }
+
+    impl Visit for TerminalSpanVisitor<'_> {
+        fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.values
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.values
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.values
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    fn terminal_spans() -> ([tracing::Span; 2], TerminalSpanValues) {
+        let layer = TerminalSpanLayer::default();
+        let values = Arc::clone(&layer.values);
+        let subscriber = Registry::default().with(layer);
+        macro_rules! span {
+            ($name:literal) => {
+                tracing::info_span!(
+                    $name,
+                    cc_lb.request.outcome = tracing::field::Empty,
+                    cc_lb.request.duration_ms = tracing::field::Empty,
+                    cc_lb.request.retry_count = tracing::field::Empty,
+                    cc_lb.request.unaccounted_ms = tracing::field::Empty,
+                    http.response.status_code = tracing::field::Empty,
+                    error.type = tracing::field::Empty,
+                    cc_lb.upstream.dns_ms = tracing::field::Empty,
+                    cc_lb.upstream.connect_ms = tracing::field::Empty,
+                    cc_lb.upstream.connection_reused = tracing::field::Empty,
+                    cc_lb.response.first_body_chunk_ms = tracing::field::Empty,
+                    cc_lb.response.first_content_delta_ms = tracing::field::Empty,
+                    gen_ai.usage.input_tokens = tracing::field::Empty,
+                    gen_ai.usage.output_tokens = tracing::field::Empty,
+                    cc_lb.usage.completeness = tracing::field::Empty,
+                )
+            };
+        }
+        let spans = tracing::subscriber::with_default(subscriber, || {
+            [span!("proxy.handle"), span!("proxy.response_stream")]
+        });
+        (spans, values)
+    }
+
+    #[test]
+    fn terminal_spans_use_final_attempt_and_complete_observed_usage() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new("terminal_spans".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let (spans, values) = terminal_spans();
+        observer.set_request_span(spans[0].clone());
+        observer.set_response_stream_span(spans[1].clone());
+        observer.set_attempt_connection_timings(Some(11), Some(19), Some(false));
+        observer.reset_attempt_timings();
+        observer.emit_lifecycle(LifecycleEvent::UpstreamAttempt {
+            event_id: observer.event_id().to_owned(),
+            attempt_num: 2,
+            upstream_id: Uuid::nil(),
+        });
+        observer.set_attempt_connection_timings(Some(0), None, Some(true));
+        observer.set_termination_timings(None, None, Some(3));
+        observer.set_first_content_delta_ms(7);
+        observer.set_usage_counts(
+            &crate::usage_parser::UsageCounts {
+                present: true,
+                input_tokens: 41,
+                output_tokens: 0,
+                ..Default::default()
+            },
+            true,
+        );
+        observer.set_success_status(StatusCode::OK);
+        assert!(values.lock().expect("terminal values lock").is_empty());
+        observer.finish();
+        let values = values.lock().expect("terminal values lock");
+        for span in spans {
+            let recorded = &values[&span.id().expect("enabled terminal span")];
+            for (field, expected) in [
+                ("cc_lb.request.outcome", "success"),
+                ("http.response.status_code", "200"),
+                ("cc_lb.request.retry_count", "1"),
+                ("cc_lb.upstream.dns_ms", "0"),
+                ("cc_lb.upstream.connection_reused", "true"),
+                ("cc_lb.response.first_body_chunk_ms", "3"),
+                ("cc_lb.response.first_content_delta_ms", "7"),
+                ("gen_ai.usage.input_tokens", "41"),
+                ("gen_ai.usage.output_tokens", "0"),
+                ("cc_lb.usage.completeness", "complete"),
+            ] {
+                assert_eq!(recorded.get(field).map(String::as_str), Some(expected));
+            }
+            assert!(!recorded.contains_key("cc_lb.upstream.connect_ms"));
+            assert!(!recorded.contains_key("error.type"));
+            assert!(recorded.contains_key("cc_lb.request.duration_ms"));
+        }
+    }
+
+    #[test]
+    fn cancelled_terminal_span_marks_partial_usage_without_inventing_observations() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new("cancelled_span".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let (spans, values) = terminal_spans();
+        observer.set_request_span(spans[0].clone());
+        observer.set_usage_counts(
+            &crate::usage_parser::UsageCounts {
+                present: true,
+                input_tokens: 41,
+                ..Default::default()
+            },
+            false,
+        );
+        observer.set_client_closed(StatusCode::from_u16(499).expect("client closed status"));
+        drop(observer);
+        let values = values.lock().expect("terminal values lock");
+        let recorded = &values[&spans[0].id().expect("enabled handle span")];
+        for (field, expected) in [
+            ("cc_lb.request.outcome", "client_cancelled"),
+            ("http.response.status_code", "499"),
+            ("error.type", error_codes::CLIENT_CLOSED_REQUEST),
+            ("cc_lb.usage.completeness", "partial"),
+        ] {
+            assert_eq!(recorded.get(field).map(String::as_str), Some(expected));
+        }
+        assert!(!recorded.contains_key("cc_lb.response.first_content_delta_ms"));
+        assert!(!recorded.contains_key("cc_lb.upstream.dns_ms"));
+        assert!(!recorded.contains_key("cc_lb.request.retry_count"));
+    }
+
+    #[test]
+    fn terminal_stream_error_preserves_client_status_and_absent_usage() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new("error_span".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let (spans, values) = terminal_spans();
+        observer.set_request_span(spans[0].clone());
+        observer.set_response_stream_span(spans[1].clone());
+        observer.set_usage_counts(&crate::usage_parser::UsageCounts::default(), true);
+        observer.set_upstream_error(StatusCode::OK, UpstreamErrorCode::StreamError);
+        observer.finish();
+        let values = values.lock().expect("terminal values lock");
+        for span in spans.iter() {
+            let recorded = &values[&span.id().expect("enabled terminal span")];
+            for (field, expected) in [
+                ("cc_lb.request.outcome", "error"),
+                ("http.response.status_code", "200"),
+                ("error.type", error_codes::UPSTREAM_STREAM_ERROR),
+            ] {
+                assert_eq!(recorded.get(field).map(String::as_str), Some(expected));
+            }
+            assert!(!recorded.contains_key("gen_ai.usage.input_tokens"));
+            assert!(!recorded.contains_key("cc_lb.usage.completeness"));
+        }
+    }
+    #[test]
+    fn terminal_span_status_takes_precedence_over_error_code() {
+        let bus = Arc::new(InMemoryBus::new());
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new("timeout_span".to_owned(), bus, &clock);
+        observer.mark_authn_reached();
+        let (spans, values) = terminal_spans();
+        observer.set_request_span(spans[0].clone());
+        observer.set_upstream_error(StatusCode::GATEWAY_TIMEOUT, UpstreamErrorCode::StreamError);
+        observer.finish();
+
+        let values = values.lock().expect("terminal values lock");
+        let recorded = &values[&spans[0].id().expect("enabled handle span")];
+        assert_eq!(
+            recorded.get("cc_lb.request.outcome").map(String::as_str),
+            Some("timeout")
+        );
+        assert_eq!(
+            recorded
+                .get("http.response.status_code")
+                .map(String::as_str),
+            Some("504")
+        );
+        assert_eq!(
+            recorded.get("error.type").map(String::as_str),
+            Some(error_codes::UPSTREAM_STREAM_ERROR)
+        );
+    }
+
     fn expect_terminated(event: LifecycleEvent) -> (String, TerminationReason, u16) {
         match event {
             LifecycleEvent::RequestTerminated {
@@ -1055,6 +1419,32 @@ mod tests {
         assert!(
             matches!(reason, TerminationReason::ErrorCode(ref code) if code == error_codes::UPSTREAM_4XX)
         );
+    }
+    #[tokio::test]
+    async fn terminal_event_carries_first_content_delta_for_cancellation() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req-first-content-cancel".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+        observer.set_first_content_delta_ms(12);
+        observer.set_client_closed(StatusCode::from_u16(499).expect("client closed status"));
+        observer.finish();
+
+        let LifecycleEvent::RequestTerminated {
+            first_content_delta_ms,
+            client_status,
+            ..
+        } = rx.recv().await.expect("terminal event delivered")
+        else {
+            panic!("expected request termination");
+        };
+        assert_eq!(client_status, 499);
+        assert_eq!(first_content_delta_ms, Some(12));
     }
 
     #[tokio::test]

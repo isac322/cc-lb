@@ -69,6 +69,7 @@ async fn renewal_is_priced_only_after_terminal() {
             client_status: 200,
             duration_ms: 12,
             first_body_chunk_ms: None,
+            first_content_delta_ms: None,
             dns_ms: None,
             connect_ms: None,
             connection_reused: None,

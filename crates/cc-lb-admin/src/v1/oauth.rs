@@ -1523,9 +1523,7 @@ mod tests {
 
         assert_eq!(
             refresh.idempotency_key.as_deref(),
-            Some(
-                "adaptive:oauth_refresh:12345678-1234-5678-1234-567812345678:bootstrap:123456"
-            )
+            Some("adaptive:oauth_refresh:12345678-1234-5678-1234-567812345678:bootstrap:123456")
         );
         assert_eq!(refresh.run_at_unix_secs, Some(seed_secs));
         let cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(refresh_job) = refresh.args else {

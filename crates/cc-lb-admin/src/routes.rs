@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, Query, State},
-    http::{HeaderValue, Response, StatusCode, header},
-    middleware,
+    extract::{Extension, MatchedPath, Query, State},
+    http::{HeaderValue, Request, Response, StatusCode, header},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -12,6 +12,7 @@ use cc_lb_storage_api::{AuditQueryScope, Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracing::Instrument as _;
 
 use crate::{
     AdminState,
@@ -19,6 +20,10 @@ use crate::{
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
     static_assets::{serve_asset, serve_index},
 };
+
+pub fn with_request_tracing(router: Router) -> Router {
+    router.layer(middleware::from_fn(admin_request_middleware))
+}
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
@@ -85,6 +90,47 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
         .with_state(state)
+}
+
+async fn admin_request_middleware(request: Request<Body>, next: Next) -> Response<Body> {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let method = request.method().clone();
+    let span = tracing::info_span!(
+        "admin.request",
+        otel.name = tracing::field::Empty,
+        otel.kind = "server",
+        http.request.method = %method,
+        http.route = %route,
+        http.response.status_code = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        cc_lb.request.id = tracing::field::Empty,
+    );
+    span.record("otel.name", format!("{method} {route}").as_str());
+    if let Some(request_id) = request
+        .headers()
+        .get("request-id")
+        .or_else(|| request.headers().get("x-request-id"))
+        .and_then(|value| value.to_str().ok())
+    {
+        span.record("cc_lb.request.id", request_id);
+    }
+
+    let response = next.run(request).instrument(span.clone()).await;
+    let status = response.status();
+    span.record("http.response.status_code", u64::from(status.as_u16()));
+    if status.is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    if status.is_client_error() || status.is_server_error() {
+        span.record("error.type", status.as_str());
+    }
+    response
 }
 
 async fn json_extractor_rejection(response: Response<Body>) -> Response<Body> {

@@ -23,10 +23,10 @@ use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
 type BoxedRegistryLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
-
 const REQUEST_DURATION_BUCKETS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
+const RETRY_ATTEMPT_BUCKETS: [f64; 8] = [0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0];
 const PLUGIN_CALL_DURATION_BUCKETS: [f64; 11] = [
     0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
 ];
@@ -96,16 +96,36 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 44] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 48] = [
     MetricDefinition {
-        name: "cc_lb_requests_total",
+        name: "cc_lb_requests_started_total",
         kind: MetricKind::Counter,
-        description: "Total proxied requests by principal, upstream, model, and status.",
+        description: "Proxy responses whose headers were observed by the trace layer, including local responses inside it but excluding drain responses that bypass it; not terminal completions. Labels: principal, upstream, model, and status.",
     },
     MetricDefinition {
-        name: "cc_lb_request_duration_seconds",
+        name: "cc_lb_request_headers_duration_seconds",
         kind: MetricKind::Histogram,
-        description: "End-to-end proxied request duration in seconds.",
+        description: "Seconds from request start until proxy response headers were observed by the trace layer, including local responses inside it but excluding drain responses that bypass it; not terminal duration.",
+    },
+    MetricDefinition {
+        name: "cc_lb_requests_completed_total",
+        kind: MetricKind::Counter,
+        description: "Terminal request completions by source kind, bounded terminal outcome, and client status class.",
+    },
+    MetricDefinition {
+        name: "cc_lb_request_completion_duration_seconds",
+        kind: MetricKind::Histogram,
+        description: "Terminal request completion duration in seconds by source kind and bounded terminal outcome.",
+    },
+    MetricDefinition {
+        name: "cc_lb_request_decisions_total",
+        kind: MetricKind::Counter,
+        description: "Observed route and limit decisions by stage and bounded outcome.",
+    },
+    MetricDefinition {
+        name: "cc_lb_request_retry_attempts",
+        kind: MetricKind::Histogram,
+        description: "Retry attempts per terminal request, computed as the final maximum attempt number minus one.",
     },
     MetricDefinition {
         name: "cc_lb_dropped_events_total",
@@ -136,11 +156,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 44] = [
         name: "cc_lb_tls_reload_total",
         kind: MetricKind::Counter,
         description: "TLS certificate reload attempts by outcome.",
-    },
-    MetricDefinition {
-        name: "cc_lb_sse_events_total",
-        kind: MetricKind::Counter,
-        description: "SSE events relayed by upstream and event type.",
     },
     MetricDefinition {
         name: "cc_lb_plugin_call_duration_seconds",
@@ -216,6 +231,11 @@ const METRIC_DEFINITIONS: [MetricDefinition; 44] = [
         name: "cc_lb_stream_terminations_total",
         kind: MetricKind::Counter,
         description: "Response stream terminations by bounded outcome and cause.",
+    },
+    MetricDefinition {
+        name: "cc_lb_response_body_chunks_total",
+        kind: MetricKind::Counter,
+        description: "Response transport body chunks observed by the trace layer, not bytes or SSE events; upstream is currently always unknown because provider attribution is unavailable.",
     },
     PROMETHEUS14_METRIC_DEFINITIONS[0],
     PROMETHEUS14_METRIC_DEFINITIONS[1],
@@ -343,14 +363,34 @@ pub fn metric_definitions() -> &'static [MetricDefinition] {
 
 pub fn register_metrics() {
     metrics::describe_counter!(
-        "cc_lb_requests_total",
+        "cc_lb_requests_started_total",
         Unit::Count,
-        "Total proxied requests by principal, upstream, model, and status."
+        "Proxy responses whose headers were observed by the trace layer, including local responses inside it but excluding drain responses that bypass it; not terminal completions. Labels: principal, upstream, model, and status."
     );
     metrics::describe_histogram!(
-        "cc_lb_request_duration_seconds",
+        "cc_lb_request_headers_duration_seconds",
         Unit::Seconds,
-        "End-to-end proxied request duration in seconds."
+        "Seconds from request start until proxy response headers were observed by the trace layer, including local responses inside it but excluding drain responses that bypass it; not terminal duration."
+    );
+    metrics::describe_counter!(
+        "cc_lb_requests_completed_total",
+        Unit::Count,
+        "Terminal request completions by source kind, bounded terminal outcome, and client status class."
+    );
+    metrics::describe_histogram!(
+        "cc_lb_request_completion_duration_seconds",
+        Unit::Seconds,
+        "Terminal request completion duration in seconds by source kind and bounded terminal outcome."
+    );
+    metrics::describe_counter!(
+        "cc_lb_request_decisions_total",
+        Unit::Count,
+        "Observed route and limit decisions by stage and bounded outcome."
+    );
+    metrics::describe_histogram!(
+        "cc_lb_request_retry_attempts",
+        Unit::Count,
+        "Retry attempts per terminal request, computed as the final maximum attempt number minus one."
     );
     metrics::describe_counter!(
         "cc_lb_dropped_events_total",
@@ -386,11 +426,6 @@ pub fn register_metrics() {
         "cc_lb_lifecycle_events_total",
         Unit::Count,
         "Total lifecycle events emitted by event kind."
-    );
-    metrics::describe_counter!(
-        "cc_lb_sse_events_total",
-        Unit::Count,
-        "SSE events relayed by upstream and event type."
     );
     metrics::describe_histogram!(
         "cc_lb_plugin_call_duration_seconds",
@@ -467,6 +502,11 @@ pub fn register_metrics() {
         Unit::Count,
         "Response stream terminations by bounded outcome and cause."
     );
+    metrics::describe_counter!(
+        "cc_lb_response_body_chunks_total",
+        Unit::Count,
+        "Response transport body chunks observed by the trace layer, not bytes or SSE events; upstream is currently always unknown because provider attribution is unavailable."
+    );
     metrics::describe_histogram!(
         "cc_lb_prompt_cache_analysis_duration_seconds",
         Unit::Seconds,
@@ -524,8 +564,22 @@ pub fn panic_total() -> u64 {
 fn install_prometheus(cfg: &ObservabilityConfig) -> Result<(), InitError> {
     PrometheusBuilder::new()
         .set_buckets_for_metric(
-            Matcher::Full("cc_lb_request_duration_seconds".to_owned()),
+            Matcher::Full("cc_lb_request_headers_duration_seconds".to_owned()),
             &REQUEST_DURATION_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?
+        .set_buckets_for_metric(
+            Matcher::Full("cc_lb_request_completion_duration_seconds".to_owned()),
+            &REQUEST_DURATION_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?
+        .set_buckets_for_metric(
+            Matcher::Full("cc_lb_request_retry_attempts".to_owned()),
+            &RETRY_ATTEMPT_BUCKETS,
         )
         .map_err(|source| InitError::Prometheus {
             message: source.to_string(),
@@ -553,20 +607,28 @@ fn install_prometheus(cfg: &ObservabilityConfig) -> Result<(), InitError> {
 
 fn touch_metrics() {
     metrics::counter!(
-        "cc_lb_requests_total",
+        "cc_lb_requests_started_total",
         "principal" => "unknown",
         "upstream" => "unknown",
         "model" => "unknown",
         "status" => "unknown"
     )
     .increment(0);
-    metrics::histogram!(
-        "cc_lb_request_duration_seconds",
-        "principal" => "unknown",
-        "upstream" => "unknown",
-        "model" => "unknown"
+    metrics::counter!(
+        "cc_lb_requests_completed_total",
+        "source_kind" => "unknown",
+        "terminal_outcome" => "error",
+        "client_status_class" => "other"
     )
-    .record(0.0);
+    .increment(0);
+    for (stage, outcome) in [("route", "success"), ("limit", "reserved")] {
+        metrics::counter!(
+            "cc_lb_request_decisions_total",
+            "stage" => stage,
+            "outcome" => outcome
+        )
+        .increment(0);
+    }
     metrics::counter!("cc_lb_dropped_events_total", "reason" => "none").increment(0);
     metrics::gauge!("cc_lb_circuit_breaker_state", "upstream" => "unknown").set(0.0);
     metrics::counter!("cc_lb_panic_total").increment(0);
@@ -575,12 +637,6 @@ fn touch_metrics() {
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "success").increment(0);
     metrics::counter!("cc_lb_tls_reload_total", "outcome" => "failure").increment(0);
     metrics::counter!("cc_lb_limit_reservation_ttl_evicted_total").absolute(0);
-    metrics::counter!(
-        "cc_lb_sse_events_total",
-        "upstream" => "unknown",
-        "event_type" => "unknown"
-    )
-    .increment(0);
     metrics::histogram!(
         "cc_lb_plugin_call_duration_seconds",
         "plugin" => "unknown",
@@ -626,6 +682,11 @@ fn touch_metrics() {
         "cc_lb_stream_terminations_total",
         "outcome" => "completed",
         "cause" => "none"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_response_body_chunks_total",
+        "upstream" => "unknown"
     )
     .increment(0);
     for stage in ["queue", "tokenize", "total"] {
