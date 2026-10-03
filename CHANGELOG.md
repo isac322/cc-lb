@@ -12,6 +12,9 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - The plugin author guide now uses the published 0.8 wire dependency required by the compatible Wasmtime PDK.
+- Installation descriptions and supported upstream, storage, and plugin details are readable in the website's light theme.
+- The plugin guides and SDK READMEs now show an accept-all filter that retains every input candidate, and document that omitted candidates are rejected.
+- The warm-up emergency-stop guide now separates SQLite and PostgreSQL timestamp expressions.
 
 ## [1.0.1] - 2026-10-02
 

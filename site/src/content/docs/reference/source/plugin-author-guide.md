@@ -53,8 +53,9 @@ Minimal filter plugin:
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -71,8 +72,19 @@ mod accept_all {
         description = "Accepts all candidates without modification.",
         usage = "Attach to a router filter chain for baseline validation.",
     )]
-    pub fn filter(_req: FilterRequest) -> FilterResponse {
-        FilterResponse { results: Box::from([]) }
+    pub fn filter(req: FilterRequest) -> FilterResponse {
+        let results = req
+            .candidates
+            .into_vec()
+            .into_iter()
+            .map(|candidate| PerCandidateReason {
+                upstream_id: candidate.upstream_id,
+                decision: Box::from("accept"),
+                reason: Box::from(""),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        FilterResponse { results }
     }
 }
 ```
@@ -95,31 +107,10 @@ Required plugin metadata:
 - `description`: short operator-facing summary.
 - `usage`: operator-facing deployment guidance.
 
-```rust
-#[cc_lb_plugin(
-    name = "cache-aware",
-    version = "0.1.0",
-    description = "Routes requests toward warm prompt-cache upstreams.",
-    usage = "Attach to router filter chains where cache locality is preferred.",
-)]
-mod cache_aware {
-    use super::*;
-
-    #[handler(
-        filter,
-        wire = 1,
-        description = "Marks candidates as accepted or rejected by cache affinity.",
-        usage = "Requires upstream candidate cache metadata from the host.",
-    )]
-    pub fn filter(req: FilterRequest) -> FilterResponse {
-        let _ = req;
-        FilterResponse { results: Box::from([]) }
-    }
-}
-```
-
 The macro emits allocator exports, hook exports, per-hook schema custom
-sections, and one `cc_lb.plugin.v1` metadata custom section.
+sections, and one `cc_lb.plugin.v1` metadata custom section. For a complete
+filter handler, see the filter example under [Hook
+Contracts](#hook-contracts).
 
 ## Hook Contracts
 
@@ -133,6 +124,8 @@ cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more 
 Filter example:
 
 ```rust
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 
 #[handler(
@@ -144,9 +137,10 @@ use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 pub fn filter(req: FilterRequest) -> FilterResponse {
     let results = req
         .candidates
-        .iter()
+        .into_vec()
+        .into_iter()
         .map(|candidate| PerCandidateReason {
-            upstream_id: candidate.upstream_id.clone(),
+            upstream_id: candidate.upstream_id,
             decision: if candidate.observed_at_unix_secs > 0 {
                 Box::from("accept")
             } else {
@@ -160,6 +154,12 @@ pub fn filter(req: FilterRequest) -> FilterResponse {
     FilterResponse { results }
 }
 ```
+
+The host keeps a candidate only when `decision` is `"accept"`. Every other
+candidate is dropped, whether the plugin rejects it or leaves it out of
+`results`, so an empty `results` rejects the whole candidate set. The host
+writes each non-empty `reason` to the router audit log as `{upstream_id}:
+{reason}`; pass an empty string when the decision needs no explanation.
 
 Shape example (Unified Slot):
 
@@ -261,6 +261,10 @@ Wire versions are independent per hook. The plugin declares the version on each
 handler:
 
 ```rust
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
+
 #[handler(
     filter,
     wire = 1,
@@ -268,32 +272,25 @@ handler:
     usage = "Attach to router filter chains.",
 )]
 pub fn filter(req: FilterRequest) -> FilterResponse {
-    let _ = req;
-    FilterResponse { results: Box::from([]) }
+    let results = req
+        .candidates
+        .into_vec()
+        .into_iter()
+        .map(|candidate| PerCandidateReason {
+            upstream_id: candidate.upstream_id,
+            decision: Box::from("accept"),
+            reason: Box::from(""),
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    FilterResponse { results }
 }
 ```
 
-Filter plugins receive the requested tier on the V1 filter request:
-
-```rust
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
-
-#[handler(
-    filter,
-    wire = 1,
-    description = "Filters candidates using the requested service tier.",
-    usage = "Attach to router filter chains that distinguish service tiers.",
-)]
-pub fn filter(req: FilterRequest) -> FilterResponse {
-    let requested_service_tier = req.service_tier.as_deref();
-    let _ = requested_service_tier;
-    FilterResponse { results: Box::from([]) }
-}
-```
-
-`service_tier` is the optional tier requested in the inbound request body. A
-pre-request filter cannot observe the tier ultimately reported by an upstream
-response.
+The filter example under [Hook Contracts](#hook-contracts) shows a complete
+handler. `service_tier` is the optional tier requested in the inbound request
+body; a pre-request filter cannot observe the tier ultimately reported by an
+upstream response.
 
 The host maintains supported-version lists per hook:
 

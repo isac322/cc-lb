@@ -46,7 +46,19 @@ curl -X PATCH http://[::1]:9090/admin/v1/upstreams/11111111-2222-3333-4444-55555
 
 ## Emergency stop
 
-If you need to stop all warm-up activity immediately across all OAuth upstreams, you can run a direct SQL update on the database. This disables the warm-up flag for all Anthropic OAuth upstreams at once. The `kind` column stores `UpstreamKind::as_str()` output, which is `anthropic_oauth` (snake_case). The update bumps `spec_revision` and `updated_at` so admin replicas pick up the change on the next reconcile.
+If you need to stop all warm-up activity immediately across all OAuth upstreams, you can run a direct SQL update on the database. This disables the warm-up flag for all Anthropic OAuth upstreams at once. The `kind` column stores `UpstreamKind::as_str()` output, which is `anthropic_oauth` (snake_case). The update bumps `spec_revision` and `updated_at` so admin replicas pick up the change on the next reconcile. `updated_at` is stored as integer unix seconds on SQLite and `TIMESTAMPTZ` on PostgreSQL, so each backend needs its own expression.
+
+**SQLite (default):**
+
+```sql
+UPDATE upstream_spec_v1
+SET warmup_enabled = false,
+    spec_revision = spec_revision + 1,
+    updated_at = unixepoch()
+WHERE kind = 'anthropic_oauth' AND deleted_at IS NULL;
+```
+
+**PostgreSQL:**
 
 ```sql
 UPDATE upstream_spec_v1
