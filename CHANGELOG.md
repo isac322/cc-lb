@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - Installation descriptions and supported upstream, storage, and plugin details are readable in the website's light theme.
 - The plugin guides and SDK READMEs now show an accept-all filter that retains every input candidate, and document that omitted candidates are rejected.
 - The warm-up emergency-stop guide now separates SQLite and PostgreSQL timestamp expressions.
+- Wasmtime now uses the 48.0.5 security patch for RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327.
 
 ## [1.0.1] - 2026-10-02
 
