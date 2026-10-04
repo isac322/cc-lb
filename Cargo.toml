@@ -44,10 +44,10 @@ cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
 cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
 cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }
 
-wasmtime  = "48"
+wasmtime  = "49"
 rkyv      = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.259"
+wasmparser = "0.260"
 
 anyhow = "1"
 arc-swap = "1"
@@ -114,7 +114,7 @@ tower = "0.5"
 tower-service = "0.3"
 tower-http = "0.7"
 tracing = "0.1"
-tracing-opentelemetry = "0.33"
+tracing-opentelemetry = "0.34"
 tracing-subscriber = "0.3"
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
