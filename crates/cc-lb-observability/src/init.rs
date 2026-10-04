@@ -371,7 +371,7 @@ fn build_otlp_pipeline(
     // that worker.
     let provider = {
         let _enter = runtime.enter();
-        let result = (|| {
+        (|| {
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_tonic()
                 .with_endpoint(endpoint)
@@ -393,8 +393,7 @@ fn build_otlp_pipeline(
                     .with_batch_exporter(exporter)
                     .build(),
             )
-        })();
-        result
+        })()
     };
 
     match provider {

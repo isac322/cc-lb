@@ -336,6 +336,7 @@ fn record_dispatch_failure(span: &tracing::Span, error_type: &str) {
         error.type = tracing::field::Empty,
         http.request.method = %request.method(),
         http.response.status_code = tracing::field::Empty,
+        server.address = request.url().host_str().unwrap_or_default(),
         server.port = i64::from(request.url().port_or_known_default().unwrap_or_default()),
         url.full = %sanitized_url(request.url()),
         url.path = request.url().path(),

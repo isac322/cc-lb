@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Terminal OpenTelemetry attributes are recorded in one subscriber update per span to reduce synchronous request-completion work. Attribute values, missing timings, measured zeros, and usage completeness are unchanged.
 - OTLP transport runs on a dedicated runtime when configured, keeping exporter HTTP/2 work off proxy workers; terminal and stream telemetry attributes now use numeric OTLP values for representable integers while preserving exact overflow strings.
+- Updated Wasmtime to 48.0.4 to address RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327 without suppressing the security check.
 
 ## [1.0.1] - 2026-10-02
 

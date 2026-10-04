@@ -217,13 +217,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use super::renewal_lifecycle_span;
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Id};
+    use tracing::span::{Attributes, Id, Record};
     use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
-
-    use super::renewal_lifecycle_span;
 
     #[derive(Clone, Default)]
     struct RenewalSpanLayer {
@@ -240,6 +239,12 @@ mod tests {
                     values: &self.values,
                 });
             }
+        }
+
+        fn on_record(&self, _id: &Id, values: &Record<'_>, _ctx: LayerContext<'_, S>) {
+            values.record(&mut RenewalSpanVisitor {
+                values: &self.values,
+            });
         }
     }
 
