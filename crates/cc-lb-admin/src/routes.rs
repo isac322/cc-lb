@@ -123,7 +123,7 @@ async fn admin_request_middleware(request: Request<Body>, next: Next) -> Respons
 
     let response = next.run(request).instrument(span.clone()).await;
     let status = response.status();
-    span.record("http.response.status_code", u64::from(status.as_u16()));
+    span.record("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
         span.record("otel.status_code", "ERROR");
     }
@@ -735,4 +735,87 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
 fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::response::Response {
     tracing::error!(%error, action, "admin audit write failed");
     dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::Value;
+    use opentelemetry::trace::{Status, TracerProvider as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tower::ServiceExt as _;
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn admin_status_is_exported_as_integer_without_changing_error_classification() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("admin-status")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("admin test runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                for status in [
+                    StatusCode::OK,
+                    StatusCode::BAD_REQUEST,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ] {
+                    let router = with_request_tracing(
+                        Router::new()
+                            .route("/admin/status-test", get(move || async move { status })),
+                    );
+                    let response = router
+                        .oneshot(
+                            Request::builder()
+                                .uri("/admin/status-test")
+                                .body(Body::empty())
+                                .expect("admin request"),
+                        )
+                        .await
+                        .expect("admin handler response");
+                    assert_eq!(response.status(), status);
+                }
+            });
+        });
+        provider.force_flush().expect("flush admin spans");
+        let spans = exporter.get_finished_spans().expect("exported admin spans");
+        assert_eq!(spans.len(), 3);
+        for (span, status) in spans.into_iter().zip([
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ]) {
+            let attribute = |name| {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key.as_str() == name)
+                    .map(|attribute| &attribute.value)
+            };
+            assert_eq!(
+                attribute("http.response.status_code"),
+                Some(&Value::I64(i64::from(status.as_u16()))),
+            );
+            assert_eq!(
+                attribute("http.route"),
+                Some(&Value::String("/admin/status-test".into())),
+            );
+            let expected_error = if status.is_success() {
+                None
+            } else {
+                Some(Value::String(status.as_str().to_owned().into()))
+            };
+            assert_eq!(attribute("error.type"), expected_error.as_ref());
+            assert_eq!(
+                matches!(span.status, Status::Error { .. }),
+                status.is_server_error(),
+            );
+        }
+        provider.shutdown().expect("shutdown admin provider");
+    }
 }

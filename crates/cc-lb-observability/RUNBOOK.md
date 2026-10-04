@@ -309,6 +309,14 @@ The per-request Logs UI applies a separate five-group responsibility attribution
 
 The compact Logs popover and Request Detail Sheet share these totals. The Sheet keeps its chronological timeline and SSE markers separate because responsibility attribution is not a wall-clock sequence. A missing value means not measured; a present zero means measured zero.
 
+## Trace recording cost
+
+Terminal attributes on `proxy.handle` and `proxy.response_stream` use one batched subscriber update per span. Optional values remain absent when they were not measured; recorded zeros and partial usage retain their existing meaning.
+
+OTLP export runs in the background, but span creation and attribute recording still consume CPU on the request path. Verify telemetry changes with alternating before/after proxy measurements on the same host, using the same compiler flags and workload. Include tracing-enabled runs and collector-outage runs; passing the load harness's latency budget alone does not establish that latency stayed unchanged.
+
+Numeric OTLP attributes use integer values for unsigned measurements that fit in signed 64-bit range. Values above `i64::MAX` retain their exact decimal-string representation instead of being rounded or truncated. Query ordinary duration, status, retry, token, stream-count, and byte attributes as integers; treat an above-range string as an explicit overflow case. When OTLP is configured, its tonic transport is built on a dedicated runtime so HTTP/2 encoding and export work do not execute on proxy Tokio workers.
+
 ## Troubleshooting
 
 ### When hit-rate suddenly drops

@@ -336,8 +336,7 @@ fn record_dispatch_failure(span: &tracing::Span, error_type: &str) {
         error.type = tracing::field::Empty,
         http.request.method = %request.method(),
         http.response.status_code = tracing::field::Empty,
-        server.address = request.url().host_str().unwrap_or_default(),
-        server.port = request.url().port_or_known_default().unwrap_or_default(),
+        server.port = i64::from(request.url().port_or_known_default().unwrap_or_default()),
         url.full = %sanitized_url(request.url()),
         url.path = request.url().path(),
     )
@@ -378,7 +377,7 @@ where
     })?;
     crate::request_timing::finalize_connection_reused_if_unset();
     let status = response.status();
-    span.record("http.response.status_code", u64::from(status.as_u16()));
+    span.record("http.response.status_code", i64::from(status.as_u16()));
     if status.is_client_error() || status.is_server_error() {
         record_dispatch_failure(&span, status.as_str());
     }

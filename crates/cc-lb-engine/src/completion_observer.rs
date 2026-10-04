@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
+use crate::terminal_observer::numeric_attribute;
 use arc_swap::ArcSwapOption;
 use opentelemetry::trace::{SpanId, TraceContextExt as _, TraceId};
 use tokio::sync::mpsc::{self, error::TrySendError};
@@ -207,18 +208,33 @@ impl StreamLatency {
         );
         record_optional(span, "stream_message_stop_ms", self.stream_message_stop_ms);
         record_optional(span, "stream_last_chunk_ms", self.stream_last_chunk_ms);
-        span.record("stream_total_ms", self.stream_total_ms);
-        span.record("sse_event_count", self.sse_event_count);
-        span.record("content_delta_count", self.content_delta_count);
-        span.record("ping_count", self.ping_count);
+        span.record(
+            "stream_total_ms",
+            numeric_attribute(Some(self.stream_total_ms)).as_value(),
+        );
+        span.record(
+            "sse_event_count",
+            numeric_attribute(Some(self.sse_event_count)).as_value(),
+        );
+        span.record(
+            "content_delta_count",
+            numeric_attribute(Some(self.content_delta_count)).as_value(),
+        );
+        span.record(
+            "ping_count",
+            numeric_attribute(Some(self.ping_count)).as_value(),
+        );
         record_optional(span, "inter_token_avg_ms", self.inter_token_avg_ms);
-        span.record("total_bytes", self.total_bytes);
+        span.record(
+            "total_bytes",
+            numeric_attribute(Some(self.total_bytes)).as_value(),
+        );
     }
 }
 
 fn record_optional(span: &Span, field: &'static str, value: Option<u64>) {
     if let Some(value) = value {
-        span.record(field, value);
+        span.record(field, numeric_attribute(Some(value)).as_value());
     }
 }
 

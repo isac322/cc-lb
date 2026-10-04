@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Terminal OpenTelemetry attributes are recorded in one subscriber update per span to reduce synchronous request-completion work. Attribute values, missing timings, measured zeros, and usage completeness are unchanged.
+- OTLP transport runs on a dedicated runtime when configured, keeping exporter HTTP/2 work off proxy workers; terminal and stream telemetry attributes now use numeric OTLP values for representable integers while preserving exact overflow strings.
+
 ## [1.0.1] - 2026-10-02
 
 ### Removed

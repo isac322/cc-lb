@@ -73,7 +73,7 @@ use crate::sse_error_frame::make_error_frame;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamTerminationCause, UpstreamErrorCode,
-    classify_stream_error, error_codes,
+    classify_stream_error, error_codes, numeric_attribute,
 };
 use crate::upstream_affinity::{
     extract_anthropic_web_search_affinity_keys,
@@ -2463,7 +2463,10 @@ impl Lifecycle {
         match &result {
             Ok(auth) => {
                 span.record("cc_lb.auth.outcome", "success");
-                span.record("cc_lb.auth.duration_ms", auth.auth_ms());
+                span.record(
+                    "cc_lb.auth.duration_ms",
+                    numeric_attribute(Some(auth.auth_ms())).as_value(),
+                );
             }
             Err(_) => {
                 span.record("cc_lb.auth.outcome", "error");
@@ -2835,7 +2838,7 @@ impl Lifecycle {
         );
         route_span.record(
             "cc_lb.route.candidate_count",
-            pipeline_result.candidates.len() as u64,
+            numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
         );
         if pipeline_result.candidates.is_empty() {
             route_span.record("cc_lb.route.outcome", "error");
@@ -2946,7 +2949,10 @@ impl Lifecycle {
         drop(route_guard);
         let route_ms = duration_to_ms(route_start.elapsed());
         route_span.record("cc_lb.route.outcome", "success");
-        route_span.record("cc_lb.route.duration_ms", route_ms);
+        route_span.record(
+            "cc_lb.route.duration_ms",
+            numeric_attribute(Some(route_ms)).as_value(),
+        );
         let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
         let selected_quota_candidate =
             resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
@@ -3520,7 +3526,7 @@ impl Lifecycle {
         name = "proxy.finish_response",
         skip_all,
         fields(
-            http.response.status_code = u64::from(status.as_u16()),
+            http.response.status_code = i64::from(status.as_u16()),
             cc_lb.response_body_ms = tracing::field::Empty,
             cc_lb.request.finalize_ms = tracing::field::Empty,
         )
@@ -3920,8 +3926,14 @@ impl Lifecycle {
             duration_to_ms(finalize_started.elapsed())
         };
         let response_span = tracing::Span::current();
-        response_span.record("cc_lb.response_body_ms", body_collect_ms);
-        response_span.record("cc_lb.request.finalize_ms", finalize_ms);
+        response_span.record(
+            "cc_lb.response_body_ms",
+            numeric_attribute(Some(body_collect_ms)).as_value(),
+        );
+        response_span.record(
+            "cc_lb.request.finalize_ms",
+            numeric_attribute(Some(finalize_ms)).as_value(),
+        );
         Response::from_parts(parts, Body::from(downstream_body))
     }
 
@@ -4088,7 +4100,10 @@ impl Lifecycle {
         };
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
         if let Some(shape_ms) = timings.shape_ms {
-            tracing::Span::current().record("cc_lb.upstream.shape_ms", shape_ms);
+            tracing::Span::current().record(
+                "cc_lb.upstream.shape_ms",
+                numeric_attribute(Some(shape_ms)).as_value(),
+            );
         }
         if capture_shaped_body {
             *shaped_body_out = Some(shaped.body().clone());
@@ -4106,13 +4121,19 @@ impl Lifecycle {
                 span.record("otel.status_code", "ERROR");
                 span.record("error.type", error_codes::SIGNER_FAILED);
                 if let Some(sign_ms) = timings.sign_ms {
-                    span.record("cc_lb.upstream.sign_ms", sign_ms);
+                    span.record(
+                        "cc_lb.upstream.sign_ms",
+                        numeric_attribute(Some(sign_ms)).as_value(),
+                    );
                 }
                 AttemptFailure::Sign(source)
             })?;
         timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
         if let Some(sign_ms) = timings.sign_ms {
-            tracing::Span::current().record("cc_lb.upstream.sign_ms", sign_ms);
+            tracing::Span::current().record(
+                "cc_lb.upstream.sign_ms",
+                numeric_attribute(Some(sign_ms)).as_value(),
+            );
         }
 
         let signed_header_names: Vec<String> = signed
@@ -4149,7 +4170,7 @@ impl Lifecycle {
             ("cc_lb.upstream.connect_ms", timings.connect_ms),
         ] {
             if let Some(value) = value {
-                attempt_span.record(field, value);
+                attempt_span.record(field, numeric_attribute(Some(value)).as_value());
             }
         }
         if let Some(reused) = timings.connection_reused {
@@ -4172,11 +4193,14 @@ impl Lifecycle {
         // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
         timings.upstream_ttfb_ms = Some(duration_to_ms(dispatch_start.elapsed()));
         if let Some(ttfb_ms) = timings.upstream_ttfb_ms {
-            attempt_span.record("cc_lb.upstream.ttfb_ms", ttfb_ms);
+            attempt_span.record(
+                "cc_lb.upstream.ttfb_ms",
+                numeric_attribute(Some(ttfb_ms)).as_value(),
+            );
         }
         attempt_span.record(
             "http.response.status_code",
-            u64::from(response.status().as_u16()),
+            i64::from(response.status().as_u16()),
         );
         if response.status().is_client_error() || response.status().is_server_error() {
             attempt_span.record("otel.status_code", "ERROR");

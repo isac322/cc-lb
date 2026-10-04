@@ -2470,12 +2470,20 @@ async fn lifecycle_handler(
         .elapsed()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
-    body_read_span.record("cc_lb.request_body_read_ms", body_read_ms);
+    if let Ok(body_read_ms) = i64::try_from(body_read_ms) {
+        body_read_span.record("cc_lb.request_body_read_ms", body_read_ms);
+    } else {
+        body_read_span.record("cc_lb.request_body_read_ms", body_read_ms);
+    }
 
     let body = match body_result {
         Ok(body) => {
             let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
-            body_read_span.record("http.request.body.size", body_bytes);
+            if let Ok(body_bytes) = i64::try_from(body_bytes) {
+                body_read_span.record("http.request.body.size", body_bytes);
+            } else {
+                body_read_span.record("http.request.body.size", body_bytes);
+            }
             body_read_span.record("outcome", "success");
             drop(body_read_span);
             if let Some(observer) = observer.as_ref() {
