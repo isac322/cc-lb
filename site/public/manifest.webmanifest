@@ -1,7 +1,7 @@
 {
   "name": "cc-lb",
   "short_name": "cc-lb",
-  "description": "Self-hosted Anthropic-compatible reverse proxy and load balancer.",
+  "description": "Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

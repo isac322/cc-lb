@@ -1,0 +1,67 @@
+name: Tried it
+description: Report how installing or first running cc-lb went, including when it worked
+title: "[Tried it] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Successful installs are useful reports too. If something broke and you can reproduce it, the bug report form asks for the details needed to fix it. Remove credentials, tokens, and proxy keys from everything you paste.
+  - type: dropdown
+    id: install_path
+    attributes:
+      label: Install path
+      options:
+        - Source build (binary)
+        - Published container image
+        - Helm chart
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Worked as documented
+        - Worked after extra steps
+        - Stopped before the first request succeeded
+    validations:
+      required: true
+  - type: input
+    id: stopped_at
+    attributes:
+      label: Last step that worked
+      description: For example, the build, server start, upstream creation, proxy key issue, or first request.
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened
+      description: Note extra steps, confusing docs, or the error you hit.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: cc-lb version or commit
+      placeholder: "1.0.1"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: "Ubuntu 24.04, x86_64"
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did you hear about cc-lb?
+      options:
+        - GitHub
+        - Search engine
+        - crates.io or docs.rs
+        - Documentation site
+        - Colleague or friend
+        - Social media or forum
+        - Other

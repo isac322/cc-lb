@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 - The website now presents setup and runtime control in one operator-focused flow, with GitHub star links and a dismissible support notice.
 - The admin sidebar now includes a "Star on GitHub" link in expanded, collapsed, and mobile navigation.
+- Contribution and support guides, structured issue forms, and a pull request checklist define the public contribution and documentation-parity workflow.
+- Default-branch builds and a weekly GitHub-hosted workflow run OpenSSF Scorecard analysis.
+- Public metadata sync and CI checks keep declared repository, site, chart, and package metadata aligned with `positioning.yml`.
+- New server container releases include OCI build provenance and SPDX SBOM attestations.
 
 ### Fixed
 
@@ -16,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - The plugin guides and SDK READMEs now show an accept-all filter that retains every input candidate, and document that omitted candidates are rejected.
 - The warm-up emergency-stop guide now separates SQLite and PostgreSQL timestamp expressions.
 - Wasmtime now uses the 48.0.5 security patch for RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327.
+- The Apache-2.0 license text includes the canonical sentence preserving separate contribution agreements.
 
 ## [1.0.1] - 2026-10-02
 

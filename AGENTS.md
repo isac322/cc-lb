@@ -64,3 +64,9 @@ Forbidden shortcuts:
 - `sleep`, retry loops, or weakened assertions to hide a race.
 - Silently removing, moving, or renaming the failing test to bypass CI matching.
 - Adding a public `flush`/`persist_now`/completion/notification method on a production type whose only immediate consumer is a test — that is masking the missing test seam by contaminating the production API surface.
+
+## Public surface parity
+
+Code, repository documentation, the documentation site, and registry listings MUST describe the same shipped behavior. A mismatch is a defect and MUST block the pull request until it is corrected.
+
+Use `positioning.yml` as the source of truth for public identity, category, description, topics, homepage, license, and public claims. Use the API schema, generated references, and release metadata as the source of truth for technical contracts and versions. Before merging a public-surface change, update every affected surface and run the repository's documentation, site, CI, and parity checks. The pull request template records the commands and results.
