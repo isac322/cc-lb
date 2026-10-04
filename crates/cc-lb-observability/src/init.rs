@@ -57,13 +57,27 @@ impl Default for ObservabilityConfig {
 #[derive(Debug)]
 pub struct TracingGuard {
     tracer_provider: Option<SdkTracerProvider>,
+    otlp_runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl TracingGuard {
+    fn shutdown(&mut self) {
+        if let Some(provider) = self.tracer_provider.take() {
+            let _ = provider.shutdown();
+        }
+        if let Some(runtime) = self.otlp_runtime.take() {
+            // `Runtime`'s normal drop waits indefinitely for spawned blocking
+            // work and panics when called from another Tokio runtime. The
+            // background form is bounded and valid in both sync and async
+            // callers; the provider has already drained its batch processor.
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl Drop for TracingGuard {
     fn drop(&mut self) {
-        if let Some(provider) = self.tracer_provider.take() {
-            let _ = provider.shutdown();
-        }
+        self.shutdown();
     }
 }
 
@@ -316,34 +330,82 @@ pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
         ]
     };
 
-    let tracer_provider = if let Some(endpoint) = cfg.otlp_endpoint.as_deref() {
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
-            .build()
-            .map_err(|source| InitError::OtlpExporter {
-                message: source.to_string(),
-            })?;
-        let provider = SdkTracerProvider::builder()
-            .with_resource(
-                Resource::builder()
-                    .with_service_name("cc-lb")
-                    .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
-                    .build(),
-            )
-            .with_batch_exporter(exporter)
-            .build();
+    let (tracer_provider, otlp_runtime) = if let Some(endpoint) = cfg.otlp_endpoint.as_deref() {
+        let (provider, runtime) = build_otlp_pipeline(endpoint)?;
         let tracer = provider.tracer("cc-lb");
         layers.push(tracing_opentelemetry::layer().with_tracer(tracer).boxed());
-        Some(provider)
+        (Some(provider), Some(runtime))
     } else {
-        None
+        (None, None)
     };
 
     let subscriber = filtered_subscriber(layers, env_filter);
-    tracing::subscriber::set_global_default(subscriber)?;
+    let mut guard = TracingGuard {
+        tracer_provider,
+        otlp_runtime,
+    };
+    if let Err(source) = tracing::subscriber::set_global_default(subscriber) {
+        guard.shutdown();
+        return Err(InitError::TracingSubscriber { source });
+    }
 
-    Ok(TracingGuard { tracer_provider })
+    Ok(guard)
+}
+
+fn build_otlp_pipeline(
+    endpoint: &str,
+) -> Result<(SdkTracerProvider, tokio::runtime::Runtime), InitError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|source| InitError::OtlpExporter {
+            message: format!("failed to create dedicated Tokio runtime: {source}"),
+        })?;
+
+    // Tonic's lazy channel captures the current Tokio runtime when built.
+    // Enter the dedicated runtime before constructing it so transport tasks
+    // never bind to proxy workers. The SDK batch processor deliberately uses
+    // its ordinary dedicated thread; making its synchronous shutdown depend
+    // on this one-worker runtime would deadlock when a guard is dropped from
+    // that worker.
+    let provider = {
+        let _enter = runtime.enter();
+        (|| {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .build()
+                .map_err(|source| InitError::OtlpExporter {
+                    message: source.to_string(),
+                })?;
+            Ok::<_, InitError>(
+                SdkTracerProvider::builder()
+                    .with_resource(
+                        Resource::builder()
+                            .with_service_name("cc-lb")
+                            .with_attribute(KeyValue::new(
+                                "service.version",
+                                env!("CARGO_PKG_VERSION"),
+                            ))
+                            .build(),
+                    )
+                    .with_batch_exporter(exporter)
+                    .build(),
+            )
+        })()
+    };
+
+    match provider {
+        Ok(provider) => Ok((provider, runtime)),
+        Err(error) => {
+            // The runtime was created before exporter construction. Shut it
+            // down explicitly so an init error is safe inside another Tokio
+            // runtime and cannot leave worker threads behind.
+            runtime.shutdown_background();
+            Err(error)
+        }
+    }
 }
 
 fn filtered_subscriber(
@@ -752,5 +814,40 @@ mod tests {
             *levels.lock().expect("recorded levels lock poisoned"),
             vec![Level::INFO]
         );
+    }
+
+    #[test]
+    fn tracing_guard_drop_shuts_down_provider_inside_tokio_runtime() {
+        let proxy_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("proxy runtime should build");
+
+        proxy_runtime.block_on(async {
+            let (provider, runtime) =
+                build_otlp_pipeline("http://127.0.0.1:1").expect("OTLP pipeline should build");
+            let provider_handle = provider.clone();
+            drop(TracingGuard {
+                tracer_provider: Some(provider),
+                otlp_runtime: Some(runtime),
+            });
+            assert!(matches!(
+                provider_handle.shutdown(),
+                Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown)
+            ));
+        });
+    }
+
+    #[test]
+    fn otlp_pipeline_startup_failure_is_reported_without_runtime_leak_panic() {
+        let proxy_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("proxy runtime should build");
+
+        proxy_runtime.block_on(async {
+            let error = build_otlp_pipeline("not a URI").expect_err("endpoint should be rejected");
+            assert!(matches!(error, InitError::OtlpExporter { .. }));
+        });
     }
 }

@@ -106,6 +106,166 @@ fn assert_child_success(output: Output) {
     );
 }
 
+#[test]
+fn lifecycle_exports_queryable_numeric_stage_and_response_stream_attributes() {
+    use opentelemetry::Value;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = Registry::default()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("lifecycle-numeric")));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("numeric telemetry runtime");
+    tracing::subscriber::with_default(subscriber, || {
+        runtime.block_on(async {
+            let test_bus = TestLifecycleBus::new();
+            let body = Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
+            );
+            let lifecycle = lifecycle(
+                Arc::new(SequenceDispatch::new([ResponseSpec {
+                    body: body.clone(),
+                    content_encoding: None,
+                }])),
+                &test_bus,
+            );
+            let request = stream_request();
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("numeric test authenticates");
+            let response = lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("numeric test response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let collected = response
+                .into_body()
+                .collect()
+                .await
+                .expect("numeric test response body")
+                .to_bytes();
+            assert_eq!(collected, body);
+            lifecycle.shutdown().await;
+        });
+    });
+    provider
+        .force_flush()
+        .expect("flush lifecycle numeric spans");
+    let spans = exporter
+        .get_finished_spans()
+        .expect("exported lifecycle numeric spans");
+    let span = |name| {
+        spans
+            .iter()
+            .find(|span| span.name == name)
+            .unwrap_or_else(|| panic!("missing span {name}"))
+    };
+    for (span_name, fields) in [
+        ("proxy.authenticate", &["cc_lb.auth.duration_ms"][..]),
+        (
+            "proxy.route",
+            &["cc_lb.route.candidate_count", "cc_lb.route.duration_ms"][..],
+        ),
+        (
+            "proxy.upstream_attempt",
+            &[
+                "cc_lb.upstream.shape_ms",
+                "cc_lb.upstream.sign_ms",
+                "cc_lb.upstream.ttfb_ms",
+            ][..],
+        ),
+        (
+            "proxy.handle",
+            &[
+                "cc_lb.request.duration_ms",
+                "cc_lb.request.finalize_ms",
+                "cc_lb.request.unaccounted_ms",
+            ][..],
+        ),
+        (
+            "proxy.response_stream",
+            &[
+                "cc_lb.request.duration_ms",
+                "cc_lb.request.finalize_ms",
+                "cc_lb.response_body_ms",
+                "stream_first_chunk_ms",
+                "stream_total_ms",
+                "sse_event_count",
+                "content_delta_count",
+                "ping_count",
+                "total_bytes",
+            ][..],
+        ),
+    ] {
+        let selected_span = span(span_name);
+        for field in fields {
+            let values = selected_span
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.key.as_str() == *field)
+                .map(|attribute| &attribute.value)
+                .collect::<Vec<_>>();
+            assert!(
+                !values.is_empty(),
+                "{span_name}.{field} must be present in the exported span"
+            );
+            assert!(
+                values
+                    .iter()
+                    .all(|value| matches!(value, Value::I64(value) if *value >= 0)),
+                "{span_name}.{field} must contain only nonnegative OTLP integers, got {values:?}"
+            );
+        }
+    }
+    for span_name in [
+        "proxy.handle",
+        "proxy.upstream_attempt",
+        "proxy.response_stream",
+    ] {
+        let values = span(span_name)
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.key.as_str() == "http.response.status_code")
+            .map(|attribute| &attribute.value)
+            .collect::<Vec<_>>();
+        assert!(!values.is_empty(), "{span_name} must export a status code");
+        assert!(
+            values.iter().all(|value| *value == &Value::I64(200)),
+            "{span_name} must export only integer 200 status codes, got {values:?}"
+        );
+    }
+    for span_name in ["proxy.handle", "proxy.response_stream"] {
+        let span = span(span_name);
+        for (field, expected) in [
+            ("cc_lb.request.retry_count", 0),
+            ("gen_ai.usage.input_tokens", 3),
+            ("gen_ai.usage.output_tokens", 5),
+        ] {
+            let values = span
+                .attributes
+                .iter()
+                .filter(|attribute| attribute.key.as_str() == field)
+                .map(|attribute| &attribute.value)
+                .collect::<Vec<_>>();
+            assert!(!values.is_empty(), "{span_name}.{field} must be present");
+            assert!(
+                values.iter().all(|value| *value == &Value::I64(expected)),
+                "{span_name}.{field} must remain integer {expected}, got {values:?}"
+            );
+        }
+    }
+    provider
+        .shutdown()
+        .expect("shutdown lifecycle numeric provider");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn response_span_closes_at_eos_and_body_drop() {
     if std::env::var_os(SPAN_CHILD_ENV).is_none() {

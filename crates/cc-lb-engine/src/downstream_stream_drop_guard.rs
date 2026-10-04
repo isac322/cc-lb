@@ -6,6 +6,7 @@ use tracing::Span;
 use crate::body_io_timing::BodyIoTiming;
 use crate::terminal_observer::{
     LifecycleContext, StreamErrorClassification, StreamTerminationCause, StreamTerminationOutcome,
+    numeric_attribute,
 };
 
 const CLIENT_CLOSED_STATUS: u16 = 499;
@@ -109,8 +110,14 @@ impl DownstreamStreamDropGuard {
     }
 
     fn record_response_timings(&self, response_body_ms: u64, finalize_ms: u64) {
-        self.span.record("cc_lb.response_body_ms", response_body_ms);
-        self.span.record("cc_lb.request.finalize_ms", finalize_ms);
+        self.span.record(
+            "cc_lb.response_body_ms",
+            numeric_attribute(Some(response_body_ms)).as_value(),
+        );
+        self.span.record(
+            "cc_lb.request.finalize_ms",
+            numeric_attribute(Some(finalize_ms)).as_value(),
+        );
     }
 
     fn record_terminal(
@@ -129,7 +136,7 @@ impl DownstreamStreamDropGuard {
             | StreamTerminationOutcome::ProxyError => self.initial_upstream_status.as_u16(),
         };
         self.span
-            .record("http.response.status_code", u64::from(response_status));
+            .record("http.response.status_code", i64::from(response_status));
         self.span.record("stream.outcome", outcome.as_str());
         self.span.record("error.cause", cause.as_str());
         if matches!(
@@ -258,6 +265,13 @@ mod tests {
 
     impl Visit for ResponseTimingVisitor<'_> {
         fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.record_u64(
+                field,
+                u64::try_from(value).expect("nonnegative response timing"),
+            );
+        }
 
         fn record_u64(&mut self, field: &Field, value: u64) {
             if matches!(

@@ -228,7 +228,7 @@ impl CircuitBreaker {
     fn release_half_open_slot(&self) {
         let _ =
             self.half_open_in_flight
-                .fetch_update(
+                .try_update(
                     Ordering::SeqCst,
                     Ordering::SeqCst,
                     |current| match current {

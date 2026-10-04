@@ -104,7 +104,7 @@ pub struct ProxyOnResponse;
 impl<B> OnResponse<B> for ProxyOnResponse {
     fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
         let status = response.status();
-        span.record("http.response.status_code", u64::from(status.as_u16()));
+        span.record("http.response.status_code", i64::from(status.as_u16()));
         if status.is_server_error() {
             span.record("otel.status_code", "ERROR");
         }
@@ -173,4 +173,56 @@ fn header_value<'a, B>(request: &'a Request<B>, name: &'static str) -> Option<&'
         .headers()
         .get(name)
         .and_then(|value| value.to_str().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::Value;
+    use opentelemetry::trace::{Status, TracerProvider as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn proxy_http_status_is_exported_as_an_integer() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("proxy-status")));
+        tracing::subscriber::with_default(subscriber, || {
+            for status in [http::StatusCode::OK, http::StatusCode::BAD_GATEWAY] {
+                let request = Request::builder()
+                    .uri("/v1/messages")
+                    .body(())
+                    .expect("proxy request");
+                let span = ProxyMakeSpan::default().make_span(&request);
+                let response = Response::builder()
+                    .status(status)
+                    .body(())
+                    .expect("proxy response");
+                span.in_scope(|| {
+                    ProxyOnResponse.on_response(&response, Duration::from_micros(125), &span);
+                });
+            }
+        });
+        provider.force_flush().expect("flush proxy spans");
+        let spans = exporter.get_finished_spans().expect("exported proxy spans");
+        assert_eq!(spans.len(), 2);
+        for (span, expected_status) in spans.into_iter().zip([200, 502]) {
+            let status = span
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "http.response.status_code")
+                .map(|attribute| &attribute.value);
+            assert_eq!(status, Some(&Value::I64(expected_status)));
+            assert_eq!(
+                matches!(span.status, Status::Error { .. }),
+                expected_status == 502,
+            );
+        }
+        provider.shutdown().expect("shutdown proxy provider");
+    }
 }

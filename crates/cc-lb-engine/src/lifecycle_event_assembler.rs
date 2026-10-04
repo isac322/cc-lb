@@ -1622,7 +1622,7 @@ mod tests {
             self.attempts.fetch_add(1, Ordering::Relaxed);
             if self
                 .fail_next
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_ok()
             {
                 return Err(StorageError::Unavailable {

@@ -84,6 +84,7 @@ cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true
 metrics-exporter-prometheus.workspace = true
 metrics-util.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -826,6 +826,34 @@ impl LifecycleContext {
     }
 }
 
+// OTLP integers are signed. Keep unrepresentable unsigned values on tracing's
+// original decimal-string path instead of truncating or rounding them.
+pub(crate) enum NumericAttribute {
+    Missing,
+    Integer(i64),
+    Unsigned(u64),
+}
+
+impl NumericAttribute {
+    pub(crate) fn as_value(&self) -> &dyn tracing::field::Value {
+        match self {
+            Self::Missing => &tracing::field::Empty,
+            Self::Integer(value) => value,
+            Self::Unsigned(value) => value,
+        }
+    }
+}
+
+pub(crate) fn numeric_attribute(value: Option<u64>) -> NumericAttribute {
+    match value {
+        None => NumericAttribute::Missing,
+        Some(value) => match i64::try_from(value) {
+            Ok(value) => NumericAttribute::Integer(value),
+            Err(_) => NumericAttribute::Unsigned(value),
+        },
+    }
+}
+
 fn record_terminal_span(
     span: &tracing::Span,
     state: &TerminalState,
@@ -839,65 +867,52 @@ fn record_terminal_span(
         _ if error_code.is_some() => "error",
         _ => "success",
     };
-    span.record("cc_lb.request.outcome", outcome);
-    if state.status != 0 {
-        span.record("http.response.status_code", u64::from(state.status));
-    }
-    if let Some(code) = error_code {
-        span.record("error.type", code);
-        if code != error_codes::CLIENT_CLOSED_REQUEST {
-            span.record("otel.status_code", "ERROR");
+    let status_code = (state.status != 0).then_some(i64::from(state.status));
+    let otel_status_code = error_code
+        .filter(|code| *code != error_codes::CLIENT_CLOSED_REQUEST)
+        .map(|_| "ERROR");
+    let retry_count = state.retry_count.map(i64::from);
+    let input_tokens = state.usage.map(|usage| usage.input_tokens);
+    let output_tokens = state.usage.map(|usage| usage.output_tokens);
+    let cache_creation_input_tokens = state.usage.map(|usage| usage.cache_creation_input_tokens);
+    let cache_read_input_tokens = state.usage.map(|usage| usage.cache_read_input_tokens);
+    let usage_completeness = state.usage.map(|usage| {
+        if usage.complete && error_code.is_none() {
+            "complete"
+        } else {
+            "partial"
         }
-    }
-    span.record("cc_lb.request.duration_ms", duration_ms);
-    span.record("cc_lb.request.unaccounted_ms", unaccounted_ms);
-    for (field, value) in [
-        ("cc_lb.request.finalize_ms", state.finalize_ms),
-        ("cc_lb.upstream.bulkhead_wait_ms", state.bulkhead_wait_ms),
-        ("cc_lb.upstream.dns_ms", state.dns_ms),
-        ("cc_lb.upstream.connect_ms", state.connect_ms),
-        ("cc_lb.upstream.shape_ms", state.shape_ms),
-        ("cc_lb.upstream.sign_ms", state.sign_ms),
-        ("cc_lb.upstream.ttfb_ms", state.upstream_ttfb_ms),
-        (
-            "cc_lb.response.first_body_chunk_ms",
-            state.first_body_chunk_ms,
-        ),
-        (
-            "cc_lb.response.first_content_delta_ms",
-            state.first_content_delta_ms,
-        ),
-    ] {
-        if let Some(value) = value {
-            span.record(field, value);
-        }
-    }
-    if let Some(reused) = state.connection_reused {
-        span.record("cc_lb.upstream.connection_reused", reused);
-    }
-    if let Some(retry_count) = state.retry_count {
-        span.record("cc_lb.request.retry_count", u64::from(retry_count));
-    }
-    if let Some(usage) = state.usage {
-        span.record("gen_ai.usage.input_tokens", usage.input_tokens);
-        span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-        span.record(
-            "gen_ai.usage.cache_creation_input_tokens",
-            usage.cache_creation_input_tokens,
-        );
-        span.record(
-            "gen_ai.usage.cache_read_input_tokens",
-            usage.cache_read_input_tokens,
-        );
-        span.record(
-            "cc_lb.usage.completeness",
-            if usage.complete && error_code.is_none() {
-                "complete"
-            } else {
-                "partial"
-            },
-        );
-    }
+    });
+
+    tracing::record_all!(
+        span,
+        "cc_lb.request.outcome" = outcome,
+        "http.response.status_code" = status_code,
+        "error.type" = error_code,
+        "otel.status_code" = otel_status_code,
+        "cc_lb.request.duration_ms" = numeric_attribute(Some(duration_ms)).as_value(),
+        "cc_lb.request.unaccounted_ms" = numeric_attribute(Some(unaccounted_ms)).as_value(),
+        "cc_lb.request.finalize_ms" = numeric_attribute(state.finalize_ms).as_value(),
+        "cc_lb.upstream.bulkhead_wait_ms" = numeric_attribute(state.bulkhead_wait_ms).as_value(),
+        "cc_lb.upstream.dns_ms" = numeric_attribute(state.dns_ms).as_value(),
+        "cc_lb.upstream.connect_ms" = numeric_attribute(state.connect_ms).as_value(),
+        "cc_lb.upstream.shape_ms" = numeric_attribute(state.shape_ms).as_value(),
+        "cc_lb.upstream.sign_ms" = numeric_attribute(state.sign_ms).as_value(),
+        "cc_lb.upstream.ttfb_ms" = numeric_attribute(state.upstream_ttfb_ms).as_value(),
+        "cc_lb.response.first_body_chunk_ms" =
+            numeric_attribute(state.first_body_chunk_ms).as_value(),
+        "cc_lb.response.first_content_delta_ms" =
+            numeric_attribute(state.first_content_delta_ms).as_value(),
+        "cc_lb.upstream.connection_reused" = state.connection_reused,
+        "cc_lb.request.retry_count" = retry_count,
+        "gen_ai.usage.input_tokens" = numeric_attribute(input_tokens).as_value(),
+        "gen_ai.usage.output_tokens" = numeric_attribute(output_tokens).as_value(),
+        "gen_ai.usage.cache_creation_input_tokens" =
+            numeric_attribute(cache_creation_input_tokens).as_value(),
+        "gen_ai.usage.cache_read_input_tokens" =
+            numeric_attribute(cache_read_input_tokens).as_value(),
+        "cc_lb.usage.completeness" = usage_completeness,
+    );
 }
 
 /// Append a diagnostic to the accumulated internal-error history with its
@@ -1120,6 +1135,12 @@ mod tests {
 
     impl Visit for RequestTimingVisitor<'_> {
         fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.record_u64(
+                field,
+                u64::try_from(value).expect("nonnegative request timing"),
+            );
+        }
 
         fn record_u64(&mut self, field: &Field, value: u64) {
             if matches!(
@@ -1170,6 +1191,10 @@ mod tests {
 
     impl Visit for TerminalSpanVisitor<'_> {
         fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.values
+                .insert(field.name().to_owned(), value.to_string());
+        }
 
         fn record_u64(&mut self, field: &Field, value: u64) {
             self.values
@@ -1191,6 +1216,11 @@ mod tests {
         let layer = TerminalSpanLayer::default();
         let values = Arc::clone(&layer.values);
         let subscriber = Registry::default().with(layer);
+        let spans = tracing::subscriber::with_default(subscriber, new_terminal_spans);
+        (spans, values)
+    }
+
+    fn new_terminal_spans() -> [tracing::Span; 2] {
         macro_rules! span {
             ($name:literal) => {
                 tracing::info_span!(
@@ -1201,6 +1231,12 @@ mod tests {
                     cc_lb.request.unaccounted_ms = tracing::field::Empty,
                     http.response.status_code = tracing::field::Empty,
                     error.type = tracing::field::Empty,
+                    otel.status_code = tracing::field::Empty,
+                    cc_lb.request.finalize_ms = tracing::field::Empty,
+                    cc_lb.upstream.bulkhead_wait_ms = tracing::field::Empty,
+                    cc_lb.upstream.shape_ms = tracing::field::Empty,
+                    cc_lb.upstream.sign_ms = tracing::field::Empty,
+                    cc_lb.upstream.ttfb_ms = tracing::field::Empty,
                     cc_lb.upstream.dns_ms = tracing::field::Empty,
                     cc_lb.upstream.connect_ms = tracing::field::Empty,
                     cc_lb.upstream.connection_reused = tracing::field::Empty,
@@ -1208,14 +1244,195 @@ mod tests {
                     cc_lb.response.first_content_delta_ms = tracing::field::Empty,
                     gen_ai.usage.input_tokens = tracing::field::Empty,
                     gen_ai.usage.output_tokens = tracing::field::Empty,
+                    gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
+                    gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
                     cc_lb.usage.completeness = tracing::field::Empty,
                 )
             };
         }
-        let spans = tracing::subscriber::with_default(subscriber, || {
-            [span!("proxy.handle"), span!("proxy.response_stream")]
+        [span!("proxy.handle"), span!("proxy.response_stream")]
+    }
+
+    #[test]
+    fn otlp_terminal_attributes_are_exact_integers_with_lossless_unsigned_fallback() {
+        use opentelemetry::Value;
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = Registry::default()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("terminal")));
+        let state = TerminalState {
+            status: 200,
+            retry_count: Some(u32::MAX),
+            finalize_ms: Some(0),
+            bulkhead_wait_ms: Some(2),
+            dns_ms: Some(0),
+            connect_ms: None,
+            shape_ms: Some(3),
+            sign_ms: Some(4),
+            upstream_ttfb_ms: Some(5),
+            first_body_chunk_ms: Some(6),
+            first_content_delta_ms: Some(7),
+            connection_reused: Some(true),
+            usage: Some(TerminalUsage {
+                input_tokens: i64::MAX as u64,
+                output_tokens: 0,
+                cache_creation_input_tokens: i64::MAX as u64 + 1,
+                cache_read_input_tokens: u64::MAX,
+                complete: true,
+            }),
+            ..Default::default()
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            for span in new_terminal_spans() {
+                record_terminal_span(&span, &state, None, i64::MAX as u64, 0);
+            }
         });
-        (spans, values)
+        provider.force_flush().expect("flush terminal spans");
+        let spans = exporter
+            .get_finished_spans()
+            .expect("exported terminal spans");
+        assert_eq!(spans.len(), 2);
+        for span in spans {
+            let attributes = span
+                .attributes
+                .iter()
+                .map(|attr| (attr.key.as_str(), &attr.value))
+                .collect::<HashMap<_, _>>();
+            for (name, expected) in [
+                ("http.response.status_code", 200),
+                ("cc_lb.request.duration_ms", i64::MAX),
+                ("cc_lb.request.unaccounted_ms", 0),
+                ("cc_lb.request.finalize_ms", 0),
+                ("cc_lb.request.retry_count", i64::from(u32::MAX)),
+                ("cc_lb.upstream.bulkhead_wait_ms", 2),
+                ("cc_lb.upstream.dns_ms", 0),
+                ("cc_lb.upstream.shape_ms", 3),
+                ("cc_lb.upstream.sign_ms", 4),
+                ("cc_lb.upstream.ttfb_ms", 5),
+                ("cc_lb.response.first_body_chunk_ms", 6),
+                ("cc_lb.response.first_content_delta_ms", 7),
+                ("gen_ai.usage.input_tokens", i64::MAX),
+                ("gen_ai.usage.output_tokens", 0),
+            ] {
+                assert_eq!(attributes.get(name), Some(&&Value::I64(expected)), "{name}");
+            }
+            assert_eq!(
+                attributes.get("gen_ai.usage.cache_creation_input_tokens"),
+                Some(&&Value::String("9223372036854775808".into())),
+            );
+            assert_eq!(
+                attributes.get("gen_ai.usage.cache_read_input_tokens"),
+                Some(&&Value::String("18446744073709551615".into())),
+            );
+            assert_eq!(
+                attributes.get("cc_lb.request.outcome"),
+                Some(&&Value::String("success".into())),
+            );
+            assert_eq!(
+                attributes.get("cc_lb.usage.completeness"),
+                Some(&&Value::String("complete".into())),
+            );
+            assert_eq!(
+                attributes.get("cc_lb.upstream.connection_reused"),
+                Some(&&Value::Bool(true)),
+            );
+            assert!(!attributes.contains_key("cc_lb.upstream.connect_ms"));
+            assert!(!attributes.contains_key("error.type"));
+        }
+        provider.shutdown().expect("shutdown terminal provider");
+    }
+
+    #[test]
+    fn otlp_terminal_absence_cancellation_and_error_precedence_are_preserved() {
+        use opentelemetry::Value;
+        use opentelemetry::trace::{Status, TracerProvider as _};
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = Registry::default()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("terminal-errors")));
+        tracing::subscriber::with_default(subscriber, || {
+            for (status, error_code) in [
+                (0, None),
+                (499, Some(error_codes::CLIENT_CLOSED_REQUEST)),
+                (504, Some(error_codes::TOWER_TIMEOUT)),
+                (200, Some(error_codes::UPSTREAM_STREAM_ERROR)),
+            ] {
+                let state = TerminalState {
+                    status,
+                    usage: (status != 0).then_some(TerminalUsage {
+                        input_tokens: 11,
+                        output_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        complete: true,
+                    }),
+                    ..Default::default()
+                };
+                record_terminal_span(&new_terminal_spans()[0], &state, error_code, 0, 0);
+            }
+        });
+        provider.force_flush().expect("flush terminal error spans");
+        let spans = exporter
+            .get_finished_spans()
+            .expect("exported terminal error spans");
+        let handles = spans
+            .iter()
+            .filter(|span| span.name == "proxy.handle")
+            .collect::<Vec<_>>();
+        assert_eq!(handles.len(), 4);
+        for (span, (status, outcome, sdk_error)) in handles.into_iter().zip([
+            (0, "success", false),
+            (499, "client_cancelled", false),
+            (504, "timeout", true),
+            (200, "error", true),
+        ]) {
+            let attributes = span
+                .attributes
+                .iter()
+                .map(|attr| (attr.key.as_str(), &attr.value))
+                .collect::<HashMap<_, _>>();
+            assert_eq!(
+                attributes.get("http.response.status_code").copied(),
+                (status != 0).then_some(&Value::I64(status)),
+            );
+            assert_eq!(
+                attributes.get("cc_lb.request.outcome"),
+                Some(&&Value::String(outcome.into())),
+            );
+            assert_eq!(matches!(span.status, Status::Error { .. }), sdk_error);
+            for name in [
+                "cc_lb.request.retry_count",
+                "cc_lb.upstream.dns_ms",
+                "cc_lb.response.first_content_delta_ms",
+            ] {
+                assert!(!attributes.contains_key(name), "{name}");
+            }
+            if status == 0 {
+                assert!(!attributes.contains_key("gen_ai.usage.input_tokens"));
+                assert!(!attributes.contains_key("cc_lb.usage.completeness"));
+            } else {
+                assert_eq!(
+                    attributes.get("gen_ai.usage.output_tokens"),
+                    Some(&&Value::I64(0)),
+                );
+                assert_eq!(
+                    attributes.get("cc_lb.usage.completeness"),
+                    Some(&&Value::String("partial".into())),
+                );
+            }
+        }
+        provider
+            .shutdown()
+            .expect("shutdown terminal error provider");
     }
 
     #[test]
