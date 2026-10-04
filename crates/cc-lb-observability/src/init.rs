@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn tracing_guard_drop_is_safe_inside_tokio_runtime() {
+    fn tracing_guard_drop_shuts_down_provider_inside_tokio_runtime() {
         let proxy_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -826,10 +826,15 @@ mod tests {
         proxy_runtime.block_on(async {
             let (provider, runtime) =
                 build_otlp_pipeline("http://127.0.0.1:1").expect("OTLP pipeline should build");
+            let provider_handle = provider.clone();
             drop(TracingGuard {
                 tracer_provider: Some(provider),
                 otlp_runtime: Some(runtime),
             });
+            assert!(matches!(
+                provider_handle.shutdown(),
+                Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown)
+            ));
         });
     }
 
