@@ -63,7 +63,7 @@
    * by native fetch and never substitutes or consumes the application's Response.
    * Bounded response cloning is an observer side effect and is timed explicitly.
    * A Server-Timing rid metric description is recorded verbatim only when it
-   * matches the server-generated req_admin_<UUIDv7> format; every other
+   * matches the server-generated req_admin_<decimal counter> format; every other
    * description is discarded and never collected.
    */
 
@@ -85,8 +85,7 @@
   const QUERY_NAME = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
   const SHA256 = /^[a-f0-9]{64}$/;
   const PROD_ENVIRONMENT = /(?:prod(?:uction)?|live)/i;
-  const SERVER_REQUEST_ID =
-    /^req_admin_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+  const SERVER_REQUEST_ID = /^req_admin_[0-9]+$/;
   const SECRET_KEY =
     /(?:authorization|cookie|credential|password|passwd|secret|token|api[_-]?key|private[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token)/i;
   const SECRET_VALUE =
@@ -1595,7 +1594,7 @@
       ...base,
       state: 'invalid_format',
       reason:
-        'rid metric description did not match req_admin_<UUIDv7>; the description was not recorded',
+        'rid metric description did not match req_admin_<decimal counter>; the description was not recorded',
     };
   }
 
@@ -1874,7 +1873,7 @@
       }
     }
     // Server request ID correlation: a Server-Timing rid description that
-    // matches req_admin_<UUIDv7> is compared by SHA-256 against the observed
+    // matches req_admin_<decimal counter> is compared by SHA-256 against the observed
     // x-request-id response header (stored hashed, never raw). Attribution is
     // re-evaluated from current evidence on every reconcile: a fetch is
     // promoted over the URL/time guess only while exactly one of its
@@ -2293,7 +2292,7 @@
       resource_timing_authority:
         'native Resource Timing owns network TTFB/download/source-byte fields; JavaScript fetch settle latency is never copied into them',
       request_id_authority:
-        'crypto.randomUUID per wrapped fetch; a Server-Timing rid description matching req_admin_<UUIDv7> is recorded verbatim and compared by SHA-256 against observed response correlation headers; a unique same-ID candidate promotes the link, while a reused or unmatched ID stays a candidate and never proves a fresh server execution',
+        'crypto.randomUUID per wrapped fetch; a Server-Timing rid description matching req_admin_<decimal counter> is recorded verbatim and compared by SHA-256 against observed response correlation headers; a unique same-ID candidate promotes the link, while a reused or unmatched ID stays a candidate and never proves a fresh server execution',
     };
   }
 
@@ -2360,7 +2359,7 @@
         'Resource Timing does not expose response header end, connection reuse identity, HTTP cache key, or in-flight request coalescing identity.',
         'A zero Resource Timing field can mean cache, cancellation, privacy masking, an empty body, or unsupported data; ambiguous zeroes remain null with a reason.',
         'UI render observation is supplied by the Main agent and is never converted into recorder PASS/FAIL.',
-        'A Server-Timing rid description carries the server-generated request ID (req_admin_<UUIDv7>), not a time value; the metric duration is not a latency measurement and is never read as one.',
+        'A Server-Timing rid description carries the server-generated request ID (req_admin_<decimal counter>), not a time value; the metric duration is not a latency measurement and is never read as one.',
         'A matched server_request_id is a join key to backend evidence, not proof of a fresh server execution; a cached or reused ID stays ambiguous, and backend matching belongs to the outer QA stage.',
       ],
     });

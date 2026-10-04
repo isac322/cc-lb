@@ -439,8 +439,8 @@ curl -N -X POST http://127.0.0.1:8080/v1/messages \
         <h3>트래픽이 실제로 도는지 확인 (이게 "로드 밸런싱 검증")</h3>
         <p>위 호출 직후:</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># Prometheus 카운터로 본 트래픽
-curl -s http://127.0.0.1:9091/metrics | grep -E &#39;^cc_lb_requests_total&#39;
-# upstream=&quot;anthropic&quot;, status=&quot;200&quot; 등이 값 1 이상으로 늘어야 함
+curl -s http://127.0.0.1:9091/metrics | grep -E &#39;^cc_lb_requests_started_total&#39;
+# upstream=&quot;unknown&quot;, status=&quot;200&quot; 값은 trace layer가 proxy 응답 헤더를 관찰할 때 증가함 (upstream별 집계 아님)
 
 # Admin UI에서 시각적 확인 (브라우저)
 xdg-open http://127.0.0.1:9090/ 2&gt;/dev/null
@@ -450,7 +450,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   http://127.0.0.1:9090/admin/v1/audit | head -c 400</code></pre><button class="copy">복사</button></div>
         <div class="callout tip">
           <span class="label">잘 됐나?</span>
-          <code>cc_lb_requests_total</code>이 늘었고 응답 본문이 정상 Anthropic JSON이면 프록시 path가 끝까지 통과한 것입니다. 이 상태에서 클라이언트(Claude Code, OpenCode 등)의 <code>ANTHROPIC_BASE_URL</code>을 <code>http://127.0.0.1:8080</code>로 바꾸면 됩니다.
+          <code>cc_lb_requests_started_total</code>은 trace layer가 proxy 응답 헤더를 관찰한 횟수입니다. 이 layer 내부의 로컬 응답도 포함하지만, 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않습니다. 이 카운터는 terminal completion을 뜻하지 않습니다. 응답 본문이 정상 Anthropic JSON인지도 별도로 확인하면 프록시 path가 정상 동작했는지 판단할 수 있습니다. 이 상태에서 클라이언트(Claude Code, OpenCode 등)의 <code>ANTHROPIC_BASE_URL</code>을 <code>http://127.0.0.1:8080</code>로 바꾸면 됩니다.
         </div>
       </li>
 
@@ -565,7 +565,7 @@ tracing_level = &quot;info&quot;
 log_redaction = true</code></pre><button class="copy">복사</button></div>
 
     <h4>실행 + 확인</h4>
-    <p><a href="#quick-start">Quick Start</a> 그대로 따라가면 됩니다. <code>cc_lb_requests_total</code>이 호출마다 올라가는지만 확인하세요.</p>
+    <p><a href="#quick-start">Quick Start</a> 그대로 따라가면 됩니다. <code>cc_lb_requests_started_total</code>이 trace layer에서 proxy 응답 헤더를 관찰할 때 올라가는지 확인하세요. layer 내부의 로컬 응답도 포함합니다. 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않으며, terminal completion은 이 카운터로 확인할 수 없습니다.</p>
 
     <h2 id="uc-multi-key">Use Case ② · 여러 Anthropic 키 분산</h2>
 
@@ -604,8 +604,8 @@ curl -s http://127.0.0.1:9090/admin/v1/principals/api-key/router-terminal \
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
 
-# 3. 메트릭에서 각 upstream 별 요청 수 확인
-curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total</code></pre><button class="copy">복사</button></div>
+# 3. trace layer가 관찰한 proxy 응답 헤더 수 확인 (upstream=&quot;unknown&quot; 고정, upstream별 집계 아님)
+curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_started_total</code></pre><button class="copy">복사</button></div>
 
     <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
 
@@ -811,7 +811,9 @@ curl -s http://127.0.0.1:8080/v1/messages \
     <h4>핵심 메트릭</h4>
     <table>
       <tr><th>메트릭</th><th>의미</th></tr>
-      <tr><td><code>cc_lb_requests_total{principal,upstream,model,status}</code></td><td>모든 요청 카운터</td></tr>
+      <tr><td><code>cc_lb_requests_started_total{principal,upstream,model,status}</code></td><td>trace layer가 관찰한 proxy 응답 헤더 카운터 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal completion 아님)</td></tr>
+      <tr><td><code>cc_lb_request_headers_duration_seconds{principal,upstream,model}</code></td><td>요청 시작부터 trace layer가 proxy 응답 헤더를 관찰할 때까지의 시간 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal duration 아님)</td></tr>
+      <tr><td><code>cc_lb_response_body_chunks_total{upstream="unknown"}</code></td><td>trace layer가 관찰한 transport body chunk 수 (바이트 수나 SSE 이벤트 수 아님). provider attribution을 사용할 수 없어 upstream은 현재 unknown 고정</td></tr>
       <tr><td><code>cc_lb_breaker_state{upstream}</code></td><td>0=Closed / 1=HalfOpen / 2=Open</td></tr>
       <tr><td><code>cc_lb_bulkhead_active{upstream}</code></td><td>현재 동시 처리 수</td></tr>
       <tr><td><code>cc_lb_drain_in_progress</code></td><td>SIGTERM 후 drain 진행 중</td></tr>
@@ -819,6 +821,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>cc_lb_plugin_failure_total{plugin,kind}</code></td><td>플러그인 패닉/OOM 등</td></tr>
       <tr><td><code>cc_lb_aws_clock_skew_total</code></td><td>Bedrock SigV4 시계 skew 회수</td></tr>
     </table>
+    <p>응답 헤더 메트릭의 <code>principal</code>, <code>upstream</code>, <code>model</code>은 현재 <code>unknown</code>으로 고정되므로 upstream별 트래픽을 구분하지 못합니다. drain 거부 응답은 인증 전에 trace layer를 우회하므로 started/header 및 terminal lifecycle metric 어디에도 집계되지 않습니다.</p>
 
     <h4>Admin REST 빠른 참조</h4>
     <table>
@@ -941,7 +944,7 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
 ./target/debug/cc-lb config validate --config prod.toml
 
 # 트래픽 카운터만 빠르게
-curl -s http://127.0.0.1:9091/metrics | grep ^cc_lb_requests_total
+curl -s http://127.0.0.1:9091/metrics | grep ^cc_lb_requests_started_total
 
 # 모든 upstream의 breaker 상태
 curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \

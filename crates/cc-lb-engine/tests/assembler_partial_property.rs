@@ -287,6 +287,7 @@ fn lifecycle_event(profile: Profile, op: EventOp) -> LifecycleEvent {
             client_status: 200,
             duration_ms: profile.token_base(),
             first_body_chunk_ms: Some(profile.token_base() + 6),
+            first_content_delta_ms: None,
             dns_ms: None,
             connect_ms: None,
             connection_reused: None,

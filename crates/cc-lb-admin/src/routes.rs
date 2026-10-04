@@ -1,9 +1,9 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, Query, State},
-    http::{HeaderValue, Response, StatusCode, header},
-    middleware,
+    extract::{Extension, MatchedPath, Query, State},
+    http::{HeaderValue, Request, Response, StatusCode, header},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -12,6 +12,7 @@ use cc_lb_storage_api::{AuditQueryScope, Storage, StorageError};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracing::Instrument as _;
 
 use crate::{
     AdminState,
@@ -19,6 +20,10 @@ use crate::{
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
     static_assets::{serve_asset, serve_index},
 };
+
+pub fn with_request_tracing(router: Router) -> Router {
+    router.layer(middleware::from_fn(admin_request_middleware))
+}
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
@@ -85,6 +90,47 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
         .with_state(state)
+}
+
+async fn admin_request_middleware(request: Request<Body>, next: Next) -> Response<Body> {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or("unknown")
+        .to_owned();
+    let method = request.method().clone();
+    let span = tracing::info_span!(
+        "admin.request",
+        otel.name = tracing::field::Empty,
+        otel.kind = "server",
+        http.request.method = %method,
+        http.route = %route,
+        http.response.status_code = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        cc_lb.request.id = tracing::field::Empty,
+    );
+    span.record("otel.name", format!("{method} {route}").as_str());
+    if let Some(request_id) = request
+        .headers()
+        .get("request-id")
+        .or_else(|| request.headers().get("x-request-id"))
+        .and_then(|value| value.to_str().ok())
+    {
+        span.record("cc_lb.request.id", request_id);
+    }
+
+    let response = next.run(request).instrument(span.clone()).await;
+    let status = response.status();
+    span.record("http.response.status_code", i64::from(status.as_u16()));
+    if status.is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    if status.is_client_error() || status.is_server_error() {
+        span.record("error.type", status.as_str());
+    }
+    response
 }
 
 async fn json_extractor_rejection(response: Response<Body>) -> Response<Body> {
@@ -689,4 +735,87 @@ fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response 
 fn audit_write_failed_response(action: &str, error: &StorageError) -> axum::response::Response {
     tracing::error!(%error, action, "admin audit write failed");
     dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use opentelemetry::Value;
+    use opentelemetry::trace::{Status, TracerProvider as _};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tower::ServiceExt as _;
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn admin_status_is_exported_as_integer_without_changing_error_classification() {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("admin-status")));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("admin test runtime");
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                for status in [
+                    StatusCode::OK,
+                    StatusCode::BAD_REQUEST,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ] {
+                    let router = with_request_tracing(
+                        Router::new()
+                            .route("/admin/status-test", get(move || async move { status })),
+                    );
+                    let response = router
+                        .oneshot(
+                            Request::builder()
+                                .uri("/admin/status-test")
+                                .body(Body::empty())
+                                .expect("admin request"),
+                        )
+                        .await
+                        .expect("admin handler response");
+                    assert_eq!(response.status(), status);
+                }
+            });
+        });
+        provider.force_flush().expect("flush admin spans");
+        let spans = exporter.get_finished_spans().expect("exported admin spans");
+        assert_eq!(spans.len(), 3);
+        for (span, status) in spans.into_iter().zip([
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ]) {
+            let attribute = |name| {
+                span.attributes
+                    .iter()
+                    .find(|attribute| attribute.key.as_str() == name)
+                    .map(|attribute| &attribute.value)
+            };
+            assert_eq!(
+                attribute("http.response.status_code"),
+                Some(&Value::I64(i64::from(status.as_u16()))),
+            );
+            assert_eq!(
+                attribute("http.route"),
+                Some(&Value::String("/admin/status-test".into())),
+            );
+            let expected_error = if status.is_success() {
+                None
+            } else {
+                Some(Value::String(status.as_str().to_owned().into()))
+            };
+            assert_eq!(attribute("error.type"), expected_error.as_ref());
+            assert_eq!(
+                matches!(span.status, Status::Error { .. }),
+                status.is_server_error(),
+            );
+        }
+        provider.shutdown().expect("shutdown admin provider");
+    }
 }

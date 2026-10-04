@@ -141,7 +141,7 @@ sum(rate(cc_lb_cache_observation_write_failed_total[1m])) > 0
 This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the cost-first within-tier selection actually placed candidates in, and which upstream captured the pick.
 
 - `tier` ∈ `{known_base, partial_base, overage, unknown_probe}` from the `SubscriptionTier` enum.
-- `upstream` matches the upstream name (same convention as `cc_lb_requests_total` / `cc_lb_cache_hit_total`), NOT the UUID.
+- `upstream` matches the upstream name (same convention as `cc_lb_cache_hit_total`), NOT the UUID. The response-header trace metrics currently use `upstream="unknown"` instead.
 - `principal_id` is the UUID string (same convention as `cclb_api_key_requests_total`).
 
 Bookkeeping counter `cc_lb_lifecycle_routing_tier_events_total{outcome=emitted|missing_principal_id|orphan_ttl_evicted|cap_evicted}` tracks subscriber-side health without contaminating the main tier signal.
@@ -183,6 +183,36 @@ When `RoutingUpstreamFunneling` fires:
 
 False positives: sustained low traffic that clears the `> 2 req/s` floor after the alert has already latched. If confirmed low-volume, no action; alert will self-clear.
 
+## Metric: cc_lb_response_body_chunks_total
+
+- **Type**: Counter
+- **Labels**: `upstream`
+- **Label Cardinality Bounds**: One `upstream` value, currently hard-coded to `unknown`; provider attribution is unavailable in the trace hook.
+
+### Interpretation
+
+Counts transport response-body chunks observed by the trace layer as `cc_lb_response_body_chunks_total{upstream="unknown"}`. It is a chunk count, not a byte count or an SSE event count, and cannot currently distinguish providers.
+
+### Typical PromQL Query
+
+```promql
+sum(rate(cc_lb_response_body_chunks_total{upstream="unknown"}[5m]))
+```
+
+## Metrics: request terminal aggregation
+
+- `cc_lb_requests_started_total{principal,upstream,model,status}` counts proxy responses whose headers are observed by the trace layer.
+- `cc_lb_request_headers_duration_seconds{principal,upstream,model}` measures request start to those proxy response headers.
+
+These header-time metrics include locally generated responses handled inside the trace layer, not just upstream responses. Drain rejections bypass the trace layer before authentication and are not counted by the started/header or terminal lifecycle metrics. Neither header-time metric measures terminal completion. The trace hook currently sets `principal`, `upstream`, and `model` to `unknown`, so these metrics do not provide per-upstream attribution.
+
+- `cc_lb_requests_completed_total{source_kind,terminal_outcome,client_status_class}` counts the single terminal lifecycle event.
+- `cc_lb_request_completion_duration_seconds{source_kind,terminal_outcome}` records terminal duration.
+- `cc_lb_request_decisions_total{stage,outcome}` records only observed `route` and `limit` decisions; route and limit outcomes use fixed vocabularies.
+- `cc_lb_request_retry_attempts{source_kind,terminal_outcome}` records `max_attempt_num - 1` from the terminal request aggregate, including an observed zero-retry value.
+
+Missing lifecycle observations remain absent; the logger never emits zero for an unavailable timing.
+
 ## Metric: cc_lb_request_stage_duration_seconds
 
 - **Type**: Histogram
@@ -194,20 +224,27 @@ False positives: sustained low traffic that clears the `> 2 req/s` floor after t
 - `source_kind` ∈ `{proxy, renewal, unknown}`
 - `outcome` ∈ `{success, client_cancelled, error, timeout}`
 - Parent `stage` ∈ `{request_body_read, proxy_setup, shape, sign, upstream_ttfb, response_body, finalize, renewal_cycle}`
+- Overlapping diagnostic components `stage` ∈ `{bulkhead_wait, dns, connect}`
+- Elapsed markers inside `response_body`, `stage` ∈ `{first_body_chunk, first_content_delta}`
 - Diagnostic I/O `stage` ∈ `{request_body_first_chunk_marker, request_body_receive_marker, request_body_wait_mixed, request_body_process, response_body_wait_mixed, response_body_process, downstream_poll_gap_mixed, retry_overhead_mixed}`
 
 The logger emits only stages available in its bounded per-request aggregate when the terminal lifecycle event arrives. Renewal events emit `renewal_cycle` and do not emit zero-valued proxy stages. A measured fractional or zero-valued I/O stage remains observable. `request_body_chunk_count` remains request-event data; it is not emitted as a duration histogram.
 
 ### Boundaries and interpretation
 
-The parent stages preserve request chronology:
+The parent intervals preserve request chronology. Diagnostic components and elapsed markers overlap these intervals; do not sum all stage values to estimate request duration.
 
 - `request_body_read` covers handler-side request-body collection.
 - `proxy_setup`, `shape`, and `sign` cover the local pre-dispatch parent intervals.
-- `upstream_ttfb` is a parent that includes bulkhead wait, DNS, TCP/TLS connect, and the remaining combined header wait.
 - `response_body` selects one parent: completed `stream_total_ms`, buffered `upstream_body_ms`, or partial `upstream_body_ms` for `client_cancelled`.
 - `finalize` covers the final local parent interval.
 - `retry_overhead_mixed` covers the earlier attempt path only when a retry starts. The final attempt's stage values are reset, so parent accounting includes retry overhead once.
+
+The dispatch and response diagnostics are non-additive:
+
+- `upstream_ttfb` is the accounted inclusive final-attempt parent stage from dispatch start through response headers. It includes bulkhead wait, DNS, TCP/TLS connect, provider generation/transit, and the remaining combined header wait. Do not sum it with its `bulkhead_wait`, `dns`, or `connect` components.
+- `bulkhead_wait`, `dns`, and `connect` are overlapping final-attempt diagnostic components, not additional accounted parent stages.
+- `first_body_chunk` and `first_content_delta` are distinct elapsed markers inside `response_body`, not parent duration stages. Each is emitted independently only when its terminal stream observation is present. Do not add either marker to `response_body` or to the other marker.
 
 The diagnostic I/O stages have narrower meanings:
 
@@ -230,7 +267,7 @@ sum by (stage, outcome) (
 )
 ```
 
-Average duration for one non-overlapping parent stage:
+Average inclusive dispatch-to-headers time, queried independently of its components:
 
 ```promql
 sum(rate(cc_lb_request_stage_duration_seconds_sum{
@@ -271,6 +308,14 @@ The per-request Logs UI applies a separate five-group responsibility attribution
 - **Unattributed**: retry aggregates and residual time without a finer ownership witness.
 
 The compact Logs popover and Request Detail Sheet share these totals. The Sheet keeps its chronological timeline and SSE markers separate because responsibility attribution is not a wall-clock sequence. A missing value means not measured; a present zero means measured zero.
+
+## Trace recording cost
+
+Terminal attributes on `proxy.handle` and `proxy.response_stream` use one batched subscriber update per span. Optional values remain absent when they were not measured; recorded zeros and partial usage retain their existing meaning.
+
+OTLP export runs in the background, but span creation and attribute recording still consume CPU on the request path. Verify telemetry changes with alternating before/after proxy measurements on the same host, using the same compiler flags and workload. Include tracing-enabled runs and collector-outage runs; passing the load harness's latency budget alone does not establish that latency stayed unchanged.
+
+Numeric OTLP attributes use integer values for unsigned measurements that fit in signed 64-bit range. Values above `i64::MAX` retain their exact decimal-string representation instead of being rounded or truncated. Query ordinary duration, status, retry, token, stream-count, and byte attributes as integers; treat an above-range string as an explicit overflow case. When OTLP is configured, its tonic transport is built on a dedicated runtime so HTTP/2 encoding and export work do not execute on proxy Tokio workers.
 
 ## Troubleshooting
 

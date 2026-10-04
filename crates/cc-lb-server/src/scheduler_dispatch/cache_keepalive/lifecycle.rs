@@ -142,6 +142,7 @@ pub(super) fn publish_renewal_lifecycle(
         setup_timings: Default::default(),
         upstream_body_ms: None,
         first_body_chunk_ms: None,
+        first_content_delta_ms: None,
         dns_ms: None,
         connect_ms: None,
         connection_reused: None,
@@ -152,12 +153,18 @@ pub(super) fn publish_renewal_lifecycle(
 }
 
 fn renewal_lifecycle_span(duration_ms: u64) -> tracing::Span {
-    tracing::info_span!(
+    let span = tracing::info_span!(
         "cache_keepalive.renewal_lifecycle",
         otel.kind = "internal",
         cc_lb.source_kind = "renewal",
-        cc_lb.renewal_cycle_ms = duration_ms,
-    )
+        cc_lb.renewal_cycle_ms = tracing::field::Empty,
+    );
+    if let Ok(value) = i64::try_from(duration_ms) {
+        span.record("cc_lb.renewal_cycle_ms", value);
+    } else {
+        span.record("cc_lb.renewal_cycle_ms", duration_ms);
+    }
+    span
 }
 
 fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
@@ -210,13 +217,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use super::renewal_lifecycle_span;
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Id};
+    use tracing::span::{Attributes, Id, Record};
     use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt as _};
     use tracing_subscriber::{Layer, Registry};
-
-    use super::renewal_lifecycle_span;
 
     #[derive(Clone, Default)]
     struct RenewalSpanLayer {
@@ -234,6 +240,12 @@ mod tests {
                 });
             }
         }
+
+        fn on_record(&self, _id: &Id, values: &Record<'_>, _ctx: LayerContext<'_, S>) {
+            values.record(&mut RenewalSpanVisitor {
+                values: &self.values,
+            });
+        }
     }
 
     struct RenewalSpanVisitor<'a> {
@@ -249,7 +261,7 @@ mod tests {
             self.insert(field, value.to_owned());
         }
 
-        fn record_u64(&mut self, field: &Field, value: u64) {
+        fn record_i64(&mut self, field: &Field, value: i64) {
             self.insert(field, value.to_string());
         }
     }
