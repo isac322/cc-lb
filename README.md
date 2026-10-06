@@ -40,6 +40,18 @@ curl -sS http://localhost:8080/v1/messages \
 
 Use a model allowed by the principal and inspect the response stream or the stream diagnostics below.
 
+## Screenshots
+
+These are real cc-lb 1.0.1 admin UI screens captured with synthetic fixture data, not production telemetry. The requests shown went through the proxy to a local mock upstream.
+
+| Overview | Upstreams |
+| --- | --- |
+| ![Overview with pool quota usage, traffic, cost, and top principals](assets/media/usage.png) | ![Upstreams with the paid-api-fallback API-key upstream and recent requests](assets/media/upstreams.png) |
+| **Principals** | **Principal detail** |
+| ![Principals with the ci-runner principal, cache keepalive, recent requests, and router options](assets/media/access.png) | ![Principal detail for mina-torres with recent requests and router settings](assets/media/principal-detail.png) |
+| **Logs** | |
+| ![Request log with recent rows routed to paid-api-fallback](assets/media/logs.png) | |
+
 ## Quick start
 
 Prerequisites for a local build:

@@ -3,14 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "sync": "bun scripts/sync-brand.ts && bun scripts/sync-docs.ts",
+    "sync": "bun scripts/sync-brand.ts && bun scripts/sync-media.ts && bun scripts/sync-docs.ts",
     "dev": "bun run sync && astro dev",
     "build": "bun run sync && astro build",
     "preview": "astro preview"
   },
   "dependencies": {
-    "@astrojs/sitemap": "^3.2.1",
-    "@astrojs/starlight": "^0.35.2",
-    "astro": "^5.14.1"
+    "@astrojs/sitemap": "^3.7.4",
+    "@astrojs/starlight": "^0.42.5",
+    "astro": "^7.3.6"
   }
 }
