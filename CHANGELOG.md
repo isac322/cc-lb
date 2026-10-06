@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - Default-branch builds and a weekly GitHub-hosted workflow run OpenSSF Scorecard analysis.
 - Public metadata sync and CI checks keep declared repository, site, chart, and package metadata aligned with `positioning.yml`.
 - New server container releases include OCI build provenance and SPDX SBOM attestations.
+- The documentation site builds before repository publication and deploys to Pages only from public `master`; a manual trigger supports the first deployment after IaC provisioning.
 
 ### Fixed
 
