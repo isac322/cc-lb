@@ -28,8 +28,8 @@ not need allocator boilerplate.
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-pdk-wasmtime = "0.1"
-cc-lb-plugin-wire = "0.8"
+cc-lb-pdk-wasmtime = "0.2"
+cc-lb-plugin-wire = "0.9"
 ```
 
 Do not declare another global allocator in the same plugin unless you intend to
