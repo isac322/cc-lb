@@ -1,0 +1,17 @@
+# cc-lb
+
+> Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.
+
+## Start here
+
+- [Documentation home](https://cc-lb.bhyoo.com/docs/)
+- [Getting started](https://cc-lb.bhyoo.com/docs/getting-started/)
+- [Concepts](https://cc-lb.bhyoo.com/docs/concepts/)
+- [Operations](https://cc-lb.bhyoo.com/docs/operations/)
+- [Reference](https://cc-lb.bhyoo.com/docs/reference/)
+- [Plugins](https://cc-lb.bhyoo.com/docs/plugins/)
+- [Trust and scope](https://cc-lb.bhyoo.com/docs/trust/)
+
+## Supported scope
+
+The current public contract covers Anthropic API-key and Anthropic OAuth upstreams. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.

@@ -4,11 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The website now presents setup and runtime control in one operator-focused flow, with GitHub star links and a dismissible support notice.
+- The admin sidebar now includes a "Star on GitHub" link in expanded, collapsed, and mobile navigation.
+- Contribution and support guides, structured issue forms, and a pull request checklist define the public contribution and documentation-parity workflow.
+- Default-branch builds and a weekly GitHub-hosted workflow run OpenSSF Scorecard analysis.
+- Public metadata sync and CI checks keep declared repository, site, chart, and package metadata aligned with `positioning.yml`.
+- New server container releases include OCI build provenance and SPDX SBOM attestations.
+- The documentation site builds before repository publication and deploys to Pages only from public `master`; a manual trigger supports the first deployment after IaC provisioning.
+
 ### Fixed
 
+- The plugin author guide now uses the published 0.8 wire dependency required by the compatible Wasmtime PDK.
+- Installation descriptions and supported upstream, storage, and plugin details are readable in the website's light theme.
+- The plugin guides and SDK READMEs now show an accept-all filter that retains every input candidate, and document that omitted candidates are rejected.
+- The warm-up emergency-stop guide now separates SQLite and PostgreSQL timestamp expressions.
 - Terminal OpenTelemetry attributes are recorded in one subscriber update per span to reduce synchronous request-completion work. Attribute values, missing timings, measured zeros, and usage completeness are unchanged.
 - OTLP transport runs on a dedicated runtime when configured, keeping exporter HTTP/2 work off proxy workers; terminal and stream telemetry attributes now use numeric OTLP values for representable integers while preserving exact overflow strings.
-- Updated Wasmtime to 48.0.4 to address RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327 without suppressing the security check.
+- Wasmtime now uses the 48.0.5 security patch for RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327.
+- The Apache-2.0 license text includes the canonical sentence preserving separate contribution agreements.
 
 ## [1.0.1] - 2026-10-02
 

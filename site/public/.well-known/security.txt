@@ -1,0 +1,5 @@
+Contact: https://github.com/isac322/cc-lb/security/advisories/new
+Expires: 2027-09-29T00:00:00Z
+Policy: https://cc-lb.bhyoo.com/docs/trust/security/
+Preferred-Languages: en
+Canonical: https://cc-lb.bhyoo.com/.well-known/security.txt

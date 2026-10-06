@@ -1,0 +1,275 @@
+# positioning.yml — single source of truth for positioning. Schema: isac-positioning.
+# Repository evidence resolves at meta.pinned_commit, including historical docs.
+# Owner-confirmed facts and external sources are attributed inline.
+# Site routes are working-tree destinations, not artifacts at the pinned commit.
+meta:
+  schema: 1
+  version: 1.0.0
+  pinned_commit: 2084cbf3fa959dacfc45f03279b73818d79936e6
+  updated: 2026-09-30
+
+identity:
+  name: cc-lb
+  qualifier: for Claude Code
+  repo: isac322/cc-lb
+  homepage: https://cc-lb.bhyoo.com/
+  license: Apache-2.0
+  languages: [en]
+  goal: users
+  fixed_brand_parts: [let-gate mark, wordmark, Graphite palette]
+  legacy_pages: replace
+  evidence:
+    name: owner confirmation
+    repo: Cargo.toml:1-30
+    license: Cargo.toml:28
+
+category:
+  premise: A self-hosted Anthropic-compatible reverse proxy and load balancer for pooling API-key and OAuth upstreams.
+  tagline: Anthropic-compatible load balancer for Claude Code
+  one_liner: Helps platform teams pool Anthropic API-key and OAuth upstreams while preserving session cache continuity and quota control.
+  about_description: Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.
+  meta_description: Self-hosted Anthropic-compatible reverse proxy and load balancer for API-key and OAuth upstreams, with cache keepalive, quota pacing, and Wasmtime plugins.
+  registry_description:
+    default: Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.
+  evidence:
+    premise: crates/cc-lb-domain/src/upstream.rs:7-27; crates/cc-lb-routing/src/lib.rs:1-12
+    tagline: assets/brand/README.md:3-6
+    one_liner: crates/cc-lb-domain/src/upstream.rs:19-27; crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30; crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40
+    about_description: crates/cc-lb-domain/src/upstream.rs:19-27; docs/runtime-management.md:1-25
+    meta_description: crates/cc-lb-domain/src/upstream.rs:19-27; crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30; crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40; Cargo.toml:41-48; crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60
+
+audience:
+  primary: Self-hosting platform engineers and tech leads operating Anthropic-compatible traffic.
+  secondary:
+    - Rust engineers authoring Wasmtime filter and shape plugins
+  jobs_to_be_done:
+    - When multiple Anthropic accounts hit rolling limits, I want one managed endpoint with explicit upstream and principal control, so I can operate a shared team gateway.
+    - When agent tool loops evict prompt-cache prefixes, I want best-effort keepalive scheduling, so active sessions can preserve cache continuity.
+    - When pooled accounts drain unevenly, I want cost-first and weekly-pace-aware routing, so quota pressure is managed deterministically.
+    - When runtime configuration changes, I want database-backed management and dynamic view rebinding, so I can update operations without rebuilding the binary.
+    - When I need custom routing or payload shaping, I want a published Wasmtime PDK and conformance path, so I can extend filter and shape hooks without changing core proxy code.
+  surface_priorities:
+    landing: category and first executable path before architecture depth
+    readme: install contract and supported scope within 60 seconds
+    registry: published crate purpose, hook slots, and docs links
+    docs: operator lifecycle first, plugin author path second
+  visitor_model:
+    - source: github-readme
+      who: Self-hosting DevOps engineer or tech lead sharing Anthropic accounts across a team.
+      questions_60s: ["What does cc-lb do?", "Does it fit my Anthropic-compatible setup?", "How do I run it?"]
+      first_action: Run the Quick Start command after setting required secrets.
+      landing_page: /docs/getting-started/
+    - source: search-problem
+      who: Platform engineer searching for Anthropic proxy, Claude Code account pooling, or prompt-cache preservation.
+      questions_60s: ["Can it pool API-key and OAuth upstreams?", "What happens to cache continuity?", "Does it require Kubernetes?"]
+      first_action: Read the mechanism proof section and choose binary, container, or Helm install.
+      landing_page: /
+    - source: registry
+      who: Rust developer evaluating the published PDK or wire/runtime crates.
+      questions_60s: ["Which crates are public?", "What slots can a plugin implement?", "How is conformance checked?"]
+      first_action: Open the plugin author guide.
+      landing_page: /docs/plugins/
+    - source: docs-deeplink
+      who: Operator configuring runtime management, storage, authentication, or metrics.
+      questions_60s: ["Which admin endpoints exist?", "What must be authenticated?", "What metrics distinguish stream outcomes?"]
+      first_action: Open the runtime management and reference pages.
+      landing_page: /docs/operations/
+  evidence:
+    primary: crates/cc-lb-domain/src/upstream.rs:19-27; docs/runtime-management.md:1-25
+    cache: crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30; docs/adr/0004-cache-keepalive-scheduler.md:1-25
+    quota: crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40; docs/adr/0010-cost-first-deterministic-subscription-selection.md
+    runtime: docs/runtime-management.md:1-30
+    plugins: Cargo.toml:41-48; crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60
+
+selling_points:
+  - id: SP1
+    headline: Pool Anthropic upstream accounts
+    benefit: Route Anthropic Messages API traffic through managed API-key and OAuth upstreams.
+    mechanism: The routing contract exposes Anthropic API-key and Anthropic OAuth upstream kinds and selects candidates for the proxy path.
+    evidence: ["crates/cc-lb-domain/src/upstream.rs:19-27", "crates/cc-lb-routing/src/lib.rs:1-12"]
+    proof_page: /docs/concepts/upstreams/
+    status: shipped
+  - id: SP2
+    headline: Preserve active session cache continuity
+    benefit: Reduce avoidable prompt-cache eviction during active agent sessions.
+    mechanism: A background classifier and scheduler can issue best-effort keepalive requests before configured cache TTLs expire; this is not a cache-hit guarantee.
+    evidence: ["crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30", "docs/adr/0004-cache-keepalive-scheduler.md:72-95"]
+    proof_page: /docs/concepts/prompt-cache/
+    status: shipped
+  - id: SP3
+    headline: Pace quota across rolling windows
+    benefit: Balance pooled account pressure using cost-first selection and weekly pace constraints.
+    mechanism: The subscription preference filter compares candidate cost/pressure and applies deterministic weekly pacing decisions; internal thresholds remain operational details.
+    evidence: ["crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40", "docs/adr/0010-cost-first-deterministic-subscription-selection.md", "docs/adr/0013-weekly-pace-gate-for-five-hour-pressure.md"]
+    proof_page: /docs/concepts/quota-routing/
+    status: shipped
+  - id: SP4
+    headline: Extend the proxy with Wasmtime hooks
+    benefit: Add custom request filtering and request/response/SSE shaping without editing the core proxy.
+    mechanism: Published PDK and runtime crates expose filter and shape slots over the versioned rkyv wire contract and run guests in Wasmtime 48.
+    evidence: ["Cargo.toml:41-48", "crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60"]
+    proof_page: /docs/plugins/
+    status: shipped
+  - id: SP5
+    headline: Manage runtime state from the database
+    benefit: Update upstreams, principals, keys, and plugin chains through the admin surface without rebuilding the binary.
+    mechanism: Operational entities are stored in the database and compiled into a dynamic view that can be rebound at runtime.
+    evidence: ["docs/runtime-management.md:1-30", "crates/cc-lb-server/src/dynamic_view_builder.rs:1-60"]
+    proof_page: /docs/operations/runtime-management/
+    status: shipped
+
+evidence:
+  counts:
+    - key: published_contract_crates
+      value: 5
+      source: release-plz.toml:15-38
+      shown_on: [/docs/plugins/]
+  validation:
+    - claim: supports the published filter and shape plugin contract
+      scope: local source and published crate contract
+      proof_page: /docs/plugins/
+    - claim: used internally with 10 connected accounts
+      scope: owner-confirmed internal deployment, not an independently audited public metric
+      proof_page: /docs/trust/
+  proof_inventory:
+    claimable:
+      - Anthropic API-key and OAuth upstream kinds — crates/cc-lb-domain/src/upstream.rs:19-27
+      - Best-effort prompt-cache keepalive scheduler — crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30
+      - Cost-first subscription preference routing — crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40
+      - Filter and shape Wasmtime plugin runtime — crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60
+      - Database-backed runtime management — docs/runtime-management.md:1-30
+      - Internal deployment with 10 connected accounts — owner confirmation
+    not_claimable:
+      - Universal multi-provider gateway — removed providers are outside the current UpstreamKind contract
+      - 100% cache-hit or zero-overhead guarantee — scheduler is best effort
+      - Enterprise HA, SLA, global scale, or battle-tested maturity — no public evidence at that scope
+      - Official Anthropic/Claude partnership or certification — no such relationship is evidenced
+  demo_only_we_can_show: A reproducible local operator flow from secret setup through authenticated upstream creation, first request, and the admin view, with no secret values rendered.
+
+anti_claims:
+  - never_say: Official Anthropic, Claude, or Claude Code proxy, partner, or certified integration
+    because: cc-lb is an independent project with no evidenced endorsement, partnership, or certification.
+    evidence: assets/brand/README.md:3-6
+  - never_say: Universal multi-provider LLM gateway
+    because: the current upstream contract is Anthropic API-key and Anthropic OAuth only; removed Bedrock/Vertex/OpenAI claims are stale.
+    evidence: crates/cc-lb-domain/src/upstream.rs:19-27; CHANGELOG.md:36
+  - never_say: Zero-config, instant drop-in replacement
+    because: startup requires secrets, admin authentication, database state, upstreams, principals, and proxy keys.
+    evidence: README.md:12-29; docs/runtime-management.md:1-25
+  - never_say: Guaranteed 100% prompt-cache hits or zero-overhead keepalive
+    because: keepalive is best effort and bounded by scheduler/classifier behavior.
+    evidence: crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30; docs/adr/0004-cache-keepalive-scheduler.md:72-95
+  - never_say: Enterprise-grade HA, 99.999% SLA, or global multi-region clustering
+    because: the owner-confirmed maturity evidence is bounded to internal use with 10 connected accounts.
+    evidence: owner confirmation; docs/scheduler.md:1-30
+
+cliches:
+  - dark neon mesh gradients
+  - glowing particle networks
+  - isometric gateway cubes
+  - generic universal AI gateway language
+  - unverified benchmark or customer-logo bands
+  - zero-config and blazing-fast hyperbole
+
+maturity:
+  real_usage: Owner-confirmed internal company deployment with 10 connected accounts as of 2026-09-30.
+  api_stage: 1.0.0
+  surfaces:
+    site: State bounded internal operational use only; do not imply independent customer validation, SLA, or enterprise certification.
+    readme: Show the installable 1.0.0 contract and optionally the owner-attributed internal deployment note.
+    registry: Describe shipped crates and supported hooks; omit internal deployment counts from package summaries.
+  banned_hedges: [experimental, preliminary, not production]
+  banned_overclaims: [production-grade, battle-tested, enterprise-grade, highly available, 99.999% SLA, global multi-region]
+
+planned: []
+baseline:
+  name: Direct Anthropic Messages API endpoint without pooled upstream management
+  documented_limits:
+    - limit: The direct API endpoint does not provide cc-lb's database-backed upstream/principal management or its routing/plugin layer.
+      source: https://docs.anthropic.com/en/api/messages
+      checked_on: 2026-09-30
+comparison_pages:
+  enabled: false
+  pages: []
+predecessors: []
+
+keywords:
+  primary: [anthropic-compatible proxy, self-hosted Anthropic proxy, Claude Code load balancer]
+  secondary: [Anthropic OAuth proxy, prompt cache keepalive, quota-aware routing, Rust reverse proxy, Wasmtime proxy plugins]
+  long_tail: [pool Claude Code accounts self hosted, Anthropic API key and OAuth routing, Anthropic prompt cache proxy, cc-lb Wasmtime plugin]
+  github_topics: [anthropic, reverse-proxy, load-balancer, rust, wasmtime]
+  registry_keywords:
+    default: [anthropic, reverse-proxy, load-balancer, rust, wasmtime]
+
+intent_map:
+  - cluster: problem
+    stage: problem
+    queries: [Anthropic proxy prompt cache, Claude Code account pooling, Anthropic quota routing]
+    signals: ["docs/adr/0004-cache-keepalive-scheduler.md:72-95", "docs/adr/0013-weekly-pace-gate-for-five-hour-pressure.md"]
+    canonical_page: /docs/concepts/
+    title: "Anthropic proxy concepts: cache continuity and quota pacing"
+    h1: Understand cache continuity and quota pacing
+    meta: Learn how cc-lb manages Anthropic-compatible upstreams, best-effort prompt-cache keepalive, and deterministic quota pacing.
+  - cluster: solution
+    stage: solution
+    queries: [self-hosted Anthropic-compatible proxy, Claude Code load balancer, Rust Anthropic reverse proxy]
+    signals: ["crates/cc-lb-domain/src/upstream.rs:19-27", "docs/runtime-management.md:1-25"]
+    canonical_page: /docs/getting-started/
+    title: Run a self-hosted Anthropic-compatible proxy
+    h1: Run cc-lb as a self-hosted Anthropic-compatible proxy
+    meta: Install cc-lb, configure authenticated upstreams, and route Anthropic-compatible requests through one operator-managed endpoint.
+  - cluster: product
+    stage: product
+    queries: [cc-lb install, cc-lb runtime management, cc-lb Wasmtime plugin]
+    signals: ["docs/runtime-management.md:1-30", "crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60"]
+    canonical_page: /docs/
+    title: cc-lb documentation and plugin runtime
+    h1: Operate and extend cc-lb
+    meta: Explore cc-lb installation, runtime management, metrics, and the Wasmtime filter and shape plugin contract.
+  - cluster: evaluation
+    stage: evaluation
+    queries: [Anthropic proxy alternative, self-hosted Claude Code gateway]
+    signals: ["docs/adr/0010-cost-first-deterministic-subscription-selection.md", "docs/adr/0013-weekly-pace-gate-for-five-hour-pressure.md"]
+    canonical_page: /docs/concepts/
+    title: Evaluate cc-lb's operator-controlled routing model
+    h1: Evaluate the routing and extension model
+    meta: Review cc-lb's bounded Anthropic scope, quota routing, cache keepalive, runtime management, and plugin extension points.
+
+third_party_marks:
+  - mark: Anthropic
+    owner: Anthropic
+    guideline_url: https://www.anthropic.com/
+    first_use_symbol: none
+    referential_form: cc-lb for Anthropic-compatible traffic
+    forbidden: [possessive wording, official or certified wording, logo, Anthropic brand colors, meta keywords]
+    footer: cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
+  - mark: Claude Code
+    owner: Anthropic
+    guideline_url: https://code.claude.com/docs/en/overview
+    first_use_symbol: none
+    referential_form: for Claude Code
+    forbidden: [possessive wording, official or certified wording, logo, brand colors, meta keywords]
+    footer: Claude Code and Anthropic are trademarks of Anthropic. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
+
+objections:
+  - question: Why not use a direct Anthropic endpoint per account?
+    answer: cc-lb centralizes upstream, principal, key, quota, cache-keepalive, and extension management for a self-hosted operator; it does not replace Anthropic's service.
+    evidence: ["docs/runtime-management.md:1-30", "crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30", "crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40"]
+    source_threads: []
+  - question: Does cc-lb support every major LLM provider?
+    answer: No. The current supported upstream kinds are Anthropic API key and Anthropic OAuth; removed provider claims are not part of the public contract.
+    evidence: ["crates/cc-lb-domain/src/upstream.rs:19-27", "CHANGELOG.md:36"]
+    source_threads: []
+
+brand:
+  guide: assets/brand/README.md
+  assets:
+    mark: assets/brand/mark/
+    lockups: assets/brand/lockup/
+    social_preview: assets/brand/social/cc-lb-social-preview.png
+    readme_hero: assets/brand/readme/
+    favicon: assets/brand/favicon/
+  palette:
+    source: assets/brand/README.md:30-44
+    rule: Graphite, flat-only, no gradients/glows/shadows/noise
+  social_preview: assets/brand/social/cc-lb-social-preview.png

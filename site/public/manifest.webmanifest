@@ -1,0 +1,22 @@
+{
+  "name": "cc-lb",
+  "short_name": "cc-lb",
+  "description": "Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#161719",
+  "theme_color": "#161719",
+  "icons": [
+    {
+      "src": "/brand/app-icon/cc-lb-app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/brand/app-icon/cc-lb-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

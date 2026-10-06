@@ -1,0 +1,43 @@
+name: scorecard
+
+# OpenSSF Scorecard supply-chain analysis. Runs only on trusted default-branch
+# pushes and a weekly schedule, on GitHub-hosted runners, so it never touches
+# the self-hosted pool or private build infrastructure. Results go to code
+# scanning (SARIF) and the public Scorecard API (publish_results).
+
+on:
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: '30 5 * * 1'
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: scorecard analysis
+    if: github.event.repository.private == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Upload SARIF results to code scanning.
+      security-events: write
+      # Publish results to the Scorecard API through GitHub OIDC.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard analysis
+        uses: ossf/scorecard-action@v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload results to code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif

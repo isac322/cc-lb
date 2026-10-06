@@ -1,0 +1,40 @@
+name: Feature request
+description: Describe an operator or plugin-author problem and a possible improvement
+title: "[Feature] "
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What are you trying to do, and what is blocked today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest behavior that would solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and constraints
+      description: Current workarounds, compatibility constraints, or relevant docs.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Examples or links. Do not include credentials or private data.
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did you hear about cc-lb?
+      options:
+        - GitHub
+        - Search engine
+        - crates.io or docs.rs
+        - Documentation site
+        - Colleague or friend
+        - Social media or forum
+        - Other

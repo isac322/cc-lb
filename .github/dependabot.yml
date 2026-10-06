@@ -6,8 +6,8 @@
 #   - Root Cargo workspace (covers crates/*, benches/*, tests/* members listed
 #     in the root Cargo.toml [workspace] block)
 #   - Fuzz workspace (excluded from the root workspace, so registered separately)
-#   - Bun-based admin web app (uses bun.lock; officially supported by Dependabot
-#     as of 2025-02-13 via package-ecosystem: "bun")
+#   - Bun-based admin web app and documentation site (uses bun.lock; officially
+#     supported by Dependabot as of 2025-02-13 via package-ecosystem: "bun")
 #   - ARC runner image at .github/runner-image/Dockerfile
 
 version: 2
@@ -176,3 +176,16 @@ updates:
       # `vitest run --maxWorkers=1 --no-file-parallelism`; 30.0.1 is clean.
       - dependency-name: "jsdom"
         versions: ["30.1.0"]
+
+  - package-ecosystem: "bun"
+    directory: "/site"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
+    groups:
+      site:
+        patterns:
+          - "*"

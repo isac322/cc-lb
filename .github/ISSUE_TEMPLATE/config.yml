@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://cc-lb.bhyoo.com/docs/
+    about: Installation, runtime management, routing concepts, and plugin authoring.
+  - name: Questions and discussion
+    url: https://github.com/isac322/cc-lb/discussions
+    about: Ask how-to questions and share setups that are not bug reports.
+  - name: Report a security vulnerability
+    url: https://github.com/isac322/cc-lb/security/advisories/new
+    about: Report vulnerabilities privately. Do not open a public issue.

@@ -29,7 +29,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cc-lb-pdk-wasmtime = "0.1"
-cc-lb-plugin-wire = "0.6"
+cc-lb-plugin-wire = "0.8"
 ```
 
 Do not declare another global allocator in the same plugin unless you intend to
@@ -53,8 +53,14 @@ Application code usually imports the macros and wire types, not the private
 dispatch helpers.
 
 ```rust
+#![cfg_attr(target_arch = "wasm32", no_std)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -71,28 +77,32 @@ mod accept_all {
         description = "Accepts all candidates.",
         usage = "No configuration required.",
     )]
-    pub fn filter(_req: FilterRequest) -> FilterResponse {
-        FilterResponse { results: Box::from([]) }
+    pub fn filter(req: FilterRequest) -> FilterResponse {
+        let results = req
+            .candidates
+            .into_vec()
+            .into_iter()
+            .map(|candidate| PerCandidateReason {
+                upstream_id: candidate.upstream_id,
+                decision: Box::from("accept"),
+                reason: Box::from(""),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        FilterResponse { results }
     }
 }
 ```
 
-Filter handlers receive the requested service tier on the V1 request:
+The host keeps a candidate only when `decision` is `"accept"`. Every candidate
+absent from `results` is rejected, so an empty `results` rejects the whole set.
 
-```rust
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
-
-#[handler(
-    filter,
-    wire = 1,
-    description = "Uses the requested service tier.",
-    usage = "Attach to tier-aware filter chains.",
-)]
-pub fn filter(request: FilterRequest) -> FilterResponse {
-    let _ = request.service_tier;
-    FilterResponse { results: Box::from([]) }
-}
-```
+Filter handlers also receive the requested service tier on the V1 request as
+`FilterRequest.service_tier`, an `Option<Box<str>>`. `service_tier` is the
+optional tier requested in the inbound request body; a pre-request filter
+cannot observe the tier ultimately reported by an upstream response. For a
+tier-aware filter handler, see the filter example in the [plugin author
+guide](https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md#hook-contracts).
 
 ## Links
 

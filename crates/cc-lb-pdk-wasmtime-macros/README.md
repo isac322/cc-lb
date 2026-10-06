@@ -10,19 +10,8 @@ use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
 
 ## `#[cc_lb_plugin]`
 
-Annotate one inline module with plugin metadata:
-
-```rust
-#[cc_lb_plugin(
-    name = "cache-aware",
-    version = "0.1.0",
-    description = "Routes requests by cache affinity.",
-    usage = "Attach to a router filter chain.",
-)]
-mod cache_aware {
-    // handlers live here
-}
-```
+Annotate one inline module with the plugin's name, version, description, and
+usage text. The complete `accept-all` example below includes this metadata.
 
 The macro emits allocator exports, one hook export per handler, one
 `cc_lb.schema.<hook>.vN` custom section per handler, and the consolidated
@@ -31,19 +20,7 @@ The macro emits allocator exports, one hook export per handler, one
 ## `#[handler]`
 
 Annotate each hook function with a hook kind, wire version, description, and
-usage text:
-
-```rust
-#[handler(
-    filter,
-    wire = 1,
-    description = "Keeps cache-compatible upstreams.",
-    usage = "Requires candidate cache metadata from the host.",
-)]
-pub fn filter(req: FilterRequest) -> FilterResponse {
-    // plugin logic
-}
-```
+usage text inside the plugin module, as shown in the complete example below.
 
 Supported hook kinds are `filter` and `shape`, plus the shape-owned
 response-transform hooks. The PDK accepts `wire = 1` for every hook. Add `view`
@@ -58,8 +35,9 @@ owned request.
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use cc_lb_pdk_wasmtime::{cc_lb_plugin, handler};
-use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse};
+use cc_lb_plugin_wire::v1::{FilterRequest, FilterResponse, PerCandidateReason};
 
 #[cc_lb_plugin(
     name = "accept-all",
@@ -76,8 +54,19 @@ mod accept_all {
         description = "Accepts all candidates.",
         usage = "No configuration required.",
     )]
-    pub fn filter(_req: FilterRequest) -> FilterResponse {
-        FilterResponse { results: Box::from([]) }
+    pub fn filter(req: FilterRequest) -> FilterResponse {
+        let results = req
+            .candidates
+            .into_vec()
+            .into_iter()
+            .map(|candidate| PerCandidateReason {
+                upstream_id: candidate.upstream_id,
+                decision: Box::from("accept"),
+                reason: Box::from(""),
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        FilterResponse { results }
     }
 }
 ```

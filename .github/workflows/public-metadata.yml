@@ -1,0 +1,35 @@
+name: public-metadata
+
+# Verifies that declared public metadata fields (About description, homepage,
+# license, repository links, registry keywords, brand references) stay in sync
+# with positioning.yml, the single source of truth. Runs on every PR and push:
+# driftable surfaces include Cargo.toml, deploy/helm, README, and site/public,
+# which the ci.yml docs-only path ignores and site-pages.yml path filters do
+# not cover. The check is read-only (bun scripts/public-metadata.mjs --check)
+# and never calls remote APIs; apply `bun scripts/public-metadata.mjs`
+# locally to repair syncable fields.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: positioning metadata parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Check public metadata parity
+        run: bun scripts/public-metadata.mjs --check

@@ -17,6 +17,8 @@ In multi-replica deployments, replicas synchronize their local views using Postg
 
 Administrative operations use the providers configured in `admin.auth.providers`. A static-token provider accepts its environment-backed Bearer token in the `Authorization` header.
 
+The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the examples below. Proxy traffic uses a separate listener on port 8080 (`http://localhost:8080/v1/messages`).
+
 ### Local proxy key files
 
 If an operator keeps a local proxy client key file such as `~/.config/cc-lb/proxy-key`, treat it as a client-side cache of the plaintext key returned once by `POST /admin/v1/principals/{id}/keys`. Rotating a managed key is a two-step lifecycle: issue the replacement key, update the local key file atomically with mode `0600`, verify the proxy request path with the new key, then revoke the old key through the admin API. The server never rewrites operator key files automatically.
@@ -43,6 +45,8 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "api_key_env": "ANTHROPIC_API_KEY"
 }
 ```
+
+`api_key_env` names a variable in the server process's environment. The example uses `ANTHROPIC_API_KEY`, which must be set before creating the upstream. The API reads its value and encrypts the credential for database storage; the variable name is not stored as a live secret reference. You can alternatively supply `api_key_value`, but supplying both fields returns `conflicting_api_key`. Keep literal credentials out of saved commands and source control.
 
 #### UpstreamResponse
 
@@ -83,8 +87,8 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 ```json
 {
   "name": "principal-name",
-  "kind": "user",
-  "allowed_models": ["claude-3-5-sonnet-20241022"],
+  "kind": "machine",
+  "allowed_models": ["claude-sonnet-4-5-20250929"],
   "default_limits": [],
   "cache_keepalive": {
     "enabled": true,
@@ -115,10 +119,10 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
 {
   "id": "<PRINCIPAL_ID>",
   "name": "principal-name",
-  "kind": "user",
+  "kind": "machine",
   "enabled": true,
   "revision": 1,
-  "allowed_models": ["claude-3-5-sonnet-20241022"],
+  "allowed_models": ["claude-sonnet-4-5-20250929"],
   "default_limits": [],
   "cache_keepalive": null
 }
@@ -180,7 +184,7 @@ The OAuth subscription flow allows upstreams to authenticate dynamically using O
 1. Create an OAuth upstream:
 
 ```bash
-curl -X POST http://localhost:8001/admin/v1/upstreams \
+curl -X POST http://[::1]:9090/admin/v1/upstreams \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -192,7 +196,7 @@ curl -X POST http://localhost:8001/admin/v1/upstreams \
 2. Start the OAuth flow:
 
 ```bash
-curl -X POST http://localhost:8001/admin/v1/upstreams/<UPSTREAM_ID>/oauth/start \
+curl -X POST http://[::1]:9090/admin/v1/upstreams/<UPSTREAM_ID>/oauth/start \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{}'
@@ -212,7 +216,7 @@ The request body is an empty object; `POST /admin/v1/oauth/draft/start` takes th
 4. Complete the OAuth flow:
 
 ```bash
-curl -X POST http://localhost:8001/admin/v1/upstreams/<UPSTREAM_ID>/oauth/complete \
+curl -X POST http://[::1]:9090/admin/v1/upstreams/<UPSTREAM_ID>/oauth/complete \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -267,7 +271,7 @@ You upload Wasm plugins via a multipart POST request to `/admin/v1/plugins/wasm`
 1. Send a multipart request containing the Wasm binary:
 
 ```bash
-curl -X POST http://localhost:8001/admin/v1/plugins/wasm \
+curl -X POST http://[::1]:9090/admin/v1/plugins/wasm \
   -H "Authorization: Bearer <TOKEN>" \
   -F "original_filename=plugin.wasm" \
   -F "bytes=@path/to/plugin.wasm"

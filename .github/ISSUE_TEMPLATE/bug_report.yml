@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a reproducible problem in cc-lb
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, tokens, proxy keys, and private data from everything you paste. Report security vulnerabilities through [SECURITY.md](https://github.com/isac322/cc-lb/blob/master/.github/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: cc-lb version or commit
+      description: Run `cc-lb --version`, or give the image tag or commit SHA.
+      placeholder: "1.0.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      options:
+        - Source build (binary)
+        - Published container image
+        - Helm chart
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Operating system and architecture
+      placeholder: "Ubuntu 24.04, x86_64"
+    validations:
+      required: true
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      options:
+        - SQLite
+        - PostgreSQL
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Start from a known state and list each command or request.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the status code, error message, or metric that shows the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and evidence
+      description: Relevant redacted logs, requests, or screenshots.
+      render: text
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did you hear about cc-lb?
+      options:
+        - GitHub
+        - Search engine
+        - crates.io or docs.rs
+        - Documentation site
+        - Colleague or friend
+        - Social media or forum
+        - Other
