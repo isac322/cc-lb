@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.2.4...cc-lb-plugin-conformance-v0.3.0) - 2026-10-06
+
+### Added
+
+- *(site)* add operator documentation and GitHub support links ([#904](https://github.com/isac322/cc-lb/pull/904))
+
+### Other
+
+- [**breaking**] remove legacy compatibility code, fallbacks, and dead schema ([#890](https://github.com/isac322/cc-lb/pull/890))
+- *(plugins)* [**breaking**] remove the observability hook plugin slot ([#885](https://github.com/isac322/cc-lb/pull/885))
+
 ### Breaking
 
 - Remove `conformance_engine_config` (and its prelude re-export). `ConformanceSuite` now defaults to `HotEngineConfig::default()`, which raises the plugin memory ceiling from 1024 pages (64 MiB) to 2048 pages (128 MiB) to match production.

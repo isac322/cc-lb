@@ -38,11 +38,11 @@ cc-lb-upstream = { path = "crates/cc-lb-upstream", version = "1.0.1" }
 
 # Internal, unpublished — RFC-0002 lifecycle transport.
 cc-lb-control = { path = "crates/cc-lb-control", version = "1.0.1" }
-cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.1.4" }
-cc-lb-plugin-wire = { version = "0.8", path = "crates/cc-lb-plugin-wire" }
-cc-lb-pdk-wasmtime = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime" }
-cc-lb-pdk-wasmtime-macros = { version = "0.1", path = "crates/cc-lb-pdk-wasmtime-macros" }
-cc-lb-plugin-conformance = { version = "0.2", path = "crates/cc-lb-plugin-conformance" }
+cc-lb-runtime-wasmtime    = { path = "crates/cc-lb-runtime-wasmtime", version = "0.2.0" }
+cc-lb-plugin-wire = { version = "0.9", path = "crates/cc-lb-plugin-wire" }
+cc-lb-pdk-wasmtime = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime" }
+cc-lb-pdk-wasmtime-macros = { version = "0.2", path = "crates/cc-lb-pdk-wasmtime-macros" }
+cc-lb-plugin-conformance = { version = "0.3", path = "crates/cc-lb-plugin-conformance" }
 
 wasmtime  = "48"
 rkyv      = { version = "0.8", default-features = false }
