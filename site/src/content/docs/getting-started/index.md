@@ -11,7 +11,7 @@ cc-lb puts a self-hosted Anthropic-compatible endpoint in front of pooled API-ke
 | Path | Use it when | Artifact |
 | --- | --- | --- |
 | [Build the binary](#build-the-binary) | You own the host toolchain and want a local release build. | `target/release/cc-lb` |
-| [Run the published container](#run-the-published-container) | You want the packaged server with no Rust checkout on the host. | `ghcr.io/isac322/cc-lb:1.0.0` |
+| [Run the published container](#run-the-published-container) | You want the packaged server with no Rust checkout on the host. | `ghcr.io/isac322/cc-lb:1.0.1` |
 
 Both paths need an Anthropic API key or Anthropic OAuth account for an upstream, an admin token, a master key for encrypted credentials, and durable storage.
 
@@ -124,7 +124,7 @@ docker run --rm --name cc-lb \
   -p 9091:9091 \
   -v "$PWD/cc-lb.container.toml:/etc/cc-lb/cc-lb.toml:ro" \
   -v "$PWD/data:/var/lib/cc-lb" \
-  ghcr.io/isac322/cc-lb:1.0.0
+  ghcr.io/isac322/cc-lb:1.0.1
 ```
 
 The container exposes the proxy, admin, and metrics listeners. Keep the admin and metrics ports on a private network when the container is not running only on a local host.
