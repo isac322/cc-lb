@@ -12,7 +12,7 @@ fingerprint drift before uploading the wasm artifact.
 
 ```toml
 [dev-dependencies]
-cc-lb-plugin-conformance = "0.2"
+cc-lb-plugin-conformance = "0.3"
 ```
 
 Build the plugin for `wasm32-unknown-unknown` before running the test:

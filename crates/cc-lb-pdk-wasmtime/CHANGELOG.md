@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-pdk-wasmtime-v0.1.2...cc-lb-pdk-wasmtime-v0.2.0) - 2026-10-06
+
+### Added
+
+- *(site)* add operator documentation and GitHub support links ([#904](https://github.com/isac322/cc-lb/pull/904))
+
+### Other
+
+- [**breaking**] remove legacy compatibility code, fallbacks, and dead schema ([#890](https://github.com/isac322/cc-lb/pull/890))
+- *(plugins)* [**breaking**] remove the observability hook plugin slot ([#885](https://github.com/isac322/cc-lb/pull/885))
+
 ### Breaking
 
 - Remove the `WireSchema` derive re-export. Hook wire types get their fingerprints from `cc-lb-plugin-wire`.

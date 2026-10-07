@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/isac322/cc-lb/compare/cc-lb-runtime-wasmtime-v0.1.4...cc-lb-runtime-wasmtime-v0.2.0) - 2026-10-06
+
+### Added
+
+- *(site)* add operator documentation and GitHub support links ([#904](https://github.com/isac322/cc-lb/pull/904))
+
+### Other
+
+- [**breaking**] remove legacy compatibility code, fallbacks, and dead schema ([#890](https://github.com/isac322/cc-lb/pull/890))
+- *(plugins)* [**breaking**] remove the observability hook plugin slot ([#885](https://github.com/isac322/cc-lb/pull/885))
+- *(config)* make database entities the sole runtime source ([#789](https://github.com/isac322/cc-lb/pull/789))
+- reduce redundant build work ([#627](https://github.com/isac322/cc-lb/pull/627))
+
 ### Breaking
 
 - Remove `PluginCell::version_id`; hot-swap identity is `content_hash` plus `ArcSwap` pointer identity.
