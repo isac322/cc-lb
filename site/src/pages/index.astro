@@ -270,7 +270,7 @@ cargo build --release -p cc-lb-server
           <article class="install-option">
             <div class="option-header">
               <h3>Run the image</h3>
-              <span class="option-meta">GHCR · 1.0.0</span>
+              <span class="option-meta">GHCR · 1.0.1</span>
             </div>
             <p>Run the published multi-architecture image and mount your config and durable data.</p>
             <pre><code>docker run --rm --name cc-lb \
@@ -279,7 +279,7 @@ cargo build --release -p cc-lb-server
   -p 8080:8080 -p 9090:9090 \
   -v "$PWD/cc-lb.container.toml:/etc/cc-lb/cc-lb.toml:ro" \
   -v "$PWD/data:/var/lib/cc-lb" \
-  ghcr.io/isac322/cc-lb:1.0.0</code></pre>
+  ghcr.io/isac322/cc-lb:1.0.1</code></pre>
             <a class="text-link" href="/docs/getting-started/#run-the-published-container">Read container setup</a>
           </article>
         </div>
