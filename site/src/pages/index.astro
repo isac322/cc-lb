@@ -1,8 +1,47 @@
 ---
+import { Image } from 'astro:assets';
+import accessStill from '../../../assets/media/access.png';
+import logsStill from '../../../assets/media/logs.png';
+import principalDetailStill from '../../../assets/media/principal-detail.png';
+import upstreamsStill from '../../../assets/media/upstreams.png';
+import usageStill from '../../../assets/media/usage.png';
+
 const siteUrl = 'https://cc-lb.bhyoo.com';
 const title = 'cc-lb | Anthropic-compatible load balancer for Claude Code';
 const description =
   'Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.';
+const stills = [
+  {
+    file: 'usage.png',
+    image: usageStill,
+    label: 'Overview',
+    alt: 'cc-lb Overview screen with pool quota usage, traffic, cost, and top principals.',
+  },
+  {
+    file: 'upstreams.png',
+    image: upstreamsStill,
+    label: 'Upstreams',
+    alt: 'cc-lb Upstreams screen showing the paid-api-fallback API-key upstream with usage and recent successful requests.',
+  },
+  {
+    file: 'access.png',
+    image: accessStill,
+    label: 'Principals',
+    alt: 'cc-lb Principals screen with the ci-runner machine principal, its cache keepalive setting, recent requests, and router options.',
+  },
+  {
+    file: 'principal-detail.png',
+    image: principalDetailStill,
+    label: 'Principal detail',
+    alt: 'cc-lb principal detail for the mina-torres human principal with recent requests and router settings.',
+  },
+  {
+    file: 'logs.png',
+    image: logsStill,
+    label: 'Logs',
+    alt: 'cc-lb request log with recent rows routed to paid-api-fallback and their status, latency, tokens, and cost.',
+  },
+];
 ---
 
 <!doctype html>
@@ -129,6 +168,57 @@ const description =
           </svg>
           <span>Hide</span>
         </button>
+      </section>
+
+      <section class="console-shell shell" aria-labelledby="console-title">
+        <div class="section-heading">
+          <p class="section-label">Admin console</p>
+          <h2 id="console-title">Watch the pool from the admin console.</h2>
+          <p id="console-description">
+            A real-time walkthrough with no cuts: pool quota usage on Overview, recent requests per
+            upstream and per principal, then three new requests arriving in Logs.
+          </p>
+        </div>
+        <figure class="console-video">
+          <video
+            controls
+            muted
+            playsinline
+            preload="none"
+            width="1600"
+            height="800"
+            poster="/video/cc-lb-walkthrough-poster-1280.webp"
+            aria-describedby="console-description console-caption"
+          >
+            <source media="(max-width: 700px)" src="/video/cc-lb-walkthrough-1280.webm" type="video/webm" />
+            <source media="(max-width: 700px)" src="/video/cc-lb-walkthrough-1280.mp4" type="video/mp4" />
+            <source src="/video/cc-lb-walkthrough-1600.webm" type="video/webm" />
+            <source src="/video/cc-lb-walkthrough-1600.mp4" type="video/mp4" />
+            <a class="text-link" href="/video/cc-lb-walkthrough-1600.mp4">Download the walkthrough (MP4)</a>
+          </video>
+          <figcaption id="console-caption">
+            Real cc-lb 1.0.1 UI · synthetic fixture data · requests went through the proxy to a local
+            mock upstream, so no provider received traffic · silent, 18.6 s
+          </figcaption>
+        </figure>
+        <ul class="console-stills" aria-label="Admin console screenshots">
+          {stills.map((still) => (
+            <li>
+              <a class="still-link" href={`/media/${still.file}`}>
+                <Image
+                  src={still.image}
+                  alt={still.alt}
+                  widths={[320, 480, 720]}
+                  sizes="(max-width: 800px) 46vw, 220px"
+                  format="webp"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span>{still.label}<span class="sr-only"> (full-size PNG)</span></span>
+              </a>
+            </li>
+          ))}
+        </ul>
       </section>
 
       <section class="operator-shell shell" aria-labelledby="operator-title">
@@ -630,6 +720,7 @@ cargo build --release -p cc-lb-server
     line-height: 1.5;
   }
 
+  .console-shell,
   .operator-shell,
   .support-shell,
   .install-shell,
@@ -661,6 +752,80 @@ cargo build --release -p cc-lb-server
     margin-bottom: 0;
     color: #aeb1b5;
     font-size: 1rem;
+  }
+
+  .console-video {
+    margin: 0;
+    border: 1px solid #45484d;
+  }
+
+  .console-video video {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 2 / 1;
+    background: #161719;
+  }
+
+  .console-video video:focus-visible,
+  .still-link:focus-visible {
+    outline: 2px solid #ccddee;
+    outline-offset: 4px;
+  }
+
+  .console-video figcaption {
+    padding: 14px 18px;
+    border-top: 1px solid #45484d;
+    color: #a7abb0;
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+
+  .console-stills {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 16px;
+    margin: 28px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .still-link {
+    position: relative;
+    display: block;
+    color: #aeb1b5;
+    font-size: 0.86rem;
+    text-decoration: none;
+  }
+
+  .still-link img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border: 1px solid #45484d;
+    background: #161719;
+    transition: border-color 160ms ease-out;
+  }
+
+  .still-link span {
+    display: block;
+    margin-top: 10px;
+    text-decoration: underline;
+    text-decoration-color: #5f6267;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 4px;
+  }
+
+  .still-link:hover {
+    color: #ffffff;
+  }
+
+  .still-link:hover img {
+    border-color: #ccddee;
+  }
+
+  .still-link:hover span {
+    text-decoration-color: #ccddee;
   }
 
   .star-note {
@@ -1103,6 +1268,25 @@ cargo build --release -p cc-lb-server
       gap: 32px;
     }
 
+    .console-stills {
+      grid-auto-columns: minmax(150px, 46%);
+      grid-auto-flow: column;
+      grid-template-columns: none;
+      gap: 12px;
+      overflow-x: auto;
+      padding-bottom: 12px;
+      scroll-snap-type: x mandatory;
+      scrollbar-color: #45484d transparent;
+    }
+
+    .console-stills li {
+      scroll-snap-align: start;
+    }
+
+    .still-link:focus-visible {
+      outline-offset: -2px;
+    }
+
     .star-note {
       grid-template-columns: auto minmax(0, 1fr);
       gap: 24px 28px;
@@ -1207,6 +1391,7 @@ cargo build --release -p cc-lb-server
       gap: 8px;
     }
 
+    .console-shell,
     .operator-shell,
     .support-shell,
     .install-shell,
@@ -1245,6 +1430,7 @@ cargo build --release -p cc-lb-server
     }
 
     .site-header,
+    .console-shell,
     .operator-shell,
     .support-shell,
     .install-shell,
@@ -1300,6 +1486,8 @@ cargo build --release -p cc-lb-server
       background: #e3e5e7;
     }
 
+    .console-video,
+    .still-link img,
     .panel-topline,
     .panel-caption,
     .install-option pre,
@@ -1316,9 +1504,31 @@ cargo build --release -p cc-lb-server
       color: #18191c;
     }
 
+    .still-link,
     .panel-topline,
     .panel-caption {
       color: #484a4e;
+    }
+
+    .still-link:hover {
+      color: #18191c;
+    }
+
+    .still-link:hover img,
+    .still-link:hover span {
+      border-color: #18191c;
+      text-decoration-color: #18191c;
+    }
+
+    .console-video video:focus-visible,
+    .still-link:focus-visible {
+      outline-color: #18191c;
+    }
+
+    .console-video figcaption {
+      border-color: #45484d;
+      background: #1e2023;
+      color: #c1c3c6;
     }
 
     .install-option pre {

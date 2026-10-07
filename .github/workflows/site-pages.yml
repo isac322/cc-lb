@@ -7,6 +7,7 @@ on:
     paths:
       - 'site/**'
       - 'assets/brand/**'
+      - 'assets/media/**'
       - 'docs/runtime-management.md'
       - 'docs/upstream-warmup.md'
       - 'docs/scheduler.md'
