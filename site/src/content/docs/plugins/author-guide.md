@@ -11,8 +11,8 @@ Create a Rust library crate for `wasm32-unknown-unknown` and depend on the publi
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-plugin-wire = "0.8"
-cc-lb-pdk-wasmtime = "0.1"
+cc-lb-plugin-wire = "0.9"
+cc-lb-pdk-wasmtime = "0.2"
 ```
 
 ## Declare plugin metadata

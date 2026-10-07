@@ -59,8 +59,8 @@ can reach it:
 crate-type = ["cdylib"]
 
 [dependencies]
-cc-lb-plugin-wire = "0.8"
-cc-lb-pdk-wasmtime = "0.1"
+cc-lb-plugin-wire = "0.9"
+cc-lb-pdk-wasmtime = "0.2"
 ```
 
 Minimal filter plugin:
@@ -426,7 +426,7 @@ Add the conformance harness as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-cc-lb-plugin-conformance = "0.2"
+cc-lb-plugin-conformance = "0.3"
 ```
 
 Use `ConformanceSuite::from_wasm` when the artifact exports one hook:
