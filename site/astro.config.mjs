@@ -3,6 +3,20 @@ import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 
 const siteUrl = 'https://cc-lb.bhyoo.com';
+// Public Cloudflare Web Analytics site token; injected only by the public master Pages build.
+const analyticsToken = process.env.PUBLIC_ANALYTICS_TOKEN;
+const analyticsBeacon = analyticsToken
+  ? [
+      {
+        tag: 'script',
+        attrs: {
+          defer: true,
+          src: 'https://static.cloudflareinsights.com/beacon.min.js',
+          'data-cf-beacon': JSON.stringify({ token: analyticsToken }),
+        },
+      },
+    ]
+  : [];
 const structuredData = [
   {
     tag: 'script',
@@ -70,6 +84,7 @@ export default defineConfig({
         { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
         { tag: 'meta', attrs: { name: 'twitter:image', content: `${siteUrl}/brand/social/cc-lb-social-preview.png` } },
         ...structuredData,
+        ...analyticsBeacon,
       ],
       sidebar: [
         { label: 'Overview', items: [{ label: 'Documentation home', slug: 'docs' }] },

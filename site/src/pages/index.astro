@@ -10,6 +10,7 @@ const siteUrl = 'https://cc-lb.bhyoo.com';
 const title = 'cc-lb | Anthropic-compatible load balancer for Claude Code';
 const description =
   'Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.';
+const analyticsToken = import.meta.env.PUBLIC_ANALYTICS_TOKEN;
 const stills = [
   {
     file: 'usage.png',
@@ -85,6 +86,27 @@ const stills = [
       codeRepository: 'https://github.com/isac322/cc-lb',
       license: 'https://www.apache.org/licenses/LICENSE-2.0',
     })} />
+    <script type="application/ld+json" set:html={JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'SoftwareSourceCode',
+      name: 'cc-lb',
+      codeRepository: 'https://github.com/isac322/cc-lb',
+      programmingLanguage: 'Rust',
+      runtimePlatform: 'Linux',
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+      targetProduct: {
+        '@type': 'SoftwareApplication',
+        name: 'cc-lb',
+      },
+    })} />
+    {analyticsToken && (
+      <script
+        is:inline
+        defer
+        src="https://static.cloudflareinsights.com/beacon.min.js"
+        data-cf-beacon={JSON.stringify({ token: analyticsToken })}
+      ></script>
+    )}
   </head>
   <body>
     <header class="site-header">

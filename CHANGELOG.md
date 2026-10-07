@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Public metadata sync and CI checks keep declared repository, site, chart, and package metadata aligned with `positioning.yml`.
 - New server container releases include OCI build provenance and SPDX SBOM attestations.
 - The documentation site builds before repository publication and deploys to Pages only from public `master`; a manual trigger supports the first deployment after IaC provisioning.
+- Public-master documentation site builds can embed the configured Cloudflare Web Analytics beacon; pull request, fork, private, and non-master builds omit it.
 
 ### Fixed
 
@@ -24,6 +25,7 @@ All notable changes to this project will be documented in this file.
 - OTLP transport runs on a dedicated runtime when configured, keeping exporter HTTP/2 work off proxy workers; terminal and stream telemetry attributes now use numeric OTLP values for representable integers while preserving exact overflow strings.
 - Wasmtime now uses the 48.0.5 security patch for RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327.
 - The Apache-2.0 license text includes the canonical sentence preserving separate contribution agreements.
+- The home page includes SoftwareSourceCode structured data alongside SoftwareApplication, matching the documentation pages.
 
 ## [1.0.1] - 2026-10-02
 
