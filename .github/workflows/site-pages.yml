@@ -43,6 +43,9 @@ jobs:
       - name: Install site dependencies
         run: bun install --frozen-lockfile
       - name: Build site
+        env:
+          # Public Cloudflare Web Analytics site token; empty for PRs, forks, private, and non-master builds.
+          PUBLIC_ANALYTICS_TOKEN: ${{ github.repository == 'isac322/cc-lb' && github.ref == 'refs/heads/master' && github.event.repository.private == false && github.event.repository.fork == false && vars.PUBLIC_ANALYTICS_TOKEN || '' }}
         run: bun run build
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

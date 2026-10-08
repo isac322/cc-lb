@@ -20,6 +20,8 @@ To run cc-lb rather than change it, follow the [documentation site](https://cc-l
 - Read [runtime management](../docs/runtime-management.md) before changing operator-facing API or configuration documentation.
 - For documentation site changes, run `bun install --frozen-lockfile` and `bun run build` in `site/`. The build syncs repository docs and brand assets into the site before Astro renders it.
 
+Keep `PUBLIC_ANALYTICS_TOKEN` unset for ordinary local previews. It is the public Cloudflare Web Analytics site beacon token, not a management API credential. The Pages workflow reads the IaC-managed repository variable only for public `master` builds in this repository; pull request, fork, private, and non-master builds do not receive it. A build without the token emits no analytics beacon.
+
 Run the narrowest relevant checks for your change and report the commands and results in the pull request. Do not include credentials, production data, or generated session artifacts.
 
 [`AGENTS.md`](../AGENTS.md) records repository rules that apply to every change, including the authentication ordering in the request path, the SQLite storage backend, CI failure handling, and the JSON library policy.
