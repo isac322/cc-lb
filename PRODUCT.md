@@ -2,7 +2,7 @@
 
 <!-- impeccable:product-schema 1 -->
 
-Source of truth: `positioning.yml` defines public wording and its evidence references. Product behavior is defined by the implementation and the operator and plugin documentation linked below.
+Source of truth: `positioning.yml` (schema 1, version 1.0.0). Repository evidence is pinned to `2084cbf3fa959dacfc45f03279b73818d79936e6`. Facts, keywords, counts, and evidence live in the positioning source. Product behavior is defined by the implementation and the operator and plugin documentation linked below.
 
 ## Platform
 
@@ -16,7 +16,9 @@ Primary: self-hosting platform engineers and tech leads operating Anthropic-comp
 
 ## Product purpose
 
-A self-hosted Anthropic-compatible reverse proxy and load balancer for pooling API-key and OAuth upstreams. Operators manage the shared endpoint, credentials, routing, and access; clients use principal-scoped proxy keys.
+A self-hosted Anthropic-compatible reverse proxy and load balancer for pooling API-key and OAuth upstreams.
+
+Operators manage the shared endpoint, credentials, routing, and access; clients use principal-scoped proxy keys.
 
 ## Positioning
 

@@ -232,9 +232,9 @@ field({
   },
 });
 field({
-  file: 'PRODUCT.md', name: 'product.purpose', label: 'PRODUCT.md Purpose line (category premise)',
+  file: 'PRODUCT.md', name: 'product.purpose', label: 'PRODUCT.md Product purpose line (category premise)',
   check(text) {
-    const m = /## Purpose[ \t]*\n(?:[ \t]*\n)*(\S[^\n]*)/.exec(text);
+    const m = /## Product purpose[ \t]*\n(?:[ \t]*\n)*(\S[^\n]*)/.exec(text);
     if (!m) return { found: false };
     return { found: true, actual: m[1].trim(), ok: m[1].trim() === V.premise };
   },
