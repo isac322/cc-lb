@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/readme/cc-lb-hero-dark.svg">
-    <img alt="cc-lb" src="assets/brand/readme/cc-lb-hero-light.svg" width="100%">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/social/cc-lb-social-preview.png">
+    <img alt="cc-lb: self-hosted Anthropic-compatible reverse proxy and load balancer" src="assets/brand/social/cc-lb-social-preview.png" width="640">
   </picture>
 </p>
 
@@ -9,7 +9,7 @@
 
 Self-hosted Anthropic-compatible reverse proxy and load balancer for pooled API-key and OAuth upstreams.
 
-[Website](https://cc-lb.bhyoo.com/) · [Runtime management](./docs/runtime-management.md) · [Plugin author guide](./docs/plugin-author-guide.md) · [License](./LICENSE)
+[Website](https://cc-lb.bhyoo.com/) · [Docs](https://cc-lb.bhyoo.com/docs/getting-started/) · [Install](https://cc-lb.bhyoo.com/docs/getting-started/install/) · [Changelog](./CHANGELOG.md) · [Contributing](./.github/CONTRIBUTING.md) · [Security](./.github/SECURITY.md) · [Runtime management](./docs/runtime-management.md) · [Plugin author guide](./docs/plugin-author-guide.md) · [License](./LICENSE)
 
 cc-lb is an operator-managed endpoint for Anthropic-compatible traffic. It keeps upstreams, principals, proxy keys, routing state, and plugin chains in the database so operators can update runtime state without rebuilding the binary.
 
@@ -54,45 +54,53 @@ These are real cc-lb 1.0.1 admin UI screens captured with synthetic fixture data
 
 ## Quick start
 
-Prerequisites for a local build:
+This path runs the published container image; no Git checkout or Rust toolchain is needed. To build from source instead, see [Contributing](./.github/CONTRIBUTING.md).
 
-- Rust 1.98.1 from `rust-toolchain.toml`;
-- Bun 1.3.14 or newer for the admin SPA build; and
-- the `wasm32-unknown-unknown` Rust target for bundled Wasmtime fixtures.
+Start in a new directory. Keep the master key with the persisted data and reuse it when restarting an existing instance.
 
-Install the target before building:
+Prerequisites:
 
-```bash
-rustup target add wasm32-unknown-unknown
-```
+- Docker with a running daemon;
+- `curl` and `jq` to resolve the release version; and
+- OpenSSL to generate local secrets.
 
-The server build invokes both the admin SPA and Wasm fixture builds. For a server-only build without fixture compilation, set `CC_LB_SKIP_WASM_FIXTURE_BUILD=1`; the admin SPA still requires Bun unless a prebuilt SPA is supplied.
-
-Build the server binary:
-
+Resolve the latest stable server release and derive the image tag. Server releases are tagged `cc-lb-v<version>` and the image tag is the version without the `cc-lb-v` prefix; the registry does not publish a `:latest` tag.
 
 ```bash
-cargo build --release -p cc-lb-server
+CC_LB_VERSION="$(
+  curl -fsSL "https://api.github.com/repos/isac322/cc-lb/releases?per_page=100" \
+    | jq -r 'first(.[] | select(.draft == false and .prerelease == false and (.tag_name | startswith("cc-lb-v")))) | .tag_name | ltrimstr("cc-lb-v")'
+)"
+CC_LB_IMAGE="ghcr.io/isac322/cc-lb:${CC_LB_VERSION}"
 ```
 
-Set the master key, admin token, and an upstream credential:
+Generate the master key and admin token into a local `.env` file without printing them, then add your upstream credential:
 
 ```bash
-export CC_LB_MASTER_KEY=$(openssl rand -hex 32)
-export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)
-export ANTHROPIC_API_KEY=sk-ant-api03-...
+umask 077
+{
+  printf 'CC_LB_MASTER_KEY=%s\n' "$(openssl rand -hex 32)"
+  printf 'CC_LB_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 24)"
+  printf 'ANTHROPIC_API_KEY=%s\n' "replace-with-your-upstream-secret"
+} > .env
 ```
 
-```bash
-mkdir -p ./data
-```
+Edit `.env` and replace the `ANTHROPIC_API_KEY` placeholder with a real Anthropic API key. The container reads it from the server process environment when you create an `anthropic_api_key` upstream (see the [install guide](https://cc-lb.bhyoo.com/docs/getting-started/install/)). Keep the file out of source control.
 
-Create a local `cc-lb.toml`:
+Create the container configuration `cc-lb.container.toml`:
 
 ```toml
+[runtime]
+data_dir = "/var/lib/cc-lb/data"
+
+[listener]
+proxy_addr = "0.0.0.0:8080"
+admin_addr = "0.0.0.0:9090"
+metrics_addr = "0.0.0.0:9091"
+
 [storage]
 kind = "sqlite"
-path = "./data/storage.sqlite"
+path = "/var/lib/cc-lb/storage.sqlite"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"
@@ -103,17 +111,40 @@ id = "local"
 token_env = "CC_LB_ADMIN_TOKEN"
 ```
 
-Start the server with the `cc-lb` executable:
+Create a persistent host data directory and validate the configuration inside the image:
 
 ```bash
-./target/release/cc-lb serve \
-  --config cc-lb.toml \
-  --data-dir ./data/runtime
+mkdir -p ./data
+
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  -v "$PWD/cc-lb.container.toml:/etc/cc-lb/cc-lb.toml:ro" \
+  -v "$PWD/data:/var/lib/cc-lb" \
+  "$CC_LB_IMAGE" config validate --config /etc/cc-lb/cc-lb.toml
 ```
 
-Create a database-backed upstream with `POST /admin/v1/upstreams`, create a principal with `POST /admin/v1/principals`, and issue its proxy key with `POST /admin/v1/principals/{id}/keys`. Use the admin Bearer token from `CC_LB_ADMIN_TOKEN`. The dashboard is available at `http://[::1]:9090/`.
+Start the server. The container listeners bind all interfaces, while the published host ports below expose the proxy, admin, and metrics endpoints on IPv4 loopback only; the image runs as the current host user so SQLite and runtime state persist through the bind mount:
 
-See [Runtime Management](./docs/runtime-management.md) for request bodies, the full API, and the architecture.
+```bash
+docker run --rm --name cc-lb \
+  --user "$(id -u):$(id -g)" \
+  --env-file .env \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:9090:9090 \
+  -p 127.0.0.1:9091:9091 \
+  -v "$PWD/cc-lb.container.toml:/etc/cc-lb/cc-lb.toml:ro" \
+  -v "$PWD/data:/var/lib/cc-lb" \
+  "$CC_LB_IMAGE"
+```
+
+The image's default command is `serve --config /etc/cc-lb/cc-lb.toml`, matching the read-only mount above.
+
+Create a database-backed upstream with `POST /admin/v1/upstreams`, create a principal with `POST /admin/v1/principals`, and issue its proxy key with `POST /admin/v1/principals/{id}/keys`. Use the admin Bearer token from `CC_LB_ADMIN_TOKEN`. With this container's loopback-only port publishing, the admin API and dashboard are at `http://127.0.0.1:9090/`; a native source build with default listeners uses `http://[::1]:9090/` instead.
+
+With an empty database, `/healthz` returns `200` while `/readyz` returns `503` with `no_ready_principal`. Configure a principal and an upstream through the admin API or dashboard before sending client requests.
+
+See the [install and configure guide](https://cc-lb.bhyoo.com/docs/getting-started/install/) for request bodies and [Runtime Management](./docs/runtime-management.md) for the full API and the architecture.
 
 ## Operator guides
 
@@ -143,14 +174,14 @@ The `stream latency breakdown` log runs on a dedicated worker with a fixed 4,096
 
 ## Plugin authors
 
-Plugins are Wasm modules authored with the published `cc-lb-pdk-wasmtime`; bundled guest plugins depend only on that PDK, which re-exports the guest-facing wire API from `cc-lb-plugin-wire` 0.9. The wire-only `cc-lb-runtime-wasmtime` runtime compiles each upload with Wasmtime 48, validates imports, required plugin and hook metadata, per-hook wire versions, per-hook BLAKE3 layout fingerprints, and an upload-time runtime probe before dispatching calls. Each published hook currently uses wire version 1. Local execution defaults to on-demand allocation with fresh per-call `Store`s, per-store `StoreLimits`, and a process-wide store budget; operators can opt into Wasmtime pooling through `[runtime.wasmtime] allocation_strategy = "pooling"`.
+Plugins are Wasm modules authored with the published `cc-lb-pdk-wasmtime`; bundled guest plugins depend only on that PDK, which re-exports the guest-facing wire API from `cc-lb-plugin-wire`. The wire-only `cc-lb-runtime-wasmtime` runtime compiles each upload with Wasmtime 48, validates imports, required plugin and hook metadata, per-hook wire versions, per-hook BLAKE3 layout fingerprints, and an upload-time runtime probe before dispatching calls. Each published hook currently uses wire version 1. Local execution defaults to on-demand allocation with fresh per-call `Store`s, per-store `StoreLimits`, and a process-wide store budget; operators can opt into Wasmtime pooling through `[runtime.wasmtime] allocation_strategy = "pooling"`.
 
 The slots a plugin may target:
 
 - **filter**: return a `FilterResponse` deciding which upstream candidates to keep. The V1 filter request exposes the requested `service_tier`.
 - **shape**: unified slot that transforms the incoming request into an upstream-bound `ShapedRequest`, and transforms downstream responses (both buffered and SSE). A shape plugin must implement request shaping, buffered response transform, and SSE event transform, with explicit no-op handlers for unneeded response hooks.
 
-The published crates.io set is exactly 5 crates: `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime-macros`, `cc-lb-pdk-wasmtime`, `cc-lb-runtime-wasmtime`, and `cc-lb-plugin-conformance`. Start with [docs/plugin-author-guide.md](./docs/plugin-author-guide.md), then use the crate READMEs for focused API notes: [`cc-lb-plugin-wire`](./crates/cc-lb-plugin-wire/README.md), [`cc-lb-pdk-wasmtime`](./crates/cc-lb-pdk-wasmtime/README.md), [`cc-lb-pdk-wasmtime-macros`](./crates/cc-lb-pdk-wasmtime-macros/README.md), and [`cc-lb-plugin-conformance`](./crates/cc-lb-plugin-conformance/README.md). Runtime design background is in the historical [RFC-0001](./docs/rfc/0001-plugin-runtime-vnext.md).
+The published crates.io set is `cc-lb-plugin-wire`, `cc-lb-pdk-wasmtime-macros`, `cc-lb-pdk-wasmtime`, `cc-lb-runtime-wasmtime`, and `cc-lb-plugin-conformance`. Start with [docs/plugin-author-guide.md](./docs/plugin-author-guide.md), then use the crate READMEs for focused API notes: [`cc-lb-plugin-wire`](./crates/cc-lb-plugin-wire/README.md), [`cc-lb-pdk-wasmtime-macros`](./crates/cc-lb-pdk-wasmtime-macros/README.md), [`cc-lb-pdk-wasmtime`](./crates/cc-lb-pdk-wasmtime/README.md), [`cc-lb-runtime-wasmtime`](./crates/cc-lb-runtime-wasmtime/README.md), and [`cc-lb-plugin-conformance`](./crates/cc-lb-plugin-conformance/README.md). Runtime design background is in the historical [RFC-0001](./docs/rfc/0001-plugin-runtime-vnext.md).
 
 Upload flow: build the plugin to `wasm32-unknown-unknown`, then POST the artifact to `POST /admin/v1/plugins/wasm`. The host runs `admit_wasm`, derives the supported slots from the exported hooks, persists the SHA-256, plugin metadata name/version, plugin description, plugin usage, and per-hook metadata, then triggers a dynamic-view rebind. Re-uploading the same plugin name and SHA is a successful noop; uploading the same metadata name with a higher semantic version replaces the existing registry row in place; same/lower version replacements require an explicit confirmation retry. Registry reference counts include both plugin-chain bindings and upstream warmup dialect plugin bindings.
 
