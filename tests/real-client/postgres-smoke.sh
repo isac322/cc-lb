@@ -155,10 +155,20 @@ echo "===> step 0: reset dynamic runtime tables in public schema"
 psql "$CI_POSTGRES_URL" -c "TRUNCATE principals_v1, upstream_spec_v1, managed_api_keys_v1, managed_api_key_index_v1 RESTART IDENTITY CASCADE" > /dev/null
 psql "$CI_POSTGRES_URL" -c "DELETE FROM meta WHERE key = 'backend_kind'" > /dev/null
 
+# Compile before spawning so each wait_port window covers process startup
+# only. Keep the package/feature selection identical to the `cargo run`
+# calls below so they reuse these artifacts instead of rebuilding.
+echo "===> build fake-anthropic and cc-lb-server"
+cargo build -q -p fake-anthropic
+cargo build -q -p cc-lb-server --features postgres,sqlite
+
 echo "===> step 1: spawn fake-anthropic on :$fake_port"
 cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
 FAKE_PID=$!
-wait_port "$fake_port" fake-anthropic
+if ! wait_port "$fake_port" fake-anthropic; then
+  echo "--- fake.log ---" >&2; cat "$TMP_DIR/fake.log" >&2 || true
+  exit 1
+fi
 
 echo "===> step 2: spawn cc-lb-server with [storage] kind=postgres"
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \

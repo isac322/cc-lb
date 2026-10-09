@@ -464,6 +464,10 @@ jobs:
 
       - name: Upload coverage report
         if: always()
+        # Diagnostic artifact with no downstream consumer; the nextest run and
+        # coverage gate above are the job's real signal. A transient artifact
+        # backend/DNS failure on the self-hosted runner must not fail the job.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov

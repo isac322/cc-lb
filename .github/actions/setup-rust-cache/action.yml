@@ -44,6 +44,9 @@ runs:
       if: ${{ steps.sccache-probe.outputs.available == 'true' || steps.sccache-setup.outcome == 'success' }}
       shell: bash
       run: |
+        # The probe below starts the sccache server, which reads its config
+        # only at startup; export basedirs first so the server honors it.
+        export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
         sccache_path="$(command -v sccache || true)"
         rustc_path="$(command -v rustc || true)"
 
@@ -74,8 +77,10 @@ runs:
         echo "::warning::sccache compiler-wrapper probe failed and $cleanup; continuing with uncached rustc. Error: $probe_output"
 
     # No actions/cache round-trip: sccache stores into the versitygw COSI
-    # bucket (SCCACHE_BUCKET/ENDPOINT + AWS creds set on the runner) so every
-    # runner across nodes shares one content-addressed compiler cache. Cargo registry
+    # bucket (SCCACHE_BUCKET/ENDPOINT + AWS creds from the sccache-s3 Secret,
+    # injected into the runner container and, for `container:` jobs, into the
+    # job container via the ARC `$job` pod template) so every runner across
+    # nodes shares one content-addressed compiler cache. Cargo registry
     # and git downloads persist separately in the runner's node-local CARGO_HOME.
     - name: Export Rust compiler cache env
       if: ${{ steps.sccache-health.outputs.available == 'true' }}
