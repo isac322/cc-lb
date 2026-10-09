@@ -671,6 +671,7 @@ pub async fn seed_app_testing_storage(
     use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
     use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
     use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
+    use uuid::Uuid;
 
     let now = unix_secs(clock.now());
     // NOTE [Priority-3 footgun]: postgres-conformance's managed_key_multi_instance
@@ -708,11 +709,12 @@ pub async fn seed_app_testing_storage(
         match UpstreamStore::create(
             storage,
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: "test-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },

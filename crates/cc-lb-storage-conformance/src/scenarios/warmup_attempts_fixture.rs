@@ -10,11 +10,12 @@ use uuid::Uuid;
 pub async fn create_upstream(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamRecord> {
     Ok(store
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: None,
         })

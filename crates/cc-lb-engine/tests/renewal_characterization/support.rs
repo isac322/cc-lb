@@ -53,11 +53,12 @@ impl RenewalFixture {
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: "renewal-upstream".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse("http://renewal.local/").expect("valid renewal URL")),
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },

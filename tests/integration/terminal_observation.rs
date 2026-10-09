@@ -28,6 +28,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 use url::Url;
+use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2135,11 +2136,12 @@ async fn seed_runtime_state_full_v2(
     let created = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "anthropic-mock".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&upstream_url)?),
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

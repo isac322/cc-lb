@@ -180,8 +180,11 @@ async fn create_split(
     storage: &PostgresStorage,
     create: UpstreamCreate,
 ) -> StorageResult<UpstreamRecord> {
+    // The spec row and its initial credential commit together, with a single
+    // change notification, so no reader ever observes the upstream without
+    // its credential.
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    let id = Uuid::new_v4();
+    let id = create.id;
     sqlx::query(
         "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, spec_revision, created_at, updated_at) VALUES ($1, $2, $3, $4, TRUE, $5, $6, 1, NOW(), NOW())",
     )
@@ -212,15 +215,17 @@ async fn create_split(
         .map_err(map_sqlx_error)?;
     }
 
-    if let Some(oauth_token_generation) = create.oauth_token_generation {
+    if let Some(oauth) = create.oauth_tokens {
         sqlx::query(
-            "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, oauth_token_generation, created_at, updated_at) VALUES ($1, NULL, $2, NOW(), NOW())",
+            "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, oauth_token_generation, created_at, updated_at) VALUES ($1, $2, $3, 1, NOW(), NOW())",
         )
         .bind(id)
-        .bind(u64_to_i64(oauth_token_generation, "oauth token generation")?)
+        .bind(oauth.tokens.ciphertext())
+        .bind(oauth.never_refresh)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        clear_split_apply_error_in_tx(&mut tx, id).await?;
     }
 
     notify(&mut tx, id).await?;

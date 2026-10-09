@@ -1146,9 +1146,14 @@ mod tests {
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: "stale-missing-oauth".to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
-                ..UpstreamCreate::default()
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
             },
         )
         .await
@@ -1224,9 +1229,14 @@ mod tests {
             let created = UpstreamStore::create(
                 storage.as_ref(),
                 UpstreamCreate {
+                    id: Uuid::new_v4(),
                     name: format!("stale-oauth-{enabled}"),
                     kind: UpstreamKind::AnthropicOauth,
-                    ..UpstreamCreate::default()
+                    base_url: None,
+                    api_key_ciphertext: None,
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
                 },
             )
             .await
@@ -1466,11 +1476,12 @@ mod tests {
         let created = UpstreamStore::create(
             storage,
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },

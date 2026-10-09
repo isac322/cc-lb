@@ -66,11 +66,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let primary = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "aaa-primary".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
@@ -87,11 +88,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let target = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "bbb-target".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://target.invalid").expect("target base_url parses")),
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

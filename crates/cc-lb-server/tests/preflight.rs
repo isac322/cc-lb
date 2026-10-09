@@ -208,11 +208,12 @@ async fn seed_upstream(
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             kind,
             base_url: base_url.map(|value| value.parse().unwrap()),
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

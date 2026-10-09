@@ -18,7 +18,10 @@ use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{AuditEntry, AuditQueryScope, AuditStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{
+    AuditEntry, AuditQueryScope, AuditStore, OAuthPkceStore, StoredOAuthPkceFlow, UpstreamCreate,
+    UpstreamStore,
+};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -31,8 +34,8 @@ use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
 
-const MASTER_KEY: [u8; 32] = [7; 32];
-const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
+pub(crate) const MASTER_KEY: [u8; 32] = [7; 32];
+pub(crate) const TEST_NOW_UNIX_SECS: u64 = 1_700_000_000;
 
 struct Fixture {
     _temp_dir: tempfile::TempDir,
@@ -149,11 +152,12 @@ impl Fixture {
     ) -> cc_lb_storage_api::UpstreamRecord {
         self.storage
             .create(UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind,
                 base_url: None,
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             })
@@ -239,6 +243,92 @@ impl Fixture {
             .await
             .expect("request succeeds");
         json_response(response).await
+    }
+
+    async fn get_json(&self, uri: &str) -> (StatusCode, Value) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        json_response(response).await
+    }
+
+    async fn listed_upstream_names(&self) -> Vec<String> {
+        let (status, list) = self.get_json("/admin/v1/upstreams").await;
+        assert_eq!(status, StatusCode::OK, "list upstreams: {list}");
+        list["upstreams"]
+            .as_array()
+            .expect("upstreams array")
+            .iter()
+            .filter_map(|upstream| upstream["name"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// Starts and completes an OAuth draft, returning its state token.
+    async fn completed_draft(&self) -> String {
+        let (status, start) = self.start_draft().await;
+        assert_eq!(status, StatusCode::OK, "draft start: {start}");
+        let state_token = start["state_token"]
+            .as_str()
+            .expect("state token")
+            .to_owned();
+        let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+        let (status, complete) = self.complete_draft(&state_token, &code).await;
+        assert_eq!(status, StatusCode::OK, "draft complete: {complete}");
+        state_token
+    }
+
+    /// Re-seals the completed draft's tokens under a foreign AAD inside the
+    /// stored PKCE flow, so the handshake still loads but the draft tokens no
+    /// longer open with the nil AAD the create handler expects.
+    async fn rebind_draft_tokens_to_foreign_aad(&self, state_token: &str) {
+        let now = now_unix_secs(self.clock.as_ref());
+        let flow = self
+            .storage
+            .get_pkce_flow(state_token, now)
+            .await
+            .expect("get pkce flow")
+            .expect("completed draft flow is stored");
+        let payload = self
+            .aead
+            .decrypt(&flow.encrypted_payload, state_token.as_bytes())
+            .expect("open pkce flow payload");
+        let mut in_flight: Value = serde_json::from_slice(&payload).expect("pkce flow json");
+        let tokens = in_flight
+            .pointer_mut("/target/PendingDraft/completed/encrypted_tokens")
+            .expect("completed draft carries encrypted tokens");
+        let bundle = serde_json::from_value::<AeadEncryptedField<OAuthTokenBundle>>(tokens.take())
+            .expect("draft tokens decode")
+            .decrypt(&self.aead, Uuid::nil().as_bytes())
+            .expect("draft tokens open with the nil AAD");
+        let foreign = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+            self.aead.as_ref(),
+            &bundle,
+            Uuid::new_v4().as_bytes(),
+        )
+        .expect("re-seal draft tokens");
+        *tokens = serde_json::to_value(&foreign).expect("draft tokens encode");
+        let payload = serde_json::to_vec(&in_flight).expect("pkce flow json encodes");
+        let encrypted_payload = self
+            .aead
+            .encrypt(&payload, state_token.as_bytes())
+            .expect("seal pkce flow payload");
+        self.storage
+            .put_pkce_flow(&StoredOAuthPkceFlow {
+                encrypted_payload,
+                ..flow
+            })
+            .await
+            .expect("replace pkce flow");
     }
 
     async fn get_oauth_status(&self, upstream_id: Uuid) -> (StatusCode, Value) {
@@ -619,6 +709,94 @@ async fn create_from_completed_draft_with_active_name_returns_name_conflict() {
     assert_eq!(body["error"], "upstream_name_conflict");
     assert_eq!(body["name"], "draft-name-conflict");
     assert_eq!(body["existing_upstream_id"], existing.id.to_string());
+}
+
+#[tokio::test]
+async fn oauth_draft_precreation_decrypt_failure_deletes_pkce_flow() {
+    let fixture = Fixture::new().await;
+    let state_token = fixture.completed_draft().await;
+    fixture
+        .rebind_draft_tokens_to_foreign_aad(&state_token)
+        .await;
+
+    let (status, body) = fixture
+        .create_from_draft(&state_token, "draft-decrypt-failure")
+        .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"], "oauth_draft_create_failed");
+    assert!(
+        fixture
+            .storage
+            .get_by_name("draft-decrypt-failure")
+            .await
+            .expect("get_by_name")
+            .is_none(),
+        "decrypt failure must not create an upstream"
+    );
+    assert!(
+        !fixture
+            .listed_upstream_names()
+            .await
+            .iter()
+            .any(|name| name == "draft-decrypt-failure"),
+        "decrypt failure must not list an upstream"
+    );
+    let (status, retry) = fixture
+        .create_from_draft(&state_token, "draft-decrypt-failure")
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{retry}");
+    assert_eq!(retry["error"], "invalid_state");
+}
+
+#[tokio::test]
+async fn oauth_draft_post_create_metadata_failure_rolls_back_via_hard_delete() {
+    let fixture = Fixture::new().await;
+    let state_token = fixture.completed_draft().await;
+    sqlx::query(
+        "CREATE TRIGGER fail_subscription_metadata_insert BEFORE INSERT ON upstream_subscription_metadata_v1 BEGIN SELECT RAISE(ABORT, 'injected subscription metadata failure'); END",
+    )
+    .execute(fixture.storage.pool())
+    .await
+    .expect("install subscription metadata trigger");
+
+    let (status, body) = fixture
+        .create_from_draft(&state_token, "draft-metadata-failure")
+        .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"], "oauth_draft_create_failed");
+    assert!(
+        fixture
+            .storage
+            .get_by_name("draft-metadata-failure")
+            .await
+            .expect("get_by_name")
+            .is_none(),
+        "rolled-back upstream must not be readable by name"
+    );
+    assert!(
+        !fixture
+            .listed_upstream_names()
+            .await
+            .iter()
+            .any(|name| name == "draft-metadata-failure"),
+        "rolled-back upstream must not be listed"
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_spec_v1 WHERE name = ?")
+        .bind("draft-metadata-failure")
+        .fetch_one(fixture.storage.pool())
+        .await
+        .expect("count spec rows");
+    assert_eq!(
+        remaining, 0,
+        "rollback must hard-delete the upstream, not soft-delete it"
+    );
+    let (status, retry) = fixture
+        .create_from_draft(&state_token, "draft-metadata-failure")
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{retry}");
+    assert_eq!(retry["error"], "invalid_state");
 }
 
 #[tokio::test]
@@ -1276,7 +1454,7 @@ async fn clamped_upstream_seeds_oauth_refresh_task() {
     );
 }
 
-fn test_config(oauth_addr: SocketAddr, scopes: Option<Vec<String>>) -> Config {
+pub(crate) fn test_config(oauth_addr: SocketAddr, scopes: Option<Vec<String>>) -> Config {
     let mut config = Config::default();
     config.oauth.anthropic = Some(AnthropicOAuthConfig {
         client_id: "client-test".to_owned(),
@@ -1289,7 +1467,7 @@ fn test_config(oauth_addr: SocketAddr, scopes: Option<Vec<String>>) -> Config {
     config
 }
 
-async fn spawn_mock_anthropic(state: MockOAuthState) -> (SocketAddr, MockOAuthState) {
+pub(crate) async fn spawn_mock_anthropic(state: MockOAuthState) -> (SocketAddr, MockOAuthState) {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
@@ -1304,7 +1482,7 @@ async fn spawn_mock_anthropic(state: MockOAuthState) -> (SocketAddr, MockOAuthSt
     (addr, state)
 }
 
-async fn authorize_code(authorize_url: &str) -> String {
+pub(crate) async fn authorize_code(authorize_url: &str) -> String {
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
@@ -1330,7 +1508,7 @@ async fn authorize_code(authorize_url: &str) -> String {
         .expect("code")
 }
 
-async fn json_response(response: axum::response::Response) -> (StatusCode, Value) {
+pub(crate) async fn json_response(response: axum::response::Response) -> (StatusCode, Value) {
     let status = response.status();
     let body = response
         .into_body()

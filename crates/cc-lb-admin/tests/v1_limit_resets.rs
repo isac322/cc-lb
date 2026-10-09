@@ -160,11 +160,12 @@ async fn seed_oauth_upstream(server: &SpawnedAdminServer, base_url: &str) -> Ups
     let upstream = UpstreamStore::create(
         server.storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "coupon-upstream".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse(base_url).expect("base url parses")),
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
@@ -430,11 +431,12 @@ async fn get_limit_resets_rejects_non_oauth_upstream() {
     let upstream = UpstreamStore::create(
         server.storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "api-key-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

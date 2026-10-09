@@ -72,6 +72,8 @@ mod static_assets_served;
 mod subscription_quota_slim_parity;
 #[path = "subscription_quotas.rs"]
 mod subscription_quotas;
+#[path = "upstream_atomic_create.rs"]
+mod upstream_atomic_create;
 #[path = "v1_limit_resets.rs"]
 mod v1_limit_resets;
 #[path = "v1_oauth.rs"]

@@ -453,11 +453,12 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
     let upstream = UpstreamStore::create(
         &*fixture.storage,
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "hydrate-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

@@ -25,11 +25,12 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
     storage.initialize().await.expect("sqlite initializes");
     let upstream = storage
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "warmup-attempts-persist".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: None,
         })
