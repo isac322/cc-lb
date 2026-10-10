@@ -52,8 +52,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # Cache only preflight compilation. The release jobs below intentionally
-      # remain uncached and retain real commit metadata for published artifacts.
+      # Preflight and both release jobs share the S3 sccache. The release jobs
+      # keep the default (real) commit metadata: setup-rust-cache only pins
+      # SOURCE_DATE_EPOCH/GIT_SHA when stable-build-metadata is "true", and
+      # crates.io receives source tarballs, never these compiled artifacts.
       - uses: ./.github/actions/check-published-crates
 
   release:
@@ -75,6 +77,8 @@ jobs:
         with:
           toolchain: 1.98.1
 
+      - uses: ./.github/actions/setup-rust-cache
+
       - name: Authenticate to crates.io (trusted publishing)
         id: crates-io-auth
         uses: rust-lang/crates-io-auth-action@v1
@@ -87,6 +91,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          fi
 
   release-pr:
     name: release-plz release-pr
@@ -104,6 +117,8 @@ jobs:
         with:
           toolchain: 1.98.1
 
+      - uses: ./.github/actions/setup-rust-cache
+
       - name: Run release-plz release-pr
         uses: MarcoIeni/release-plz-action@v0.5.139
         with:
@@ -117,3 +132,12 @@ jobs:
           # fixtures do not shape the rustdoc surface that semver detection
           # reads, so skip them here exactly as the preflight job does.
           CC_LB_SKIP_WASM_FIXTURE_BUILD: "1"
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo "::warning::sccache stats unavailable; continuing without cache statistics"
+          fi
