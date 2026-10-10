@@ -4958,7 +4958,16 @@ impl Lifecycle {
                                 {
                                     message_stop_at = Some(now);
                                 }
-                                semantic_message_stop_seen |= usage_update.message_stop;
+                                // Strictly JSON-typed: the usage parser's
+                                // event-name fallback must not enable #663
+                                // accept-with-warning for name-only stops.
+                                semantic_message_stop_seen |= parsed_event
+                                    .value()
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|value| value.get("type"))
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("message_stop");
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);

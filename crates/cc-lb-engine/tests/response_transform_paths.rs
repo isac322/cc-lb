@@ -1279,6 +1279,39 @@ async fn event_named_message_stop_with_malformed_payload_and_gzip_failure_stays_
 }
 
 #[tokio::test]
+async fn name_only_message_stop_without_json_type_and_gzip_failure_stays_fatal()
+-> Result<(), Box<dyn std::error::Error>> {
+    for data in [b"data: {}".as_slice(), b"data: {\"type\":null}".as_slice()] {
+        let mut plaintext = Vec::from(
+            &b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: message_stop\n"[..],
+        );
+        plaintext.extend_from_slice(data);
+        plaintext.extend_from_slice(b"\n\n");
+        let plaintext = Bytes::from(plaintext);
+        let relayed = relay_and_record(
+            "name-only-message-stop-json-type-missing.sqlite",
+            Some(Arc::new(UnchangedSseTransform::default())),
+            fixed_gzip_sse_dispatch(StatusCode::OK, gzip_without_trailer(&plaintext)),
+        )
+        .await?;
+
+        assert!(relayed.body.starts_with(&plaintext));
+        let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+        assert_eq!(text.matches("event: error\n").count(), 1);
+        assert!(text.contains("matching checksum"));
+        let row = &relayed.row;
+        assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+        assert_eq!(
+            row.upstream_error_type.as_deref(),
+            Some("upstream_response_decode_error")
+        );
+        assert_eq!(row.upstream_stream_warning_type, None);
+        assert_eq!(row.upstream_stream_warning_message, None);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn upstream_diagnostics_record_http2_version_request_id_and_content_length()
 -> Result<(), Box<dyn std::error::Error>> {
     let compressed = gzip_without_trailer(&complete_message_sse_body());
