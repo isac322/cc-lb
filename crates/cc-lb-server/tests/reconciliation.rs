@@ -93,11 +93,12 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

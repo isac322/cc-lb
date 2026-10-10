@@ -1811,15 +1811,18 @@ fn chain_with_slot(
 
 fn warmup_upstream(name: &str, wasm_registry_id: Uuid) -> UpstreamCreate {
     UpstreamCreate {
+        id: Uuid::new_v4(),
         name: name.to_owned(),
         kind: cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey,
+        base_url: None,
+        api_key_ciphertext: None,
+        oauth_tokens: None,
         warmup_enabled: true,
         warmup_dialect_plugin: Some(UpstreamWarmupDialectPlugin {
             wasm_registry_id,
             config: json!({}),
             wire_version: None,
         }),
-        ..Default::default()
     }
 }
 

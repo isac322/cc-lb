@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 - Wasmtime now uses the 48.0.5 security patch for RUSTSEC-2026-0325, RUSTSEC-2026-0326, and RUSTSEC-2026-0327.
 - The Apache-2.0 license text includes the canonical sentence preserving separate contribution agreements.
 - The home page includes SoftwareSourceCode structured data alongside SoftwareApplication, matching the documentation pages.
+- Creating an upstream through the admin API (`POST /admin/v1/upstreams` with an API key, or `POST /admin/v1/upstreams/from-oauth-draft`) now stores the upstream and its credential in one transaction on SQLite and PostgreSQL. A failed create no longer leaves an active upstream without its credential, and dynamic-view rebuilds and PostgreSQL change notifications never see a new upstream before its credential exists. ([#852](https://github.com/isac322/cc-lb/issues/852))
 
 ## [1.0.1] - 2026-10-02
 

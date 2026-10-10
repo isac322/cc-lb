@@ -647,24 +647,32 @@ mod tests {
         async fn create(&self, create: UpstreamCreate) -> StorageResult<UpstreamRecord> {
             validate_identifier("upstream.name", &create.name)?;
             let mut records = self.records.lock().await;
+            if records.iter().any(|record| record.id == create.id) {
+                return Err(conflict("upstream id already exists"));
+            }
             if records.iter().any(|record| record.name == create.name) {
                 return Err(conflict("upstream name already exists"));
             }
             let now = now_secs(self.clock.as_ref());
+            let (oauth_credentials, oauth_never_refresh, oauth_token_generation) =
+                match create.oauth_tokens {
+                    Some(oauth) => (Some(oauth.tokens), oauth.never_refresh, 1),
+                    None => (None, false, 0),
+                };
             let record = UpstreamRecord {
-                id: UpstreamRecordId::new_v4(),
+                id: create.id,
                 name: create.name,
                 kind: create.kind,
                 base_url: create.base_url,
                 enabled: true,
-                oauth_credentials: None,
-                oauth_never_refresh: false,
+                oauth_credentials,
+                oauth_never_refresh,
                 api_key_ciphertext: create.api_key_ciphertext,
                 last_apply_error: None,
                 last_apply_at_unix_secs: None,
                 deleted_at_unix_secs: None,
                 revision: 1,
-                oauth_token_generation: create.oauth_token_generation.unwrap_or_default(),
+                oauth_token_generation,
                 created_at_unix_secs: now,
                 updated_at_unix_secs: now,
                 warmup_enabled: create.warmup_enabled,
@@ -1279,11 +1287,12 @@ mod tests {
     async fn create_upstream(store: &MemoryUpstreamStore, name: &str) -> UpstreamRecord {
         store
             .create(UpstreamCreate {
+                id: UpstreamRecordId::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             })

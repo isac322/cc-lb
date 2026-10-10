@@ -81,13 +81,33 @@ impl UpstreamRecord {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Initial OAuth credential committed together with a new upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthTokensCreate {
+    /// Token bundle sealed with AAD = the upstream id.
+    pub tokens: EncryptedOAuthTokens,
+    /// Mirrors `OAuthTokenBundle.never_refresh` for the stored credential.
+    pub never_refresh: bool,
+}
+
+/// Spec and initial credential for a new upstream.
+///
+/// [`UpstreamStore::create`] commits the spec row and the credential row in
+/// one transaction, so no reader ever observes the upstream without its
+/// credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamCreate {
+    /// Caller-assigned id. Credentials are sealed with AAD = `id` before the
+    /// insert, so the id must exist before storage sees the record. A
+    /// duplicate id is rejected with [`crate::StorageError::Conflict`].
+    pub id: Uuid,
     pub name: String,
     pub kind: UpstreamKind,
     pub base_url: Option<Url>,
+    /// API-key ciphertext sealed with AAD = `id`.
     pub api_key_ciphertext: Option<Vec<u8>>,
-    pub oauth_token_generation: Option<u64>,
+    /// Initial OAuth credential; stored with `oauth_token_generation == 1`.
+    pub oauth_tokens: Option<OAuthTokensCreate>,
     pub warmup_enabled: bool,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
 }

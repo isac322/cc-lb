@@ -50,11 +50,12 @@ pub async fn new_fixture() -> Fixture {
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "warmup-primary".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: Some(dialect_plugin.clone()),
         },

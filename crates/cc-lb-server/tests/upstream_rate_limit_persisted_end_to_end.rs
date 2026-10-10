@@ -36,11 +36,12 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "fake-anthropic".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&format!("http://{}", upstream_server.addr))?),
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

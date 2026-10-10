@@ -4,7 +4,8 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::upstream::{
-    UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamUpdate,
+    OAuthTokensCreate, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate,
+    UpstreamUpdate,
 };
 use cc_lb_storage_api::{StorageError, UpstreamStore};
 use url::Url;
@@ -50,6 +51,9 @@ where
     B: UpstreamStoreBackend,
 {
     create_upstream(Arc::clone(&backend)).await?;
+    create_with_api_key_secret(Arc::clone(&backend)).await?;
+    create_with_oauth_tokens(Arc::clone(&backend)).await?;
+    create_upstream_duplicate_id_conflicts(Arc::clone(&backend)).await?;
     get_by_id(Arc::clone(&backend)).await?;
     get_by_name(Arc::clone(&backend)).await?;
     get_by_name_missing(Arc::clone(&backend)).await?;
@@ -93,6 +97,167 @@ scenario!(create_upstream, |store| async move {
     ensure!(record.kind == UpstreamKind::AnthropicOauth, "kind mismatch");
     ensure!(record.enabled, "new upstream should be enabled");
     ensure!(record.revision == 1, "new upstream revision should be 1");
+    Ok(())
+});
+
+scenario!(create_with_api_key_secret, |store| async move {
+    let id = Uuid::new_v4();
+    let ciphertext = vec![7, 8, 9];
+    let created = store
+        .create(UpstreamCreate {
+            id,
+            name: "upstream-create-api-key".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: Some(ciphertext.clone()),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        })
+        .await?;
+    ensure!(created.id == id, "create must honor the caller-assigned id");
+    ensure!(
+        created.api_key_ciphertext.as_ref() == Some(&ciphertext),
+        "create must return the committed API-key credential"
+    );
+    let stored = store
+        .get_by_id(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created upstream must be readable by id"))?;
+    ensure!(stored.revision == 1, "new upstream revision should be 1");
+    ensure!(
+        stored.api_key_ciphertext == Some(ciphertext),
+        "API-key credential must commit with the spec"
+    );
+    ensure!(
+        stored == created,
+        "create result must match the stored record"
+    );
+    ensure!(
+        store
+            .list(None, 100)
+            .await?
+            .iter()
+            .any(|record| record.id == id && record.api_key_ciphertext.is_some()),
+        "list must show the upstream with its credential"
+    );
+    Ok(())
+});
+
+scenario!(create_with_oauth_tokens, |store| async move {
+    let id = Uuid::new_v4();
+    let aead = AeadService::from_master_key([46; 32]);
+    let bundle = token_bundle("access-create", "refresh-create");
+    let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, id.as_bytes())?;
+    let created = store
+        .create(UpstreamCreate {
+            id,
+            name: "upstream-create-oauth".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: encrypted,
+                never_refresh: true,
+            }),
+            warmup_enabled: true,
+            warmup_dialect_plugin: None,
+        })
+        .await?;
+    ensure!(created.id == id, "create must honor the caller-assigned id");
+    let stored = store
+        .get_by_id(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created upstream must be readable by id"))?;
+    ensure!(
+        stored == created,
+        "create result must match the stored record"
+    );
+    ensure!(stored.revision == 1, "new upstream revision should be 1");
+    ensure!(
+        stored.oauth_token_generation == 1,
+        "initial OAuth credential must start at generation 1, got {}",
+        stored.oauth_token_generation
+    );
+    ensure!(
+        stored.oauth_never_refresh,
+        "never_refresh must commit with the credential"
+    );
+    ensure!(
+        stored.last_apply_error.is_none(),
+        "new OAuth upstream must have no apply error"
+    );
+    let tokens = stored
+        .oauth_credentials
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("OAuth credential must commit with the spec"))?;
+    ensure!(
+        tokens.decrypt(&aead, id.as_bytes())? == bundle,
+        "stored tokens must decrypt with AAD = id"
+    );
+    ensure!(
+        store.read_oauth_token_generation(id).await? == Some(1),
+        "generation reader must observe generation 1"
+    );
+    Ok(())
+});
+
+scenario!(create_upstream_duplicate_id_conflicts, |store| async move {
+    let id = Uuid::new_v4();
+    let original = store
+        .create(UpstreamCreate {
+            id,
+            name: "upstream-duplicate-id-original".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: Some(vec![1, 1, 1]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        })
+        .await?;
+    let aead = AeadService::from_master_key([47; 32]);
+    let encrypted = EncryptedOAuthTokens::encrypt(
+        &aead,
+        &token_bundle("access-collide", "refresh-collide"),
+        id.as_bytes(),
+    )?;
+    let error = store
+        .create(UpstreamCreate {
+            id,
+            name: "upstream-duplicate-id-collider".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: Some(vec![2, 2, 2]),
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens: encrypted,
+                never_refresh: true,
+            }),
+            warmup_enabled: true,
+            warmup_dialect_plugin: None,
+        })
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("creating a duplicate upstream id must fail"))?;
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected duplicate id conflict, got {error:?}"
+    );
+    ensure!(
+        store.get_by_id(id).await? == Some(original),
+        "colliding create must leave the original row and credential untouched"
+    );
+    ensure!(
+        store
+            .get_by_name("upstream-duplicate-id-collider")
+            .await?
+            .is_none(),
+        "colliding create must not insert a row"
+    );
+    ensure!(
+        store.read_oauth_token_generation(id).await? == Some(0),
+        "colliding create must not insert an OAuth token row"
+    );
     Ok(())
 });
 
@@ -487,10 +652,14 @@ scenario!(
     |store| async move {
         let record = store
             .create(UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: "api-key-terminal-looking-error".to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
                 api_key_ciphertext: Some(vec![1, 2, 3]),
-                ..UpstreamCreate::default()
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
             })
             .await?;
         store
@@ -863,11 +1032,12 @@ scenario!(
 
         let error = store
             .create(UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: NAME.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             })
@@ -931,11 +1101,12 @@ scenario!(hard_delete_removes_row, |store| async move {
 scenario!(validate_identifier_rejects_bad_name, |store| async move {
     let error = store
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "system.bad".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         })
@@ -964,11 +1135,12 @@ where
 async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamRecord> {
     Ok(store
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         })

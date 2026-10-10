@@ -22,9 +22,9 @@ use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    AuditActorFields, OrganizationMetadataRecord, Storage, StorageError, StoredOAuthPkceFlow,
-    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    validate_identifier,
+    AuditActorFields, OAuthTokensCreate, OrganizationMetadataRecord, Storage, StorageError,
+    StoredOAuthPkceFlow, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, validate_identifier,
 };
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
@@ -630,14 +630,54 @@ async fn create_upstream_from_oauth_draft(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         },
     };
+    // The draft tokens are sealed with the nil AAD; rebind them to the
+    // preallocated upstream id before the insert so the spec row and its
+    // credential land in one storage transaction. No upstream exists yet, so a
+    // crypto failure only has to discard the PKCE flow.
+    let id = Uuid::new_v4();
+    let bundle = match completion
+        .encrypted_tokens
+        .decrypt(state.aead.as_ref(), Uuid::nil().as_bytes())
+    {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return discard_oauth_draft(
+                storage.as_ref(),
+                &payload.state_token,
+                format!("draft token decrypt failed: {error}"),
+                None,
+            )
+            .await;
+        }
+    };
+    let tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+        state.aead.as_ref(),
+        &bundle,
+        id.as_bytes(),
+    ) {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            return discard_oauth_draft(
+                storage.as_ref(),
+                &payload.state_token,
+                format!("draft token re-encrypt failed: {error}"),
+                None,
+            )
+            .await;
+        }
+    };
     let created = match UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
+            id,
             name: payload.name,
             kind: UpstreamKind::AnthropicOauth,
             base_url,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: Some(OAuthTokensCreate {
+                tokens,
+                never_refresh: bundle.never_refresh,
+            }),
             warmup_enabled: true,
             warmup_dialect_plugin: None,
         },
@@ -665,58 +705,7 @@ async fn create_upstream_from_oauth_draft(
         }
         Err(error) => return storage_error_response(&error),
     };
-    let bundle = match completion
-        .encrypted_tokens
-        .decrypt(state.aead.as_ref(), Uuid::nil().as_bytes())
-    {
-        Ok(bundle) => bundle,
-        Err(error) => {
-            return rollback_oauth_draft_creation(
-                storage.as_ref(),
-                &payload.state_token,
-                created.id,
-                format!("draft token decrypt failed: {error}"),
-            )
-            .await;
-        }
-    };
-    let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
-        state.aead.as_ref(),
-        &bundle,
-        created.id.as_bytes(),
-    ) {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            return rollback_oauth_draft_creation(
-                storage.as_ref(),
-                &payload.state_token,
-                created.id,
-                format!("draft token re-encrypt failed: {error}"),
-            )
-            .await;
-        }
-    };
-    let updated = match storage
-        .store_oauth_tokens(
-            created.id,
-            created.revision,
-            encrypted_tokens,
-            bundle.never_refresh,
-        )
-        .await
-    {
-        Ok(updated) => updated,
-        Err(error) => {
-            return rollback_oauth_draft_creation(
-                storage.as_ref(),
-                &payload.state_token,
-                created.id,
-                format!("oauth token storage failed: {error}"),
-            )
-            .await;
-        }
-    };
-    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &updated).await {
+    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &created).await {
         return rollback_oauth_draft_creation(
             storage.as_ref(),
             &payload.state_token,
@@ -756,7 +745,7 @@ async fn create_upstream_from_oauth_draft(
         return response;
     }
 
-    let target_upstream = updated.name.clone();
+    let target_upstream = created.name.clone();
     if let Err(error) = record_admin_audit(
         &state,
         AdminAuditEvent {
@@ -785,8 +774,8 @@ async fn create_upstream_from_oauth_draft(
             .into_response();
     }
 
-    let mut response = (StatusCode::CREATED, Json(upstream_response(&updated))).into_response();
-    if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", updated.id)) {
+    let mut response = (StatusCode::CREATED, Json(upstream_response(&created))).into_response();
+    if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", created.id)) {
         response.headers_mut().insert(header::LOCATION, location);
     }
     add_dynamic_rebind_headers(&mut response, &state).await;
@@ -1353,6 +1342,10 @@ fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTas
     }]
 }
 
+/// Hard-deletes an upstream that was already created atomically with its
+/// OAuth credential when a later onboarding step (bootstrap task seeding or
+/// subscription/organization metadata storage) fails, then discards the PKCE
+/// draft. Crypto failures happen before the create and never reach this.
 async fn rollback_oauth_draft_creation(
     storage: &dyn Storage,
     state_token: &str,
@@ -1360,6 +1353,17 @@ async fn rollback_oauth_draft_creation(
     detail: String,
 ) -> Response {
     let rollback_error = UpstreamStore::hard_delete(storage, upstream_id).await.err();
+    discard_oauth_draft(storage, state_token, detail, rollback_error).await
+}
+
+/// Deletes the PKCE draft flow and returns the 500 `oauth_draft_create_failed`
+/// response, folding any cleanup or rollback failure into `detail`.
+async fn discard_oauth_draft(
+    storage: &dyn Storage,
+    state_token: &str,
+    detail: String,
+    rollback_error: Option<StorageError>,
+) -> Response {
     let pkce_delete_error = storage.delete_pkce_flow(state_token).await.err();
     let detail = match pkce_delete_error {
         Some(error) => format!("{detail}; pkce flow cleanup failed: {error}"),

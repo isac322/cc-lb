@@ -18,6 +18,7 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::time::{Instant, sleep};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -31,11 +32,12 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "declared-upstream".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },

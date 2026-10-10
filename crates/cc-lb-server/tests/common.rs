@@ -23,6 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use url::Url;
+use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 pub async fn postgres_test_lock(database_url: &str) -> Result<sqlx::PgConnection, sqlx::Error> {
@@ -405,6 +406,7 @@ async fn seed_storage(
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: (*name).to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: Some(
@@ -412,7 +414,7 @@ async fn seed_storage(
                         .expect("fake upstream URL parses"),
                 ),
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },

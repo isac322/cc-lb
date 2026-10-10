@@ -22,6 +22,7 @@ use cc_lb_storage_api::{
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage};
 use fixtures::{principal_create_body, seed_cache_keepalive_contract_rows};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 const NOW_UNIX_SECS: u64 = 1_730_000_100;
 
@@ -84,11 +85,12 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
     let (_directory, storage, state, principal_id) = create_principal_id().await;
     let upstream = storage
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "retired-upstream".to_owned(),
             kind: StorageUpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         })

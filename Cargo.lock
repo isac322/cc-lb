@@ -767,6 +767,7 @@ dependencies = [
  "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
+ "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
  "cc-lb-upstream",
  "figment",

@@ -390,11 +390,12 @@ impl Fixture {
         let record = UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },
@@ -459,11 +460,12 @@ impl Fixture {
         UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
                 api_key_ciphertext: None,
-                oauth_token_generation: None,
+                oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
             },

@@ -84,11 +84,12 @@ where
 {
     let record = storage
         .create(UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "lazy-proactive-race".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         })

@@ -469,9 +469,14 @@ async fn create_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &s
     UpstreamStore::create(
         storage,
         UpstreamCreate {
+            id: uuid::Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicOauth,
-            ..UpstreamCreate::default()
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
         },
     )
     .await

@@ -14,6 +14,7 @@ use cc_lb_storage_api::{
 
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+use uuid::Uuid;
 
 fn stores(storage: Arc<SqliteStorage>) -> Stores {
     Stores {
@@ -69,11 +70,12 @@ async fn create_api_key_upstream(
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
@@ -200,11 +202,12 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
     let corrupt = UpstreamStore::create(
         &*storage,
         UpstreamCreate {
+            id: Uuid::new_v4(),
             name: "corrupt".to_owned(),
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            oauth_token_generation: None,
+            oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
         },
@@ -278,9 +281,14 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
         let created = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {
+                id: Uuid::new_v4(),
                 name: format!("reconnect-{reason}"),
                 kind: UpstreamKind::AnthropicOauth,
-                ..UpstreamCreate::default()
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
             },
         )
         .await
