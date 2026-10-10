@@ -85,7 +85,7 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5.139
+        uses: MarcoIeni/release-plz-action@v0.5.140
         with:
           command: release
         env:
@@ -120,7 +120,7 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5.139
+        uses: MarcoIeni/release-plz-action@v0.5.140
         with:
           command: release-pr
         env:
