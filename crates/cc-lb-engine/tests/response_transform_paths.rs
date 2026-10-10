@@ -1219,6 +1219,65 @@ async fn provider_error_then_gzip_trailer_failure_is_not_accepted()
     Ok(())
 }
 
+// The SSE `event:` name alone is not the semantic stop: only the usage parser's
+// `usage_update.message_stop` (JSON `type` match) enables accept-with-warning.
+
+#[tokio::test]
+async fn event_named_message_stop_with_delta_payload_and_gzip_failure_stays_fatal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":11}}\n\n",
+    );
+    let relayed = relay_and_record(
+        "name-only-message-stop-delta.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, gzip_without_trailer(&plaintext)),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&plaintext));
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    assert!(text.contains("matching checksum"));
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_named_message_stop_with_malformed_payload_and_gzip_failure_stays_fatal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: message_stop\ndata: {not-json}\n\n",
+    );
+    let relayed = relay_and_record(
+        "name-only-message-stop-malformed.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, gzip_without_trailer(&plaintext)),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&plaintext));
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    assert!(text.contains("matching checksum"));
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    Ok(())
+}
+
 #[tokio::test]
 async fn upstream_diagnostics_record_http2_version_request_id_and_content_length()
 -> Result<(), Box<dyn std::error::Error>> {

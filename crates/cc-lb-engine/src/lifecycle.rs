@@ -156,14 +156,14 @@ fn sse_buffer_is_blank(buffer: &[u8]) -> bool {
 /// site.
 fn upstream_end_after_message_stop_is_acceptable(
     status: StatusCode,
-    message_stop_seen: bool,
+    semantic_message_stop_seen: bool,
     terminal_error_recorded: bool,
     provider_error_seen: bool,
     warning_recorded: bool,
     unparsed_sse: &[u8],
 ) -> bool {
     status.is_success()
-        && message_stop_seen
+        && semantic_message_stop_seen
         && !terminal_error_recorded
         && !provider_error_seen
         && !warning_recorded
@@ -4487,6 +4487,9 @@ impl Lifecycle {
             let mut first_content_delta_at: Option<Instant> = None;
             let mut last_content_delta_at: Option<Instant> = None;
             let mut message_stop_at: Option<Instant> = None;
+            // #663: semantic stop only — the SSE `event:` name alone does not
+            // count; `usage_update.message_stop` requires the JSON `type`.
+            let mut semantic_message_stop_seen = false;
             let mut prompt_cache_observations_published = false;
             let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
@@ -4600,7 +4603,7 @@ impl Lifecycle {
                                         && (success_sse_affinity_gate || sse_transform_active)
                                         && upstream_end_after_message_stop_is_acceptable(
                                             status,
-                                            message_stop_at.is_some(),
+                                            semantic_message_stop_seen,
                                             stream_upstream_error.is_some()
                                                 || stream_transform_error.is_some()
                                                 || stream_affinity_error.is_some(),
@@ -4955,6 +4958,7 @@ impl Lifecycle {
                                 {
                                     message_stop_at = Some(now);
                                 }
+                                semantic_message_stop_seen |= usage_update.message_stop;
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -5251,7 +5255,7 @@ impl Lifecycle {
                                     && !downstream_sse_boundary.partial_event_pending()))
                             && upstream_end_after_message_stop_is_acceptable(
                                 status,
-                                message_stop_at.is_some(),
+                                semantic_message_stop_seen,
                                 stream_upstream_error.is_some()
                                     || stream_transform_error.is_some()
                                     || stream_affinity_error.is_some(),
@@ -5612,7 +5616,7 @@ impl Lifecycle {
                         && (success_sse_affinity_gate || sse_transform_active)
                         && upstream_end_after_message_stop_is_acceptable(
                             status,
-                            message_stop_at.is_some(),
+                            semantic_message_stop_seen,
                             stream_upstream_error.is_some()
                                 || stream_transform_error.is_some()
                                 || stream_affinity_error.is_some(),
