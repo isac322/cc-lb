@@ -2,6 +2,7 @@ use crate::common::{TestAuthn, TestState, collect_body, messages_request};
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::io::Write as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1091,4 +1092,97 @@ async fn buffered_body_frame_error_discards_partial_opaque_body() {
     assert!(body.contains("upstream response body could not be read"));
     assert!(!body.contains(ciphertext));
     assert_eq!(dispatch.call_count(), 1);
+}
+
+/// #663: the affinity gate decodes gzip and is the SSE emitter of record, so a
+/// gzip trailer that cannot be verified after `message_stop` completes the
+/// stream with a warning instead of an inspection-failed frame.
+#[tokio::test]
+async fn gate_gzip_trailer_loss_after_message_stop_is_accepted_and_binds_affinity() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(affinity_key("gate-known-663"), upstream);
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::SseWithEncoding {
+        body: gzip_without_trailer(&plaintext),
+        content_encoding: "gzip",
+    });
+    let lifecycle = lifecycle(
+        vec![upstream_record(upstream, "origin", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let (status, headers, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(opaque_request(
+                &["gate-known-663", "gate-pending-663"],
+                true,
+            )),
+        )
+        .await
+        .expect("gated gzip SSE response handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get(http::header::CONTENT_ENCODING).is_none());
+    assert_eq!(body, plaintext);
+    assert_eq!(
+        store.upstream_for(&affinity_key("gate-pending-663")),
+        Some(upstream)
+    );
+    assert_eq!(dispatch.call_count(), 1);
+}
+
+#[tokio::test]
+async fn gate_gzip_truncated_before_message_stop_fails_closed_without_binding() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(affinity_key("gate-known-663-before"), upstream);
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    );
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::SseWithEncoding {
+        body: gzip_without_trailer(&plaintext),
+        content_encoding: "gzip",
+    });
+    let lifecycle = lifecycle(
+        vec![upstream_record(upstream, "origin", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(opaque_request(
+                &["gate-known-663-before", "gate-pending-663-before"],
+                true,
+            )),
+        )
+        .await
+        .expect("truncated gated gzip SSE response handled"),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(text.starts_with(std::str::from_utf8(&plaintext).expect("utf8 fixture")));
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    assert!(text.contains("upstream SSE response could not be safely processed"));
+    assert_eq!(
+        store.upstream_for(&affinity_key("gate-pending-663-before")),
+        None
+    );
+}
+
+fn gzip_without_trailer(body: &Bytes) -> Bytes {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(body).expect("gzip write succeeds");
+    let compressed = encoder.finish().expect("gzip finish succeeds");
+    Bytes::copy_from_slice(&compressed[..compressed.len() - 8])
 }

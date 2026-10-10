@@ -178,6 +178,7 @@ fn lifecycle_event_assembler_matches_are_explicit_and_documented() {
             "LimitDecision",
             "UpstreamAttempt",
             "RequestLogUpstreamErrorObserved",
+            "UpstreamStreamDiagnosticsObserved",
             "Priced",
             "CacheObserved",
         ],

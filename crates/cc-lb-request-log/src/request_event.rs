@@ -237,6 +237,37 @@ pub struct RequestEvent {
     pub upstream_error_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_error_message: Option<String>,
+    /// Upstream HTTP version (`HTTP/1.1`, `HTTP/2.0`) for streaming responses
+    /// whose upstream body ended abnormally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_http_version: Option<String>,
+    /// Anthropic `request-id` upstream response header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_content_encoding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_content_length: Option<u64>,
+    /// Raw (still-encoded) upstream body bytes received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_bytes: Option<u64>,
+    /// `transport_error`, `decode_error_after_clean_end`, or
+    /// `decode_error_mid_body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_error_cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_error_io_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_error_h2_reason: Option<String>,
+    /// Set when a stream was accepted after upstream `message_stop` despite a
+    /// trailing body/decode failure. Never mirrored into
+    /// `upstream_error_type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_stream_warning_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_stream_warning_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<JsonValue>,
 }
@@ -301,6 +332,81 @@ mod tests {
 
         let restored: RequestEvent =
             serde_json::from_value(json).expect("deserialize request latency fields");
+        assert_eq!(restored, event);
+    }
+
+    const DIAGNOSTIC_KEYS: [&str; 11] = [
+        "upstream_http_version",
+        "upstream_request_id",
+        "upstream_content_encoding",
+        "upstream_content_length",
+        "upstream_body_bytes",
+        "upstream_body_end",
+        "upstream_body_error_cause",
+        "upstream_body_error_io_kind",
+        "upstream_body_error_h2_reason",
+        "upstream_stream_warning_type",
+        "upstream_stream_warning_message",
+    ];
+
+    #[test]
+    fn legacy_payload_without_upstream_diagnostics_deserializes_to_none() {
+        let legacy = serde_json::json!({
+            "ts": 1_730_000_000_000_u64,
+            "request_id": "req-legacy",
+            "status": 200,
+            "duration_ms": 345,
+            "stream_message_stop_ms": 12,
+        });
+        let restored: RequestEvent =
+            serde_json::from_value(legacy).expect("deserialize legacy payload");
+        assert_eq!(restored.request_id, "req-legacy");
+        assert_eq!(restored.stream_message_stop_ms, Some(12));
+        assert_eq!(restored.upstream_http_version, None);
+        assert_eq!(restored.upstream_request_id, None);
+        assert_eq!(restored.upstream_content_encoding, None);
+        assert_eq!(restored.upstream_content_length, None);
+        assert_eq!(restored.upstream_body_bytes, None);
+        assert_eq!(restored.upstream_body_end, None);
+        assert_eq!(restored.upstream_body_error_cause, None);
+        assert_eq!(restored.upstream_body_error_io_kind, None);
+        assert_eq!(restored.upstream_body_error_h2_reason, None);
+        assert_eq!(restored.upstream_stream_warning_type, None);
+        assert_eq!(restored.upstream_stream_warning_message, None);
+    }
+
+    #[test]
+    fn upstream_diagnostics_fields_absent_when_none() {
+        let json = serde_json::to_value(RequestEvent::default()).expect("serialize default");
+        for key in DIAGNOSTIC_KEYS {
+            assert!(json.get(key).is_none(), "{key} must be skipped when None");
+        }
+    }
+
+    #[test]
+    fn upstream_diagnostics_fields_roundtrip() {
+        let event = RequestEvent {
+            upstream_http_version: Some("HTTP/2.0".to_owned()),
+            upstream_request_id: Some("req_011".to_owned()),
+            upstream_content_encoding: Some("gzip".to_owned()),
+            upstream_content_length: Some(4096),
+            upstream_body_bytes: Some(3_210),
+            upstream_body_end: Some("transport_error".to_owned()),
+            upstream_body_error_cause: Some("upstream_body_error".to_owned()),
+            upstream_body_error_io_kind: Some("connection_reset".to_owned()),
+            upstream_body_error_h2_reason: Some("INTERNAL_ERROR".to_owned()),
+            upstream_stream_warning_type: Some("upstream_response_body_error".to_owned()),
+            upstream_stream_warning_message: Some("body error".to_owned()),
+            stream_message_stop_ms: Some(77),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_value(&event).expect("serialize diagnostics");
+        for key in DIAGNOSTIC_KEYS {
+            assert!(json.get(key).is_some(), "{key} must be serialized when set");
+        }
+        assert_eq!(json["upstream_body_end"], "transport_error");
+        assert_eq!(json["upstream_body_bytes"], 3_210);
+        let restored: RequestEvent = serde_json::from_value(json).expect("deserialize diagnostics");
         assert_eq!(restored, event);
     }
 }

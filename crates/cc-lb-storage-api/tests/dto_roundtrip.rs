@@ -517,6 +517,17 @@ fn batch_b_wire_snapshots_are_stable() {
         inference_geo: Some("us-east".to_owned()),
         upstream_error_type: Some("overloaded_error".to_owned()),
         upstream_error_message: Some("upstream overloaded; retry".to_owned()),
+        upstream_http_version: Some("HTTP/2.0".to_owned()),
+        upstream_request_id: Some("req_upstream_batch_b".to_owned()),
+        upstream_content_encoding: Some("gzip".to_owned()),
+        upstream_content_length: Some(4096),
+        upstream_body_bytes: Some(3072),
+        upstream_body_end: Some("decode_error_after_clean_end".to_owned()),
+        upstream_body_error_cause: Some("upstream_body_error".to_owned()),
+        upstream_body_error_io_kind: Some("unexpected_eof".to_owned()),
+        upstream_body_error_h2_reason: Some("INTERNAL_ERROR".to_owned()),
+        upstream_stream_warning_type: Some("upstream_response_decode_error".to_owned()),
+        upstream_stream_warning_message: Some("upstream response decoding failed".to_owned()),
         iterations: Some(json!([{ "type": "message", "input_tokens": 100 }])),
     };
     let request_event_json = json!({
@@ -659,6 +670,17 @@ fn batch_b_wire_snapshots_are_stable() {
         "inference_geo": "us-east",
         "upstream_error_type": "overloaded_error",
         "upstream_error_message": "upstream overloaded; retry",
+        "upstream_http_version": "HTTP/2.0",
+        "upstream_request_id": "req_upstream_batch_b",
+        "upstream_content_encoding": "gzip",
+        "upstream_content_length": 4096,
+        "upstream_body_bytes": 3072,
+        "upstream_body_end": "decode_error_after_clean_end",
+        "upstream_body_error_cause": "upstream_body_error",
+        "upstream_body_error_io_kind": "unexpected_eof",
+        "upstream_body_error_h2_reason": "INTERNAL_ERROR",
+        "upstream_stream_warning_type": "upstream_response_decode_error",
+        "upstream_stream_warning_message": "upstream response decoding failed",
         "iterations": [{ "type": "message", "input_tokens": 100 }]
     });
     assert_wire(request_event.clone(), request_event_json.clone());

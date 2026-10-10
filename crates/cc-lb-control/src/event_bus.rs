@@ -282,7 +282,8 @@ impl InMemoryBus {
     /// Whether this event carries request-log meaning for the durable
     /// assembler: it creates the row (`RequestStarted`), finalizes it
     /// (`RequestTerminated`), or records an abnormal outcome
-    /// (`RequestLogUpstreamErrorObserved`, `StreamCompleted` errors). These
+    /// (`RequestLogUpstreamErrorObserved`, `UpstreamStreamDiagnosticsObserved`,
+    /// `StreamCompleted` errors). These
     /// must not be dropped when the assembler channel is full.
     fn carries_request_row(event: &LifecycleEvent) -> bool {
         matches!(
@@ -290,6 +291,7 @@ impl InMemoryBus {
             LifecycleEvent::RequestStarted { .. }
                 | LifecycleEvent::RequestTerminated { .. }
                 | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+                | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
                 | LifecycleEvent::StreamCompleted { .. }
         )
     }
@@ -409,6 +411,7 @@ impl RequestEventBus for InMemoryBus {
         if matches!(
             &event,
             LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+                | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
         ) {
             // Row-bearing event routed only to the durable assembler; never
             // broadcast or written to the metric writer channel.
@@ -790,6 +793,28 @@ mod tests {
             event_id: "evt-private".into(),
             error_type: "rate_limit_error".into(),
             error_message: "bounded".into(),
+        };
+
+        bus.publish_lifecycle(event.clone());
+
+        assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
+        assert!(broadcast_rx.try_recv().is_err());
+        assert!(writer_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn upstream_stream_diagnostics_routes_only_to_assembler() {
+        let bus = InMemoryBus::new();
+        let mut broadcast_rx = bus.subscribe_lifecycle();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+        let mut writer_rx = bus.attach_lifecycle_writer(1);
+        let event = LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+            event_id: "evt-private".into(),
+            diagnostics: cc_lb_lifecycle::UpstreamStreamDiagnostics {
+                request_id: Some("req_upstream".into()),
+                body_bytes: 10,
+                ..Default::default()
+            },
         };
 
         bus.publish_lifecycle(event.clone());

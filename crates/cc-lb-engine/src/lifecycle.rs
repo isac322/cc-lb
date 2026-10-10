@@ -72,8 +72,8 @@ use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::sse_error_frame::make_error_frame;
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
-    InternalFailure, LifecycleContext, StreamTerminationCause, UpstreamErrorCode,
-    classify_stream_error, error_codes, numeric_attribute,
+    InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
+    UpstreamErrorCode, classify_stream_error, error_codes, numeric_attribute,
 };
 use crate::upstream_affinity::{
     extract_anthropic_web_search_affinity_keys,
@@ -140,6 +140,131 @@ fn is_upstream_response_decode_error(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::InvalidInput
             | std::io::ErrorKind::UnexpectedEof
     )
+}
+
+const UPSTREAM_DIAGNOSTIC_HEADER_MAX_BYTES: usize = 256;
+
+/// True when the unconsumed SSE bytes hold no partial event: only line
+/// terminators remain, matching the end-of-stream framing check.
+fn sse_buffer_is_blank(buffer: &[u8]) -> bool {
+    buffer.iter().all(|byte| matches!(byte, b'\r' | b'\n'))
+}
+
+/// Accept-with-warning predicate for an upstream SSE body that fails after
+/// cc-lb already parsed the upstream `message_stop` (#663). The caller adds
+/// the emitter-of-record and error-class conditions specific to its failure
+/// site.
+fn upstream_end_after_message_stop_is_acceptable(
+    status: StatusCode,
+    semantic_message_stop_seen: bool,
+    terminal_error_recorded: bool,
+    provider_error_seen: bool,
+    warning_recorded: bool,
+    unparsed_sse: &[u8],
+) -> bool {
+    status.is_success()
+        && semantic_message_stop_seen
+        && !terminal_error_recorded
+        && !provider_error_seen
+        && !warning_recorded
+        && sse_buffer_is_blank(unparsed_sse)
+}
+
+fn bounded_diagnostic_header(value: Option<&HeaderValue>) -> Option<String> {
+    let text = value?.to_str().ok()?;
+    // `to_str` only accepts visible ASCII, so every index is a char boundary.
+    text.get(..text.len().min(UPSTREAM_DIAGNOSTIC_HEADER_MAX_BYTES))
+        .map(str::to_owned)
+}
+
+/// Upstream body-end evidence collected while relaying an SSE response.
+/// Header values are kept as cheap `HeaderValue` clones and only rendered
+/// into strings when the body ended abnormally.
+struct UpstreamBodyDiagnostics {
+    http_version: http::Version,
+    request_id: Option<HeaderValue>,
+    content_encoding: Option<HeaderValue>,
+    content_length: Option<u64>,
+    body_end: Option<cc_lb_lifecycle::UpstreamBodyEnd>,
+    error: Option<StreamErrorClassification>,
+    warning: Option<(&'static str, String)>,
+}
+
+impl UpstreamBodyDiagnostics {
+    fn from_parts(parts: &http::response::Parts) -> Self {
+        Self {
+            http_version: parts.version,
+            request_id: parts.headers.get("request-id").cloned(),
+            content_encoding: parts.headers.get(http::header::CONTENT_ENCODING).cloned(),
+            content_length: parts
+                .headers
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse().ok()),
+            body_end: None,
+            error: None,
+            warning: None,
+        }
+    }
+
+    /// Records how the upstream body ended. The first abnormal end wins, so a
+    /// transport error followed by a decoder finish failure stays a transport
+    /// error.
+    fn record_body_end(
+        &mut self,
+        body_end: cc_lb_lifecycle::UpstreamBodyEnd,
+        classify: impl FnOnce() -> StreamErrorClassification,
+    ) {
+        if self.body_end.is_none() {
+            self.body_end = Some(body_end);
+            self.error = Some(classify());
+        }
+    }
+
+    fn record_warning(&mut self, warning_type: &'static str, message: String) {
+        if self.warning.is_none() {
+            self.warning = Some((warning_type, message));
+        }
+    }
+
+    fn warning_recorded(&self) -> bool {
+        self.warning.is_some()
+    }
+
+    /// Renders the lifecycle payload, or `None` when the body ended cleanly.
+    fn into_lifecycle(
+        self,
+        body_bytes: u64,
+        message_stop_ms: Option<u64>,
+    ) -> Option<cc_lb_lifecycle::UpstreamStreamDiagnostics> {
+        let body_end = self.body_end?;
+        let (body_error_cause, body_error_io_kind, body_error_h2_reason) = match self.error {
+            Some(error) => (
+                Some(error.cause.as_str().to_owned()),
+                error.io_kind,
+                error.h2_reason,
+            ),
+            None => (None, None, None),
+        };
+        let (warning_type, warning_message) = match self.warning {
+            Some((warning_type, message)) => (Some(warning_type.to_owned()), Some(message)),
+            None => (None, None),
+        };
+        Some(cc_lb_lifecycle::UpstreamStreamDiagnostics {
+            http_version: Some(format!("{:?}", self.http_version)),
+            request_id: bounded_diagnostic_header(self.request_id.as_ref()),
+            content_encoding: bounded_diagnostic_header(self.content_encoding.as_ref()),
+            content_length: self.content_length,
+            body_bytes,
+            body_end: Some(body_end),
+            body_error_cause,
+            body_error_io_kind,
+            body_error_h2_reason,
+            message_stop_ms,
+            warning_type,
+            warning_message,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -4232,6 +4357,7 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
+        let upstream_diagnostics = UpstreamBodyDiagnostics::from_parts(&parts);
         strip_hop_by_hop(&mut parts.headers);
         let decompression_output_budget_bytes =
             decompression_output_budget_bytes(self.config.messages_body_cap_bytes);
@@ -4350,6 +4476,7 @@ impl Lifecycle {
         let stream = async_stream::stream! {
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
+            let mut upstream_diagnostics = upstream_diagnostics;
             let mut batch_index = 0_u64;
             let mut buffer = BytesMut::new();
             let mut usage = UsageCounts::default();
@@ -4360,6 +4487,9 @@ impl Lifecycle {
             let mut first_content_delta_at: Option<Instant> = None;
             let mut last_content_delta_at: Option<Instant> = None;
             let mut message_stop_at: Option<Instant> = None;
+            // #663: semantic stop only — the SSE `event:` name alone does not
+            // count; `usage_update.message_stop` requires the JSON `type`.
+            let mut semantic_message_stop_seen = false;
             let mut prompt_cache_observations_published = false;
             let mut keepalive_response = crate::cache_keepalive::StreamingKeepaliveResponse::default();
             let mut sse_event_count: u64 = 0;
@@ -4386,9 +4516,16 @@ impl Lifecycle {
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
             let mut deferred_terminal_chunk: Option<Bytes> = None;
-            'upstream: while let Some(frame) =
-                timed_body_frame(&mut body, &stream_body_io_timing).await
-            {
+            // #663: true only once the upstream body stream delivered its final
+            // frame. A decoder finish failure after cc-lb aborted the loop
+            // locally is not upstream evidence.
+            let mut upstream_body_eof = false;
+            'upstream: loop {
+                let Some(frame) = timed_body_frame(&mut body, &stream_body_io_timing).await
+                else {
+                    upstream_body_eof = true;
+                    break;
+                };
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
@@ -4453,6 +4590,47 @@ impl Lifecycle {
                                         upstream_decode_failed,
                                         "skipping streaming usage extraction: chunk decode failed"
                                     );
+                                    upstream_diagnostics.record_body_end(
+                                        cc_lb_lifecycle::UpstreamBodyEnd::DecodeErrorMidBody,
+                                        || classify_stream_error(&error),
+                                    );
+                                    // #663: once cc-lb parsed the upstream message_stop and it is
+                                    // the SSE emitter of record, a decode failure on a later chunk
+                                    // completes the stream with a warning instead of an error.
+                                    // The plaintext of the failing chunk is discarded, so a
+                                    // message_stop carried by that same chunk stays fatal.
+                                    if upstream_decode_failed
+                                        && (success_sse_affinity_gate || sse_transform_active)
+                                        && upstream_end_after_message_stop_is_acceptable(
+                                            status,
+                                            semantic_message_stop_seen,
+                                            stream_upstream_error.is_some()
+                                                || stream_transform_error.is_some()
+                                                || stream_affinity_error.is_some(),
+                                            stream_provider_error_seen,
+                                            upstream_diagnostics.warning_recorded(),
+                                            &buffer,
+                                        )
+                                    {
+                                        let classification = classify_stream_error(&error);
+                                        tracing::warn!(
+                                            parent: &stream_span,
+                                            request_id = %event_ctx.request_id,
+                                            error_chain = %classification.redacted_chain,
+                                            warning_type = UPSTREAM_RESPONSE_DECODE_ERROR_TYPE,
+                                            "accepting upstream SSE response after message_stop despite chunk decode failure"
+                                        );
+                                        upstream_diagnostics.record_warning(
+                                            UPSTREAM_RESPONSE_DECODE_ERROR_TYPE,
+                                            truncate_reason(&format!(
+                                                "upstream response decoding failed: {error}"
+                                            )),
+                                        );
+                                        upstream_error_body_decode_failed = true;
+                                        parse_sse_events_active = false;
+                                        buffer.clear();
+                                        break 'upstream;
+                                    }
                                     upstream_error_body_decode_failed = true;
                                     parse_sse_events_active = false;
                                     buffer.clear();
@@ -4780,6 +4958,16 @@ impl Lifecycle {
                                 {
                                     message_stop_at = Some(now);
                                 }
+                                // Strictly JSON-typed: the usage parser's
+                                // event-name fallback must not enable #663
+                                // accept-with-warning for name-only stops.
+                                semantic_message_stop_seen |= parsed_event
+                                    .value()
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|value| value.get("type"))
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("message_stop");
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -5065,6 +5253,43 @@ impl Lifecycle {
                             h2_reason = classification.h2_reason.as_deref().unwrap_or(""),
                             "upstream response body stream failed"
                         );
+                        // #663: a transport failure after cc-lb parsed the upstream
+                        // message_stop, with no partial event pending, completes the
+                        // stream with a warning when cc-lb is the SSE emitter of record
+                        // (transform, affinity gate, or uncompressed SSE passthrough).
+                        let body_end_accepted = upstream_is_sse
+                            && (success_sse_affinity_gate
+                                || sse_transform_active
+                                || (downstream_stream_is_identity
+                                    && !downstream_sse_boundary.partial_event_pending()))
+                            && upstream_end_after_message_stop_is_acceptable(
+                                status,
+                                semantic_message_stop_seen,
+                                stream_upstream_error.is_some()
+                                    || stream_transform_error.is_some()
+                                    || stream_affinity_error.is_some(),
+                                stream_provider_error_seen,
+                                upstream_diagnostics.warning_recorded(),
+                                &buffer,
+                            );
+                        upstream_diagnostics.record_body_end(
+                            cc_lb_lifecycle::UpstreamBodyEnd::TransportError,
+                            || classification.clone(),
+                        );
+                        if body_end_accepted {
+                            tracing::warn!(
+                                parent: &stream_span,
+                                request_id = %event_ctx.request_id,
+                                error_chain = %classification.redacted_chain,
+                                warning_type = UPSTREAM_RESPONSE_BODY_ERROR_TYPE,
+                                "accepting upstream SSE response after message_stop despite body stream failure"
+                            );
+                            upstream_diagnostics.record_warning(
+                                UPSTREAM_RESPONSE_BODY_ERROR_TYPE,
+                                classification.redacted_message,
+                            );
+                            break;
+                        }
                         let body_error_is_primary =
                             !stream_provider_error_seen && stream_upstream_error.is_none();
                         if body_error_is_primary {
@@ -5384,7 +5609,47 @@ impl Lifecycle {
                         upstream_decode_failed,
                         "streaming usage extractor decoder finish failed"
                     );
-                    if success_sse_affinity_gate
+                    if upstream_body_eof {
+                        upstream_diagnostics.record_body_end(
+                            cc_lb_lifecycle::UpstreamBodyEnd::DecodeErrorAfterCleanEnd,
+                            || classify_stream_error(&error),
+                        );
+                    }
+                    if upstream_diagnostics.warning_recorded() {
+                        // #663: an earlier accepted failure (push or body error) already
+                        // owns the single warning; the decoder finish failure follows
+                        // from it and must not turn the stream into an error.
+                    } else if upstream_body_eof
+                        && upstream_decode_failed
+                        && upstream_is_sse
+                        && (success_sse_affinity_gate || sse_transform_active)
+                        && upstream_end_after_message_stop_is_acceptable(
+                            status,
+                            semantic_message_stop_seen,
+                            stream_upstream_error.is_some()
+                                || stream_transform_error.is_some()
+                                || stream_affinity_error.is_some(),
+                            stream_provider_error_seen,
+                            false,
+                            &buffer,
+                        )
+                    {
+                        // #663: the upstream body ended after cc-lb parsed message_stop,
+                        // but the decoder could not verify the gzip trailer (missing,
+                        // truncated, or CRC/ISIZE mismatch are indistinguishable).
+                        let classification = classify_stream_error(&error);
+                        tracing::warn!(
+                            parent: &stream_span,
+                            request_id = %event_ctx.request_id,
+                            error_chain = %classification.redacted_chain,
+                            warning_type = UPSTREAM_RESPONSE_DECODE_ERROR_TYPE,
+                            "accepting upstream SSE response after message_stop despite decoder finish failure"
+                        );
+                        upstream_diagnostics.record_warning(
+                            UPSTREAM_RESPONSE_DECODE_ERROR_TYPE,
+                            truncate_reason(&format!("upstream response decoding failed: {error}")),
+                        );
+                    } else if success_sse_affinity_gate
                         && stream_transform_error.is_none()
                         && stream_affinity_error.is_none()
                         && stream_upstream_error.is_none()
@@ -5612,6 +5877,19 @@ impl Lifecycle {
                 o.set_usage_counts(&usage, message_stop_at.is_some());
                 if let Some(first_content_delta_ms) = elapsed_ms(first_content_delta_at) {
                     o.set_first_content_delta_ms(first_content_delta_ms);
+                }
+                // #663: attribution evidence for abnormal upstream SSE body ends,
+                // emitted at most once and before the terminal StreamCompleted.
+                if upstream_is_sse
+                    && let Some(diagnostics) = upstream_diagnostics
+                        .into_lifecycle(total_bytes, elapsed_ms(message_stop_at))
+                {
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+                            event_id: o.event_id().to_owned(),
+                            diagnostics,
+                        },
+                    );
                 }
                 if let Some(error) = stream_affinity_error.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
