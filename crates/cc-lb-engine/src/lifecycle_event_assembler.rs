@@ -6,7 +6,7 @@ use cc_lb_control::RequestEventBus;
 use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_lifecycle::{
     AuthInfo, EventId, LifecycleEvent, ParseInfo, RequestIoTimings, RouteInfo, TerminationReason,
-    UsageSnapshot,
+    UpstreamStreamDiagnostics, UsageSnapshot,
 };
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
@@ -142,6 +142,7 @@ struct Partial {
     stream_success: Option<u64>,
     stream_error_type: Option<String>,
     stream_error_message: Option<String>,
+    upstream_stream_diagnostics: Option<UpstreamStreamDiagnostics>,
     cost: Option<LifecycleCostBreakdown>,
     cache_state: Option<RequestCacheState>,
     cache_control_block_count: Option<u64>,
@@ -474,6 +475,8 @@ impl Partial {
 /// - `UpstreamAttempt`: attempt counters are internal bookkeeping.
 /// - `RequestLogUpstreamErrorObserved`: merged into `stream_error_*` fields
 ///   but not worth a partial publish on its own.
+/// - `UpstreamStreamDiagnosticsObserved`: merged into the upstream body
+///   attribution fields and published with the final write.
 /// - `Priced` / `CacheObserved`: merged into the row but published only with
 ///   the final write.
 fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
@@ -496,6 +499,7 @@ fn partial_emit_trigger(event: &LifecycleEvent) -> Option<PartialTrigger> {
         | LifecycleEvent::LimitDecision { .. }
         | LifecycleEvent::UpstreamAttempt { .. }
         | LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
+        | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
         | LifecycleEvent::Priced { .. }
         | LifecycleEvent::CacheObserved { .. } => None,
     }
@@ -1223,6 +1227,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_error_message = Some(error_message);
             }
         }
+        LifecycleEvent::UpstreamStreamDiagnosticsObserved { diagnostics, .. } => {
+            partial.upstream_stream_diagnostics = Some(diagnostics);
+        }
         // Intentional no-op: `handle_event` consumes `RequestTerminated`
         // before `merge` runs; this arm exists only for exhaustiveness.
         LifecycleEvent::RequestTerminated { .. } => {}
@@ -1338,6 +1345,7 @@ fn finalize_base(
         .unwrap_or_default();
 
     let cost = partial.cost_options();
+    let diagnostics = partial.upstream_stream_diagnostics.as_ref();
     RequestEvent {
         ts: ts_ms / 1_000,
         ts_ms: Some(ts_ms),
@@ -1356,6 +1364,19 @@ fn finalize_base(
         error_code,
         upstream_error_type: partial.stream_error_type.clone(),
         upstream_error_message: partial.stream_error_message.clone(),
+        upstream_http_version: diagnostics.and_then(|d| d.http_version.clone()),
+        upstream_request_id: diagnostics.and_then(|d| d.request_id.clone()),
+        upstream_content_encoding: diagnostics.and_then(|d| d.content_encoding.clone()),
+        upstream_content_length: diagnostics.and_then(|d| d.content_length),
+        upstream_body_bytes: diagnostics.map(|d| d.body_bytes),
+        upstream_body_end: diagnostics
+            .and_then(|d| d.body_end)
+            .map(|end| end.as_str().to_owned()),
+        upstream_body_error_cause: diagnostics.and_then(|d| d.body_error_cause.clone()),
+        upstream_body_error_io_kind: diagnostics.and_then(|d| d.body_error_io_kind.clone()),
+        upstream_body_error_h2_reason: diagnostics.and_then(|d| d.body_error_h2_reason.clone()),
+        upstream_stream_warning_type: diagnostics.and_then(|d| d.warning_type.clone()),
+        upstream_stream_warning_message: diagnostics.and_then(|d| d.warning_message.clone()),
         input_tokens: partial.usage_seen.then_some(partial.usage.input_tokens),
         output_tokens: partial.usage_seen.then_some(partial.usage.output_tokens),
         cache_creation_input_tokens: partial
@@ -1474,7 +1495,9 @@ fn finalize_base(
         stream_content_block_start_ms: partial.stream_content_block_start_ms,
         stream_first_content_delta_ms: partial.stream_first_content_delta_ms,
         stream_last_content_delta_ms: partial.stream_last_content_delta_ms,
-        stream_message_stop_ms: partial.stream_message_stop_ms,
+        stream_message_stop_ms: partial
+            .stream_message_stop_ms
+            .or_else(|| diagnostics.and_then(|d| d.message_stop_ms)),
         stream_last_chunk_ms: partial.stream_last_chunk_ms,
         stream_total_ms: partial.stream_total_ms,
         content_delta_count: partial.stream_content_delta_count,
@@ -2579,6 +2602,232 @@ mod tests {
             Some("rate_limit_error")
         );
         assert_eq!(rows[0].upstream_error_message.as_deref(), Some("bounded"));
+    }
+
+    fn diagnostics_terminated(
+        event_id: EventId,
+        reason: TerminationReason,
+        client_status: u16,
+    ) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id,
+            reason,
+            client_status,
+            duration_ms: 900,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            first_body_chunk_ms: None,
+            first_content_delta_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            internal_errors: Vec::new(),
+            event_kind: None,
+        }
+    }
+
+    fn diagnostics_started(event_id: EventId, request_id: &str) -> LifecycleEvent {
+        LifecycleEvent::RequestStarted {
+            event_id,
+            request_id: request_id.into(),
+            ts_ms: 1_730_000_000_000,
+            stream: true,
+            source_kind: None,
+            source_ref_id: None,
+            event_kind: None,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upstream_stream_diagnostics_populate_error_row_and_message_stop() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("upstream-diagnostics-error");
+
+        tx.send(diagnostics_started(event_id.clone(), "req-diag-error"))
+            .await
+            .unwrap();
+        tx.send(LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+            event_id: event_id.clone(),
+            diagnostics: UpstreamStreamDiagnostics {
+                http_version: Some("HTTP/2.0".into()),
+                request_id: Some("req_011CUpstream".into()),
+                content_encoding: Some("gzip".into()),
+                content_length: Some(4096),
+                body_bytes: 3_210,
+                body_end: Some(cc_lb_lifecycle::UpstreamBodyEnd::TransportError),
+                body_error_cause: Some("upstream_body_error".into()),
+                body_error_io_kind: Some("connection_reset".into()),
+                body_error_h2_reason: Some("INTERNAL_ERROR".into()),
+                message_stop_ms: Some(812),
+                warning_type: None,
+                warning_message: None,
+            },
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Err(StreamError {
+                error_type: "upstream_response_body_error".into(),
+                error_message: "upstream response body failed".into(),
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::ErrorCode("upstream_stream_error".into()),
+            200,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+        assert_eq!(
+            row.upstream_error_type.as_deref(),
+            Some("upstream_response_body_error")
+        );
+        assert_eq!(row.upstream_http_version.as_deref(), Some("HTTP/2.0"));
+        assert_eq!(row.upstream_request_id.as_deref(), Some("req_011CUpstream"));
+        assert_eq!(row.upstream_content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(row.upstream_content_length, Some(4096));
+        assert_eq!(row.upstream_body_bytes, Some(3_210));
+        assert_eq!(row.upstream_body_end.as_deref(), Some("transport_error"));
+        assert_eq!(
+            row.upstream_body_error_cause.as_deref(),
+            Some("upstream_body_error")
+        );
+        assert_eq!(
+            row.upstream_body_error_io_kind.as_deref(),
+            Some("connection_reset")
+        );
+        assert_eq!(
+            row.upstream_body_error_h2_reason.as_deref(),
+            Some("INTERNAL_ERROR")
+        );
+        assert_eq!(row.stream_message_stop_ms, Some(812));
+        assert_eq!(row.upstream_stream_warning_type, None);
+        assert_eq!(row.upstream_stream_warning_message, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upstream_stream_warning_populates_success_row_without_error_fields() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("upstream-diagnostics-warning");
+
+        tx.send(diagnostics_started(event_id.clone(), "req-diag-warning"))
+            .await
+            .unwrap();
+        tx.send(LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+            event_id: event_id.clone(),
+            diagnostics: UpstreamStreamDiagnostics {
+                http_version: Some("HTTP/1.1".into()),
+                content_encoding: Some("gzip".into()),
+                body_bytes: 2_048,
+                body_end: Some(cc_lb_lifecycle::UpstreamBodyEnd::DecodeErrorAfterCleanEnd),
+                body_error_io_kind: Some("unexpected_eof".into()),
+                // Diagnostics value must not override the success-path value.
+                message_stop_ms: Some(999),
+                warning_type: Some("upstream_response_decode_error".into()),
+                warning_message: Some(
+                    "upstream response decoding failed: matching checksum".into(),
+                ),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess {
+                sse_event_count: 6,
+                stream_message_stop_ms: Some(640),
+                ..Default::default()
+            }),
+        })
+        .await
+        .unwrap();
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::Success,
+            200,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.status, 200);
+        assert_eq!(row.error_code, None);
+        assert_eq!(row.upstream_error_type, None);
+        assert_eq!(row.upstream_error_message, None);
+        assert_eq!(
+            row.upstream_stream_warning_type.as_deref(),
+            Some("upstream_response_decode_error")
+        );
+        assert!(
+            row.upstream_stream_warning_message
+                .as_deref()
+                .is_some_and(|message| message.contains("matching checksum"))
+        );
+        assert_eq!(
+            row.upstream_body_end.as_deref(),
+            Some("decode_error_after_clean_end")
+        );
+        assert_eq!(row.upstream_body_bytes, Some(2_048));
+        assert_eq!(row.stream_message_stop_ms, Some(640));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clean_stream_row_has_no_upstream_diagnostics_fields() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
+        let event_id = eid("upstream-diagnostics-clean");
+
+        tx.send(diagnostics_started(event_id.clone(), "req-diag-clean"))
+            .await
+            .unwrap();
+        tx.send(LifecycleEvent::StreamCompleted {
+            event_id: event_id.clone(),
+            result: Ok(StreamSuccess::default()),
+        })
+        .await
+        .unwrap();
+        tx.send(diagnostics_terminated(
+            event_id,
+            TerminationReason::Success,
+            200,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let rows = store.rows.lock().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.upstream_body_end, None);
+        assert_eq!(row.upstream_body_bytes, None);
+        assert_eq!(row.upstream_http_version, None);
+        assert_eq!(row.upstream_stream_warning_type, None);
     }
 
     #[tokio::test(flavor = "current_thread")]

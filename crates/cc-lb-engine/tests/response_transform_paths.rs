@@ -781,6 +781,7 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
     let transform = Arc::new(UnchangedSseTransform::default());
     let plaintext = Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n");
     let body = incomplete_gzip_prefix(&plaintext);
+    let compressed_len = body.len() as u64;
     let mut headers = sse_headers();
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     let dir = tempfile::tempdir()?;
@@ -847,7 +848,486 @@ async fn truncated_gzip_after_transformed_output_is_upstream_decode_error()
             .as_deref()
             .is_some_and(|message| message.contains("matching checksum"))
     );
+    // #663 Q02: truncation before message_stop stays fatal, records no warning,
+    // and persists body-end attribution.
+    assert_eq!(event.upstream_stream_warning_type, None);
+    assert_eq!(event.upstream_stream_warning_message, None);
+    assert_eq!(
+        event.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    assert_eq!(event.upstream_body_bytes, Some(compressed_len));
+    assert_eq!(event.upstream_content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(event.upstream_http_version.as_deref(), Some("HTTP/1.1"));
+    assert_eq!(
+        event.upstream_body_error_cause.as_deref(),
+        Some("decode_error")
+    );
     Ok(())
+}
+
+// #663 accept-with-warning policy: an upstream SSE body that fails after cc-lb
+// parsed `message_stop` completes as success with a persisted warning when
+// cc-lb is the SSE emitter of record; every other failure keeps today's error.
+
+#[tokio::test]
+async fn sse_transform_gzip_trailer_missing_after_message_stop_is_accepted_with_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    let compressed = gzip_without_trailer(&plaintext);
+    let transform = Arc::new(SseToolNameTransform::default());
+    let relayed = relay_and_record(
+        "q01-gzip-trailer-missing.sqlite",
+        Some(transform.clone()),
+        fixed_gzip_sse_dispatch(StatusCode::OK, compressed.clone()),
+    )
+    .await?;
+
+    assert_eq!(relayed.status, StatusCode::OK);
+    assert!(relayed.headers.get(CONTENT_ENCODING).is_none());
+    assert_eq!(
+        relayed.body,
+        replace_bytes(&plaintext, br#""name":"Bash""#, br#""name":"bash""#)
+    );
+    assert!(!String::from_utf8_lossy(&relayed.body).contains("event: error"));
+    assert_eq!(
+        transform.seen_events(),
+        vec![
+            "message_start".to_owned(),
+            "content_block_start".to_owned(),
+            "message_delta".to_owned(),
+            "message_stop".to_owned(),
+        ]
+    );
+    let row = &relayed.row;
+    assert_accepted_with_warning(row, "upstream_response_decode_error");
+    assert!(
+        row.upstream_stream_warning_message
+            .as_deref()
+            .is_some_and(|message| message.contains("matching checksum"))
+    );
+    assert_eq!(row.input_tokens, Some(3));
+    assert_eq!(row.output_tokens, Some(11));
+    assert_eq!(row.upstream_content_encoding.as_deref(), Some("gzip"));
+    assert_eq!(row.upstream_http_version.as_deref(), Some("HTTP/1.1"));
+    assert_eq!(row.upstream_body_bytes, Some(compressed.len() as u64));
+    assert_eq!(
+        row.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    assert_eq!(
+        row.upstream_body_error_cause.as_deref(),
+        Some("decode_error")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sse_transform_gzip_crc_mismatch_after_message_stop_is_indistinguishable_from_missing_trailer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    let compressed = gzip_with_corrupt_crc(&plaintext);
+    let relayed = relay_and_record(
+        "q03-gzip-crc-mismatch.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, compressed.clone()),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, plaintext);
+    let row = &relayed.row;
+    assert_accepted_with_warning(row, "upstream_response_decode_error");
+    assert!(
+        row.upstream_stream_warning_message
+            .as_deref()
+            .is_some_and(|message| message.contains("matching checksum"))
+    );
+    assert_eq!(row.upstream_body_bytes, Some(compressed.len() as u64));
+    assert_eq!(
+        row.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn incomplete_trailing_event_after_message_stop_with_gzip_failure_stays_fatal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let complete = complete_message_sse_body();
+    let mut plaintext = complete.to_vec();
+    plaintext.extend_from_slice(b"event: ping\ndata: {");
+    let compressed = gzip_without_trailer(&Bytes::from(plaintext));
+    let relayed = relay_and_record(
+        "q04-partial-event-after-stop.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, compressed.clone()),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&complete));
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    assert!(text.contains("matching checksum"));
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    assert_eq!(
+        row.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    assert_eq!(row.upstream_body_bytes, Some(compressed.len() as u64));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gzip_trailer_failure_after_message_stop_with_trailing_line_terminators_is_accepted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let complete = complete_message_sse_body();
+    let mut plaintext = complete.to_vec();
+    plaintext.extend_from_slice(b"\r\n");
+    let compressed = gzip_without_trailer(&Bytes::from(plaintext));
+    let relayed = relay_and_record(
+        "q05-trailing-terminators.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, compressed),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&complete));
+    assert!(!String::from_utf8_lossy(&relayed.body).contains("event: error"));
+    assert_accepted_with_warning(&relayed.row, "upstream_response_decode_error");
+    assert_eq!(
+        relayed.row.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn gzip_body_error_after_message_stop_then_finish_failure_is_single_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    // Sync-flushed: every event decodes, but no final block or trailer follows,
+    // so the decoder finish also fails after the transport error.
+    let chunk = incomplete_gzip_prefix(&plaintext);
+    let relayed = relay_and_record(
+        "q06-body-error-after-stop.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        Arc::new(ScriptedDispatch::gzip_sse(
+            vec![chunk.clone()],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, plaintext);
+    assert!(!String::from_utf8_lossy(&relayed.body).contains("event: error"));
+    let row = &relayed.row;
+    assert_accepted_with_warning(row, "upstream_response_body_error");
+    assert!(row.upstream_stream_warning_message.is_some());
+    assert!(
+        !row.upstream_stream_warning_message
+            .as_deref()
+            .is_some_and(|message| message.contains("matching checksum")),
+        "finish failure must not replace the first warning"
+    );
+    assert_eq!(row.upstream_body_end.as_deref(), Some("transport_error"));
+    assert_eq!(row.upstream_body_error_cause.as_deref(), Some("io_reset"));
+    assert_eq!(
+        row.upstream_body_error_io_kind.as_deref(),
+        Some("ConnectionReset")
+    );
+    assert_eq!(row.upstream_body_bytes, Some(chunk.len() as u64));
+    Ok(())
+}
+
+#[tokio::test]
+async fn gzip_body_error_before_message_stop_stays_fatal_with_attribution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    );
+    let chunk = incomplete_gzip_prefix(&plaintext);
+    let relayed = relay_and_record(
+        "q07-body-error-before-stop.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        Arc::new(ScriptedDispatch::gzip_sse(
+            vec![chunk.clone()],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&plaintext));
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_body_end.as_deref(), Some("transport_error"));
+    assert_eq!(row.upstream_body_error_cause.as_deref(), Some("io_reset"));
+    assert_eq!(
+        row.upstream_body_error_io_kind.as_deref(),
+        Some("ConnectionReset")
+    );
+    assert_eq!(row.upstream_body_bytes, Some(chunk.len() as u64));
+    assert_eq!(row.stream_message_stop_ms, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn uncompressed_sse_body_error_after_message_stop_is_accepted_with_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    let relayed = relay_and_record(
+        "q08-identity-body-error-after-stop.sqlite",
+        None,
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![plaintext.clone()],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, plaintext);
+    let row = &relayed.row;
+    assert_accepted_with_warning(row, "upstream_response_body_error");
+    assert_eq!(row.upstream_body_end.as_deref(), Some("transport_error"));
+    assert_eq!(row.upstream_content_encoding, None);
+    assert_eq!(row.upstream_body_bytes, Some(plaintext.len() as u64));
+    Ok(())
+}
+
+#[tokio::test]
+async fn uncompressed_sse_body_error_after_message_stop_with_partial_event_stays_fatal()
+-> Result<(), Box<dyn std::error::Error>> {
+    let complete = complete_message_sse_body();
+    let mut chunk = complete.to_vec();
+    chunk.extend_from_slice(b"event: ping\ndata: {");
+    let chunk = Bytes::from(chunk);
+    let relayed = relay_and_record(
+        "q09-identity-partial-event.sqlite",
+        None,
+        Arc::new(ScriptedDispatch::identity_sse(
+            vec![chunk.clone()],
+            Some(std::io::ErrorKind::ConnectionReset),
+        )),
+    )
+    .await?;
+
+    assert!(relayed.body.starts_with(&chunk));
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_body_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_body_end.as_deref(), Some("transport_error"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compressed_passthrough_trailer_failure_after_message_stop_keeps_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    let compressed = gzip_without_trailer(&plaintext);
+    let relayed = relay_and_record(
+        "q10-compressed-passthrough.sqlite",
+        None,
+        fixed_gzip_sse_dispatch(StatusCode::OK, compressed.clone()),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, compressed);
+    assert_eq!(
+        relayed.headers.get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
+    );
+    let row = &relayed.row;
+    assert_eq!(row.error_code.as_deref(), Some("upstream_stream_error"));
+    assert_eq!(
+        row.upstream_error_type.as_deref(),
+        Some("upstream_response_decode_error")
+    );
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    assert_eq!(
+        row.upstream_body_end.as_deref(),
+        Some("decode_error_after_clean_end")
+    );
+    assert_eq!(row.upstream_body_bytes, Some(compressed.len() as u64));
+    assert_eq!(row.upstream_content_encoding.as_deref(), Some("gzip"));
+    assert!(row.stream_message_stop_ms.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_error_sse_with_gzip_trailer_failure_keeps_http_classification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let compressed = gzip_without_trailer(&complete_message_sse_body());
+    let relayed = relay_and_record(
+        "q14-http-error-gzip.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::TOO_MANY_REQUESTS, compressed),
+    )
+    .await?;
+
+    assert_eq!(relayed.status, StatusCode::TOO_MANY_REQUESTS);
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert!(text.contains("matching checksum"));
+    let row = &relayed.row;
+    assert_eq!(row.status, StatusCode::TOO_MANY_REQUESTS.as_u16());
+    assert_eq!(row.error_code.as_deref(), Some("upstream_4xx"));
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_error_then_gzip_trailer_failure_is_not_accepted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = Bytes::from_static(
+        b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
+    let relayed = relay_and_record(
+        "q15-provider-error.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, gzip_without_trailer(&plaintext)),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, plaintext);
+    let text = std::str::from_utf8(&relayed.body).expect("SSE body is utf8");
+    assert_eq!(text.matches("event: error\n").count(), 1);
+    assert!(!text.contains("matching checksum"));
+    let row = &relayed.row;
+    assert_eq!(row.upstream_error_type.as_deref(), Some("overloaded_error"));
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn upstream_diagnostics_record_http2_version_request_id_and_content_length()
+-> Result<(), Box<dyn std::error::Error>> {
+    let compressed = gzip_without_trailer(&complete_message_sse_body());
+    let mut dispatch = ScriptedDispatch::gzip_sse(vec![compressed.clone()], None);
+    dispatch.version = http::Version::HTTP_2;
+    dispatch.headers.insert(
+        "request-id",
+        HeaderValue::from_static("req_011CUpstream663"),
+    );
+    dispatch.headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&compressed.len().to_string()).expect("content length header"),
+    );
+    let relayed = relay_and_record(
+        "q16-http2-diagnostics.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        Arc::new(dispatch),
+    )
+    .await?;
+
+    let row = &relayed.row;
+    assert_accepted_with_warning(row, "upstream_response_decode_error");
+    assert_eq!(row.upstream_http_version.as_deref(), Some("HTTP/2.0"));
+    assert_eq!(
+        row.upstream_request_id.as_deref(),
+        Some("req_011CUpstream663")
+    );
+    assert_eq!(row.upstream_content_length, Some(compressed.len() as u64));
+    assert_eq!(row.upstream_body_bytes, Some(compressed.len() as u64));
+    Ok(())
+}
+
+#[tokio::test]
+async fn clean_gzip_sse_stream_records_no_upstream_diagnostics()
+-> Result<(), Box<dyn std::error::Error>> {
+    let plaintext = complete_message_sse_body();
+    let relayed = relay_and_record(
+        "q17-clean-stream.sqlite",
+        Some(Arc::new(UnchangedSseTransform::default())),
+        fixed_gzip_sse_dispatch(StatusCode::OK, gzip_bytes(&plaintext)),
+    )
+    .await?;
+
+    assert_eq!(relayed.body, plaintext);
+    let row = &relayed.row;
+    assert_eq!(row.error_code, None);
+    assert_eq!(row.upstream_error_type, None);
+    assert_eq!(row.upstream_http_version, None);
+    assert_eq!(row.upstream_request_id, None);
+    assert_eq!(row.upstream_content_encoding, None);
+    assert_eq!(row.upstream_content_length, None);
+    assert_eq!(row.upstream_body_bytes, None);
+    assert_eq!(row.upstream_body_end, None);
+    assert_eq!(row.upstream_body_error_cause, None);
+    assert_eq!(row.upstream_body_error_io_kind, None);
+    assert_eq!(row.upstream_body_error_h2_reason, None);
+    assert_eq!(row.upstream_stream_warning_type, None);
+    assert_eq!(row.upstream_stream_warning_message, None);
+    Ok(())
+}
+
+struct RelayedRow {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+    row: cc_lb_storage_api::RequestEvent,
+}
+
+async fn relay_and_record(
+    db_name: &str,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+) -> Result<RelayedRow, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let storage = Arc::new(sqlite_storage(&dir, db_name).await?);
+    let test_bus =
+        TestLifecycleBus::new().with_assembler(Arc::clone(&storage) as Arc<dyn StorageTrait>);
+    let lifecycle = lifecycle_with_transforms(None, sse_transform, dispatcher)
+        .with_event_bus(test_bus.bus_arc());
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles upstream SSE response");
+    let (status, headers, body) = collect_body(response).await;
+    let mut events = wait_for_events(storage.as_ref(), 1).await?;
+    assert_eq!(events.len(), 1);
+    let row = events.remove(0);
+    Ok(RelayedRow {
+        status,
+        headers,
+        body,
+        row,
+    })
+}
+
+fn assert_accepted_with_warning(row: &cc_lb_storage_api::RequestEvent, warning_type: &str) {
+    assert_eq!(row.status, StatusCode::OK.as_u16());
+    assert_eq!(row.error_code, None);
+    assert_eq!(row.upstream_error_type, None);
+    assert_eq!(row.upstream_error_message, None);
+    assert_eq!(
+        row.upstream_stream_warning_type.as_deref(),
+        Some(warning_type)
+    );
+    assert!(row.stream_message_stop_ms.is_some());
 }
 
 #[tokio::test]
@@ -940,6 +1420,17 @@ async fn gzip_transform_failure_preserves_transform_error() -> Result<(), Box<dy
         events[0].upstream_error_type.as_deref(),
         Some("response_transform_error")
     );
+    // #663: cc-lb aborted the upstream body locally (third chunk never read),
+    // so the decoder finish failure must not be recorded as upstream evidence.
+    assert_eq!(events[0].upstream_http_version, None);
+    assert_eq!(events[0].upstream_content_encoding, None);
+    assert_eq!(events[0].upstream_body_bytes, None);
+    assert_eq!(events[0].upstream_body_end, None);
+    assert_eq!(events[0].upstream_body_error_cause, None);
+    assert_eq!(events[0].upstream_body_error_io_kind, None);
+    assert_eq!(events[0].upstream_body_error_h2_reason, None);
+    assert_eq!(events[0].upstream_stream_warning_type, None);
+    assert_eq!(events[0].upstream_stream_warning_message, None);
     Ok(())
 }
 
@@ -2238,6 +2729,91 @@ fn gzip_event_chunks(first: &[u8], second: &[u8]) -> Vec<Bytes> {
         Bytes::copy_from_slice(&compressed[first_end..second_end]),
         Bytes::copy_from_slice(&compressed[second_end..]),
     ]
+}
+
+/// A complete Anthropic message stream: usage in `message_start` and
+/// `message_delta`, one tool_use block, and `message_stop`.
+fn complete_message_sse_body() -> Bytes {
+    Bytes::from_static(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_663\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"Bash\",\"input\":{}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":11}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    )
+}
+
+/// A complete gzip member with its 8-byte CRC32/ISIZE trailer removed.
+fn gzip_without_trailer(body: &Bytes) -> Bytes {
+    let compressed = gzip_bytes(body);
+    compressed.slice(..compressed.len() - 8)
+}
+
+/// A complete gzip member whose CRC32 trailer no longer matches the payload.
+fn gzip_with_corrupt_crc(body: &Bytes) -> Bytes {
+    let mut compressed = gzip_bytes(body).to_vec();
+    let crc_offset = compressed.len() - 8;
+    compressed[crc_offset] ^= 0xff;
+    Bytes::from(compressed)
+}
+
+fn gzip_sse_headers() -> HeaderMap {
+    let mut headers = sse_headers();
+    headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    headers
+}
+
+fn fixed_gzip_sse_dispatch(status: StatusCode, body: Bytes) -> Arc<dyn UpstreamDispatch> {
+    Arc::new(FixedDispatch {
+        status,
+        headers: gzip_sse_headers(),
+        body,
+    })
+}
+
+/// Yields `chunks`, then optionally fails the body with `trailing_error`.
+struct ScriptedDispatch {
+    version: http::Version,
+    headers: HeaderMap,
+    chunks: Vec<Bytes>,
+    trailing_error: Option<std::io::ErrorKind>,
+}
+
+impl ScriptedDispatch {
+    fn gzip_sse(chunks: Vec<Bytes>, trailing_error: Option<std::io::ErrorKind>) -> Self {
+        Self {
+            version: http::Version::HTTP_11,
+            headers: gzip_sse_headers(),
+            chunks,
+            trailing_error,
+        }
+    }
+
+    fn identity_sse(chunks: Vec<Bytes>, trailing_error: Option<std::io::ErrorKind>) -> Self {
+        Self {
+            version: http::Version::HTTP_11,
+            headers: sse_headers(),
+            chunks,
+            trailing_error,
+        }
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for ScriptedDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let chunks = self.chunks.clone();
+        let trailing_error = self.trailing_error;
+        let stream = async_stream::stream! {
+            for chunk in chunks {
+                yield Ok::<Bytes, std::io::Error>(chunk);
+            }
+            if let Some(kind) = trailing_error {
+                yield Err(std::io::Error::from(kind));
+            }
+        };
+        let mut response = Response::new(Body::from_stream(stream));
+        *response.status_mut() = StatusCode::OK;
+        *response.version_mut() = self.version;
+        *response.headers_mut() = self.headers.clone();
+        Ok(response)
+    }
 }
 
 fn sse_headers() -> HeaderMap {

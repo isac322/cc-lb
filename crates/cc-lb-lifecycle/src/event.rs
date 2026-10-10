@@ -61,6 +61,52 @@ pub struct RequestIoTimings {
     pub retry_overhead_ms: Option<f64>,
 }
 
+/// How the upstream response body ended when it did not end cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamBodyEnd {
+    /// The upstream transport reported an error while reading the body.
+    TransportError,
+    /// The raw body ended cleanly but decoding failed at finish
+    /// (for example a missing or mismatched gzip trailer).
+    DecodeErrorAfterCleanEnd,
+    /// Decoding failed while the raw body was still being received.
+    DecodeErrorMidBody,
+}
+
+impl UpstreamBodyEnd {
+    /// Stable snake_case label, identical to the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TransportError => "transport_error",
+            Self::DecodeErrorAfterCleanEnd => "decode_error_after_clean_end",
+            Self::DecodeErrorMidBody => "decode_error_mid_body",
+        }
+    }
+}
+
+/// Upstream transport/body attribution captured for streaming responses whose
+/// body ended abnormally. Emitted at most once per request, before
+/// `StreamCompleted`, via `LifecycleEvent::UpstreamStreamDiagnosticsObserved`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamStreamDiagnostics {
+    pub http_version: Option<String>,
+    pub request_id: Option<String>,
+    pub content_encoding: Option<String>,
+    pub content_length: Option<u64>,
+    pub body_bytes: u64,
+    pub body_end: Option<UpstreamBodyEnd>,
+    /// `StreamTerminationCause` snake_case label.
+    pub body_error_cause: Option<String>,
+    pub body_error_io_kind: Option<String>,
+    pub body_error_h2_reason: Option<String>,
+    pub message_stop_ms: Option<u64>,
+    /// Set only when the stream was accepted after upstream `message_stop`
+    /// despite a trailing body/decode failure.
+    pub warning_type: Option<String>,
+    pub warning_message: Option<String>,
+}
+
 /// Fixed vocabulary of events emitted during a single request's lifecycle.
 ///
 /// See the crate-level documentation for the expected sequences.
@@ -145,6 +191,12 @@ pub enum LifecycleEvent {
         event_id: EventId,
         error_type: String,
         error_message: String,
+    },
+    /// Upstream body attribution for an abnormally ended streaming response.
+    /// Emitted at most once, before `StreamCompleted`.
+    UpstreamStreamDiagnosticsObserved {
+        event_id: EventId,
+        diagnostics: UpstreamStreamDiagnostics,
     },
     /// Usage counts were observed from an SSE frame or non-stream body.
     UsageObserved {
@@ -231,6 +283,7 @@ impl LifecycleEvent {
             | Self::UpstreamAttempt { event_id, .. }
             | Self::UpstreamResponseStarted { event_id, .. }
             | Self::RequestLogUpstreamErrorObserved { event_id, .. }
+            | Self::UpstreamStreamDiagnosticsObserved { event_id, .. }
             | Self::UsageObserved { event_id, .. }
             | Self::StreamCompleted { event_id, .. }
             | Self::RequestTerminated { event_id, .. }
@@ -251,6 +304,9 @@ impl LifecycleEvent {
             Self::UpstreamAttempt { .. } => "upstream_attempt",
             Self::UpstreamResponseStarted { .. } => "upstream_response_started",
             Self::RequestLogUpstreamErrorObserved { .. } => "request_log_upstream_error_observed",
+            Self::UpstreamStreamDiagnosticsObserved { .. } => {
+                "upstream_stream_diagnostics_observed"
+            }
             Self::UsageObserved { .. } => "usage_observed",
             Self::StreamCompleted { .. } => "stream_completed",
             Self::RequestTerminated { .. } => "request_terminated",

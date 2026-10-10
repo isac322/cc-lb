@@ -20,8 +20,9 @@ use cc_lb_storage_conformance::{
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
         request_event_list, request_event_principal_costs, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, warmup_attempts_store,
+        storage_roundtrips_upstream_diagnostics, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -177,6 +178,14 @@ fn request_event_cache_split_round_trip_sqlite() {
     run_sqlite_scenario(
         "request_event_cache_split_round_trip",
         storage_roundtrips_cache_split::request_event_cache_split_round_trip,
+    );
+}
+
+#[test]
+fn request_event_upstream_diagnostics_round_trip_sqlite() {
+    run_sqlite_scenario(
+        "request_event_upstream_diagnostics_round_trip",
+        storage_roundtrips_upstream_diagnostics::request_event_upstream_diagnostics_round_trip,
     );
 }
 

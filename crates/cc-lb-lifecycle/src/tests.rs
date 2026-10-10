@@ -165,6 +165,11 @@ fn kind_labels_cover_every_variant() {
             error_message: "bounded".into(),
         }
         .kind(),
+        LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+            event_id: sample_event_id(),
+            diagnostics: UpstreamStreamDiagnostics::default(),
+        }
+        .kind(),
         LifecycleEvent::UsageObserved {
             event_id: sample_event_id(),
             usage: UsageSnapshot::default(),
@@ -220,6 +225,7 @@ fn kind_labels_cover_every_variant() {
             "upstream_attempt",
             "upstream_response_started",
             "request_log_upstream_error_observed",
+            "upstream_stream_diagnostics_observed",
             "usage_observed",
             "stream_completed",
             "request_terminated",
@@ -238,6 +244,52 @@ fn event_id_accessor_returns_stable_reference() {
         error_message: "bounded".into(),
     };
     assert_eq!(event.event_id(), &id);
+}
+
+#[test]
+fn upstream_stream_diagnostics_event_id_and_roundtrip() {
+    let id = sample_event_id();
+    let event = LifecycleEvent::UpstreamStreamDiagnosticsObserved {
+        event_id: id.clone(),
+        diagnostics: UpstreamStreamDiagnostics {
+            http_version: Some("HTTP/2.0".into()),
+            request_id: Some("req_abc".into()),
+            content_encoding: Some("gzip".into()),
+            content_length: None,
+            body_bytes: 1234,
+            body_end: Some(UpstreamBodyEnd::DecodeErrorAfterCleanEnd),
+            body_error_cause: None,
+            body_error_io_kind: Some("unexpected_eof".into()),
+            body_error_h2_reason: None,
+            message_stop_ms: Some(42),
+            warning_type: Some("upstream_response_decode_error".into()),
+            warning_message: Some("upstream response decoding failed: eof".into()),
+        },
+    };
+    assert_eq!(event.event_id(), &id);
+    assert_eq!(event.kind(), "upstream_stream_diagnostics_observed");
+    let json = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(json["kind"], "upstream_stream_diagnostics_observed");
+    assert_eq!(
+        json["diagnostics"]["body_end"],
+        "decode_error_after_clean_end"
+    );
+    let restored: LifecycleEvent = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(event, restored);
+}
+
+#[test]
+fn upstream_body_end_labels_match_serde() {
+    for end in [
+        UpstreamBodyEnd::TransportError,
+        UpstreamBodyEnd::DecodeErrorAfterCleanEnd,
+        UpstreamBodyEnd::DecodeErrorMidBody,
+    ] {
+        assert_eq!(
+            serde_json::to_value(end).expect("serialize"),
+            serde_json::Value::String(end.as_str().to_owned()),
+        );
+    }
 }
 
 #[test]
