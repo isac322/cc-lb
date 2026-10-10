@@ -116,7 +116,7 @@ jobs:
       - name: Run release-plz server release
         id: release-plz
         if: steps.target.outputs.version_changed == 'true' && steps.target.outputs.operation != 'resume'
-        uses: MarcoIeni/release-plz-action@v0.5.139
+        uses: MarcoIeni/release-plz-action@v0.5.140
         with:
           command: release
           config: release-plz-server.toml
