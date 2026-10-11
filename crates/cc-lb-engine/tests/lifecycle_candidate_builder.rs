@@ -6,7 +6,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_control::{DynamicView, DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_control::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
+};
 use cc_lb_domain::{Principal, TerminalStrategy, Upstream, UpstreamCandidate};
 use cc_lb_engine::{
     ApiKeyAwareSignerFactory, Body, DispatchError, Lifecycle, LifecycleConfig, RequestKind,
@@ -127,6 +130,62 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         )
         .is_empty()
     );
+}
+
+// #851: an upstream whose last apply errored cannot sign a request, so the
+// candidate builder must drop it; `Active` entries and upstreams with no
+// snapshot entry stay eligible.
+#[test]
+fn build_candidates_excludes_apply_status_error_upstreams() {
+    let errored = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let active = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let missing_entry = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+    let upstreams = vec![
+        upstream(errored, UpstreamKind::AnthropicApiKey, true, None),
+        upstream(active, UpstreamKind::AnthropicApiKey, true, None),
+        upstream(missing_entry, UpstreamKind::AnthropicApiKey, true, None),
+    ];
+    let mut entries = HashMap::new();
+    entries.insert(
+        upstreams[0].name.clone(),
+        UpstreamStatusEntry {
+            status: ApplyStatus::Error,
+            last_apply_error: Some("apply failed".to_owned()),
+            last_apply_at_unix_secs: 1,
+        },
+    );
+    entries.insert(
+        upstreams[1].name.clone(),
+        UpstreamStatusEntry {
+            status: ApplyStatus::Active,
+            last_apply_error: None,
+            last_apply_at_unix_secs: 1,
+        },
+    );
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(TestSignerFactory))
+        .principal_view(Arc::new(PrincipalView::from_db(
+            &[principal("all", Vec::new())],
+            HashMap::new(),
+        )))
+        .upstream_records(upstreams)
+        .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
+            entries,
+            applied_at_unix_secs: 1,
+            revision_hash: 1,
+        }))
+        .build();
+
+    let candidates = build_candidates(
+        &view,
+        "all",
+        RequestKind::AnthropicMessages,
+        &[],
+        &HashMap::new(),
+        &cc_lb_clock::SystemClock,
+    );
+
+    assert_eq!(candidate_ids(&candidates), vec![active, missing_entry]);
 }
 
 #[tokio::test]
