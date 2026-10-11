@@ -4855,6 +4855,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "reset-priority-wasmtime"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk-wasmtime",
+]
+
+[[package]]
 name = "resolv-conf"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
