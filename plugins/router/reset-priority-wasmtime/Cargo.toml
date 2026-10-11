@@ -1,0 +1,25 @@
+[package]
+name = "reset-priority-wasmtime"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.98.1"
+publish = false
+description = "Reset-priority router plugin: burns the subscription whose weekly quota resets soonest."
+
+# This plugin is built and uploaded independently of the server.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cc-lb-pdk-wasmtime = { path = "../../../crates/cc-lb-pdk-wasmtime" }
+
+# Mirrors the workspace release profile so the standalone crate produces the
+# same kind of artifact the workspace members do.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
