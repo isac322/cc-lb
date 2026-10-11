@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use cc_lb_control::SubscriptionQuotaCacheLike;
 use cc_lb_domain::{
-    Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    WarmCacheEntry,
+    PrefixBytes, Principal, PrincipalKind, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, WarmCacheEntry,
 };
 use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
 use cc_lb_storage_api::principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord};
@@ -146,8 +146,8 @@ impl PromptCacheObservationStore for TestPromptCacheObservationCache {
                         last_observed_at_unix_secs: entry.last_observed_at_unix_secs,
                         hash_schema_version: HASH_SCHEMA_VERSION,
                         prefix_content_block_index: entry.content_block_index,
-                        estimated_prefix_tokens: entry.estimated_prefix_tokens,
-                        token_estimate_source: entry.token_estimate_source.clone(),
+                        estimated_prefix_tokens: entry.estimated_prefix_bytes.get(),
+                        token_estimate_source: PrefixBytes::ESTIMATE_SOURCE.to_owned(),
                     })
             })
             .collect::<Vec<_>>();

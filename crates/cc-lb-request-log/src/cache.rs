@@ -34,6 +34,10 @@ pub struct RequestCacheBreakpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
     pub prefix_hash: String,
+    /// Serialized byte length of the prefix up to this breakpoint, measured by
+    /// `token_estimate_source`; a token estimate (see
+    /// `PrefixBytes::as_token_estimate`), not a provider-reported token count.
+    /// The JSON key keeps its historical name.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub prefix_token_count: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

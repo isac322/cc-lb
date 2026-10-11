@@ -86,10 +86,16 @@ pub struct RequestEvent {
     pub matched_content_block_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookback_distance: Option<u64>,
+    /// Token estimate derived from serialized prefix bytes (see
+    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_read_tokens: Option<u64>,
+    /// Token estimate derived from serialized prefix bytes (see
+    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_creation_tokens_5m: Option<u64>,
+    /// Token estimate derived from serialized prefix bytes (see
+    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicted_cache_creation_tokens_1h: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

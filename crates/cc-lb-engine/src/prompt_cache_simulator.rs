@@ -15,14 +15,17 @@ use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len};
+use cc_lb_domain::PrefixBytes;
+
+use crate::tokenizer::{PrefixTokenizer, cache_threshold_from_byte_len, prefix_bytes_of};
 
 mod optimized;
 
 pub(crate) use optimized::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
 };
-pub const V3_TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
+/// Estimator identity of every [`PrefixBytes`] value this simulator produces.
+pub const V3_TOKEN_ESTIMATE_SOURCE: &str = PrefixBytes::ESTIMATE_SOURCE;
 
 /// Anthropic's shared cap for resolved explicit and automatic breakpoints. Provider-invalid
 /// requests skip analysis before tokenization.
@@ -123,7 +126,7 @@ pub struct V3PromptCacheBreakpoint {
     pub message_index: Option<u64>,
     pub ttl: Option<String>,
     pub prefix_key: String,
-    pub prefix_token_count: u64,
+    pub prefix_bytes: PrefixBytes,
     pub lookback_prefixes: Vec<V3PromptCacheLookbackPrefix>,
 }
 
@@ -541,22 +544,22 @@ pub(super) fn analyze_v3_prompt_cache_with_tokenize_duration(
         return (unanalyzable_prompt_cache(), Duration::ZERO);
     };
     let mut tokenization_duration = Duration::ZERO;
-    let prefix_token_counts = structural
+    let prefix_bytes = structural
         .breakpoints
         .iter()
         .map(|breakpoint| {
-            let (count, duration) = breakpoint_prefix_token_count(
+            let (bytes, duration) = breakpoint_prefix_bytes(
                 canonical_model,
                 &structural.blocks,
                 breakpoint.block_index as usize,
                 &mut serialization_scratch,
             );
             tokenization_duration = tokenization_duration.saturating_add(duration);
-            count
+            bytes
         })
         .collect();
     (
-        finish_structural_analysis(structural, prefix_token_counts)
+        finish_structural_analysis(structural, prefix_bytes)
             .unwrap_or_else(unanalyzable_prompt_cache),
         tokenization_duration,
     )
@@ -600,23 +603,23 @@ fn analyze_v3_prompt_cache_structure<'a>(
 
 fn finish_structural_analysis(
     structural: V3StructuralAnalysis<'_>,
-    prefix_token_counts: Vec<u64>,
+    prefix_bytes: Vec<PrefixBytes>,
 ) -> Option<V3PromptCacheAnalysis> {
-    if structural.breakpoints.len() != prefix_token_counts.len() {
+    if structural.breakpoints.len() != prefix_bytes.len() {
         return None;
     }
     let breakpoints = structural
         .breakpoints
         .into_iter()
-        .zip(prefix_token_counts)
-        .map(|(breakpoint, prefix_token_count)| V3PromptCacheBreakpoint {
+        .zip(prefix_bytes)
+        .map(|(breakpoint, prefix_bytes)| V3PromptCacheBreakpoint {
             block_index: breakpoint.block_index,
             source: breakpoint.source,
             path: breakpoint.path,
             message_index: breakpoint.message_index,
             ttl: breakpoint.ttl,
             prefix_key: breakpoint.prefix_key,
-            prefix_token_count,
+            prefix_bytes,
             lookback_prefixes: breakpoint.lookback_prefixes,
         })
         .collect();
@@ -821,16 +824,16 @@ fn block_digest(block: &CacheBlockRef<'_>, scratch: &mut SerializationScratch) -
     digest
 }
 
-fn breakpoint_prefix_token_count(
+fn breakpoint_prefix_bytes(
     canonical_model: &str,
     blocks: &[CacheBlockRef<'_>],
     breakpoint_index: usize,
     scratch: &mut SerializationScratch,
-) -> (u64, Duration) {
+) -> (PrefixBytes, Duration) {
     let bytes = serialized_prefix(canonical_model, &blocks[..=breakpoint_index], scratch);
-    let count = bytes.len() as u64;
+    let prefix_bytes = prefix_bytes_of(bytes);
     scratch.clear_for_reuse();
-    (count, Duration::ZERO)
+    (prefix_bytes, Duration::ZERO)
 }
 
 fn serialized_prefix<'a>(
@@ -871,28 +874,29 @@ pub(super) fn cacheable_breakpoint_prefix_keys_with_tokenize_duration(
         .breakpoints
         .iter()
         .filter_map(|breakpoint| {
-            let byte_len = usize::try_from(breakpoint.prefix_token_count).unwrap_or(usize::MAX);
-            let accepted = match cache_threshold_from_byte_len(byte_len, token_threshold) {
-                Some(decision) => decision,
-                None => {
-                    if !tokenize_ambiguous {
-                        return None;
+            let accepted =
+                match cache_threshold_from_byte_len(breakpoint.prefix_bytes, token_threshold) {
+                    Some(decision) => decision,
+                    None => {
+                        if !tokenize_ambiguous {
+                            return None;
+                        }
+                        let block_index = usize::try_from(breakpoint.block_index).ok()?;
+                        let blocks = analysis.blocks.get(..=block_index)?;
+                        let bytes = scratch.serialize(&OwnedPrefixSerializer {
+                            model: canonical_model,
+                            blocks,
+                        });
+                        debug_assert_eq!(prefix_bytes_of(bytes), breakpoint.prefix_bytes);
+                        let started = Instant::now();
+                        let accepted =
+                            PrefixTokenizer::global().meets_cache_threshold(bytes, token_threshold);
+                        tokenization_duration =
+                            tokenization_duration.saturating_add(started.elapsed());
+                        scratch.clear_for_reuse();
+                        accepted
                     }
-                    let block_index = usize::try_from(breakpoint.block_index).ok()?;
-                    let blocks = analysis.blocks.get(..=block_index)?;
-                    let bytes = scratch.serialize(&OwnedPrefixSerializer {
-                        model: canonical_model,
-                        blocks,
-                    });
-                    debug_assert_eq!(bytes.len(), byte_len);
-                    let started = Instant::now();
-                    let accepted =
-                        PrefixTokenizer::global().meets_cache_threshold(bytes, token_threshold);
-                    tokenization_duration = tokenization_duration.saturating_add(started.elapsed());
-                    scratch.clear_for_reuse();
-                    accepted
-                }
-            };
+                };
             accepted.then(|| breakpoint.prefix_key.clone())
         })
         .collect();
@@ -1459,7 +1463,7 @@ mod tests {
         });
         let model = canonical_model_id("claude-sonnet-4-5");
         let analysis = analyze_v3_prompt_cache(&request, model);
-        assert!((1_024..8_192).contains(&analysis.breakpoints[0].prefix_token_count));
+        assert!((1_024..8_192).contains(&analysis.breakpoints[0].prefix_bytes.get()));
 
         reset_tokenizer_call_count();
         let keys = cacheable_breakpoint_prefix_keys(&analysis, model, 1_024);
