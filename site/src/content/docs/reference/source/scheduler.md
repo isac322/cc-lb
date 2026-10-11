@@ -6,6 +6,8 @@ slug: docs/reference/source/scheduler
 
 ## 1. Topology Overview
 
+The SQLite cache-keepalive queue caps its idle polling backoff at two seconds. This keeps scheduled renewals within short cache TTL windows; cron and adaptive queues retain their existing polling behavior.
+
 The cc-lb scheduler uses a hybrid job model to coordinate background tasks across multiple replicas. It separates local, low-latency operations from durable, cross-replica background tasks. This design satisfies the "local vs durable" rule defined in the local-vs-durable architecture.
 
 The system consists of the following components:
