@@ -8,7 +8,7 @@ An HTTP 200 status means response headers were sent. It does not prove that the 
 
 ## Stream outcomes
 
-The `cc_lb_stream_terminations_total{outcome,cause}` metric distinguishes:
+The `cc_lb_stream_terminations_total{outcome,cause,upstream,model}` metric distinguishes the following outcomes per routed upstream and requested model (`model="none"` when the request body named no model):
 
 - `completed`
 - `upstream_error`

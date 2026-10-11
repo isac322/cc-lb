@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
+use cc_lb_observability::UNRESOLVED_ATTRIBUTION_LABEL;
 use http::StatusCode;
+use metrics::SharedString;
 use tracing::Span;
 
 use crate::body_io_timing::BodyIoTiming;
@@ -11,6 +13,23 @@ use crate::terminal_observer::{
 
 const CLIENT_CLOSED_STATUS: u16 = 499;
 
+/// Routed upstream name and requested model attached to
+/// `cc_lb_stream_terminations_total`, using the same values as the
+/// lifecycle-attributed request metrics.
+pub(crate) struct StreamTerminationAttribution {
+    upstream: String,
+    model: Option<String>,
+}
+
+impl StreamTerminationAttribution {
+    pub(crate) fn new(upstream: &str, model: Option<&str>) -> Self {
+        Self {
+            upstream: upstream.to_owned(),
+            model: model.map(str::to_owned),
+        }
+    }
+}
+
 pub(crate) struct DownstreamStreamDropGuard {
     observer: Option<LifecycleContext>,
     timing_observer: Option<LifecycleContext>,
@@ -20,6 +39,7 @@ pub(crate) struct DownstreamStreamDropGuard {
     finalized: bool,
     relay_start: Instant,
     body_io_timing: BodyIoTiming,
+    attribution: StreamTerminationAttribution,
 }
 
 impl DownstreamStreamDropGuard {
@@ -30,6 +50,7 @@ impl DownstreamStreamDropGuard {
         initial_upstream_error: Option<StreamTerminationCause>,
         relay_start: Instant,
         body_io_timing: BodyIoTiming,
+        attribution: StreamTerminationAttribution,
     ) -> Self {
         Self {
             timing_observer: observer.clone(),
@@ -41,6 +62,7 @@ impl DownstreamStreamDropGuard {
             finalized: false,
             relay_start,
             body_io_timing,
+            attribution,
         }
     }
 
@@ -145,10 +167,18 @@ impl DownstreamStreamDropGuard {
         ) {
             self.span.record("otel.status_code", "ERROR");
         }
+        // `finalized` makes this the only emission for the guard, so the
+        // attribution strings move into the label set instead of being cloned.
+        let model = self.attribution.model.take().map_or(
+            SharedString::const_str(UNRESOLVED_ATTRIBUTION_LABEL),
+            SharedString::from,
+        );
         metrics::counter!(
             "cc_lb_stream_terminations_total",
             "outcome" => outcome.as_str(),
-            "cause" => cause.as_str()
+            "cause" => cause.as_str(),
+            "upstream" => std::mem::take(&mut self.attribution.upstream),
+            "model" => model
         )
         .increment(1);
     }
@@ -318,9 +348,22 @@ mod tests {
         counter_sample_with_status_and_span(StatusCode::OK, span, exercise)
     }
 
+    fn test_attribution() -> StreamTerminationAttribution {
+        StreamTerminationAttribution::new("upstream-a", Some("claude-test"))
+    }
+
     fn counter_sample_with_status_and_span(
         initial_upstream_status: StatusCode,
         span: Span,
+        exercise: impl FnOnce(&mut DownstreamStreamDropGuard),
+    ) -> (HashMap<String, String>, u64) {
+        counter_sample_with_attribution(initial_upstream_status, span, test_attribution(), exercise)
+    }
+
+    fn counter_sample_with_attribution(
+        initial_upstream_status: StatusCode,
+        span: Span,
+        attribution: StreamTerminationAttribution,
         exercise: impl FnOnce(&mut DownstreamStreamDropGuard),
     ) -> (HashMap<String, String>, u64) {
         let recorder = DebuggingRecorder::new();
@@ -333,6 +376,7 @@ mod tests {
                 None,
                 Instant::now(),
                 BodyIoTiming::default(),
+                attribution,
             );
             exercise(&mut guard);
             drop(guard);
@@ -342,15 +386,47 @@ mod tests {
         assert_eq!(samples.len(), 1, "one terminal metric series expected");
         let (key, _, _, value) = samples.into_iter().next().expect("metric sample");
         assert_eq!(key.key().name(), "cc_lb_stream_terminations_total");
-        let labels = key
+        let labels: HashMap<String, String> = key
             .key()
             .labels()
             .map(|label| (label.key().to_owned(), label.value().to_owned()))
             .collect();
+        let mut label_keys = labels.keys().map(String::as_str).collect::<Vec<_>>();
+        label_keys.sort_unstable();
+        assert_eq!(label_keys, ["cause", "model", "outcome", "upstream"]);
         let DebugValue::Counter(value) = value else {
             panic!("stream termination metric must be a counter");
         };
         (labels, value)
+    }
+
+    #[test]
+    fn termination_carries_routed_upstream_and_requested_model() {
+        let (labels, value) = counter_sample(|guard| guard.finish(1, 1));
+
+        assert_eq!(
+            labels.get("upstream").map(String::as_str),
+            Some("upstream-a")
+        );
+        assert_eq!(labels.get("model").map(String::as_str), Some("claude-test"));
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn termination_without_requested_model_uses_unresolved_label() {
+        let (labels, value) = counter_sample_with_attribution(
+            StatusCode::OK,
+            Span::none(),
+            StreamTerminationAttribution::new("upstream-a", None),
+            |guard| guard.finish(1, 1),
+        );
+
+        assert_eq!(
+            labels.get("upstream").map(String::as_str),
+            Some("upstream-a")
+        );
+        assert_eq!(labels.get("model").map(String::as_str), Some("none"));
+        assert_eq!(value, 1);
     }
 
     fn recorded_once(values: &HashMap<String, Vec<u64>>, field: &str) -> Option<u64> {
@@ -428,6 +504,7 @@ mod tests {
             None,
             relay_start,
             BodyIoTiming::default(),
+            test_attribution(),
         );
         guard.mark_upstream_error(StreamTerminationCause::H2Reset, None);
 
@@ -542,6 +619,7 @@ mod tests {
             None,
             relay_start,
             body_io_timing,
+            test_attribution(),
         );
 
         drop(guard);
@@ -616,6 +694,7 @@ mod tests {
             None,
             relay_start,
             BodyIoTiming::default(),
+            test_attribution(),
         );
 
         drop(guard);
@@ -697,6 +776,7 @@ mod tests {
             None,
             Instant::now(),
             body_io_timing,
+            test_attribution(),
         );
         guard.detach_lifecycle_observer();
         drop(guard);

@@ -56,7 +56,9 @@ use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
-use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
+use crate::downstream_stream_drop_guard::{
+    DownstreamStreamDropGuard, StreamTerminationAttribution,
+};
 use crate::error_format::{
     anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
 };
@@ -3522,6 +3524,8 @@ impl Lifecycle {
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
                     canonical_model_id: ctx.canonical_model_id.clone(),
+                    upstream_name: router_chosen_upstream_name.clone(),
+                    requested_model: body_view.model(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                 },
@@ -4471,6 +4475,10 @@ impl Lifecycle {
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
             relay_start,
             response_body_timing.clone(),
+            StreamTerminationAttribution::new(
+                &event_ctx.upstream_name,
+                event_ctx.requested_model.as_deref(),
+            ),
         );
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
@@ -6559,6 +6567,10 @@ struct ActiveLimit {
 pub(crate) struct RequestEventContext {
     pub(crate) request_id: String,
     pub(crate) canonical_model_id: String,
+    /// Routed upstream name, matching the `RouteCompleted` lifecycle event.
+    pub(crate) upstream_name: String,
+    /// Model requested in the body, matching the `RouteCompleted` lifecycle event.
+    pub(crate) requested_model: Option<String>,
     pub(crate) proxy_setup_ms: Option<u64>,
     pub(crate) stage_timings: AttemptTimings,
 }

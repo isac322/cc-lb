@@ -69,6 +69,8 @@ mod lifecycle_oversized_body;
 mod lifecycle_preview_route;
 #[path = "lifecycle_request_events.rs"]
 mod lifecycle_request_events;
+#[path = "lifecycle_request_metrics_attribution.rs"]
+mod lifecycle_request_metrics_attribution;
 #[path = "lifecycle_response_header_passthrough.rs"]
 mod lifecycle_response_header_passthrough;
 #[path = "lifecycle_router_drives_credentials.rs"]

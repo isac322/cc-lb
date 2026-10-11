@@ -141,7 +141,7 @@ sum(rate(cc_lb_cache_observation_write_failed_total[1m])) > 0
 This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the cost-first within-tier selection actually placed candidates in, and which upstream captured the pick.
 
 - `tier` ∈ `{known_base, partial_base, overage, unknown_probe}` from the `SubscriptionTier` enum.
-- `upstream` matches the upstream name (same convention as `cc_lb_cache_hit_total`), NOT the UUID. The response-header trace metrics currently use `upstream="unknown"` instead.
+- `upstream` matches the upstream name (same convention as `cc_lb_cache_hit_total`, `cc_lb_requests_completed_total`, and `cc_lb_stream_terminations_total`), NOT the UUID.
 - `principal_id` is the UUID string (same convention as `cclb_api_key_requests_total`).
 
 Bookkeeping counter `cc_lb_lifecycle_routing_tier_events_total{outcome=emitted|missing_principal_id|orphan_ttl_evicted|cap_evicted}` tracks subscriber-side health without contaminating the main tier signal.
@@ -186,32 +186,67 @@ False positives: sustained low traffic that clears the `> 2 req/s` floor after t
 ## Metric: cc_lb_response_body_chunks_total
 
 - **Type**: Counter
-- **Labels**: `upstream`
-- **Label Cardinality Bounds**: One `upstream` value, currently hard-coded to `unknown`; provider attribution is unavailable in the trace hook.
+- **Labels**: None
+- **Label Cardinality Bounds**: One series.
 
 ### Interpretation
 
-Counts transport response-body chunks observed by the trace layer as `cc_lb_response_body_chunks_total{upstream="unknown"}`. It is a chunk count, not a byte count or an SSE event count, and cannot currently distinguish providers.
+Counts transport response-body chunks observed by the trace layer. It is a chunk count, not a byte count or an SSE event count. The trace hook cannot see which upstream produced a chunk, so the counter carries no attribution; use `cc_lb_stream_terminations_total{upstream}` or `cc_lb_requests_completed_total{upstream}` for per-upstream signals.
 
 ### Typical PromQL Query
 
 ```promql
-sum(rate(cc_lb_response_body_chunks_total{upstream="unknown"}[5m]))
+sum(rate(cc_lb_response_body_chunks_total[5m]))
 ```
 
 ## Metrics: request terminal aggregation
 
-- `cc_lb_requests_started_total{principal,upstream,model,status}` counts proxy responses whose headers are observed by the trace layer.
-- `cc_lb_request_headers_duration_seconds{principal,upstream,model}` measures request start to those proxy response headers.
+Header-time metrics, recorded by the trace layer:
 
-These header-time metrics include locally generated responses handled inside the trace layer, not just upstream responses. Drain rejections bypass the trace layer before authentication and are not counted by the started/header or terminal lifecycle metrics. Neither header-time metric measures terminal completion. The trace hook currently sets `principal`, `upstream`, and `model` to `unknown`, so these metrics do not provide per-upstream attribution.
+- `cc_lb_requests_started_total{status}` counts proxy responses whose headers are observed by the trace layer.
+- `cc_lb_request_headers_duration_seconds` (no labels) measures request start to those proxy response headers.
 
-- `cc_lb_requests_completed_total{source_kind,terminal_outcome,client_status_class}` counts the single terminal lifecycle event.
-- `cc_lb_request_completion_duration_seconds{source_kind,terminal_outcome}` records terminal duration.
+These header-time metrics include locally generated responses handled inside the trace layer, such as the 404 router fallback, 405, authentication failures, and pre-routing errors, not just upstream responses. Drain rejections bypass the trace layer before authentication and are not counted by the started/header or terminal lifecycle metrics. Neither header-time metric measures terminal completion. The trace hook cannot see principal, upstream, or model, so these metrics carry no attribution labels.
+
+Terminal metrics, recorded once per request by the lifecycle event logger from the assembled lifecycle events:
+
+- `cc_lb_requests_completed_total{source_kind,principal,upstream,model,status,terminal_outcome,client_status_class}` counts the single terminal lifecycle event.
+- `cc_lb_request_completion_duration_seconds{source_kind,upstream,model,status,terminal_outcome}` records terminal duration. It deliberately omits `principal`: per-principal latency would multiply the histogram buckets past a safe series budget; per-principal detail lives on `cclb_api_key_*`.
 - `cc_lb_request_decisions_total{stage,outcome}` records only observed `route` and `limit` decisions; route and limit outcomes use fixed vocabularies.
 - `cc_lb_request_retry_attempts{source_kind,terminal_outcome}` records `max_attempt_num - 1` from the terminal request aggregate, including an observed zero-retry value.
+- `cc_lb_request_body_size_bytes{source_kind,outcome}` records the request body size of terminal requests that carried one.
+- `cc_lb_request_unaccounted_duration_seconds{source_kind,outcome}` records proxy request time not covered by the accounted parent stages, only for proxy requests with complete parent timing.
+
+Attribution labels on the terminal metrics:
+
+- `principal` is the authenticated principal ID, `upstream` is the routed upstream name, and `model` is the model requested in the body (the same values as `cc_lb_tokens_total`).
+- `status` is the exact client status code; `client_status_class` is derived from it.
+- An attribution stage the request never reached is labelled `none`: an authentication failure has `principal="none"`, a routing failure has `upstream="none"`, and a body without a model has `model="none"`.
+- Requests that never reach the credential check (404 router fallback, 405, drain 503, pre-handler timeout) publish no lifecycle events. They are counted only by `cc_lb_requests_started_total`, except drain rejections, which no request metric counts.
+
+Cardinality: the counter is bounded by `principals × upstreams × models × statuses`; `source_kind`, `terminal_outcome`, and `client_status_class` are determined by the status and termination reason and add few series. The histogram drops `principal`, leaving `upstreams × models × statuses × buckets`.
+
+Per-upstream 429 rate:
+
+```promql
+sum by (upstream) (rate(cc_lb_requests_completed_total{status="429"}[5m]))
+```
 
 Missing lifecycle observations remain absent; the logger never emits zero for an unavailable timing.
+
+## Metric: cc_lb_stream_terminations_total
+
+- **Type**: Counter
+- **Labels**: `outcome`, `cause`, `upstream`, `model`
+- **Label Cardinality Bounds**: Bounded by `outcomes × causes × upstreams × models`; `outcome` and `cause` use fixed vocabularies.
+
+### Interpretation
+
+Counts how relayed response streams ended: `completed`, `upstream_error`, `proxy_error`, or `client_cancelled`, with a bounded `cause`. `upstream` is the routed upstream name and `model` is the model requested in the body (`none` when the body named none), so provider-side disconnects can be attributed to an upstream without querying request events.
+
+```promql
+sum by (upstream, cause) (rate(cc_lb_stream_terminations_total{outcome="upstream_error"}[5m]))
+```
 
 ## Metric: cc_lb_request_stage_duration_seconds
 
