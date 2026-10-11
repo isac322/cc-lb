@@ -2457,6 +2457,15 @@ async fn lifecycle_handler(
             return cc_lb_engine::reject_unauthenticated(&error, observer.as_ref());
         }
     };
+    // Record the authenticated principal before the body is read: requests
+    // that terminate on a body-read error or the size cap still carry their
+    // real principal in metrics. The event is metrics-only; `Lifecycle::handle`
+    // re-emits it idempotently for non-HTTP callers.
+    if let Some(observer) = observer.as_ref() {
+        state
+            .lifecycle
+            .record_authentication_completed(&auth, observer);
+    }
     let cap = state.body_caps.for_path(parts.uri.path());
     let body_read_started = Instant::now();
     let body_read_span = tracing::info_span!(

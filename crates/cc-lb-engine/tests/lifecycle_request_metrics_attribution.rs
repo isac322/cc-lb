@@ -2,12 +2,13 @@
 //! assembled by the lifecycle path, not placeholder attribution.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_control::RequestEventBus as _;
 use cc_lb_lifecycle::LifecycleEvent;
-use http::StatusCode;
+use http::{Request, StatusCode};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use tokio::time::timeout;
 
@@ -175,4 +176,95 @@ async fn streamed_response_termination_metric_carries_routed_upstream_and_model(
     assert_eq!(label(termination, "upstream"), Some(UPSTREAM));
     assert_eq!(label(termination, "model"), Some(MODEL));
     assert!(matches!(termination.value, DebugValue::Counter(1)));
+}
+
+/// Drive one authenticated request through `Lifecycle::handle` with the real
+/// lifecycle-event logger attached, wait for its terminal event, then return
+/// the rendered metrics. `config` is the `LifecycleConfig` under test and
+/// `request` is the authenticated request (already through `authenticate`).
+async fn completed_metric_for(
+    config: cc_lb_engine::LifecycleConfig,
+    request: Request<Bytes>,
+) -> (Vec<Sample>, StatusCode) {
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+    let test_bus = TestLifecycleBus::new();
+    let logger =
+        cc_lb_engine::spawn_lifecycle_event_logger(test_bus.bus.attach_lifecycle_writer(256));
+    let mut lifecycle_events = test_bus.bus.subscribe_lifecycle();
+    let state = TestState::default();
+    let lifecycle = crate::common::lifecycle_with_parts(
+        TestAuthn::new(state.clone()),
+        Arc::new(MockDispatch {
+            state,
+            mode: DispatchMode::HeadersOk(http::HeaderMap::new()),
+        }),
+        config,
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("lifecycle handles request");
+    let (status, _, _) = collect_body(response).await;
+    drop(lifecycle);
+    settle().await;
+    timeout(Duration::from_secs(3), async {
+        while !matches!(
+            lifecycle_events
+                .recv()
+                .await
+                .expect("lifecycle broadcast stays open"),
+            LifecycleEvent::RequestTerminated { .. }
+        ) {}
+    })
+    .await
+    .expect("terminal lifecycle event is published");
+    logger.shutdown().await;
+    (snapshot(&snapshotter), status)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authenticated_invalid_json_still_carries_real_principal() {
+    // Given an authenticated request whose body is not valid JSON.
+    let request = messages_request(Bytes::from_static(b"{\"model\": not-json"));
+    let (samples, status) =
+        completed_metric_for(cc_lb_engine::LifecycleConfig::default(), request).await;
+
+    // The 400 rejection happens after authentication, so the request keeps its
+    // real principal instead of the `none` fallback.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let completed = named(&samples, "cc_lb_requests_completed_total");
+    assert_eq!(completed.len(), 1, "one completed request series expected");
+    let completed = completed[0];
+    assert_eq!(label(completed, "principal"), Some(PRINCIPAL));
+    assert_eq!(label(completed, "status"), Some("400"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn authenticated_body_too_large_still_carries_real_principal() {
+    // Given an authenticated request whose body exceeds the configured cap.
+    let config = cc_lb_engine::LifecycleConfig {
+        messages_body_cap_bytes: 8,
+        ..cc_lb_engine::LifecycleConfig::default()
+    };
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[]}"#,
+    ));
+    let (samples, status) = completed_metric_for(config, request).await;
+
+    // The 413 rejection happens after authentication, so the request keeps its
+    // real principal instead of the `none` fallback.
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let completed = named(&samples, "cc_lb_requests_completed_total");
+    assert_eq!(completed.len(), 1, "one completed request series expected");
+    let completed = completed[0];
+    assert_eq!(label(completed, "principal"), Some(PRINCIPAL));
+    assert_eq!(label(completed, "status"), Some("413"));
 }

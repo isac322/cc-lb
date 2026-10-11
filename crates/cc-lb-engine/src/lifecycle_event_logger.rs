@@ -182,29 +182,17 @@ impl RequestTimingAggregator {
                 ..
             } => {
                 let source_kind = SourceKind::from_event(source_kind.as_deref());
+                // An entry may already exist when `AuthenticationCompleted`
+                // arrived first; keep its principal and set the source kind.
                 if let Some(active) = self.active.get_mut(event_id.as_str()) {
                     active.timing.source_kind = source_kind;
                     return;
                 }
-                if self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS {
-                    self.evict_oldest();
-                }
-
-                let sequence = self.next_sequence;
-                self.next_sequence = self
-                    .next_sequence
-                    .checked_add(1)
-                    .expect("request timing sequence exhausted");
-                let event_id = Arc::<str>::from(event_id.as_str());
-                self.active_order.insert(sequence, Arc::clone(&event_id));
-                self.active.insert(
+                self.insert_active(
                     event_id,
-                    ActiveRequestTiming {
-                        sequence,
-                        timing: RequestTiming {
-                            source_kind,
-                            ..RequestTiming::default()
-                        },
+                    RequestTiming {
+                        source_kind,
+                        ..RequestTiming::default()
                     },
                 );
             }
@@ -216,6 +204,27 @@ impl RequestTimingAggregator {
                     return;
                 };
                 active.timing.principal = Some(info.principal_id.clone());
+            }
+            // `AuthenticationCompleted` is emitted at handler entry, before the
+            // body is read, so on the HTTP path it precedes `RequestStarted`.
+            // Open the bounded entry here in that case; `RequestStarted` then
+            // fills in the source kind and keeps the principal.
+            LifecycleEvent::AuthenticationCompleted {
+                event_id,
+                principal_id,
+                ..
+            } => {
+                if let Some(active) = self.active.get_mut(event_id.as_str()) {
+                    active.timing.principal = Some(principal_id.clone());
+                } else {
+                    self.insert_active(
+                        event_id,
+                        RequestTiming {
+                            principal: Some(principal_id.clone()),
+                            ..RequestTiming::default()
+                        },
+                    );
+                }
             }
             LifecycleEvent::ParseCompleted {
                 event_id,
@@ -365,6 +374,23 @@ impl RequestTimingAggregator {
         if self.active.remove(event_id.as_ref()).is_some() {
             metrics::counter!("cc_lb_request_timing_aggregator_evictions_total").increment(1);
         }
+    }
+
+    /// Open a bounded entry for `event_id`, evicting the oldest entry when the
+    /// aggregate is full. Shared by every event that may arrive first.
+    fn insert_active(&mut self, event_id: &str, timing: RequestTiming) {
+        if self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS {
+            self.evict_oldest();
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("request timing sequence exhausted");
+        let event_id = Arc::<str>::from(event_id);
+        self.active_order.insert(sequence, Arc::clone(&event_id));
+        self.active
+            .insert(event_id, ActiveRequestTiming { sequence, timing });
     }
 
     fn clear(&mut self) {
@@ -1546,6 +1572,66 @@ mod tests {
             ],
         );
         assert_histogram(completion[0], &[12]);
+    }
+
+    fn authentication_completed(event_id: &str, principal_id: &str) -> LifecycleEvent {
+        LifecycleEvent::AuthenticationCompleted {
+            event_id: event_id.to_owned(),
+            principal_id: principal_id.to_owned(),
+            principal_kind: cc_lb_domain::PrincipalKindLite::Human,
+        }
+    }
+
+    #[test]
+    fn authentication_before_request_started_keeps_principal_and_source_kind() {
+        // The HTTP handler publishes `AuthenticationCompleted` before
+        // `RequestStarted`, e.g. for a body that exceeds the size cap.
+        let event_id = "authn-first";
+        let (timings, samples) = capture_metrics([
+            authentication_completed(event_id, "principal-a"),
+            started(event_id, Some("proxy")),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("body_too_large".to_owned()),
+                413,
+                TerminalTiming {
+                    duration_ms: 3,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let completed = named(&samples, "cc_lb_requests_completed_total");
+        assert_eq!(completed.len(), 1);
+        assert_labels(
+            completed[0],
+            &[
+                ("source_kind", "proxy"),
+                ("principal", "principal-a"),
+                ("upstream", UNRESOLVED_ATTRIBUTION_LABEL),
+                ("model", UNRESOLVED_ATTRIBUTION_LABEL),
+                ("status", "413"),
+                ("terminal_outcome", "error"),
+                ("client_status_class", "4xx"),
+            ],
+        );
+        assert!(timings.active.is_empty());
+        assert!(timings.active_order.is_empty());
+    }
+
+    #[test]
+    fn authentication_without_request_started_stays_bounded() {
+        let mut timings = RequestTimingAggregator::default();
+        for index in 0..=MAX_ACTIVE_REQUEST_TIMINGS {
+            timings.observe(&authentication_completed(
+                &format!("orphan-{index}"),
+                "principal-a",
+            ));
+        }
+
+        assert_eq!(timings.active.len(), MAX_ACTIVE_REQUEST_TIMINGS);
+        assert_eq!(timings.active_order.len(), MAX_ACTIVE_REQUEST_TIMINGS);
+        assert!(!timings.active.contains_key("orphan-0"));
     }
 
     #[test]
