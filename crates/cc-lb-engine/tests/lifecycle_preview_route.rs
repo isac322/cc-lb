@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use cc_lb_control::api_keys::principal_view::{DialectCache, PrincipalView, RouterPipelineCache};
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_control::{
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+};
 use cc_lb_domain::{Principal, TerminalStrategy, UpstreamCandidate};
 use cc_lb_engine::lifecycle::{PreviewRouteError, PreviewRouteInput};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
@@ -79,7 +81,11 @@ async fn same_request_id_produces_deterministic_winner() {
 async fn pipeline_instantiation_error_returns_error() {
     let upstream_records = default_upstream_records();
     let principal_view = principal_view_with_broken_pipeline();
-    let lifecycle = build_lifecycle_from(principal_view, upstream_records);
+    let lifecycle = build_lifecycle_with_status_snapshot(
+        principal_view,
+        upstream_records,
+        UpstreamStatusSnapshot::default(),
+    );
 
     let err = lifecycle
         .preview_route(input(PRINCIPAL, None))
@@ -119,6 +125,85 @@ async fn empty_candidate_pool_returns_null_winner() {
     );
 }
 
+// #851: an upstream whose last apply errored cannot sign, so preview routing
+// must skip it for a healthy sibling; when every upstream errored there is
+// no winner.
+#[tokio::test]
+async fn preview_route_skips_apply_error_upstreams() {
+    let upstream_records = default_upstream_records();
+    let errored = upstream_records[0].id;
+    let healthy = upstream_records[1].id;
+    let third = upstream_records[2].id;
+
+    // The errored upstream sorts first by id yet must be skipped.
+    let filter = Arc::new(IndexKeepingFilter {
+        name: "keep-all",
+        kept_indices: vec![0, 1, 2],
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+    let mut snapshot = status_snapshot([(errored, ApplyStatus::Error)]);
+    snapshot.entries.insert(
+        upstream_records[1].name.clone(),
+        UpstreamStatusEntry {
+            status: ApplyStatus::Active,
+            last_apply_error: None,
+            last_apply_at_unix_secs: 1,
+        },
+    );
+    let lifecycle = build_lifecycle_with_status_snapshot(
+        principal_view_with_pipeline(vec![filter.clone()]),
+        upstream_records.clone(),
+        snapshot,
+    );
+
+    let outcome = lifecycle
+        .preview_route(input(PRINCIPAL, Some("apply-error-skip")))
+        .await
+        .expect("preview succeeds");
+
+    assert_eq!(outcome.winner_upstream_id, Some(healthy));
+    assert_eq!(outcome.winner_upstream_name.as_deref(), Some("upstream-1"));
+    let seen = filter.calls.lock().unwrap().clone();
+    assert_eq!(seen.as_slice(), &[vec![healthy, third]]);
+    assert!(
+        outcome
+            .trace
+            .stages
+            .iter()
+            .all(|stage| stage.upstream_id != Some(errored)),
+        "trace stages must not reference the errored upstream: {:?}",
+        outcome.trace.stages
+    );
+
+    // All errored: no upstream can sign, so the preview has no winner.
+    let lifecycle = build_lifecycle_with_status_snapshot(
+        principal_view_with_pipeline(vec![kept_filter("keep-all", vec![0, 1, 2])]),
+        upstream_records.clone(),
+        status_snapshot([
+            (errored, ApplyStatus::Error),
+            (healthy, ApplyStatus::Error),
+            (third, ApplyStatus::Error),
+        ]),
+    );
+
+    let outcome = lifecycle
+        .preview_route(input(PRINCIPAL, Some("apply-error-empty")))
+        .await
+        .expect("preview succeeds");
+
+    assert!(outcome.winner_upstream_id.is_none());
+    assert!(outcome.winner_upstream_name.is_none());
+    assert_eq!(
+        outcome
+            .trace
+            .terminal_decision
+            .as_ref()
+            .unwrap()
+            .upstream_id,
+        None
+    );
+}
+
 fn input(principal_id: &str, request_id: Option<&str>) -> PreviewRouteInput {
     PreviewRouteInput {
         principal_id: principal_id.to_owned(),
@@ -140,13 +225,18 @@ fn build_lifecycle(filters: Vec<Arc<dyn FilterPlugin>>) -> (Lifecycle, Vec<Uuid>
     let upstream_records = default_upstream_records();
     let upstream_ids: Vec<Uuid> = upstream_records.iter().map(|u| u.id).collect();
     let principal_view = principal_view_with_pipeline(filters);
-    let lifecycle = build_lifecycle_from(principal_view, upstream_records);
+    let lifecycle = build_lifecycle_with_status_snapshot(
+        principal_view,
+        upstream_records,
+        UpstreamStatusSnapshot::default(),
+    );
     (lifecycle, upstream_ids)
 }
 
-fn build_lifecycle_from(
+fn build_lifecycle_with_status_snapshot(
     principal_view: Arc<PrincipalView>,
     upstream_records: Vec<UpstreamRecord>,
+    upstream_status_snapshot: UpstreamStatusSnapshot,
 ) -> Lifecycle {
     let state = TestState::default();
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
@@ -158,6 +248,7 @@ fn build_lifecycle_from(
         .signer_factory(Arc::new(authn.clone()))
         .principal_view(principal_view)
         .upstream_records(upstream_records)
+        .upstream_status_snapshot(Arc::new(upstream_status_snapshot))
         .build();
     Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
@@ -166,6 +257,34 @@ fn build_lifecycle_from(
         LifecycleConfig::default(),
         Arc::new(cc_lb_clock::SystemClock),
     )
+}
+
+fn status_snapshot(
+    statuses: impl IntoIterator<Item = (Uuid, ApplyStatus)>,
+) -> UpstreamStatusSnapshot {
+    let upstream_names: HashMap<Uuid, String> = default_upstream_records()
+        .into_iter()
+        .map(|record| (record.id, record.name))
+        .collect();
+    let entries = statuses
+        .into_iter()
+        .map(|(id, status)| {
+            (
+                upstream_names[&id].clone(),
+                UpstreamStatusEntry {
+                    status,
+                    last_apply_error: (status == ApplyStatus::Error)
+                        .then(|| "apply failed".to_owned()),
+                    last_apply_at_unix_secs: 1,
+                },
+            )
+        })
+        .collect();
+    UpstreamStatusSnapshot {
+        entries,
+        applied_at_unix_secs: 1,
+        revision_hash: 1,
+    }
 }
 
 fn principal_view_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {

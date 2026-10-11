@@ -8,9 +8,9 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_control::DynamicViewHolder;
 use cc_lb_control::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_control::{ApplyStatus, DynamicView, DynamicViewHolder};
 use cc_lb_engine::{Lifecycle, LifecycleConfig};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
@@ -231,14 +231,28 @@ async fn api_key_upstream_without_stored_credential_fails_closed() {
         .await
         .expect("response body")
         .to_bytes();
-    // SignerError::MissingCredentials maps to 502; the request must fail rather
-    // than fall back to the downstream client's key.
+    // Apply validation marks the credential-less upstream ApplyStatus::Error, so
+    // candidate building excludes it and routing answers 503
+    // `route_no_upstream_after_filter` rather than falling back to the
+    // downstream caller's key.
     assert_eq!(
         status,
-        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
         "{}",
         String::from_utf8_lossy(&body)
     );
+    let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
+    assert_eq!(
+        error_body["error"]["type"],
+        "route_no_upstream_after_filter"
+    );
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(
+        last.x_api_key, None,
+        "upstream must not see the downstream caller's managed key"
+    );
+    assert_eq!(last.authorization, None);
 }
 
 #[tokio::test]
@@ -277,9 +291,14 @@ async fn api_key_upstream_rejects_credential_that_is_not_a_valid_header_value() 
         drive_proxied_request(&fixture, "api-key-invalid-header-principal", upstream_id).await;
     assert_eq!(
         status,
-        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
         "{}",
         String::from_utf8_lossy(&body)
+    );
+    let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
+    assert_eq!(
+        error_body["error"]["type"],
+        "route_no_upstream_after_filter"
     );
 
     let last = fetch_last_request(&fixture).await;
@@ -308,9 +327,14 @@ async fn api_key_upstream_fails_closed_when_ciphertext_uses_unknown_aad() {
         drive_proxied_request(&fixture, "api-key-unknown-aad-principal", upstream_id).await;
     assert_eq!(
         status,
-        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
         "{}",
         String::from_utf8_lossy(&body)
+    );
+    let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
+    assert_eq!(
+        error_body["error"]["type"],
+        "route_no_upstream_after_filter"
     );
 
     let last = fetch_last_request(&fixture).await;
@@ -318,6 +342,154 @@ async fn api_key_upstream_fails_closed_when_ciphertext_uses_unknown_aad() {
         last.x_api_key, None,
         "upstream must not see the downstream caller's managed key"
     );
+    assert_eq!(last.authorization, None);
+}
+
+/// Regression: `build_candidates_with_matches` filtered candidates only on
+/// `enabled`, `deleted_at_unix_secs`, kind, and the principal allowlist
+/// (crates/cc-lb-engine/src/lifecycle.rs); it never consulted
+/// `view.upstream_status_snapshot`, so an upstream the real `apply_upstreams`
+/// path marked `ApplyStatus::Error` still won routing when it sorted first —
+/// candidates are ordered by `upstream_id` and the default terminal strategy
+/// `FirstPick` picks `candidates.first()`. Signing then failed closed with
+/// `SignerError::MissingCredentials` → terminal 502 and the healthy sibling was
+/// never tried. The status snapshot now participates in candidate building, so
+/// the errored upstream is skipped and the healthy sibling serves the request.
+#[tokio::test]
+async fn apply_error_upstream_is_skipped_for_healthy_sibling() {
+    let fixture = Fixture::new().await;
+    // `Uuid::nil()` sorts before every `Uuid::new_v4()`, so the credential-less
+    // upstream deterministically becomes the first routing candidate under
+    // `FirstPick` without any sleeps, retries, or list-order tricks.
+    let broken_id = fixture
+        .create_api_key_upstream_record_with_id("api-key-apply-error-first-pick", Uuid::nil())
+        .await;
+    let healthy_id = fixture
+        .create_api_key_upstream("api-key-healthy", "sk-ant-HEALTHY-SECRET")
+        .await;
+    fixture
+        .create_principal("apply-error-principal", vec![broken_id, healthy_id])
+        .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "apply-error-principal",
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let (lifecycle, view) = fixture.lifecycle_and_view(key_store).await;
+    assert_eq!(
+        view.upstream_status_snapshot
+            .entries
+            .get("api-key-apply-error-first-pick")
+            .map(|entry| entry.status),
+        Some(ApplyStatus::Error)
+    );
+    assert_eq!(
+        view.upstream_status_snapshot
+            .entries
+            .get("api-key-healthy")
+            .map(|entry| entry.status),
+        Some(ApplyStatus::Active)
+    );
+
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(last.x_api_key.as_deref(), Some("sk-ant-HEALTHY-SECRET"));
+}
+
+/// Same defect, degenerate case: with `ApplyStatus::Error` upstreams excluded,
+/// a deployment whose upstreams all failed validation has no eligible
+/// candidates — the same outcome as the existing "no upstream candidates remain
+/// after routing filters" path, which answers 503 with
+/// `route_no_upstream_after_filter`
+/// (`RouteFailure::RouteNoUpstreamAfterFilter`, lifecycle.rs). Before the status
+/// snapshot fed candidate building this returned 502 `MissingCredentials` from
+/// the routed broken upstream.
+#[tokio::test]
+async fn all_apply_error_upstreams_yield_service_unavailable() {
+    let fixture = Fixture::new().await;
+    let broken_id = fixture
+        .create_api_key_upstream_record_with_id("api-key-apply-error-only", Uuid::nil())
+        .await;
+    fixture
+        .create_principal("all-error-principal", vec![broken_id])
+        .await;
+    let key_store = Arc::new(KeyStore::new(fixture.storage.clone()));
+    let (_key_record, key_secret) = key_store
+        .create(
+            "all-error-principal",
+            CreateParams {
+                label: "composite-signer-dispatch".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("managed key created");
+    let (lifecycle, view) = fixture.lifecycle_and_view(key_store).await;
+    assert_eq!(
+        view.upstream_status_snapshot
+            .entries
+            .get("api-key-apply-error-only")
+            .map(|entry| entry.status),
+        Some(ApplyStatus::Error)
+    );
+
+    let request = message_request(key_secret.expose());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("test request authenticates");
+    let response = lifecycle
+        .handle(request, &auth)
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
+    assert_eq!(
+        error_body["error"]["type"],
+        "route_no_upstream_after_filter"
+    );
+
+    let last = fetch_last_request(&fixture).await;
+    assert_eq!(last.x_api_key, None, "upstream must not be hit");
     assert_eq!(last.authorization, None);
 }
 
@@ -457,10 +629,17 @@ impl Fixture {
     }
 
     async fn create_api_key_upstream_record(&self, name: &str) -> Uuid {
+        self.create_api_key_upstream_record_with_id(name, Uuid::new_v4())
+            .await
+    }
+
+    /// Same as `create_api_key_upstream_record` but persists a caller-chosen
+    /// id, so tests can pin candidate ordering (candidates sort by id).
+    async fn create_api_key_upstream_record_with_id(&self, name: &str, id: Uuid) -> Uuid {
         UpstreamStore::create(
             self.storage.as_ref(),
             UpstreamCreate {
-                id: Uuid::new_v4(),
+                id,
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
@@ -476,6 +655,12 @@ impl Fixture {
     }
 
     async fn lifecycle(&self, key_store: Arc<KeyStore>) -> Lifecycle {
+        self.lifecycle_and_view(key_store).await.0
+    }
+
+    /// Like `lifecycle`, but also returns the built `DynamicView` so tests can
+    /// inspect `upstream_status_snapshot`.
+    async fn lifecycle_and_view(&self, key_store: Arc<KeyStore>) -> (Lifecycle, Arc<DynamicView>) {
         let runtime = std::sync::Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
         let view = build_dynamic_view(
             self.stores.as_ref(),
@@ -492,16 +677,17 @@ impl Fixture {
         )
         .await
         .expect("dynamic view builds");
-        Lifecycle::new_with_dynamic_view(
+        let lifecycle = Lifecycle::new_with_dynamic_view(
             Arc::new(BuiltinAuthn::new(
                 key_store,
                 Arc::new(cc_lb_clock::SystemClock),
             )),
-            Arc::new(DynamicViewHolder::new(view)),
+            Arc::new(DynamicViewHolder::new(view.clone())),
             cc_lb_engine::make_default_dispatcher(50),
             LifecycleConfig::default(),
             Arc::new(cc_lb_clock::SystemClock),
-        )
+        );
+        (lifecycle, view)
     }
 }
 

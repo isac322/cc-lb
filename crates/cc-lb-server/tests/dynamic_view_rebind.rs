@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_control::{ApplyStatus, DynamicView};
+use cc_lb_engine::{RequestKind, build_candidates};
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
@@ -427,4 +429,82 @@ async fn plan_info_uses_catalog_ratio_and_reconciles_history() {
     assert_eq!(resolved.resolved_ratio_snapshot, Some(5.0));
     assert_eq!(resolved.effective_to_unix_millis, None);
     assert_eq!(resolved.provenance, "dynamic_view_reconcile");
+}
+
+/// An upstream whose credential fails apply validation enters the view with
+/// `ApplyStatus::Error` and is excluded from routing candidates. Replacing the
+/// credential through the store and rebuilding the view must restore it to
+/// `ApplyStatus::Active` and back into `build_candidates` output — no restart
+/// or separate eligibility reset involved.
+#[tokio::test]
+async fn repaired_upstream_leaves_apply_error_and_becomes_routable() {
+    let (dir, storage) = storage_fixture().await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let principal = create_principal(&storage, "principal-repair").await;
+    // No `api_key_ciphertext`: apply validation fails with
+    // "anthropic api-key upstream missing api_key_ciphertext".
+    let broken = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "api-key-broken".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+        },
+    )
+    .await
+    .expect("upstream created");
+
+    let candidates_for = |view: &DynamicView, principal_name: &str| {
+        build_candidates(
+            view,
+            principal_name,
+            RequestKind::AnthropicMessages,
+            &[],
+            &HashMap::new(),
+            &cc_lb_clock::SystemClock,
+        )
+        .iter()
+        .map(|candidate| candidate.upstream_id)
+        .collect::<Vec<_>>()
+    };
+
+    let broken_view = build(&stores, 0, &runtime, dir.path()).await;
+    let status = broken_view
+        .upstream_status_snapshot
+        .entries
+        .get("api-key-broken")
+        .expect("broken upstream status");
+    assert_eq!(status.status, ApplyStatus::Error);
+    assert!(status.last_apply_error.is_some());
+    assert!(
+        !candidates_for(&broken_view, &principal.name).contains(&broken.id),
+        "apply-error upstream must not be a routing candidate"
+    );
+
+    let aead = AeadService::from_master_key([1; 32]);
+    let ciphertext = aead
+        .encrypt(b"sk-ant-repaired-secret", broken.id.as_bytes())
+        .expect("api-key ciphertext");
+    UpstreamStore::update_api_key_secret(storage.as_ref(), broken.id, Some(ciphertext))
+        .await
+        .expect("api-key secret repaired");
+
+    let repaired_view = build(&stores, broken_view.generation, &runtime, dir.path()).await;
+    let status = repaired_view
+        .upstream_status_snapshot
+        .entries
+        .get("api-key-broken")
+        .expect("repaired upstream status");
+    assert_eq!(status.status, ApplyStatus::Active);
+    assert_eq!(status.last_apply_error, None);
+    assert!(
+        candidates_for(&repaired_view, &principal.name).contains(&broken.id),
+        "repaired upstream must return to routing candidates"
+    );
 }
