@@ -5,6 +5,7 @@ members = [
     "crates/cc-lb-control",
     "crates/cc-lb-*",
     "plugins/router/cache-aware-wasmtime",
+    "plugins/router/reset-priority-wasmtime",
     "plugins/test-fixtures/wasmtime-shape-passthrough",
     "plugins/test-fixtures/wasmtime-filter-service-tier",
     "tests/fixtures/fake-anthropic",

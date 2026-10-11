@@ -508,4 +508,4 @@ fixtures, and conformance coverage together.
 
 ## Reset-priority router example
 
-[`reset-priority-wasmtime`](../plugins/router/reset-priority-wasmtime/README.md) is an optional standalone filter using wire V2 quota snapshots and the host routing clock. Insert it before the built-in subscription-preference filter to rank accounts by weekly expiry urgency while retaining comparable warm-cache owners.
+[`reset-priority-wasmtime`](../plugins/router/reset-priority-wasmtime/README.md) is an optional workspace filter using wire V2 quota snapshots and the host routing clock. Insert it before the built-in subscription-preference filter to rank accounts by weekly expiry urgency while retaining comparable warm-cache owners.

@@ -98,25 +98,24 @@ when guest decoding fails. Older hosts lack this protection.
 Build the host and all attached filter plugins from the same source revision,
 then upload matching artifacts. A V2 guest must be rebuilt against the V2 wire;
 a V1-only host on the other side of the wire rejects it. Shape/transform
-fingerprints are unchanged. The plugin remains a standalone workspace, so its
-build does not change the server's dependency lockfile. These source changes do not update a running service.
+fingerprints are unchanged. The plugin is a workspace member. These source changes do not update a running service.
 
 ## Build
 
-The plugin is a standalone workspace and is built independently of the server.
-Use its manifest path.
+The plugin follows the workspace conventions and is covered by workspace tests.
+Build its Wasm artifact separately from the server.
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo build --manifest-path plugins/router/reset-priority-wasmtime/Cargo.toml \
+cargo build -p reset-priority-wasmtime \
   --target wasm32-unknown-unknown --release
-# plugins/router/reset-priority-wasmtime/target/wasm32-unknown-unknown/release/reset_priority_wasmtime.wasm
+# target/wasm32-unknown-unknown/release/reset_priority_wasmtime.wasm
 ```
 
 ## Tests
 
 ```bash
-cargo test --manifest-path plugins/router/reset-priority-wasmtime/Cargo.toml   # decision-table tests + invariant sweep
+cargo test -p reset-priority-wasmtime   # decision-table tests + invariant sweep
 cargo test -p cc-lb-runtime-wasmtime                                          # host admission + rkyv boundary
 ```
 
