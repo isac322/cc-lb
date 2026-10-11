@@ -440,7 +440,8 @@ curl -N -X POST http://127.0.0.1:8080/v1/messages \
         <p>위 호출 직후:</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># Prometheus 카운터로 본 트래픽
 curl -s http://127.0.0.1:9091/metrics | grep -E &#39;^cc_lb_requests_started_total&#39;
-# upstream=&quot;unknown&quot;, status=&quot;200&quot; 값은 trace layer가 proxy 응답 헤더를 관찰할 때 증가함 (upstream별 집계 아님)
+# status=&quot;200&quot; 값은 trace layer가 proxy 응답 헤더를 관찰할 때 증가함 (principal/upstream/model 라벨 없음)
+# upstream별 집계는 cc_lb_requests_completed_total{principal,upstream,model,status}로 확인
 
 # Admin UI에서 시각적 확인 (브라우저)
 xdg-open http://127.0.0.1:9090/ 2&gt;/dev/null
@@ -604,8 +605,8 @@ curl -s http://127.0.0.1:9090/admin/v1/principals/api-key/router-terminal \
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
 
-# 3. trace layer가 관찰한 proxy 응답 헤더 수 확인 (upstream=&quot;unknown&quot; 고정, upstream별 집계 아님)
-curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_started_total</code></pre><button class="copy">복사</button></div>
+# 3. upstream별 요청 수 확인 (lifecycle event logger가 요청마다 한 번 집계, 도달하지 못한 단계는 &quot;none&quot;)
+curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_completed_total</code></pre><button class="copy">복사</button></div>
 
     <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
 
@@ -811,9 +812,12 @@ curl -s http://127.0.0.1:8080/v1/messages \
     <h4>핵심 메트릭</h4>
     <table>
       <tr><th>메트릭</th><th>의미</th></tr>
-      <tr><td><code>cc_lb_requests_started_total{principal,upstream,model,status}</code></td><td>trace layer가 관찰한 proxy 응답 헤더 카운터 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal completion 아님)</td></tr>
-      <tr><td><code>cc_lb_request_headers_duration_seconds{principal,upstream,model}</code></td><td>요청 시작부터 trace layer가 proxy 응답 헤더를 관찰할 때까지의 시간 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal duration 아님)</td></tr>
-      <tr><td><code>cc_lb_response_body_chunks_total{upstream="unknown"}</code></td><td>trace layer가 관찰한 transport body chunk 수 (바이트 수나 SSE 이벤트 수 아님). provider attribution을 사용할 수 없어 upstream은 현재 unknown 고정</td></tr>
+      <tr><td><code>cc_lb_requests_started_total{status}</code></td><td>trace layer가 관찰한 proxy 응답 헤더 카운터 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal completion 아님; principal/upstream/model 라벨 없음)</td></tr>
+      <tr><td><code>cc_lb_request_headers_duration_seconds</code></td><td>요청 시작부터 trace layer가 proxy 응답 헤더를 관찰할 때까지의 시간 (layer 내부 로컬 응답 포함; 인증 전에 trace layer를 우회하는 drain 거부는 started/header 및 terminal lifecycle metric 어디에도 집계되지 않음; terminal duration 아님; 라벨 없음)</td></tr>
+      <tr><td><code>cc_lb_requests_completed_total{source_kind,principal,upstream,model,status,terminal_outcome,client_status_class}</code></td><td>인증 단계에 도달한 요청을 lifecycle 종료 시 한 번씩 집계. 실제 principal ID, 라우팅된 upstream 이름, 요청 model을 라벨로 기록하며, 요청이 도달하지 못한 단계(예: 인증 실패 시 principal)는 <code>none</code></td></tr>
+      <tr><td><code>cc_lb_request_completion_duration_seconds{source_kind,upstream,model,status,terminal_outcome}</code></td><td>요청 종료까지의 시간. histogram cardinality를 제한하기 위해 principal 라벨 없음</td></tr>
+      <tr><td><code>cc_lb_stream_terminations_total{outcome,cause,upstream,model}</code></td><td>응답 stream 종료 결과를 라우팅된 upstream과 요청 model별로 집계</td></tr>
+      <tr><td><code>cc_lb_response_body_chunks_total</code></td><td>trace layer가 관찰한 transport body chunk 수 (바이트 수나 SSE 이벤트 수 아님). trace layer는 provider를 알 수 없으므로 라벨 없음</td></tr>
       <tr><td><code>cc_lb_breaker_state{upstream}</code></td><td>0=Closed / 1=HalfOpen / 2=Open</td></tr>
       <tr><td><code>cc_lb_bulkhead_active{upstream}</code></td><td>현재 동시 처리 수</td></tr>
       <tr><td><code>cc_lb_drain_in_progress</code></td><td>SIGTERM 후 drain 진행 중</td></tr>

@@ -5,6 +5,16 @@
 //! stages once, including disjoint retry overhead, and expose fixed-vocabulary
 //! diagnostic I/O stages without adding overlapping children to accounting.
 //!
+//! This subscriber is the single owner of attributed request counting: the
+//! aggregate collects the authenticated principal, routed upstream, and
+//! requested model from the lifecycle events, and the terminal event emits
+//! `cc_lb_requests_completed_total` exactly once per observed request. An
+//! attribution stage the request never reached (authentication failure,
+//! routing failure, body without a model) is labelled
+//! [`UNRESOLVED_ATTRIBUTION_LABEL`]. Requests that never reach the
+//! credential check publish no lifecycle events and are counted only by the
+//! trace layer's unattributed header-time metrics.
+//!
 //! ## Shutdown protocol
 //!
 //! Signal, drain, await. Late lifecycle events after shutdown are lost;
@@ -18,6 +28,8 @@ use std::{
 use cc_lb_lifecycle::{
     LifecycleEvent, LimitDecisionKind, RequestIoTimings, RouteFailure, TerminationReason,
 };
+use cc_lb_observability::UNRESOLVED_ATTRIBUTION_LABEL;
+use metrics::SharedString;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -102,6 +114,9 @@ struct RequestTiming {
     max_attempt_num: Option<u32>,
     route_decision: Option<&'static str>,
     limit_decision: Option<&'static str>,
+    principal: Option<String>,
+    upstream: Option<String>,
+    model: Option<String>,
 }
 
 impl RequestTiming {
@@ -167,31 +182,60 @@ impl RequestTimingAggregator {
                 ..
             } => {
                 let source_kind = SourceKind::from_event(source_kind.as_deref());
+                // An entry may already exist when `AuthenticationCompleted`
+                // arrived first; keep its principal and set the source kind.
                 if let Some(active) = self.active.get_mut(event_id.as_str()) {
                     active.timing.source_kind = source_kind;
                     return;
                 }
-                if self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS {
-                    self.evict_oldest();
-                }
-
-                let sequence = self.next_sequence;
-                self.next_sequence = self
-                    .next_sequence
-                    .checked_add(1)
-                    .expect("request timing sequence exhausted");
-                let event_id = Arc::<str>::from(event_id.as_str());
-                self.active_order.insert(sequence, Arc::clone(&event_id));
-                self.active.insert(
+                self.insert_active(
                     event_id,
-                    ActiveRequestTiming {
-                        sequence,
-                        timing: RequestTiming {
-                            source_kind,
-                            ..RequestTiming::default()
-                        },
+                    RequestTiming {
+                        source_kind,
+                        ..RequestTiming::default()
                     },
                 );
+            }
+            LifecycleEvent::AuthCompleted {
+                event_id,
+                result: Ok(info),
+            } => {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
+                    return;
+                };
+                active.timing.principal = Some(info.principal_id.clone());
+            }
+            // `AuthenticationCompleted` is emitted at handler entry, before the
+            // body is read, so on the HTTP path it precedes `RequestStarted`.
+            // Open the bounded entry here in that case; `RequestStarted` then
+            // fills in the source kind and keeps the principal.
+            LifecycleEvent::AuthenticationCompleted {
+                event_id,
+                principal_id,
+                ..
+            } => {
+                if let Some(active) = self.active.get_mut(event_id.as_str()) {
+                    active.timing.principal = Some(principal_id.clone());
+                } else {
+                    self.insert_active(
+                        event_id,
+                        RequestTiming {
+                            principal: Some(principal_id.clone()),
+                            ..RequestTiming::default()
+                        },
+                    );
+                }
+            }
+            LifecycleEvent::ParseCompleted {
+                event_id,
+                result: Ok(info),
+            } => {
+                let Some(active) = self.active.get_mut(event_id.as_str()) else {
+                    return;
+                };
+                if active.timing.model.is_none() {
+                    active.timing.model.clone_from(&info.model);
+                }
             }
             LifecycleEvent::RouteCompleted {
                 event_id, result, ..
@@ -208,6 +252,12 @@ impl RequestTimingAggregator {
                     Err(RouteFailure::RouteNotConfigured) => "route_not_configured",
                     Err(_) => "unknown",
                 });
+                if let Ok(info) = result {
+                    active.timing.upstream = Some(info.upstream_name.clone());
+                    if let Some(model) = &info.model {
+                        active.timing.model = Some(model.clone());
+                    }
+                }
             }
             LifecycleEvent::LimitDecision {
                 event_id, decision, ..
@@ -307,7 +357,7 @@ impl RequestTimingAggregator {
                 timing.connect_ms = (*connect_ms).or(timing.connect_ms);
                 timing.io_timings = *io_timings;
                 emit_terminal_metrics(
-                    &timing,
+                    &mut timing,
                     RequestOutcome::from_terminal(reason, *client_status),
                     *client_status,
                     *duration_ms,
@@ -326,13 +376,38 @@ impl RequestTimingAggregator {
         }
     }
 
+    /// Open a bounded entry for `event_id`, evicting the oldest entry when the
+    /// aggregate is full. Shared by every event that may arrive first.
+    fn insert_active(&mut self, event_id: &str, timing: RequestTiming) {
+        if self.active.len() >= MAX_ACTIVE_REQUEST_TIMINGS {
+            self.evict_oldest();
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("request timing sequence exhausted");
+        let event_id = Arc::<str>::from(event_id);
+        self.active_order.insert(sequence, Arc::clone(&event_id));
+        self.active
+            .insert(event_id, ActiveRequestTiming { sequence, timing });
+    }
+
     fn clear(&mut self) {
         self.active.clear();
         self.active_order.clear();
     }
 }
+
+fn attribution_label(value: Option<String>) -> SharedString {
+    value.map_or(
+        SharedString::const_str(UNRESOLVED_ATTRIBUTION_LABEL),
+        SharedString::from,
+    )
+}
+
 fn emit_terminal_metrics(
-    timing: &RequestTiming,
+    timing: &mut RequestTiming,
     outcome: RequestOutcome,
     client_status: u16,
     duration_ms: u64,
@@ -340,17 +415,32 @@ fn emit_terminal_metrics(
     let source_kind = timing.source_kind.as_str();
     let outcome_label = outcome.as_str();
     let status_class = client_status_class(client_status);
+    let status = client_status.to_string();
+    // The timing aggregate is consumed by this terminal emission, so its owned
+    // attribution strings move into the label set; the fallback is borrowed.
+    let principal = attribution_label(timing.principal.take());
+    let upstream = attribution_label(timing.upstream.take());
+    let model = attribution_label(timing.model.take());
 
     metrics::counter!(
         "cc_lb_requests_completed_total",
         "source_kind" => source_kind,
+        "principal" => principal,
+        "upstream" => upstream.clone(),
+        "model" => model.clone(),
+        "status" => status.clone(),
         "terminal_outcome" => outcome_label,
         "client_status_class" => status_class
     )
     .increment(1);
+    // `principal` is deliberately absent: per-principal latency multiplies the
+    // histogram buckets past a safe series budget and is served by `cclb_api_key_*`.
     metrics::histogram!(
         "cc_lb_request_completion_duration_seconds",
         "source_kind" => source_kind,
+        "upstream" => upstream,
+        "model" => model,
+        "status" => status,
         "terminal_outcome" => outcome_label
     )
     .record(milliseconds_to_seconds(duration_ms));
@@ -629,7 +719,9 @@ fn record(event: &LifecycleEvent, timings: &mut RequestTimingAggregator) {
 mod tests {
     use std::collections::BTreeMap;
 
-    use cc_lb_lifecycle::{StreamSuccess, TerminationReason};
+    use cc_lb_lifecycle::{
+        AuthFailure, AuthInfo, ParseInfo, RouteInfo, StreamSuccess, TerminationReason,
+    };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 
     use super::*;
@@ -1323,10 +1415,16 @@ mod tests {
 
         let completed = named(&samples, "cc_lb_requests_completed_total");
         assert_eq!(completed.len(), 1);
+        // No auth, parse, or successful route events were observed, so every
+        // attribution stage carries the explicit unresolved fallback.
         assert_labels(
             completed[0],
             &[
                 ("source_kind", "proxy"),
+                ("principal", "none"),
+                ("upstream", "none"),
+                ("model", "none"),
+                ("status", "200"),
                 ("terminal_outcome", "success"),
                 ("client_status_class", "2xx"),
             ],
@@ -1337,7 +1435,13 @@ mod tests {
         assert_eq!(completion.len(), 1);
         assert_labels(
             completion[0],
-            &[("source_kind", "proxy"), ("terminal_outcome", "success")],
+            &[
+                ("source_kind", "proxy"),
+                ("upstream", "none"),
+                ("model", "none"),
+                ("status", "200"),
+                ("terminal_outcome", "success"),
+            ],
         );
         assert_histogram(completion[0], &[240]);
 
@@ -1370,6 +1474,204 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing final-attempt stage {stage}"));
             assert_histogram(sample, &[duration_ms]);
         }
+    }
+
+    fn route_completed_ok(
+        event_id: &str,
+        upstream_name: &str,
+        model: Option<&str>,
+    ) -> LifecycleEvent {
+        LifecycleEvent::RouteCompleted {
+            event_id: event_id.to_owned(),
+            result: Ok(RouteInfo {
+                upstream_id: uuid::Uuid::nil(),
+                upstream_name: upstream_name.to_owned(),
+                model: model.map(str::to_owned),
+                upstream_kind: None,
+                route_ms: None,
+                routing_trace: None,
+                predicted_cache_read_tokens: None,
+                matched_v3_cache_key: None,
+                breakpoint_content_block_index: None,
+                matched_content_block_index: None,
+                lookback_distance: None,
+                predicted_cache_creation_tokens_5m: None,
+                predicted_cache_creation_tokens_1h: None,
+                token_estimate_source: None,
+                cache_value_micros: None,
+                formula_winner_upstream_id: None,
+                kept_upstream_id: None,
+                quota_urgency_5h: None,
+                quota_urgency_7d: None,
+                quota_urgency_combined: None,
+                quota_warning_multiplier: None,
+            }),
+            routing_trace: None,
+        }
+    }
+
+    #[test]
+    fn terminal_metrics_carry_resolved_principal_upstream_and_model() {
+        let event_id = "attributed";
+        let (_, samples) = capture_metrics([
+            started(event_id, Some("proxy")),
+            LifecycleEvent::ParseCompleted {
+                event_id: event_id.to_owned(),
+                result: Ok(ParseInfo {
+                    model: Some("claude-requested".to_owned()),
+                    ..Default::default()
+                }),
+            },
+            LifecycleEvent::AuthCompleted {
+                event_id: event_id.to_owned(),
+                result: Ok(AuthInfo {
+                    principal_id: "principal-a".to_owned(),
+                    key_id: Some("key-a".to_owned()),
+                    principal_kind: None,
+                    auth_ms: None,
+                }),
+            },
+            route_completed_ok(event_id, "upstream-a", Some("claude-routed")),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("rate_limited".to_owned()),
+                429,
+                TerminalTiming {
+                    duration_ms: 12,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let completed = named(&samples, "cc_lb_requests_completed_total");
+        assert_eq!(completed.len(), 1);
+        assert_labels(
+            completed[0],
+            &[
+                ("source_kind", "proxy"),
+                ("principal", "principal-a"),
+                ("upstream", "upstream-a"),
+                ("model", "claude-routed"),
+                ("status", "429"),
+                ("terminal_outcome", "error"),
+                ("client_status_class", "4xx"),
+            ],
+        );
+        assert_eq!(completed[0].value, MetricValue::Counter(1));
+
+        let completion = named(&samples, "cc_lb_request_completion_duration_seconds");
+        assert_eq!(completion.len(), 1);
+        assert_labels(
+            completion[0],
+            &[
+                ("source_kind", "proxy"),
+                ("upstream", "upstream-a"),
+                ("model", "claude-routed"),
+                ("status", "429"),
+                ("terminal_outcome", "error"),
+            ],
+        );
+        assert_histogram(completion[0], &[12]);
+    }
+
+    fn authentication_completed(event_id: &str, principal_id: &str) -> LifecycleEvent {
+        LifecycleEvent::AuthenticationCompleted {
+            event_id: event_id.to_owned(),
+            principal_id: principal_id.to_owned(),
+            principal_kind: cc_lb_domain::PrincipalKindLite::Human,
+        }
+    }
+
+    #[test]
+    fn authentication_before_request_started_keeps_principal_and_source_kind() {
+        // The HTTP handler publishes `AuthenticationCompleted` before
+        // `RequestStarted`, e.g. for a body that exceeds the size cap.
+        let event_id = "authn-first";
+        let (timings, samples) = capture_metrics([
+            authentication_completed(event_id, "principal-a"),
+            started(event_id, Some("proxy")),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("body_too_large".to_owned()),
+                413,
+                TerminalTiming {
+                    duration_ms: 3,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let completed = named(&samples, "cc_lb_requests_completed_total");
+        assert_eq!(completed.len(), 1);
+        assert_labels(
+            completed[0],
+            &[
+                ("source_kind", "proxy"),
+                ("principal", "principal-a"),
+                ("upstream", UNRESOLVED_ATTRIBUTION_LABEL),
+                ("model", UNRESOLVED_ATTRIBUTION_LABEL),
+                ("status", "413"),
+                ("terminal_outcome", "error"),
+                ("client_status_class", "4xx"),
+            ],
+        );
+        assert!(timings.active.is_empty());
+        assert!(timings.active_order.is_empty());
+    }
+
+    #[test]
+    fn authentication_without_request_started_stays_bounded() {
+        let mut timings = RequestTimingAggregator::default();
+        for index in 0..=MAX_ACTIVE_REQUEST_TIMINGS {
+            timings.observe(&authentication_completed(
+                &format!("orphan-{index}"),
+                "principal-a",
+            ));
+        }
+
+        assert_eq!(timings.active.len(), MAX_ACTIVE_REQUEST_TIMINGS);
+        assert_eq!(timings.active_order.len(), MAX_ACTIVE_REQUEST_TIMINGS);
+        assert!(!timings.active.contains_key("orphan-0"));
+    }
+
+    #[test]
+    fn authentication_failure_is_counted_once_with_unresolved_attribution() {
+        let event_id = "auth-failed";
+        let (_, samples) = capture_metrics([
+            LifecycleEvent::AuthCompleted {
+                event_id: event_id.to_owned(),
+                result: Err(AuthFailure::AuthenticationFailed {
+                    http_status: 401,
+                    reason: None,
+                }),
+            },
+            started(event_id, Some("proxy")),
+            terminated(
+                event_id,
+                TerminationReason::ErrorCode("authentication_failed".to_owned()),
+                401,
+                TerminalTiming {
+                    duration_ms: 1,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let completed = named(&samples, "cc_lb_requests_completed_total");
+        assert_eq!(completed.len(), 1);
+        assert_labels(
+            completed[0],
+            &[
+                ("source_kind", "proxy"),
+                ("principal", "none"),
+                ("upstream", "none"),
+                ("model", "none"),
+                ("status", "401"),
+                ("terminal_outcome", "error"),
+                ("client_status_class", "4xx"),
+            ],
+        );
+        assert_eq!(completed[0].value, MetricValue::Counter(1));
     }
 
     #[test]

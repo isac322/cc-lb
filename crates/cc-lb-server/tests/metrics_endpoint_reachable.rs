@@ -17,24 +17,31 @@ async fn metrics_endpoint_reachable() {
         .expect("metrics endpoint");
 
     assert_eq!(metrics.status, 200);
-    assert!(metrics.body.contains("cc_lb_requests_started_total"));
+    // The trace layer records these before the response reaches the client,
+    // so they are deterministically present once the request has returned.
     assert!(
         metrics
             .body
-            .contains("cc_lb_request_headers_duration_seconds")
+            .lines()
+            .any(|line| line.starts_with("cc_lb_requests_started_total{")
+                && line.contains("status=\"200\""))
     );
-    assert!(metrics.body.contains("cc_lb_tokens_total"));
-    assert!(metrics.body.contains("cc_lb_virtual_cost_usd_total"));
-    assert!(metrics.body.contains("direction=\"input\""));
-    assert!(metrics.body.contains("direction=\"output\""));
-    assert!(metrics.body.contains("status=\"200\""));
-    assert!(metrics.body.lines().any(
-        |line| line.contains("cc_lb_requests_started_total") && line.contains("status=\"200\"")
-    ));
-    assert!(metrics.body.lines().any(
-        |line| line.contains("cc_lb_request_headers_duration_seconds")
-            && line.contains("principal=\"")
-            && line.contains("upstream=\"")
-            && line.contains("model=\"")
-    ));
+    assert!(
+        metrics
+            .body
+            .lines()
+            .any(|line| line.starts_with("cc_lb_request_headers_duration_seconds"))
+    );
+    // The trace layer cannot see attribution, so its series carry no
+    // principal, upstream, or model labels (previously all "unknown").
+    let trace_layer_series = metrics.body.lines().filter(|line| {
+        line.starts_with("cc_lb_requests_started_total")
+            || line.starts_with("cc_lb_request_headers_duration_seconds")
+            || line.starts_with("cc_lb_response_body_chunks_total")
+    });
+    for line in trace_layer_series {
+        for key in ["principal=", "upstream=", "model="] {
+            assert!(!line.contains(key), "unattributable label {key} on {line}");
+        }
+    }
 }

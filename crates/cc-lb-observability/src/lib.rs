@@ -16,8 +16,8 @@ pub use cclb_metrics::{prometheus14_metric_definitions, touch_prometheus14_metri
 pub use dropped_events::increment_dropped_events_by;
 pub use engine_hook::{EngineMetricsHook, MetricsCrateHook, NoopMetricsHook};
 pub use init::{
-    InitError, MetricDefinition, MetricKind, ObservabilityConfig, TracingGuard, init,
-    metric_definitions, panic_total, register_metrics,
+    InitError, MetricDefinition, MetricKind, ObservabilityConfig, TracingGuard,
+    UNRESOLVED_ATTRIBUTION_LABEL, init, metric_definitions, panic_total, register_metrics,
 };
 pub use panic_hook::install_panic_hook;
 pub use propagation::{inject_current_trace_context, parent_context_from_headers};

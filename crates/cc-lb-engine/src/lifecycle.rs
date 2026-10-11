@@ -56,7 +56,9 @@ use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
-use crate::downstream_stream_drop_guard::DownstreamStreamDropGuard;
+use crate::downstream_stream_drop_guard::{
+    DownstreamStreamDropGuard, StreamTerminationAttribution,
+};
 use crate::error_format::{
     anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
 };
@@ -2605,6 +2607,31 @@ impl Lifecycle {
         result
     }
 
+    /// Record the authenticated principal identity on the lifecycle context,
+    /// resolving the real principal kind from the current view.
+    ///
+    /// Called by the server handler right after [`Self::authenticate`] and
+    /// before the request body is read, so requests that terminate on a
+    /// body-read error or the size cap still carry their real principal in
+    /// metrics. `LifecycleContext::emit_authentication_completed` is
+    /// idempotent, so the later call inside [`Self::handle`] is a no-op on the
+    /// HTTP path; a caller that drives `handle` without the handler still gets
+    /// exactly one event. Emits nothing when the principal is absent from the
+    /// current view — `handle`'s `PrincipalMissing` path reports that case.
+    pub fn record_authentication_completed(
+        &self,
+        auth: &crate::authn_rail::Authenticated,
+        observer: &LifecycleContext,
+    ) {
+        let view = self.dynamic_view.load();
+        let principal_id = auth.principal_id();
+        let Some(cached) = view.principal_view.get(principal_id) else {
+            return;
+        };
+        let kind = principal_kind_lite(cached.principal_kind());
+        observer.emit_authentication_completed(principal_id.to_owned(), kind);
+    }
+
     /// Handle a request that has already been authenticated. `auth` is the
     /// proof: callers must obtain it from [`Lifecycle::authenticate`] before
     /// the request body is read.
@@ -2686,6 +2713,64 @@ impl Lifecycle {
             o.emit_request_started(body_view.stream());
         }
         store_setup_timings(observer.as_ref(), setup_timings);
+        // Authentication already succeeded: `auth` is the proof obtained from
+        // `Lifecycle::authenticate` before the body was read. Resolve the
+        // principal view and emit the `AuthCompleted` event before any
+        // body-dependent exit (413 / invalid-JSON 400) so the request keeps
+        // its real principal in metrics and request events on those paths.
+        let success = auth.success();
+        let auth_ms = auth.auth_ms();
+        let principal_id = success.principal_id.clone();
+        handle_span.record("cc_lb.principal.id", principal_id.as_str());
+        let Some(cached) = principal_view.get(&principal_id) else {
+            tracing::error!(%principal_id, "authenticated principal missing from principal view");
+            let response = anthropic_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "authenticated principal is unavailable",
+            );
+            if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
+                        principal_id: principal_id.clone(),
+                    }),
+                });
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    error_code: error_codes::PRINCIPAL_MISSING,
+                    error: InternalError {
+                        stage: InternalErrorStage::Authn,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some("authenticated principal is unavailable".to_owned()),
+                    },
+                });
+            }
+            return Ok(response);
+        };
+        let db_principal_kind = cached.principal_kind();
+        let lifecycle_principal_kind = principal_kind_lite(db_principal_kind);
+        if let Some(o) = observer.as_ref() {
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
+                event_id: o.event_id().to_owned(),
+                result: Ok(cc_lb_lifecycle::AuthInfo {
+                    principal_id: principal_id.clone(),
+                    key_id: Some(success.key_id.clone()),
+                    principal_kind: Some(db_principal_kind_as_str(db_principal_kind).to_owned()),
+                    auth_ms: Some(auth_ms),
+                }),
+            });
+            // Metrics-only principal identity. The server handler already
+            // emitted it at entry (before the body read), so this call no-ops
+            // on the HTTP path; a caller that drives `handle` directly still
+            // records exactly one event with the real principal kind.
+            o.emit_authentication_completed(principal_id.clone(), lifecycle_principal_kind);
+        }
+        let principal = Principal {
+            id: principal_id,
+            kind: PrincipalKind::InternalKey,
+        };
+
         if let Some(response) = body_too_large {
             if let Some(o) = observer.as_ref() {
                 o.terminate_body_too_large(body_cap_for_path(&self.config, &ctx.path) as u64);
@@ -2786,55 +2871,8 @@ impl Lifecycle {
             ctx.requested_service_tier.as_deref(),
         );
 
-        // Authentication already succeeded: `auth` is the proof obtained from
-        // `Lifecycle::authenticate` before the body was read.
-        let success = auth.success();
-        let auth_ms = auth.auth_ms();
-        let principal_id = success.principal_id.clone();
-        handle_span.record("cc_lb.principal.id", principal_id.as_str());
-        let Some(cached) = principal_view.get(&principal_id) else {
-            tracing::error!(%principal_id, "authenticated principal missing from principal view");
-            let response = anthropic_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "api_error",
-                "authenticated principal is unavailable",
-            );
-            if let Some(o) = observer.as_ref() {
-                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-                    event_id: o.event_id().to_owned(),
-                    result: Err(cc_lb_lifecycle::AuthFailure::PrincipalMissing {
-                        principal_id: principal_id.clone(),
-                    }),
-                });
-                o.terminate_failure(InternalFailure {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    error_code: error_codes::PRINCIPAL_MISSING,
-                    error: InternalError {
-                        stage: InternalErrorStage::Authn,
-                        kind: InternalErrorKind::Unavailable,
-                        message: Some("authenticated principal is unavailable".to_owned()),
-                    },
-                });
-            }
-            return Ok(response);
-        };
-        let db_principal_kind = cached.principal_kind();
-        let lifecycle_principal_kind = principal_kind_lite(db_principal_kind);
-        if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::AuthCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_lifecycle::AuthInfo {
-                    principal_id: principal_id.clone(),
-                    key_id: Some(success.key_id.clone()),
-                    principal_kind: Some(db_principal_kind_as_str(db_principal_kind).to_owned()),
-                    auth_ms: Some(auth_ms),
-                }),
-            });
-        }
-        let principal = Principal {
-            id: principal_id,
-            kind: PrincipalKind::InternalKey,
-        };
+        // Authentication was already recorded before the body-dependent exits
+        // above (413 / invalid-JSON 400), so no `AuthCompleted` event here.
         let request_affinity_keys = match body_view
             .value()
             .map(|value| extract_anthropic_web_search_affinity_keys(value, &principal.id))
@@ -2911,9 +2949,6 @@ impl Lifecycle {
                 });
             }
             return Ok(response);
-        }
-        if let Some(o) = observer.as_ref() {
-            o.emit_authentication_completed(principal.id.clone(), lifecycle_principal_kind);
         }
 
         let route_start = Instant::now();
@@ -3522,6 +3557,8 @@ impl Lifecycle {
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
                     canonical_model_id: ctx.canonical_model_id.clone(),
+                    upstream_name: router_chosen_upstream_name.clone(),
+                    requested_model: body_view.model(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                 },
@@ -4471,6 +4508,10 @@ impl Lifecycle {
             upstream_error_status.then_some(StreamTerminationCause::ProviderError),
             relay_start,
             response_body_timing.clone(),
+            StreamTerminationAttribution::new(
+                &event_ctx.upstream_name,
+                event_ctx.requested_model.as_deref(),
+            ),
         );
         let completion_observer = Arc::clone(&self.completion_observer);
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
@@ -6559,6 +6600,10 @@ struct ActiveLimit {
 pub(crate) struct RequestEventContext {
     pub(crate) request_id: String,
     pub(crate) canonical_model_id: String,
+    /// Routed upstream name, matching the `RouteCompleted` lifecycle event.
+    pub(crate) upstream_name: String,
+    /// Model requested in the body, matching the `RouteCompleted` lifecycle event.
+    pub(crate) requested_model: Option<String>,
     pub(crate) proxy_setup_ms: Option<u64>,
     pub(crate) stage_timings: AttemptTimings,
 }

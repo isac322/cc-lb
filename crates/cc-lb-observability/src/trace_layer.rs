@@ -111,25 +111,18 @@ impl<B> OnResponse<B> for ProxyOnResponse {
         let duration_seconds = latency.as_secs_f64();
         let status_label = status.as_u16().to_string();
 
-        // Observe proxy response headers, including local responses inside this layer.
-        // Drain rejections bypass this hook before authentication and are not counted by
-        // the started/header or terminal lifecycle metrics.
-        // This is not terminal completion of a response.
+        // Observe proxy response headers, including local responses inside this layer
+        // (404/405 fallbacks, authentication failures, pre-routing errors). This hook
+        // cannot see principal, upstream, or model, so these header-time metrics carry
+        // no attribution labels; attributed terminal counts are owned by the lifecycle
+        // event logger (`cc_lb_requests_completed_total`). Drain rejections bypass this
+        // hook before authentication. This is not terminal completion of a response.
         metrics::counter!(
             "cc_lb_requests_started_total",
-            "principal" => "unknown",
-            "upstream" => "unknown",
-            "model" => "unknown",
             "status" => status_label
         )
         .increment(1);
-        metrics::histogram!(
-            "cc_lb_request_headers_duration_seconds",
-            "principal" => "unknown",
-            "upstream" => "unknown",
-            "model" => "unknown"
-        )
-        .record(duration_seconds);
+        metrics::histogram!("cc_lb_request_headers_duration_seconds").record(duration_seconds);
 
         tracing::info!(
             target: "cc_lb_observability::http",
@@ -152,12 +145,8 @@ where
 
         // Transport body chunks are not SSE events and are intentionally observed
         // without creating per-chunk child spans or parsing the chunk contents.
-        // Provider attribution is unavailable here, so upstream is always "unknown".
-        metrics::counter!(
-            "cc_lb_response_body_chunks_total",
-            "upstream" => "unknown"
-        )
-        .increment(1);
+        // Provider attribution is unavailable to this hook, so the counter is label-free.
+        metrics::counter!("cc_lb_response_body_chunks_total").increment(1);
 
         tracing::debug!(
             target: "cc_lb_observability::http",

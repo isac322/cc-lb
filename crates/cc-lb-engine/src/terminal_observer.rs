@@ -386,6 +386,10 @@ struct Inner {
     started: Instant,
     state: Mutex<TerminalState>,
     finalized: AtomicBool,
+    /// Guarantees `AuthenticationCompleted` is published at most once per
+    /// request, whether emitted at the HTTP handler entry or inside
+    /// `Lifecycle::handle`.
+    authentication_completed_emitted: AtomicBool,
 }
 
 #[derive(Default)]
@@ -451,6 +455,7 @@ impl LifecycleContext {
                 }),
                 finalized: AtomicBool::new(false),
                 authn_reached: AtomicBool::new(false),
+                authentication_completed_emitted: AtomicBool::new(false),
             }),
         }
     }
@@ -805,11 +810,29 @@ impl LifecycleContext {
         self.inner.emit_or_buffer(event);
     }
 
+    /// Record the authenticated principal identity for this request.
+    ///
+    /// Emitted once per request as early as the `Authenticated` proof exists —
+    /// at the server handler right after `Lifecycle::authenticate`, before the
+    /// body is read — so requests that terminate on body-read, size-cap, or
+    /// JSON-validation exits still carry their real principal in metrics. The
+    /// event is metrics-only: it never changes the persisted request row.
+    /// Idempotent: exactly one `AuthenticationCompleted` per request, even when
+    /// both the server handler entry and `Lifecycle::handle` emit.
     pub(crate) fn emit_authentication_completed(
         &self,
         principal_id: String,
         principal_kind: PrincipalKindLite,
     ) {
+        // Idempotent: exactly one `AuthenticationCompleted` per request, even
+        // when both the server handler entry and `Lifecycle::handle` emit.
+        if self
+            .inner
+            .authentication_completed_emitted
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
         self.inner
             .emit_or_buffer(LifecycleEvent::AuthenticationCompleted {
                 event_id: self.inner.event_id.clone(),
@@ -2351,6 +2374,43 @@ mod tests {
         observer.finish();
         let (_id, _reason, _status) =
             expect_terminated(rx.recv().await.expect("terminal event delivered"));
+    }
+
+    #[tokio::test]
+    async fn authentication_completed_is_emitted_once() {
+        let bus = Arc::new(InMemoryBus::new());
+        let mut rx = subscribe(&bus);
+        let clock: ClockHandle = Arc::new(SystemClock);
+        let observer = LifecycleContext::new(
+            "req_authn_once".to_owned(),
+            bus.clone() as Arc<dyn RequestEventBus>,
+            &clock,
+        );
+        observer.mark_authn_reached();
+
+        // The HTTP handler emits at entry and `Lifecycle::handle` emits again;
+        // only the first reaches the bus.
+        observer.emit_authentication_completed("principal-a".to_owned(), PrincipalKindLite::Human);
+        observer
+            .emit_authentication_completed("principal-b".to_owned(), PrincipalKindLite::Machine);
+
+        let mut seen = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.push(event);
+        }
+        let completed: Vec<_> = seen
+            .iter()
+            .filter(|event| matches!(event, LifecycleEvent::AuthenticationCompleted { .. }))
+            .collect();
+        assert_eq!(completed.len(), 1, "exactly one AuthenticationCompleted");
+        assert!(matches!(
+            completed[0],
+            LifecycleEvent::AuthenticationCompleted {
+                principal_id,
+                principal_kind: PrincipalKindLite::Human,
+                ..
+            } if principal_id.as_str() == "principal-a"
+        ));
     }
 
     #[tokio::test]

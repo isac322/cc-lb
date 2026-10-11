@@ -155,11 +155,11 @@ See the [install and configure guide](https://cc-lb.bhyoo.com/docs/getting-start
 
 ### Stream diagnostics
 
-HTTP 200 means response headers were sent, not that the response body completed. Use `cc_lb_stream_terminations_total{outcome,cause}` to distinguish `completed`, `upstream_error`, `proxy_error`, and `client_cancelled`. Causes are bounded categories such as `unexpected_eof`, `h2_cancel`, and `affinity_error`; request IDs and error messages are never metric labels.
+HTTP 200 means response headers were sent, not that the response body completed. Use `cc_lb_stream_terminations_total{outcome,cause,upstream,model}` to distinguish `completed`, `upstream_error`, `proxy_error`, and `client_cancelled` per routed upstream and requested model. Causes are bounded categories such as `unexpected_eof`, `h2_cancel`, and `affinity_error`; request IDs and error messages are never metric labels.
 
 With OTLP enabled, `proxy.response_stream` spans remain open until the response body ends or is dropped. Transport failures record a bounded, redacted `error.chain` and, when available, `error.io.kind`, `error.io.os_error`, and `error.h2.reason`. These describe the failed response path, not necessarily which party caused the disconnect.
 
-`cc_lb_requests_started_total` counts proxied requests when proxy response headers are sent, including locally generated responses. `cc_lb_request_headers_duration_seconds` measures request-start-to-header latency for those responses. Neither metric measures terminal completion.
+`cc_lb_requests_started_total{status}` counts proxied requests when proxy response headers are sent, including locally generated responses. `cc_lb_request_headers_duration_seconds` measures request-start-to-header latency for those responses. Neither metric measures terminal completion, and neither carries principal, upstream, or model labels. For per-upstream rates, use `cc_lb_requests_completed_total{source_kind,principal,upstream,model,status,terminal_outcome,client_status_class}`, which the lifecycle event logger records once for every request that reached the credential check; an attribution stage the request never reached is labelled `none`. Its latency counterpart `cc_lb_request_completion_duration_seconds{source_kind,upstream,model,status,terminal_outcome}` omits `principal` to bound histogram series.
 
 The `proxy.handle` span stays open through terminal lifecycle completion and records:
 
