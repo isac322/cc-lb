@@ -1,3 +1,4 @@
+mod schema_descriptor;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -143,6 +144,7 @@ fn main() {
     ];
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by Cargo"));
+    generate_v2_schema(&out_dir);
     fs::write(
         out_dir.join("wire_schema_impls.rs"),
         render_schema_impls(&entries),
@@ -167,4 +169,36 @@ fn render_schema_impls(entries: &[SchemaEntry]) -> String {
     }
 
     output
+}
+
+// V1 descriptors are frozen for compatibility. V2 descriptors include every
+// nested declaration in field order, so nested additions and reorderings also
+// invalidate the filter admission fingerprint.
+fn generate_v2_schema(out_dir: &std::path::Path) {
+    println!("cargo:rerun-if-changed=src/v1/mod.rs");
+    println!("cargo:rerun-if-changed=src/v2.rs");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=schema_descriptor.rs");
+    let v1 = fs::read_to_string("src/v1/mod.rs").expect("read V1 wire types");
+    let v2 = fs::read_to_string("src/v2.rs").expect("read V2 wire types");
+    let mut output = String::new();
+    for request in ["FilterRequest", "FilterRequestRef"] {
+        let descriptor = format!("v2:{}", schema_descriptor::describe(&[&v1, &v2], request));
+        let digest = blake3::hash(descriptor.as_bytes());
+        let bytes = digest
+            .as_bytes()
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (generics, ty) = if request.ends_with("Ref") {
+            ("<'a>", format!("{request}<'a>"))
+        } else {
+            ("", request.to_owned())
+        };
+        output.push_str(&format!(
+            "impl{generics} crate::schema::WireSchema for {ty} {{ const FINGERPRINT: [u8; 32] = [{bytes}]; const DESCRIPTOR: &'static str = {descriptor:?}; }}\n"
+        ));
+    }
+    fs::write(out_dir.join("wire_schema_v2_impls.rs"), output).expect("write V2 schemas");
 }

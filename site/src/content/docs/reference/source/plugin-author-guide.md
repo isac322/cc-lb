@@ -118,7 +118,7 @@ cc-lb supports two plugin slot kinds. A wasm artifact may implement one or more 
 
 | Slot | Export | Request type | Response type | Use |
 |---|---|---|---|---|
-| `filter` | `cc_lb_filter` | `v1::FilterRequest` | `FilterResponse` | Keep or reject upstream candidates. The V1 request exposes the requested service tier. |
+| `filter` | `cc_lb_filter` | `v1::FilterRequest` or `v2::FilterRequest` | `v1::FilterResponse` | Keep or reject upstream candidates. V2 additionally exposes subscription quota snapshots and the current routing time. |
 | `shape` | `cc_lb_shape`<br>`cc_lb_transform_response`<br>`cc_lb_transform_sse_event` | `ShapeRequest`<br>`TransformResponseRequest`<br>`TransformSseEventRequest` | `ShapeResponse`<br>`TransformResponseResult`<br>`TransformSseEventResult` | Unified slot that produces the upstream-bound request and transforms downstream responses (both buffered and SSE). |
 
 Filter example:
@@ -224,8 +224,8 @@ mod request_only_shaper {
 }
 ```
 
-Each handler declares its own `wire = N`. The published PDK supports `wire = 1`
-for every hook.
+Each handler declares its own `wire = N`. The PDK supports `wire = 1` and `wire = 2` for filters; shape and
+transform hooks support `wire = 1`.
 
 ## Metadata Contract
 
@@ -291,6 +291,28 @@ The filter example under [Hook Contracts](#hook-contracts) shows a complete
 handler. `service_tier` is the optional tier requested in the inbound request
 body; a pre-request filter cannot observe the tier ultimately reported by an
 upstream response.
+
+Filter hooks support V1 and V2; shape and transform hooks support V1. Existing
+V1 plugins keep their original request layout and fingerprints. To read quota
+snapshots, import `cc_lb_plugin_wire::v2::FilterRequest` (or
+`v2::ArchivedFilterRequest` for `view = true`) and declare `wire = 2` on the
+filter handler. The response remains `v1::FilterResponse`.
+
+V2 candidates expose `subscription_quotas`, the host's current known quota
+windows, including unobserved entries. Match windows by label, never position;
+future unknown labels are valid. Each snapshot includes `window`, `state`, optional
+`utilization`, `resets_at_unix_secs`, `observed_at_unix_millis`, `status`,
+`disabled_reason`, and `max_staleness_secs`. States are `fresh`, `stale`, `absent`,
+and `unobserved`; plugins should handle unknown strings conservatively. Missing
+values and stale observations do not establish available capacity. These values
+are projected from the routing candidate snapshots: encoding the request makes
+no provider calls. Observation timestamps describe measurements, not the current
+routing time; they must not be treated as a live clock for reset countdowns.
+Use V2 `routing_now_unix_secs`, sampled from the injected host clock for each
+routing pass, to compare reset deadlines. Candidate `observed_at_unix_secs` is
+the rate-limit cache measurement time. This quota projection omits policy
+thresholds, source metadata, overage and fallback decisions, and extra usage;
+it does not reproduce the built-in subscription policy.
 
 The host maintains supported-version lists per hook:
 

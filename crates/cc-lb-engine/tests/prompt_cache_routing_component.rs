@@ -218,6 +218,7 @@ fn ctx(
     thread_id: &str,
 ) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: "req-1".to_owned(),
         thread_id: Some(thread_id.to_owned()),
         requested_service_tier: None,

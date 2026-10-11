@@ -23,7 +23,9 @@ Annotate each hook function with a hook kind, wire version, description, and
 usage text inside the plugin module, as shown in the complete example below.
 
 Supported hook kinds are `filter` and `shape`, plus the shape-owned
-response-transform hooks. The PDK accepts `wire = 1` for every hook. Add `view`
+response-transform hooks. Filters support `wire = 1` and `wire = 2`; shape and
+transform hooks support `wire = 1`. V2 filters use `v2::FilterRequest` and the
+existing `v1::FilterResponse`. Add `view`
 when the handler wants an archived zero-copy request reference instead of an
 owned request.
 

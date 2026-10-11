@@ -141,6 +141,39 @@ fn main() {
             )
         });
     }
+    for (feature, artifact) in [
+        ("quota-v2", "wasmtime_filter_quota_v2.wasm"),
+        ("quota-v2-view", "wasmtime_filter_quota_v2_view.wasm"),
+    ] {
+        let status = Command::new(&cargo)
+            .args([
+                "build",
+                "--locked",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--release",
+                "-p",
+                "wasmtime-filter-service-tier",
+                "--features",
+                feature,
+                "--target-dir",
+            ])
+            .arg(&nested_target_dir)
+            .current_dir(workspace_root)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .env_remove("RUSTC_WRAPPER")
+            .status()
+            .expect("build V2 quota fixture");
+        assert!(status.success(), "V2 quota fixture build failed: {feature}");
+        std::fs::copy(
+            nested_release_dir.join("wasmtime_filter_service_tier.wasm"),
+            canonical_dir.join(artifact),
+        )
+        .expect("copy V2 quota fixture");
+    }
 }
 
 fn is_workspace_manifest(path: &Path) -> bool {
@@ -152,6 +185,10 @@ fn emit_rerun_directives(manifest_dir: &Path) {
     for path in ["../../Cargo.toml", "../../Cargo.lock"] {
         emit_rerun_tree(manifest_dir, Path::new(path));
     }
+    emit_rerun_tree(
+        manifest_dir,
+        Path::new("../../crates/cc-lb-plugin-wire/schema_descriptor.rs"),
+    );
     for fixture in FIXTURE_CRATES {
         emit_crate_rerun_directives(manifest_dir, Path::new(fixture.crate_path));
     }

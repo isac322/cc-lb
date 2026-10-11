@@ -72,7 +72,7 @@ plugin must implement request shaping, buffered response transformation, and
 SSE event transformation. Use explicit no-op handlers for response hooks that
 the plugin does not change.
 
-Each handler currently uses `wire = 1`. Wire versions are independent per hook, so a future contract can evolve one hook without silently changing the others.
+Filter handlers support `wire = 1` and `wire = 2`; shape and transform handlers support `wire = 1`. V2 supplies cached subscription quota windows and `routing_now_unix_secs` from the injected host clock. Match windows by label; unobserved entries and future unknown labels are valid. Measurement timestamps are not the routing clock. Quota snapshots omit policy thresholds, source metadata, overage and fallback decisions, and extra usage.
 
 ## Build and upload
 
@@ -83,5 +83,16 @@ curl -X POST http://[::1]:9090/admin/v1/plugins/wasm \
   -F "original_filename=plugin.wasm" \
   -F "bytes=@target/wasm32-unknown-unknown/release/plugin.wasm"
 ```
+
+Filter handlers may opt into `wire = 2` with
+`cc_lb_plugin_wire::v2::FilterRequest`, or `v2::ArchivedFilterRequest` for
+`view = true`. V2 adds each candidate's cached `subscription_quotas`: window,
+state, utilization, reset and observation timestamps, status, disabled reason,
+and staleness limit. The response remains `v1::FilterResponse`. V1 plugins
+remain compatible; other hooks still use V1. Missing or stale quota data does
+not prove capacity, and observation timestamps are not a live routing clock.
+The host projects cached snapshots without provider calls. V2 fingerprints
+cover nested declarations and field order; conformance tests select the
+request version declared by the handler.
 
 The host validates imports, required exports, metadata, wire versions, schema fingerprints, and an upload-time runtime probe before dispatch. Uploading the same name and SHA is idempotent. Replacing an existing name may require an explicit confirmation when the new version is not higher.

@@ -26,8 +26,14 @@ serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }
 
 [build-dependencies]
+quote = "1"
+syn = { version = "3", features = ["full"] }
 blake3 = { workspace = true, features = ["std"] }
 
 [features]
 default = []
 std = ["dep:serde", "dep:serde_json", "rkyv/std"]
+
+[dev-dependencies]
+quote = "1"
+syn = { version = "3", features = ["full"] }

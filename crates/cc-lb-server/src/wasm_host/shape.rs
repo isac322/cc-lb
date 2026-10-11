@@ -65,9 +65,9 @@ impl UpstreamDialect for WasmtimeUpstreamDialect {
         let wire_version = self.dispatch.shape_wire_version();
         match wire_version {
             Some(WireVersion::V1) => {}
-            None => {
+            Some(WireVersion::V2) | None => {
                 return Err(DialectError::UnsupportedRequest {
-                    reason: "plugin metadata missing shape hook".to_owned(),
+                    reason: "plugin metadata missing shape hook or declaring an unsupported wire version".to_owned(),
                 });
             }
         }
@@ -141,9 +141,9 @@ impl ResponseTransformHook for WasmtimeResponseTransformHook {
         })?;
         let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => self.dispatch.call_transform_response(in_bytes.as_slice()),
-            None => {
+            Some(WireVersion::V2) | None => {
                 return Err(response_runtime_error(
-                    "shape plugin is missing transform_response metadata".to_owned(),
+                    "shape plugin is missing transform_response metadata or declares an unsupported wire version".to_owned(),
                 ));
             }
         }
@@ -171,9 +171,9 @@ impl SseEventTransformHook for WasmtimeSseEventTransformHook {
         })?;
         let out_bytes = match self.wire_version {
             Some(WireVersion::V1) => self.dispatch.call_transform_sse_event(in_bytes.as_slice()),
-            None => {
+            Some(WireVersion::V2) | None => {
                 return Err(response_runtime_error(
-                    "shape plugin is missing transform_sse_event metadata".to_owned(),
+                    "shape plugin is missing transform_sse_event metadata or declares an unsupported wire version".to_owned(),
                 ));
             }
         }

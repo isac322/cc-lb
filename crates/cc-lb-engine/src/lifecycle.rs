@@ -2456,6 +2456,7 @@ impl Lifecycle {
             &*self.clock,
         );
         let pipeline_result = execute_filter_pipeline(
+            cc_lb_clock::unix_secs(self.clock.now()),
             &resolved_pipeline.user_filters,
             &ctx,
             &principal,
@@ -2988,8 +2989,13 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
-        let mut pipeline_result =
-            execute_filter_pipeline(&router_pipeline.user_filters, &ctx, &principal, candidates);
+        let mut pipeline_result = execute_filter_pipeline(
+            cc_lb_clock::unix_secs(self.clock.now()),
+            &router_pipeline.user_filters,
+            &ctx,
+            &principal,
+            candidates,
+        );
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -6131,12 +6137,13 @@ pub(crate) fn resolved_candidate_urgency(
 }
 
 fn execute_filter_pipeline(
+    routing_now_unix_secs: u64,
     filters: &[Arc<dyn FilterPlugin>],
     ctx: &RequestContext,
     principal: &Principal,
     candidates: Vec<UpstreamCandidate>,
 ) -> FilterPipelineResult {
-    let routing_context = ctx.routing_context();
+    let routing_context = ctx.routing_context(routing_now_unix_secs);
     let mut current = candidates;
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();

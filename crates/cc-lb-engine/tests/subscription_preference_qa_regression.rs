@@ -269,6 +269,7 @@ fn cache_score(key: &str, read_tokens: u32, create_5m_tokens: u32) -> CacheScore
 
 fn ctx(request_id: &str) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: request_id.to_owned(),
         thread_id: Some("qa-regression-thread".to_owned()),
         requested_service_tier: None,

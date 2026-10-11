@@ -208,6 +208,7 @@ impl<'a> ConformanceSuite<'a> {
             runtime,
             slot_key,
             kind: self.kind,
+            filter_wire_version: self.inspect().hook_versions.get(&HookKind::Filter).copied(),
         }
     }
 
@@ -219,7 +220,7 @@ impl<'a> ConformanceSuite<'a> {
     /// have missed it.
     ///
     /// Coverage:
-    /// - `Filter` → canonical V1 request
+    /// - `Filter` → canonical request for its declared V1 or V2 wire version
     /// - `Shape` → `call_shape(sample_shape_request())`
     ///
     /// Assertions are boundary-only: hooks must not trap and responses
@@ -229,9 +230,15 @@ impl<'a> ConformanceSuite<'a> {
     pub fn run(&self) {
         let session = self.session();
         match self.kind {
-            ConformanceKind::Filter => {
-                let _ = session.call_filter(fixtures::sample_filter_request());
-            }
+            ConformanceKind::Filter => match session.filter_wire_version {
+                Some(cc_lb_plugin_wire::WireVersion::V2) => {
+                    let _ = session.call_filter_v2(fixtures::sample_filter_request_v2());
+                }
+                Some(cc_lb_plugin_wire::WireVersion::V1) => {
+                    let _ = session.call_filter(fixtures::sample_filter_request());
+                }
+                None => panic!("filter metadata missing"),
+            },
             ConformanceKind::Shape => {
                 let _ = session.call_shape(fixtures::sample_shape_request());
             }
@@ -246,6 +253,7 @@ pub struct PluginSession {
     runtime: WasmtimeRuntime,
     slot_key: RuntimeSlotKey,
     kind: ConformanceKind,
+    filter_wire_version: Option<cc_lb_plugin_wire::WireVersion>,
 }
 
 impl PluginSession {
@@ -273,10 +281,34 @@ impl PluginSession {
             "call_filter requires HookKind::Filter, got {:?}",
             self.kind.slot_kind()
         );
+        assert_eq!(
+            self.filter_wire_version,
+            Some(cc_lb_plugin_wire::WireVersion::V1),
+            "call_filter requires filter V1; use call_filter_v2 for V2"
+        );
         let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest");
+        self.call_filter_bytes(in_bytes.as_slice())
+    }
+
+    /// Round-trip a quota-aware V2 filter request through the guest boundary.
+    pub fn call_filter_v2(&self, request: cc_lb_plugin_wire::v2::FilterRequest) -> FilterResponse {
+        assert!(
+            matches!(self.kind, ConformanceKind::Filter),
+            "call_filter_v2 requires HookKind::Filter"
+        );
+        assert_eq!(
+            self.filter_wire_version,
+            Some(cc_lb_plugin_wire::WireVersion::V2),
+            "call_filter_v2 requires filter V2"
+        );
+        let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode FilterRequest V2");
+        self.call_filter_bytes(in_bytes.as_slice())
+    }
+
+    fn call_filter_bytes(&self, in_bytes: &[u8]) -> FilterResponse {
         let out_bytes = self
             .runtime
-            .call_filter(&self.slot_key, in_bytes.as_slice())
+            .call_filter(&self.slot_key, in_bytes)
             .expect("guest cc_lb_filter must complete without trap");
         let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
         aligned.extend_from_slice(&out_bytes);

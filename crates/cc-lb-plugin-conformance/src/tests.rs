@@ -33,3 +33,20 @@ fn run_exercises_cache_aware_filter() {
     // When / Then
     suite.run();
 }
+
+#[test]
+fn quota_v2_owned_and_view_pass_conformance() {
+    for artifact in [
+        "wasmtime_filter_quota_v2.wasm",
+        "wasmtime_filter_quota_v2_view.wasm",
+    ] {
+        let wasm = std::fs::read(wasm_fixture_path(artifact))
+            .expect("runtime build script produces V2 filter fixtures");
+        let suite = ConformanceSuite::for_filter(&wasm);
+        suite.run();
+        let response = suite
+            .session()
+            .call_filter_v2(super::fixtures::sample_filter_request_v2());
+        assert!(response.results.is_empty());
+    }
+}

@@ -115,3 +115,23 @@ pub fn sample_transform_sse_event_request() -> TransformSseEventRequest {
         },
     }
 }
+
+/// Canonical V2 filter input. Authors may add candidates and quota windows.
+pub fn sample_filter_request_v2() -> cc_lb_plugin_wire::v2::FilterRequest {
+    let request = sample_filter_request();
+    cc_lb_plugin_wire::v2::FilterRequest {
+        routing_now_unix_secs: 1_800_000_000,
+        request_id: request.request_id,
+        thread_id: request.thread_id,
+        service_tier: request.service_tier,
+        canonical_model_id: request.canonical_model_id,
+        cache_pricing: request.cache_pricing,
+        method: request.method,
+        path: request.path,
+        query: request.query,
+        headers: request.headers,
+        body: request.body,
+        principal: request.principal,
+        candidates: Box::new([]),
+    }
+}

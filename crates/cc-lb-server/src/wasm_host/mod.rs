@@ -162,6 +162,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
         RoutingContext {
+            routing_now_unix_secs: 1_800_000_000,
             request_id: "req-123".to_owned(),
             thread_id: None,
             requested_service_tier: None,

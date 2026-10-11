@@ -12,3 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 cc-lb-pdk-wasmtime.workspace = true
+
+[features]
+quota-v2 = []
+quota-v2-view = ["quota-v2"]

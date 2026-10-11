@@ -11,8 +11,8 @@ the common PDK path.
 
 ## What This Crate Provides
 
-- Hook wire types under `cc_lb_plugin_wire::v1`.
-- `WireVersion::V1`.
+- Original hook types under `cc_lb_plugin_wire::v1`; quota-aware filter inputs under `v2`.
+- `WireVersion::V1` and filter-only `WireVersion::V2`.
 - `HookKind` for `filter` and `shape` hooks.
 - `WireSchema`, the layout fingerprint of every hook wire type.
 - `PluginMetadata` and `HookMetadata` behind the `std` feature.
@@ -20,8 +20,9 @@ the common PDK path.
 
 ## WireVersion, HookKind, and WireSchema
 
-`WireVersion` identifies the wire layout line. All hooks use V1, including
-filter hooks that need `FilterRequest::service_tier`.
+`WireVersion` identifies the wire layout line. Filter hooks support V1 and V2;
+other hooks support V1. V2 adds cached `subscription_quotas` to filter candidates.
+Both filter versions share the V1 response layout. Root re-exports remain V1.
 
 `HookKind` names the supported plugin hooks, including:
 
@@ -31,9 +32,12 @@ filter hooks that need `FilterRequest::service_tier`.
 `WireSchema` exposes a canonical descriptor and BLAKE3 fingerprint for a hook
 wire type. This crate's build script generates the impl for every wire type from
 its canonical descriptor, and `#[cc_lb_plugin]` embeds the fingerprint of each
-handler's request type in the plugin. Any field addition, removal, rename,
-reorder, or type edit changes the descriptor and fingerprint. Plugin authors do
-not manage hashes manually.
+handler's request type in the plugin. V1 descriptors are frozen for compatibility. V2 descriptors are generated from
+Rust declarations, including reachable nested structs, field order, and rkyv
+attributes. Unsupported reachable enums, aliases, types, and layout attributes
+fail the build rather than silently escaping the fingerprint. Nested field edits
+also change the V2 admission fingerprint. Plugin
+authors do not manage hashes manually.
 
 ## PluginMetadata Schema
 
@@ -75,3 +79,9 @@ versions, and empty description or usage text.
 ## License
 
 Licensed under the workspace license.
+
+Filter V2 supplies `routing_now_unix_secs` from the injected host clock for each
+routing pass, separately from measurement timestamps. Quota windows include
+current known labels with unobserved entries; match labels rather than positions
+and accept future unknown labels. This projection omits policy thresholds, source
+metadata, overage/fallback decisions, and extra usage.

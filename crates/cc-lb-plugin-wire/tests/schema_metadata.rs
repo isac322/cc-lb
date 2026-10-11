@@ -4,7 +4,18 @@ use cc_lb_plugin_wire::{HookKind, WireVersion, schema};
 fn root_schema_exports_describe_supported_hooks() {
     assert_eq!(WireVersion::V1.as_u8(), 1);
     assert_eq!(WireVersion::from_u8(1), Some(WireVersion::V1));
-    assert_eq!(WireVersion::from_u8(2), None);
+    assert_eq!(WireVersion::from_u8(2), Some(WireVersion::V2));
+    assert_eq!(WireVersion::V2.as_u8(), 2);
+    assert_eq!(WireVersion::V2.as_str(), "v2");
+    assert_eq!(WireVersion::from_u8(3), None);
+    assert!(schema::host_supports(HookKind::Filter, WireVersion::V2));
+    for hook in [
+        HookKind::Shape,
+        HookKind::TransformResponse,
+        HookKind::TransformSseEvent,
+    ] {
+        assert!(!schema::host_supports(hook, WireVersion::V2));
+    }
     assert_eq!(WireVersion::V1.as_str(), "v1");
 
     assert_eq!(HookKind::Filter.as_str(), "filter");

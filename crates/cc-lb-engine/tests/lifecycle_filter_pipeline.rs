@@ -168,6 +168,14 @@ async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
 }
 
 fn lifecycle_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>, state: TestState) -> Lifecycle {
+    lifecycle_with_pipeline_clock(filters, state, Arc::new(cc_lb_clock::SystemClock))
+}
+
+fn lifecycle_with_pipeline_clock(
+    filters: Vec<Arc<dyn FilterPlugin>>,
+    state: TestState,
+    clock: cc_lb_clock::ClockHandle,
+) -> Lifecycle {
     let principal_view = principal_view(filters);
     let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
     let dispatcher = Arc::new(MockDispatch {
@@ -184,7 +192,7 @@ fn lifecycle_with_pipeline(filters: Vec<Arc<dyn FilterPlugin>>, state: TestState
         Arc::new(DynamicViewHolder::new(view)),
         dispatcher,
         LifecycleConfig::default(),
-        Arc::new(cc_lb_clock::SystemClock),
+        clock,
     )
 }
 
@@ -352,5 +360,63 @@ impl FilterErrorKind {
             Self::Trap => "trap-filter",
             Self::Runtime => "runtime-filter",
         }
+    }
+}
+
+#[tokio::test]
+async fn injected_clock_is_sampled_for_actual_and_preview_routing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let times = Arc::new(ParkingMutex::new(Vec::new()));
+    let clock = Arc::new(cc_lb_clock::TestClock::new_at_secs(42));
+    let lifecycle = lifecycle_with_pipeline_clock(
+        vec![Arc::new(RecordingTimeFilter(times.clone()))],
+        TestState::default(),
+        clock.clone(),
+    );
+    let body = Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#);
+    let request = messages_request(body.clone());
+    let auth = lifecycle
+        .authenticate(request.headers())
+        .await
+        .expect("authenticated");
+    let response = lifecycle.handle(request, &auth).await?;
+    assert_eq!(collect_body(response).await.0, StatusCode::OK);
+    clock.advance(std::time::Duration::from_secs(17));
+    lifecycle
+        .preview_route(cc_lb_engine::lifecycle::PreviewRouteInput {
+            principal_id: "principal-test".to_owned(),
+            request_id: None,
+            headers: http::HeaderMap::new(),
+            body_bytes: body,
+        })
+        .await?;
+    assert_eq!(times.lock().as_slice(), &[42, 59]);
+    Ok(())
+}
+
+struct RecordingTimeFilter(Arc<ParkingMutex<Vec<u64>>>);
+impl FilterPlugin for RecordingTimeFilter {
+    fn filter(
+        &self,
+        ctx: &cc_lb_routing::RoutingContext,
+        _principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.0.lock().push(ctx.routing_now_unix_secs);
+        Ok(FilterOutput {
+            kept_upstream_ids: candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect(),
+            reason: "record-time".to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        })
+    }
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+    fn plugin_name(&self) -> &str {
+        "record-time"
     }
 }

@@ -5,6 +5,8 @@ use http::{HeaderMap, Method};
 /// Request data available to routing filters and routers.
 #[derive(Clone, Debug)]
 pub struct RoutingContext {
+    /// Current injected host clock sampled once for this routing pass.
+    pub routing_now_unix_secs: u64,
     /// Stable request identifier used for routing and wire-backed filters.
     pub request_id: String,
     /// Conversation identifier used by session-aware routing filters.

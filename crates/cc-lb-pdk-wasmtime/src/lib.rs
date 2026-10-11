@@ -263,22 +263,7 @@ pub mod __private {
 
         let response = handler(owned);
 
-        let bytes =
-            rkyv::to_bytes::<Error>(&response).expect("rkyv::to_bytes(FilterResponse) failed");
-
-        let out_len = bytes.len() as u32;
-        let out_ptr = alloc_bytes(out_len, DEFAULT_ALIGN);
-        assert!(
-            out_ptr != 0,
-            "cc_lb_alloc returned null for FilterResponse output buffer"
-        );
-
-        // SAFETY: out_ptr points to `out_len` bytes we just allocated.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_ptr as *mut u8, out_len as usize);
-        }
-
-        pack_ret(out_ptr, out_len)
+        encode_filter_response(response)
     }
 
     /// Zero-copy view-mode filter dispatch — invoked from the
@@ -307,6 +292,67 @@ pub mod __private {
         // Now safe to free input — handler is done borrowing from it.
         free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
 
+        encode_filter_response(response)
+    }
+
+    /// Filter V2 dispatch with owned quota-aware requests.
+    #[allow(unsafe_code)]
+    pub fn run_filter_v2<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(crate::types::v2::FilterRequest) -> FilterResponse,
+    {
+        // SAFETY: host promises `(in_ptr, in_len)` covers an initialised
+        // buffer obtained from `cc_lb_alloc` immediately before this call.
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+
+        let archived: &crate::types::v2::ArchivedFilterRequest =
+            rkyv::access::<crate::types::v2::ArchivedFilterRequest, Error>(in_bytes)
+                .expect("rkyv::access(FilterRequest) failed — host/guest schema mismatch?");
+
+        let owned: crate::types::v2::FilterRequest =
+            rkyv::deserialize::<crate::types::v2::FilterRequest, Error>(archived)
+                .expect("rkyv::deserialize(FilterRequest) failed");
+
+        // Free input as soon as we own a deserialised copy. Keeps guest
+        // peak memory close to one wire-buffer instead of two.
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+
+        let response = handler(owned);
+
+        encode_filter_response(response)
+    }
+
+    /// Zero-copy view-mode filter dispatch — invoked from the
+    /// macro-generated `cc_lb_filter` export when the handler is
+    /// declared with `#[handler(filter, wire = 2, ..., view)]` and takes
+    /// `&crate::types::v2::ArchivedFilterRequest`.
+    ///
+    /// Skips `rkyv::deserialize` entirely. Field access happens
+    /// straight against the archived bytes in guest memory, so the
+    /// handler must run BEFORE the input buffer is freed (view types
+    /// borrow from `in_bytes`).
+    #[allow(unsafe_code)]
+    pub fn run_filter_v2_view<F>(in_ptr: u32, in_len: u32, handler: F) -> u64
+    where
+        F: FnOnce(&crate::types::v2::ArchivedFilterRequest) -> FilterResponse,
+    {
+        // SAFETY: same as run_filter.
+        let in_bytes = unsafe { slice::from_raw_parts(in_ptr as *const u8, in_len as usize) };
+
+        let archived: &crate::types::v2::ArchivedFilterRequest =
+            rkyv::access::<crate::types::v2::ArchivedFilterRequest, Error>(in_bytes)
+                .expect("rkyv::access(FilterRequest) failed — host/guest schema mismatch?");
+
+        let response = handler(archived);
+
+        // Now safe to free input — handler is done borrowing from it.
+        free_bytes(in_ptr, in_len, DEFAULT_ALIGN);
+
+        encode_filter_response(response)
+    }
+
+    #[allow(unsafe_code)]
+    fn encode_filter_response(response: FilterResponse) -> u64 {
         let bytes =
             rkyv::to_bytes::<Error>(&response).expect("rkyv::to_bytes(FilterResponse) failed");
 

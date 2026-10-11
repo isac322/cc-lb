@@ -599,6 +599,7 @@ fn clean_known_base(name: &str, id_seed: u8) -> UpstreamCandidate {
 
 fn ctx() -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: "req-regression".to_owned(),
         thread_id: None,
         requested_service_tier: None,
@@ -614,6 +615,7 @@ fn ctx() -> RoutingContext {
 
 fn ctx_with_thread_id(request_id: &str, thread_id: &str) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
         requested_service_tier: None,

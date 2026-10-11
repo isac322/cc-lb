@@ -9,12 +9,12 @@
 use core::fmt;
 
 /// Wire schema version. Distinct enum values indicate incompatible
-/// struct layouts. Filter-only additions currently stay on V1 because
-/// the filter plugin is internal to cc-lb.
+/// struct layouts. V2 is supported only for the filter hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum WireVersion {
     V1 = 1,
+    V2 = 2,
 }
 
 impl WireVersion {
@@ -25,6 +25,7 @@ impl WireVersion {
     pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             1 => Some(Self::V1),
+            2 => Some(Self::V2),
             _ => None,
         }
     }
@@ -32,6 +33,7 @@ impl WireVersion {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::V1 => "v1",
+            Self::V2 => "v2",
         }
     }
 }
@@ -108,7 +110,7 @@ impl fmt::Display for HookKind {
 }
 
 /// Host-supported versions per hook. Update when adding new versions.
-pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] = &[WireVersion::V1];
+pub const HOST_SUPPORTED_FILTER_VERSIONS: &[WireVersion] = &[WireVersion::V1, WireVersion::V2];
 pub const HOST_SUPPORTED_SHAPE_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 pub const HOST_SUPPORTED_TRANSFORM_RESPONSE_VERSIONS: &[WireVersion] = &[WireVersion::V1];
 pub const HOST_SUPPORTED_TRANSFORM_SSE_EVENT_VERSIONS: &[WireVersion] = &[WireVersion::V1];

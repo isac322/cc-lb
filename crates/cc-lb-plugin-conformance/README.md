@@ -56,8 +56,10 @@ This is the static gate to run in CI whenever the plugin or host crates change.
 
 `run()` builds a live wasmtime runtime, registers the plugin, and exercises the
 hook boundary with canonical sample payloads selected from the declared wire
-version. Filter plugins receive a V1 request whose `service_tier` is
-`Some("priority")`.
+version. Filter plugins receive their declared V1 or V2 request whose
+`service_tier` is `Some("priority")`. Use `PluginSession::call_filter_v2`
+for semantic tests of V2 candidates and quota snapshots; `call_filter` remains
+the V1 entry point.
 
 It verifies allocator exports, hook exports, and rkyv encode/decode round-trips.
 It does not verify plugin business semantics such

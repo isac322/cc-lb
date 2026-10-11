@@ -24,3 +24,6 @@ mod scoped_dispatch;
 mod shape_round_trip;
 #[path = "slot_eviction.rs"]
 mod slot_eviction;
+
+#[path = "filter_v2.rs"]
+mod filter_v2;

@@ -2110,6 +2110,7 @@ fn ctx(canonical_model: &str) -> RoutingContext {
 
 fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: request_id.to_owned(),
         thread_id: None,
         requested_service_tier: None,
@@ -2125,6 +2126,7 @@ fn ctx_with_request_id(canonical_model: &str, request_id: &str) -> RoutingContex
 
 fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         request_id: request_id.to_owned(),
         thread_id: Some(thread_id.to_owned()),
         requested_service_tier: None,
@@ -2140,6 +2142,7 @@ fn ctx_with_thread_id(canonical_model: &str, request_id: &str, thread_id: &str) 
 
 fn ctx_with_unknown_cache_pricing(canonical_model: &str, request_id: &str) -> RoutingContext {
     RoutingContext {
+        routing_now_unix_secs: 1_800_000_000,
         cache_pricing: cc_lb_domain::CachePricingSummary::default(),
         ..ctx_with_request_id(canonical_model, request_id)
     }

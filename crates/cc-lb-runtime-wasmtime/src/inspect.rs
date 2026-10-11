@@ -327,6 +327,9 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::Filter, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::FilterRequest as WireSchema>::FINGERPRINT)
         }
+        (HookKind::Filter, WireVersion::V2) => {
+            Some(<cc_lb_plugin_wire::v2::FilterRequest as WireSchema>::FINGERPRINT)
+        }
         (HookKind::Shape, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::ShapeRequest as WireSchema>::FINGERPRINT)
         }
@@ -336,6 +339,7 @@ pub(crate) fn expected_fingerprint(hook: HookKind, version: WireVersion) -> Opti
         (HookKind::TransformSseEvent, WireVersion::V1) => {
             Some(<cc_lb_plugin_wire::v1::TransformSseEventRequest as WireSchema>::FINGERPRINT)
         }
+        (_, WireVersion::V2) => None,
     }
 }
 
@@ -465,6 +469,46 @@ mod tests {
             (func (export "cc_lb_transform_sse_event") (param i32 i32) (result i64) i64.const 0)
         )
         "#
+    }
+
+    #[test]
+    fn v2_filter_requires_its_own_fingerprint() {
+        let metadata = String::from_utf8(metadata_section("filter"))
+            .unwrap()
+            .replace("\"wire_version\":1", "\"wire_version\":2");
+        for fingerprint in [filter_section_bytes(), vec![0; 32]] {
+            let bytes = wat_with_custom_sections(
+                filter_plugin_wat(),
+                &[
+                    (
+                        &schema_section_name(HookKind::Filter, WireVersion::V2),
+                        &fingerprint,
+                    ),
+                    ("cc_lb.plugin.v1", metadata.as_bytes()),
+                ],
+            );
+            let error =
+                inspect_wasm(HookKind::Filter, &bytes).expect_err("V2 fingerprint mismatch");
+            assert!(error.to_string().contains("hash mismatch"), "{error}");
+        }
+    }
+
+    #[test]
+    fn v2_is_rejected_for_shape_hooks() {
+        let metadata = String::from_utf8(shape_owned_metadata_section("noop", "noop"))
+            .unwrap()
+            .replace("\"wire_version\":1", "\"wire_version\":2");
+        let bytes = wat_with_custom_sections(
+            shape_owned_plugin_wat(),
+            &[("cc_lb.plugin.v1", metadata.as_bytes())],
+        );
+        let error = inspect_wasm(HookKind::Shape, &bytes).expect_err("shape V2 unsupported");
+        assert!(
+            error
+                .to_string()
+                .contains("does not support hook `shape` wire version 2"),
+            "{error}"
+        );
     }
 
     #[test]

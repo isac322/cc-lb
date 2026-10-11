@@ -211,7 +211,7 @@ impl HandlerKind {
     }
 
     pub(crate) const fn supports_wire_version(self, wire_version: u8) -> bool {
-        wire_version == 1
+        wire_version == 1 || (matches!(self, Self::Filter) && wire_version == 2)
     }
 
     pub(crate) fn export_name(self) -> &'static str {
@@ -226,6 +226,8 @@ impl HandlerKind {
     pub(crate) fn dispatch_helper(self, wire_version: u8, view: bool) -> Option<&'static str> {
         match (self, wire_version, view) {
             (Self::Filter, 1, false) => Some("run_filter"),
+            (Self::Filter, 2, false) => Some("run_filter_v2"),
+            (Self::Filter, 2, true) => Some("run_filter_v2_view"),
             (Self::Filter, 1, true) => Some("run_filter_view"),
             (Self::Shape, 1, false) => Some("run_shape"),
             (Self::Shape, 1, true) => Some("run_shape_view"),
@@ -247,6 +249,7 @@ impl HandlerKind {
     pub(crate) fn fingerprint_type(self, wire_version: u8) -> Option<TokenStream2> {
         match (self, wire_version) {
             (Self::Filter, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::FilterRequest }),
+            (Self::Filter, 2) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v2::FilterRequest }),
             (Self::Shape, 1) => Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::ShapeRequest }),
             (Self::TransformResponse, 1) => {
                 Some(quote! { ::cc_lb_pdk_wasmtime::types::v1::TransformResponseRequest })

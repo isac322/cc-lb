@@ -114,3 +114,17 @@ guide](https://github.com/isac322/cc-lb/blob/master/docs/plugin-author-guide.md#
 ## License
 
 Licensed under the workspace license.
+
+## Quota-aware filters
+
+Declare `wire = 2` on a filter handler and use
+`cc_lb_plugin_wire::v2::FilterRequest` to read each candidate's
+`subscription_quotas`. For `view = true`, use `v2::ArchivedFilterRequest`.
+Owned and view handlers return the existing `v1::FilterResponse`. V1 handlers
+remain supported; shape and transform handlers still use `wire = 1`. Snapshots
+come from the host cache without provider calls. Current known windows include
+unobserved entries; match by label and accept future unknown labels. Use
+`routing_now_unix_secs`, sampled from the injected host clock for this routing
+pass, for reset countdowns. Policy thresholds, source metadata, overage and
+fallback decisions, and extra usage are outside this projection. Observation
+timestamps are not a live routing clock. See the plugin author guide for snapshot field semantics.

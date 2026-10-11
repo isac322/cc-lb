@@ -55,8 +55,9 @@ impl RequestContext {
     }
 
     /// Projects the request data available to routing filters and routers.
-    pub fn routing_context(&self) -> RoutingContext {
+    pub fn routing_context(&self, routing_now_unix_secs: u64) -> RoutingContext {
         RoutingContext {
+            routing_now_unix_secs,
             request_id: self.request_id.clone(),
             thread_id: self.thread_id.clone(),
             requested_service_tier: self.requested_service_tier.clone(),

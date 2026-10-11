@@ -19,7 +19,7 @@ use crate::error::WasmtimeRuntimeError;
 
 mod filter;
 
-use filter::probe_filter;
+use filter::{probe_filter, probe_filter_v2};
 
 pub(crate) fn probe_hook_dispatch(
     instance_pre: Arc<InstancePre<HostState>>,
@@ -49,9 +49,11 @@ pub(crate) fn probe_hook_dispatch(
     });
     match (hook, wire_version) {
         (HookKind::Filter, WireVersion::V1) => probe_filter(&cell),
+        (HookKind::Filter, WireVersion::V2) => probe_filter_v2(&cell),
         (HookKind::Shape, WireVersion::V1) => probe_shape_v1(&cell),
         (HookKind::TransformResponse, WireVersion::V1) => probe_transform_response_v1(&cell),
         (HookKind::TransformSseEvent, WireVersion::V1) => probe_transform_sse_event_v1(&cell),
+        (_, WireVersion::V2) => Err(probe_failed(hook, "V2 is filter-only".to_owned())),
     }
 }
 

@@ -307,6 +307,7 @@ fn make_context(request_id: &str, model: &str) -> RoutingContext {
         body_bytes: Bytes::new(),
         canonical_model_id: model.to_owned(),
         cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+        routing_now_unix_secs: 1_800_000_000,
     }
 }
 

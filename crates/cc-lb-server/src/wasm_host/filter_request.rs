@@ -1,4 +1,5 @@
-use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
+use cc_lb_domain::{Principal, PrincipalKind, SubscriptionQuotaDataState, UpstreamCandidate};
+use cc_lb_plugin_wire::v2;
 use cc_lb_plugin_wire::{
     schema::WireVersion,
     v1::{
@@ -120,6 +121,70 @@ impl FilterWireRequest<'_> {
                 },
                 with_bytes,
             ),
+            WireVersion::V2 => {
+                let quota_windows: Vec<Vec<v2::QuotaWindowSnapshotRef<'_>>> = self
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        candidate
+                            .subscription_quotas
+                            .iter()
+                            .map(|snapshot| v2::QuotaWindowSnapshotRef {
+                                window: &snapshot.window,
+                                state: quota_data_state_to_wire(snapshot.state),
+                                utilization: snapshot.utilization,
+                                resets_at_unix_secs: snapshot.resets_at_unix_secs,
+                                observed_at_unix_millis: snapshot.observed_at_unix_millis,
+                                status: snapshot.status.as_deref().map(|value| QueryRef { value }),
+                                disabled_reason: snapshot
+                                    .disabled_reason
+                                    .as_deref()
+                                    .map(|value| QueryRef { value }),
+                                max_staleness_secs: snapshot.max_staleness_secs,
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let candidates: Vec<v2::UpstreamCandidateRef<'_>> = candidates
+                    .into_iter()
+                    .zip(&quota_windows)
+                    .map(|(candidate, windows)| v2::UpstreamCandidateRef {
+                        upstream_id: candidate.upstream_id,
+                        name: candidate.name,
+                        kind: candidate.kind,
+                        observed_at_unix_secs: candidate.observed_at_unix_secs,
+                        predicted_cache_read_tokens: candidate.predicted_cache_read_tokens,
+                        predicted_cache_creation_tokens_5m: candidate
+                            .predicted_cache_creation_tokens_5m,
+                        predicted_cache_creation_tokens_1h: candidate
+                            .predicted_cache_creation_tokens_1h,
+                        predicted_uncached_input_tokens: candidate.predicted_uncached_input_tokens,
+                        plan_capacity_ratio: candidate.plan_capacity_ratio,
+                        organization_type: candidate.organization_type,
+                        rate_limit_tier: candidate.rate_limit_tier,
+                        seat_tier: candidate.seat_tier,
+                        subscription_quotas: windows,
+                    })
+                    .collect();
+                serialize_with_input_scratch(
+                    &v2::FilterRequestRef {
+                        routing_now_unix_secs: self.ctx.routing_now_unix_secs,
+                        request_id: self.ctx.request_id.as_str(),
+                        thread_id,
+                        service_tier,
+                        canonical_model_id: self.ctx.canonical_model_id.as_str(),
+                        cache_pricing: cache_pricing(),
+                        method: self.ctx.method.as_str(),
+                        path: self.ctx.path.as_str(),
+                        query,
+                        headers: &headers,
+                        body: self.ctx.body_bytes.as_ref(),
+                        principal: principal(),
+                        candidates: &candidates,
+                    },
+                    with_bytes,
+                )
+            }
         }
     }
 }
@@ -129,6 +194,18 @@ pub(super) fn principal_kind_to_wire(principal: &Principal) -> &'static str {
         PrincipalKind::ApiKey => "api_key",
         PrincipalKind::OAuthSubject => "oauth_subject",
         PrincipalKind::InternalKey => "internal_key",
+    }
+}
+
+/// Subscription quota freshness state as the domain's serde `snake_case`
+/// name — the same strings the admin API and storage layer emit, so a
+/// plugin sees one vocabulary across every projection of the snapshot.
+pub(super) fn quota_data_state_to_wire(state: SubscriptionQuotaDataState) -> &'static str {
+    match state {
+        SubscriptionQuotaDataState::Fresh => "fresh",
+        SubscriptionQuotaDataState::Stale => "stale",
+        SubscriptionQuotaDataState::Absent => "absent",
+        SubscriptionQuotaDataState::Unobserved => "unobserved",
     }
 }
 
