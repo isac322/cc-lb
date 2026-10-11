@@ -158,6 +158,7 @@ impl UpstreamDispatch for FixedSuccessDispatch {
 
 fn principal_with_keepalive() -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,

@@ -137,6 +137,7 @@ async fn read_model_contract(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    seed_principals(&storage).await?;
 
     // Given: stateful sessions and an unjoined decision-only row.
     let renewed = storage
@@ -447,7 +448,31 @@ async fn initialized_storage(url: &str) -> Result<(Fixture, PostgresStorage)> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    seed_principals(&storage).await?;
     Ok((fixture, storage))
+}
+
+/// Session admission resolves the caller-visible principal id against the live
+/// principal table and fails closed on an id that resolves to nothing, so the
+/// fixture creates every principal its sessions and queries name.
+async fn seed_principals(storage: &PostgresStorage) -> Result<()> {
+    for name in [PRINCIPAL_ID, "principal-b", "other-principal"] {
+        cc_lb_storage_api::PrincipalStore::create(
+            storage,
+            cc_lb_storage_api::principal::PrincipalCreate {
+                name: name.to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+                prompt_cache_mode: Default::default(),
+            },
+            100,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn query(principal_id: &str, limit: u32) -> CacheKeepaliveSessionListQuery {

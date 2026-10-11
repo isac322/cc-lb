@@ -40,6 +40,7 @@ async fn run_test(url: &str) -> Result<()> {
     let principal = storage
         .create(
             PrincipalCreate {
+                prompt_cache_mode: Default::default(),
                 name: "test-principal".to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: Vec::new(),

@@ -431,6 +431,7 @@ async fn seed_storage(
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: "api-key".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),

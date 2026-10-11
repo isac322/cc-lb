@@ -217,6 +217,7 @@ impl Fixture {
         cc_lb_storage_api::PrincipalStore::create(
             self.storage.as_ref(),
             PrincipalCreate {
+                prompt_cache_mode: Default::default(),
                 name: name.to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: Vec::new(),

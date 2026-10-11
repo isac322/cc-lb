@@ -67,6 +67,8 @@ mod lifecycle_observation_upstream_keyed;
 mod lifecycle_oversized_body;
 #[path = "lifecycle_preview_route.rs"]
 mod lifecycle_preview_route;
+#[path = "lifecycle_prompt_cache_mode.rs"]
+mod lifecycle_prompt_cache_mode;
 #[path = "lifecycle_request_events.rs"]
 mod lifecycle_request_events;
 #[path = "lifecycle_request_metrics_attribution.rs"]

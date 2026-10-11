@@ -21,8 +21,72 @@ are skipped at fire time and the session is cancelled with `reason=upstream_gone
 - **OpenRouter:** schema requires `max_tokens >= 1`.
 
 Nothing runs - no snapshot, no schedule - for principals whose
-`cache_keepalive.enabled` is `false` or unset, or for requests that carry
+`cache_keepalive.enabled` is `false` or unset, for principals whose
+`prompt_cache_mode` is `one_hour_no_keepalive` (see
+[One-hour cache mode](#one-hour-cache-mode)), or for requests that carry
 no `cache_control` breakpoint.
+
+## One-hour cache mode
+
+`prompt_cache_mode` is a per-principal enum carried on the principal record and
+managed through the existing `PATCH /admin/v1/principals/{id}` contract with
+`If-Match`. The admin UI exposes it as the **Use one-hour cache** switch.
+
+| Mode | Cache controls sent upstream | Keep-alives |
+|---|---|---|
+| `preserve_client` (default) | exactly as the caller sent them | operate normally |
+| `one_hour_no_keepalive` | recognized `ephemeral` controls promoted to `ttl: "1h"` | prohibited; stored config dormant |
+
+Details that operators need:
+
+- The mode rewrites only locations the prompt-cache contract already reads: the
+  top-level automatic `cache_control`, tool entries, `system` content blocks,
+  and `messages[].content[]` blocks. Nested JSON - tool input schemas, tool
+  arguments, user payloads - is never touched, and a request without cache
+  controls gains none. It is a duration override, not an automatic-caching
+  feature.
+- Only markers the provider contract already defines are promoted: an
+  `ephemeral` control with no `ttl`, `ttl: "5m"`, or `ttl: "1h"`. A control the
+  contract would reject - an unknown or non-string `ttl`, a non-`ephemeral`
+  type - is left exactly as the caller sent it, so the mode overrides a
+  duration instead of repairing an invalid request.
+- Anthropic Messages requests are affected. Other protocols and the
+  count-token endpoints are unchanged.
+- The stored `cache_keepalive` configuration is kept, not deleted, when the mode
+  is enabled. The UI shows it as disabled by one-hour cache mode. Returning to
+  `preserve_client` restores the saved configuration and keeps serving the
+  client's own TTLs.
+- Entering `one_hour_no_keepalive` retires the principal's active keep-alive
+  sessions (`status=terminal`, `reason=cancelled`) in the same storage
+  transaction as the mode write. Already-queued jobs become no-ops through the
+  existing generation and status fences; no scheduler job payload is rewritten.
+- A renewal that is already running when the update lands cannot be recalled.
+  Its usage is finalized and recorded, and it is not rescheduled.
+- The durable enqueue boundary re-reads the principal's mode inside its own
+  transaction, so a request admitted under the previous mode cannot recreate a
+  session after the update cancelled it.
+
+```bash
+export CC_LB_ADMIN_TOKEN=<admin token>
+export PRINCIPAL_ID=<principal uuid>
+
+curl -sS -X PATCH \
+     -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \
+     -H "If-Match: \"<current revision>\"" \
+     -H "content-type: application/json" \
+     "http://${ADMIN_ADDR}/admin/v1/principals/${PRINCIPAL_ID}" \
+     -d '{"prompt_cache_mode":"one_hour_no_keepalive"}' \
+  | jq '.prompt_cache_mode'
+```
+
+Send `"preserve_client"` with the current revision to restore client policy;
+the previously saved keep-alive configuration becomes effective again. The
+update takes effect for newly admitted traffic when the updated principal view
+is published, and requests already in flight finish under the policy they
+started with. The admin UI exposes the same write as the **Use one-hour cache**
+switch and disables the keep-alive controls while it is on. The API contract is
+documented in
+[docs/runtime-management.md](./runtime-management.md#principals-api).
 
 ## Scheduler and storage model
 

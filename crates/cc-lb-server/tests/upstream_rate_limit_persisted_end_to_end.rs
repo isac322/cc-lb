@@ -54,6 +54,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: "api-key".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),

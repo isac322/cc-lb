@@ -255,6 +255,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
     });
 
     assert_json_roundtrip(PrincipalCreate {
+        prompt_cache_mode: Default::default(),
         name: "test-principal".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["claude-3-5-sonnet".to_owned()],

@@ -14,6 +14,8 @@ mod bulkhead;
 #[cfg(not(loom))]
 pub mod cache_keepalive;
 #[cfg(not(loom))]
+pub mod cache_policy;
+#[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]
 mod completion_observer;

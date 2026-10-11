@@ -49,6 +49,7 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
     PrincipalStore::create(
         storage_arc.as_ref(),
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: "declared-principal".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),

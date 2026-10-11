@@ -1749,6 +1749,7 @@ async fn one_chain<S: PluginRegistryStore + PrincipalStore>(
 
 fn principal_create(seed: u8) -> PrincipalCreate {
     PrincipalCreate {
+        prompt_cache_mode: Default::default(),
         name: format!("plugin-principal-{seed:04}"),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["claude-sonnet-*".to_owned()],

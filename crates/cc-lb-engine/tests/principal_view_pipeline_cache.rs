@@ -130,6 +130,7 @@ fn view_with_pipeline(
 
 fn principal(terminal: TerminalStrategy) -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: PRINCIPAL_ID.to_owned(),
         kind: PrincipalKind::Machine,

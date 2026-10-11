@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_domain::TerminalStrategy;
-use cc_lb_storage_api::CacheKeepaliveConfig;
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
+use cc_lb_storage_api::{CacheKeepaliveConfig, PromptCacheMode};
 use uuid::Uuid;
 
 fn principal_with_cache_keepalive(enabled: bool) -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: if enabled {
             "keepalive-enabled".to_owned()
@@ -55,4 +56,32 @@ fn from_db_propagates_only_enabled_cache_keepalive_config() {
             .cache_keepalive()
             .is_none()
     );
+}
+
+#[test]
+fn one_hour_mode_masks_an_enabled_keepalive_config_and_reports_its_mode() {
+    let mut one_hour = principal_with_cache_keepalive(true);
+    one_hour.name = "keepalive-one-hour".to_owned();
+    one_hour.prompt_cache_mode = PromptCacheMode::OneHourNoKeepalive;
+    let view = PrincipalView::from_db(&[one_hour], HashMap::new());
+
+    let cached = view.get("keepalive-one-hour").expect("principal cached");
+    assert!(
+        cached.cache_keepalive().is_none(),
+        "the effective accessor is the single precedence point: one-hour mode          leaves the stored, still-enabled config dormant"
+    );
+    assert_eq!(
+        cached.prompt_cache_mode(),
+        PromptCacheMode::OneHourNoKeepalive,
+        "request normalization reads the mode from the same snapshot"
+    );
+}
+
+#[test]
+fn preserve_client_mode_reports_client_policy() {
+    let view = PrincipalView::from_db(&[principal_with_cache_keepalive(true)], HashMap::new());
+
+    let cached = view.get("keepalive-enabled").expect("principal cached");
+    assert_eq!(cached.prompt_cache_mode(), PromptCacheMode::PreserveClient);
+    assert!(cached.cache_keepalive().is_some());
 }

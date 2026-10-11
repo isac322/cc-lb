@@ -16,6 +16,8 @@ mod hook_metadata_mode_backfill;
 mod migration_versions;
 #[path = "plan_tier_concurrency.rs"]
 mod plan_tier_concurrency;
+#[path = "principal_prompt_cache_mode_migration.rs"]
+mod principal_prompt_cache_mode_migration;
 #[path = "principal_terminal_strategy.rs"]
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]

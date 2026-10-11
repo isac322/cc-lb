@@ -77,6 +77,7 @@ const principal: queries.Principal = {
   allowed_upstreams: [],
   default_limits: [],
   cache_keepalive: null,
+  prompt_cache_mode: 'preserve_client',
 };
 
 function withProviders(ui: React.ReactElement) {
@@ -100,6 +101,7 @@ function principalFixture(
     allowed_upstreams: [],
     default_limits: [],
     cache_keepalive: null,
+    prompt_cache_mode: 'preserve_client',
     ...overrides,
   };
 }

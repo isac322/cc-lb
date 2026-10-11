@@ -64,6 +64,7 @@ pub fn transform_lifecycle(
         ),
     );
     let principal = PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: uuid::Uuid::from_u128(2),
         name: "principal-test".to_owned(),
         kind: StoragePrincipalKind::Machine,

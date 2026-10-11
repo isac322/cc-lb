@@ -36,6 +36,7 @@ const principal: Principal = {
   allowed_upstreams: [],
   default_limits: [],
   cache_keepalive: null,
+  prompt_cache_mode: 'preserve_client',
 };
 
 const otherPrincipal: Principal = {

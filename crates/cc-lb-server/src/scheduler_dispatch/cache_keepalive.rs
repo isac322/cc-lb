@@ -60,7 +60,7 @@ impl SchedulerDispatch {
             return Ok(JobOutcome::Noop);
         }
 
-        if !self.cache_keepalive_still_authorized(&record) {
+        if !self.cache_keepalive_authorized(&record) {
             self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
                 .await?;
             return Ok(JobOutcome::Done);
@@ -109,6 +109,16 @@ impl SchedulerDispatch {
                 return Ok(JobOutcome::Done);
             }
         };
+        // Last authorization check before the upstream call: decoding and
+        // reservation awaited, so the principal's effective keep-alive state
+        // (including a prompt-cache mode change) may have moved since the first
+        // check. Nothing has been dispatched yet, so retiring the session here
+        // costs no accounting.
+        if !self.cache_keepalive_authorized(&record) {
+            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
+                .await?;
+            return Ok(JobOutcome::Done);
+        }
         let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
 
         let outcome = self
@@ -119,11 +129,11 @@ impl SchedulerDispatch {
                     .with_principal(record.principal_id.clone()),
             )
             .await;
-        if !self.cache_keepalive_still_authorized(&record) {
-            self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::Cancelled)
-                .await?;
-            return Ok(JobOutcome::Done);
-        }
+        // Re-read authorization after the awaited dispatch. A dispatched
+        // renewal cannot be recalled, so a prompt-cache mode change during the
+        // call still finalizes the usage it produced; only the follow-on work —
+        // rescheduling — is suppressed for every authorization revocation.
+        let keepalive_authorized = self.cache_keepalive_authorized(&record);
 
         match outcome {
             DispatchOutcome::CacheHit {
@@ -136,8 +146,17 @@ impl SchedulerDispatch {
                     &snapshot,
                     finalization,
                     "hit",
+                    keepalive_authorized,
                 )
                 .await?;
+                if !keepalive_authorized {
+                    self.mark_cache_keepalive_terminal(
+                        &job,
+                        CacheKeepaliveTerminalReason::Cancelled,
+                    )
+                    .await?;
+                    return Ok(JobOutcome::Done);
+                }
                 self.reschedule_cache_keepalive_hit(
                     job,
                     record,
@@ -148,12 +167,16 @@ impl SchedulerDispatch {
                 .await
             }
             DispatchOutcome::CacheMiss { finalization } => {
+                // The miss terminates the session on its own, so the decision
+                // row keeps the miss as its outcome even when the principal has
+                // also left keep-alive mode: nothing was rescheduled either way.
                 self.finalize_cache_keepalive_renewal(
                     &job,
                     &record,
                     &snapshot,
                     finalization,
                     "miss",
+                    true,
                 )
                 .await?;
                 self.mark_cache_keepalive_terminal(&job, CacheKeepaliveTerminalReason::CacheMiss)
@@ -179,23 +202,20 @@ impl SchedulerDispatch {
         }
     }
 
-    fn cache_keepalive_still_authorized(&self, record: &CacheKeepaliveSessionRecord) -> bool {
+    /// Fresh authorization controls dispatch and rescheduling, never whether
+    /// completed upstream work is accounted for. The effective keep-alive
+    /// accessor already suppresses renewals in one-hour mode.
+    fn cache_keepalive_authorized(&self, record: &CacheKeepaliveSessionRecord) -> bool {
         let view = self.dynamic_view.load();
-        if view.principal_view.principal_status(&record.principal_id) != PrincipalStatus::Active {
-            return false;
-        }
-        let Some(principal) = view.principal_view.get(&record.principal_id) else {
-            return false;
-        };
-        if principal.cache_keepalive().is_none() {
-            return false;
-        }
-        let allowed = principal.allowed_upstreams();
-        if allowed.is_empty() {
-            true
-        } else {
-            allowed.contains(&record.upstream_id)
-        }
+        view.principal_view.principal_status(&record.principal_id) == PrincipalStatus::Active
+            && view
+                .principal_view
+                .get(&record.principal_id)
+                .is_some_and(|principal| {
+                    principal.cache_keepalive().is_some()
+                        && (principal.allowed_upstreams().is_empty()
+                            || principal.allowed_upstreams().contains(&record.upstream_id))
+                })
     }
 
     async fn reserve_cache_keepalive(

@@ -314,6 +314,7 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
     match PrincipalStore::create(
         storage,
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: PRINCIPAL_ID.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["*".to_owned()],

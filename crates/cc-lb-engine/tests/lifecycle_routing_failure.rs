@@ -159,6 +159,7 @@ fn principal_view(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
     );
     Arc::new(PrincipalView::from_db(
         &[PrincipalRecord {
+            prompt_cache_mode: Default::default(),
             id: Uuid::from_u128(0xA11D),
             name: "principal-test".to_owned(),
             kind: StoragePrincipalKind::Admin,

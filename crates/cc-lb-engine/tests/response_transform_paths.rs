@@ -2287,6 +2287,7 @@ fn lifecycle_with_transforms_and_config(
         ),
     );
     let principal = PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: "principal-test".to_owned(),
         kind: cc_lb_storage_api::PrincipalKind::Machine,

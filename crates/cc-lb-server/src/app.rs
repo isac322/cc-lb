@@ -683,6 +683,7 @@ pub async fn seed_app_testing_storage(
     match PrincipalStore::create(
         storage,
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: "test-principal".to_owned(),
             kind: PrincipalKind::Machine,
             default_limits: vec![Limit {

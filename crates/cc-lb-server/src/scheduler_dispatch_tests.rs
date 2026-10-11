@@ -682,9 +682,10 @@ async fn renewal_response_persists_one_attributed_event_and_projection_set() {
 }
 
 #[tokio::test]
-async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finalizing() {
+async fn cache_keepalive_disable_mid_cycle_finalizes_usage_without_rescheduling() {
     // Given
     let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(100, 0, 10);
     let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
     let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
     let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
@@ -715,7 +716,11 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
         1,
         "the disable hook must run after the reservation-backed upstream dispatch"
     );
-    assert_eq!(request_event_count(&fixture).await, 0);
+    assert_eq!(request_event_count(&fixture).await, 1);
+    let (decision, reason) = cache_keepalive_decision(&fixture, "session-hash:1").await;
+    assert_eq!(decision, "terminal");
+    assert_eq!(reason, "cache hit; keep-alive authorization revoked");
+    assert_eq!(fixture.pending_keepalive_generations().await, vec![1]);
     let session = fixture
         .storage
         .get_cache_keepalive_session("session-hash")
@@ -740,10 +745,10 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
             "principal",
             "claude-test",
             0,
-            4_000,
+            3_900,
             None,
         )
-        .expect("dropped reservation refunds the full renewal amount before the TTL sweep");
+        .expect("only the unused reservation is refunded");
     assert!(
         limit_engine
             .reserve(
@@ -756,9 +761,319 @@ async fn cache_keepalive_disable_mid_cycle_drops_open_reservation_without_finali
                 None,
             )
             .is_err(),
-        "the verifier proves the original reservation refunded exactly once"
+        "the verifier proves the dispatched usage remains charged exactly once"
     );
     drop(verifier);
+}
+
+#[tokio::test]
+async fn cache_keepalive_mode_change_mid_renewal_finalizes_usage_without_rescheduling() {
+    // Given: a renewal that is already running when the principal switches to
+    // one-hour mode, whose response still reports a cache hit.
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_hit_usage(100, 0, 10);
+    let key_id = create_accounting_key(&fixture, LimitKind::InputTokens, 4_000).await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    let mut request = fixture.enqueue_request();
+    request.accounting_key_id = Some(key_id.clone());
+    enqueuer
+        .enqueue_cache_keepalive(request)
+        .await
+        .expect("enqueue keepalive with an accounting key");
+    let job = fixture.pending_keepalive_job(1).await;
+    let limit_engine = LimitEngine::new(
+        Arc::new(KeyConcurrencyManager::new()),
+        Arc::new(SystemClock),
+    );
+    fixture.enable_one_hour_mode_on_next_http_dispatch();
+    let dispatch = fixture.dispatch_with_limit_engine(Arc::clone(&pusher), limit_engine.clone());
+
+    // When
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job.clone())
+        .await
+        .expect("a mode change during a renewal stops cleanly");
+
+    // Then: the dispatched usage is accounted for exactly once, the session is
+    // retired, and no next generation was queued.
+    assert!(matches!(outcome, JobOutcome::Done));
+    assert_eq!(
+        fixture.http.requests.lock().expect("requests lock").len(),
+        1,
+        "the mode change landed after the upstream dispatch"
+    );
+    assert_eq!(
+        request_event_count(&fixture).await,
+        1,
+        "usage produced by the dispatched renewal is not dropped"
+    );
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    assert_eq!(
+        session.generation, job.generation,
+        "suppressing the reschedule leaves the session generation unbumped"
+    );
+    assert_eq!(
+        fixture.pending_keepalive_generations().await,
+        vec![1],
+        "suppressing the reschedule leaves only the original queued generation"
+    );
+    // The operator-visible projections agree: the turn keeps the hit usage,
+    // and the decision says terminal instead of claiming a reschedule.
+    let (hit_miss, cache_read_input_tokens) =
+        cache_keepalive_turn(&fixture, "session-hash:1").await;
+    assert_eq!(hit_miss, "hit");
+    assert_eq!(cache_read_input_tokens, 10);
+    let (decision, reason) = cache_keepalive_decision(&fixture, "session-hash:1").await;
+    assert_eq!(
+        decision, "terminal",
+        "a mode change must not record a reschedule that never happened"
+    );
+    assert_eq!(reason, "cache hit; keep-alive authorization revoked");
+
+    // The queued job for this generation is fenced by the terminal session.
+    let redelivery = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("redelivery of the retired generation is a no-op");
+    assert!(matches!(redelivery, JobOutcome::Noop));
+    assert_eq!(
+        fixture.http.requests.lock().expect("requests lock").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_one_hour_mode_never_dispatches_a_renewal() {
+    // Given: an already-queued renewal and a principal that has since switched
+    // to one-hour mode.
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    fixture.enable_one_hour_mode();
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    // When
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("one-hour mode stops the queued renewal");
+
+    // Then: no upstream request, no request event, and a retired session.
+    assert!(matches!(outcome, JobOutcome::Done));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty(),
+        "one-hour mode must not dispatch a synthetic renewal"
+    );
+    assert_eq!(request_event_count(&fixture).await, 0);
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_mode_change_mid_renewal_keeps_a_miss_its_own_reason() {
+    // Given: a renewal that is already running when the principal switches to
+    // one-hour mode, whose response reports a cache miss.
+    let fixture = Fixture::new().await;
+    fixture.http.return_cache_miss();
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    fixture.enable_one_hour_mode_on_next_http_dispatch();
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    // When
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("a miss during a mode change stops cleanly");
+
+    // Then: the miss terminates the session on its own terms — nothing was
+    // rescheduled either way — and the usage is still accounted for.
+    assert!(matches!(outcome, JobOutcome::Done));
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::CacheMiss)
+    );
+    assert_eq!(request_event_count(&fixture).await, 1);
+    let (hit_miss, _) = cache_keepalive_turn(&fixture, "session-hash:1").await;
+    assert_eq!(hit_miss, "miss");
+    let (decision, reason) = cache_keepalive_decision(&fixture, "session-hash:1").await;
+    assert_eq!(decision, "terminal");
+    assert_eq!(
+        reason, "cache miss",
+        "the mode change is not what ended a missed renewal"
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_mode_change_mid_renewal_leaves_a_failed_dispatch_failed() {
+    // Given: a renewal that is already running when the principal switches to
+    // one-hour mode, whose upstream call fails.
+    let fixture = Fixture::new().await;
+    fixture.http.return_status(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({"type": "error", "error": {"type": "api_error"}}),
+    );
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    fixture.enable_one_hour_mode_on_next_http_dispatch();
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+
+    // When
+    let outcome = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("a failed renewal during a mode change stops cleanly");
+
+    // Then: the failure keeps its own terminal reason, and — as before the mode
+    // change — a failed renewal records no event and no decision row.
+    assert!(matches!(outcome, JobOutcome::Done));
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::DispatchError)
+    );
+    assert_eq!(request_event_count(&fixture).await, 0);
+    let decisions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM cache_keepalive_decisions WHERE source_ref_id = ?",
+    )
+    .bind("session-hash:1")
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("count decisions");
+    assert_eq!(
+        decisions, 0,
+        "a failed renewal has no finalized decision to project"
+    );
+}
+
+#[tokio::test]
+async fn cache_keepalive_mode_reenable_does_not_resurrect_a_retired_generation() {
+    // Given: a queued renewal that one-hour mode already retired.
+    let fixture = Fixture::new().await;
+    let pusher: Arc<dyn CacheKeepaliveTaskPusher> = Arc::new(fixture.backend.backend.clone());
+    let enqueuer = fixture.enqueuer(Arc::clone(&pusher));
+    enqueuer
+        .enqueue_cache_keepalive(fixture.enqueue_request())
+        .await
+        .expect("enqueue durable keepalive");
+    let job = fixture.pending_keepalive_job(1).await;
+    let dispatch = fixture.dispatch(Arc::clone(&pusher));
+    fixture.enable_one_hour_mode();
+    assert!(matches!(
+        dispatch
+            .dispatch_cache_keepalive(job.clone())
+            .await
+            .expect("one-hour mode retires the queued renewal"),
+        JobOutcome::Done
+    ));
+
+    // When: the principal returns to client policy and the retired generation is
+    // delivered again.
+    fixture.set_prompt_cache_mode(cc_lb_storage_api::PromptCacheMode::PreserveClient);
+    let redelivery = dispatch
+        .dispatch_cache_keepalive(job)
+        .await
+        .expect("redelivery of a retired generation is a no-op");
+
+    // Then: only a new real request may start a generation; the retired job
+    // neither dispatches nor rewrites the session.
+    assert!(matches!(redelivery, JobOutcome::Noop));
+    assert!(
+        fixture
+            .http
+            .requests
+            .lock()
+            .expect("requests lock")
+            .is_empty(),
+        "a re-enabled principal must not revive a retired renewal"
+    );
+    let session = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(session.status, CacheKeepaliveSessionStatus::Terminal);
+    assert_eq!(
+        session.terminal_reason,
+        Some(CacheKeepaliveTerminalReason::Cancelled)
+    );
+    assert_eq!(fixture.pending_keepalive_generations().await, vec![1]);
+}
+
+/// The decision projection a finalized renewal wrote for `source_ref_id`.
+async fn cache_keepalive_decision(fixture: &Fixture, source_ref_id: &str) -> (String, String) {
+    sqlx::query_as::<_, (String, String)>(
+        "SELECT decision, reason FROM cache_keepalive_decisions WHERE source_ref_id = ?",
+    )
+    .bind(source_ref_id)
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("decision row exists")
+}
+
+/// The turn projection a finalized renewal wrote for `source_ref_id`.
+async fn cache_keepalive_turn(fixture: &Fixture, source_ref_id: &str) -> (String, i64) {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT hit_miss, cache_read_input_tokens FROM cache_keepalive_turns WHERE source_ref_id = ?",
+    )
+    .bind(source_ref_id)
+    .fetch_one(fixture.storage.pool())
+    .await
+    .expect("turn row exists")
 }
 
 fn api_key_id(secret: &str) -> String {

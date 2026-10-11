@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveGenerationCheck, CacheKeepaliveHitRefreshRequest,
     CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, StorageError,
-    StorageResult, cache_keepalive_job_key,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, PrincipalIdentityRef,
+    PromptCacheMode, StorageError, StorageResult, cache_keepalive_job_key, principal_identity_refs,
 };
 use sqlx::{Row, postgres::PgRow};
 
@@ -26,6 +26,8 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
                 field: "cache_keepalive_last_message_at_ms".to_owned(),
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        ensure_keepalive_permitted_in_tx(&mut tx, &request.principal_id).await?;
         let row = sqlx::query(
             "INSERT INTO cache_keepalive_sessions
              (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
@@ -75,9 +77,10 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         .bind(u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?)
         .bind(u64_to_i64(request.now_unix_secs, "cache keepalive created_at")?)
         .bind(u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         row_to_record(row)
     }
 
@@ -456,4 +459,72 @@ fn config_snapshot_from_db(
             })
         })
         .transpose()
+}
+
+/// Fences a session write on the principal's *current* prompt-cache policy,
+/// read under a share lock inside the same transaction as the write.
+///
+/// The share lock conflicts with the row lock the principal update takes, so
+/// the two order deterministically: either this read sees the committed mode
+/// change and refuses, or this transaction commits first and the mode update's
+/// session fence retires the session this call just wrote.
+///
+/// The lookup resolves the caller-visible principal id exactly as
+/// `PrincipalView::get` does and *fails closed* when it resolves to nothing: a
+/// renamed, deleted, or otherwise dead id must not create a session, because
+/// the scheduler would resolve that id to no principal at all — or, if the name
+/// were reused, to a different one.
+async fn ensure_keepalive_permitted_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal_id: &str,
+) -> StorageResult<()> {
+    let Some(mode) = principal_prompt_cache_mode_in_tx(tx, principal_id).await? else {
+        return Err(StorageError::PrincipalNotFound {
+            id: principal_id.to_owned(),
+        });
+    };
+    if PromptCacheMode::from_db_value(&mode)?.prohibits_keepalive() {
+        return Err(keepalive_prohibited());
+    }
+    Ok(())
+}
+
+/// Reads the stored prompt-cache mode for a caller-visible principal id.
+///
+/// The identities are tried in `PrincipalView::get` order — a live principal
+/// *name* first, then the live row's UUID alias — and both exclude deleted rows,
+/// which the dynamic view drops. A UUID-shaped principal name therefore
+/// resolves as a name, not as somebody else's UUID. The share lock on whichever
+/// row matched is what makes the read a fence instead of a race.
+async fn principal_prompt_cache_mode_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal_id: &str,
+) -> StorageResult<Option<String>> {
+    for identity in principal_identity_refs(principal_id) {
+        let lookup = match identity {
+            PrincipalIdentityRef::Name(name) => sqlx::query_scalar(
+                "SELECT prompt_cache_mode FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL FOR SHARE",
+            )
+            .bind(name),
+            PrincipalIdentityRef::Id(id) => sqlx::query_scalar(
+                "SELECT prompt_cache_mode FROM principals_v1 WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+            )
+            .bind(id),
+        };
+        let mode: Option<String> = lookup
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        if mode.is_some() {
+            return Ok(mode);
+        }
+    }
+    Ok(None)
+}
+
+fn keepalive_prohibited() -> StorageError {
+    StorageError::InvalidInput {
+        field: "principal.prompt_cache_mode".to_owned(),
+        reason: "keep-alive sessions are prohibited in one_hour_no_keepalive mode".to_owned(),
+    }
 }

@@ -103,6 +103,7 @@ async fn create_principal(storage: &SqliteStorage, name: &str) -> anyhow::Result
     let principal = storage
         .create(
             PrincipalCreate {
+                prompt_cache_mode: Default::default(),
                 name: name.to_owned(),
                 kind: PrincipalKind::Human,
                 allowed_models: Vec::new(),

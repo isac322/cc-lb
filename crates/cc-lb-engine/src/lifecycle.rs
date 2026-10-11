@@ -55,6 +55,10 @@ use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
 use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
+use crate::cache_policy::{
+    ANTHROPIC_MESSAGES_PATH, PromptCachePolicyError, apply_authenticated_prompt_cache_policy,
+    effective_messages_body_bytes, is_anthropic_messages_request, normalize_outbound_messages_body,
+};
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
@@ -449,6 +453,11 @@ pub enum PreviewRouteError {
     PrincipalNotFound(String),
     #[error("router pipeline instantiation error: {0}")]
     PipelineInstantiationError(String),
+    /// The preview could not build the effective body its principal's
+    /// prompt-cache policy requires, so it cannot describe a request the
+    /// authenticated path would send.
+    #[error("prompt cache policy error: {0}")]
+    PolicyError(String),
 }
 
 #[derive(Clone, Debug)]
@@ -2109,6 +2118,11 @@ enum AttemptFailure {
     /// The raw-passthrough fallback itself failed after dialect shaping had
     /// already failed.
     RawPassthrough(RawPassthroughError),
+    /// Dialect shaping or its raw fallback produced a body that cannot carry
+    /// the principal's prompt-cache policy — for example a non-JSON body on a
+    /// one-hour-mode `/v1/messages` request. The attempt stops instead of
+    /// falling back to the unnormalized bytes.
+    Policy(PromptCachePolicyError),
     /// Request signing failed.
     Sign(SignerError),
     /// Dispatch to the upstream failed.
@@ -2128,6 +2142,23 @@ impl AttemptFailure {
     /// previous inline mapping.
     fn into_response_and_failure(self) -> (Response<Body>, InternalFailure) {
         match self {
+            Self::Policy(source) => {
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    "failed to prepare upstream request",
+                );
+                let failure = InternalFailure {
+                    status: StatusCode::BAD_GATEWAY,
+                    error_code: error_codes::CACHE_POLICY_FAILED,
+                    error: InternalError {
+                        stage: InternalErrorStage::Shape,
+                        kind: InternalErrorKind::InvalidInput,
+                        message: Some(source.to_string()),
+                    },
+                };
+                (response, failure)
+            }
             Self::RawPassthrough(source) => {
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -2641,7 +2672,23 @@ impl Lifecycle {
             ));
         }
 
-        let body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
+        let mut body_value = sonic_rs::from_slice::<Value>(&input.body_bytes).ok();
+        // Preview routing must describe the same request the authenticated
+        // path would send: the same pure normalization core runs here, without
+        // an authentication proof (an admin preview has none to offer). The
+        // preview request below *is* the Anthropic Messages route, so it sits
+        // in the same policy scope as an authenticated request.
+        let body_bytes = match (body_value.as_mut(), principal_spec.prompt_cache_mode()) {
+            (Some(value), mode) => match effective_messages_body_bytes(mode, value) {
+                Ok(Some(effective_bytes)) => effective_bytes,
+                Ok(None) => input.body_bytes,
+                // The authenticated path fails a request whose effective bytes
+                // cannot be produced, so the preview reports the same failure
+                // instead of describing a body nobody would send.
+                Err(source) => return Err(PreviewRouteError::PolicyError(source.to_string())),
+            },
+            (None, _) => input.body_bytes,
+        };
         let cache_metadata = request_cache_metadata_from_value(&input.headers, body_value.as_ref());
         let cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
 
@@ -2655,9 +2702,9 @@ impl Lifecycle {
             .requested_service_tier(cache_metadata.requested_service_tier.clone())
             .downstream_headers(input.headers)
             .method(http::Method::POST)
-            .path("/v1/messages".to_owned())
+            .path(ANTHROPIC_MESSAGES_PATH.to_owned())
             .query(None)
-            .body_bytes(input.body_bytes)
+            .body_bytes(body_bytes)
             .cache_breakpoints(cache_breakpoints)
             .canonical_model_id(cache_metadata.canonical_model_id.clone())
             .cache_pricing(cache_pricing_summary_for_model(
@@ -2916,7 +2963,7 @@ impl Lifecycle {
         let started = Instant::now();
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
-        let body_view = RequestBodyView::new(&ctx.body_bytes);
+        let mut body_view = RequestBodyView::new(&ctx.body_bytes);
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings {
             json_parse_ms: Some(body_view.json_parse_ms()),
             ..cc_lb_lifecycle::RequestSetupTimings::default()
@@ -3032,6 +3079,45 @@ impl Lifecycle {
                 "invalid_request_error",
                 "request body must be valid JSON",
             ));
+        }
+        // Apply the authenticated principal policy before cache analysis.
+        ctx.prompt_cache_mode = cached.prompt_cache_mode();
+        if is_anthropic_messages_request(&ctx.method, &ctx.path)
+            && let Some(value) = body_view.value_mut()
+        {
+            match apply_authenticated_prompt_cache_policy(auth, ctx.prompt_cache_mode, value) {
+                // Publish the effective bytes with the mutated document: cache
+                // metadata, cost estimates, routing hashes, and the signed
+                // request must all be derived from the same body.
+                Ok(Some(effective_bytes)) => ctx.body_bytes = effective_bytes,
+                Ok(None) => {}
+                // The document was rewritten but its bytes could not be
+                // produced, so the request stops here rather than continuing
+                // with analysis of one body and bytes of another.
+                Err(source) => {
+                    tracing::error!(
+                        %source,
+                        "request body cannot carry the principal prompt-cache policy"
+                    );
+                    let response = anthropic_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "failed to prepare upstream request",
+                    );
+                    if let Some(o) = observer.as_ref() {
+                        o.terminate_failure(InternalFailure {
+                            status: StatusCode::BAD_GATEWAY,
+                            error_code: error_codes::CACHE_POLICY_FAILED,
+                            error: InternalError {
+                                stage: InternalErrorStage::Ingress,
+                                kind: InternalErrorKind::InvalidInput,
+                                message: Some(source.to_string()),
+                            },
+                        });
+                    }
+                    return Ok(response);
+                }
+            }
         }
         let prompt_cache_token_scope = prompt_cache_token_scope(&ctx.downstream_headers);
         let prompt_cache_analysis = match body_view.value_arc() {
@@ -4719,6 +4805,35 @@ impl Lifecycle {
                 numeric_attribute(Some(shape_ms)).as_value(),
             );
         }
+        // Dialect shaping may rebuild the body (or a plugin may rewrite it),
+        // so the principal's cache policy is re-asserted on the bytes that will
+        // actually be signed and sent. Only the Anthropic Messages route carries
+        // that contract: every other proxy route keeps whatever the dialect
+        // produced, exactly as the ingress normalization left it. A
+        // raw-passthrough fallback already carries the effective body and
+        // returns without re-encoding.
+        let shaped = if is_anthropic_messages_request(&ctx.method, &ctx.path)
+            && shaped.body() != &ctx.body_bytes
+        {
+            match normalize_outbound_messages_body(ctx.prompt_cache_mode, shaped.body()) {
+                Ok(Some(normalized)) => {
+                    let mut shaped = shaped;
+                    shaped.set_body(normalized);
+                    shaped
+                }
+                Ok(None) => shaped,
+                Err(source) => {
+                    tracing::error!(
+                        %source,
+                        "shaped body cannot carry the principal prompt-cache policy"
+                    );
+                    record_shape_internal_error(observer, &source.to_string());
+                    return Err(AttemptFailure::Policy(source));
+                }
+            }
+        } else {
+            shaped
+        };
         if capture_shaped_body {
             *shaped_body_out = Some(shaped.body().clone());
         }
@@ -6988,6 +7103,13 @@ impl RequestBodyView {
 
     fn value_arc(&self) -> Option<Arc<Value>> {
         self.parsed.as_ref().ok().cloned()
+    }
+
+    /// Mutable access to the parsed document for request policy rewriting.
+    /// Nothing else holds this `Arc` on the authenticated path yet, so the
+    /// first writer mutates in place rather than cloning the document.
+    fn value_mut(&mut self) -> Option<&mut Value> {
+        self.parsed.as_mut().ok().map(Arc::make_mut)
     }
 
     fn is_valid_json(&self) -> bool {
@@ -10248,6 +10370,7 @@ mod tests {
 
     fn principal_record(name: &str) -> PrincipalRecord {
         PrincipalRecord {
+            prompt_cache_mode: Default::default(),
             id: Uuid::new_v4(),
             name: name.to_owned(),
             kind: StoragePrincipalKind::Machine,

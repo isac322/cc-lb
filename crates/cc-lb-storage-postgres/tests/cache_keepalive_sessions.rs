@@ -33,6 +33,10 @@ async fn run_conformance(url: &str) -> Result<()> {
     let fixture = Fixture::create(url).await?;
     let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
     storage.initialize().await?;
+    // Session admission resolves the caller-visible principal id against the
+    // live principal table and fails closed on an id that resolves to nothing,
+    // so the fixture creates the principal its sessions name.
+    seed_principal(&storage, "principal").await?;
 
     replace_from_real_request_bumps_generation_and_resets_counters(&storage).await?;
     replace_roundtrips_optional_accounting_key_id(&storage).await?;
@@ -46,6 +50,24 @@ async fn run_conformance(url: &str) -> Result<()> {
     concurrent_claim_allows_exactly_one_enqueued_generation_winner(&storage).await?;
 
     fixture.drop_schema().await
+}
+
+async fn seed_principal(storage: &PostgresStorage, name: &str) -> Result<()> {
+    cc_lb_storage_api::PrincipalStore::create(
+        storage,
+        cc_lb_storage_api::principal::PrincipalCreate {
+            name: name.to_owned(),
+            kind: cc_lb_storage_api::PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            prompt_cache_mode: Default::default(),
+        },
+        100,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn replace_from_real_request_bumps_generation_and_resets_counters(

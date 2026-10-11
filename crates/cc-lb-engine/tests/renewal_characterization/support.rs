@@ -50,6 +50,25 @@ impl RenewalFixture {
             .initialize()
             .await
             .expect("initialize sqlite storage");
+        // Durable session admission resolves the caller-visible principal id
+        // against the live principal table and fails closed on an id that
+        // resolves to nothing, so the fixture creates the principal its
+        // renewals name.
+        cc_lb_storage_api::PrincipalStore::create(
+            storage.as_ref(),
+            cc_lb_storage_api::principal::PrincipalCreate {
+                name: "renewal-principal".to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+                prompt_cache_mode: Default::default(),
+            },
+            1,
+        )
+        .await
+        .expect("create fixture principal");
         let upstream = UpstreamStore::create(
             storage.as_ref(),
             UpstreamCreate {

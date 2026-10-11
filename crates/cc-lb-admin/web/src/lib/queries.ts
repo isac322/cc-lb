@@ -102,6 +102,15 @@ export interface PrincipalDefaultLimit {
   window_secs: number;
   cap_micros: number;
 }
+/**
+ * Principal prompt-cache policy.
+ *
+ * `preserve_client` honors the caller's cache controls and lets the stored
+ * keepalive configuration run. `one_hour_no_keepalive` promotes recognized
+ * ephemeral controls to `ttl: "1h"` and keeps the same configuration dormant.
+ */
+export type PromptCacheMode = 'preserve_client' | 'one_hour_no_keepalive';
+
 export interface Principal {
   id: string;
   name: string;
@@ -111,6 +120,7 @@ export interface Principal {
   allowed_models: string[];
   allowed_upstreams: string[];
   default_limits: PrincipalDefaultLimit[];
+  prompt_cache_mode: PromptCacheMode;
   cache_keepalive?: {
     enabled: boolean;
     refresh_lead_time_5m_secs: number;
@@ -1227,6 +1237,34 @@ export function useUpdatePrincipalCacheKeepalive() {
       patchJson<Principal, { cache_keepalive: Principal['cache_keepalive'] }>(
         `/admin/v1/principals/${id}`,
         { cache_keepalive },
+        { ifMatch: expected_revision },
+      ),
+    onSuccess: async (_data, vars) => {
+      await invalidatePrincipalRecordQueries(qc, vars.id);
+    },
+  });
+}
+
+/**
+ * One atomic prompt-cache mode write. The mode carries both effects (1h TTLs
+ * and dormant keepalives), so the UI never needs two PATCH calls.
+ */
+export function useUpdatePrincipalPromptCacheMode() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: PRINCIPAL_WRITE_MUTATION_KEY,
+    mutationFn: ({
+      id,
+      prompt_cache_mode,
+      expected_revision,
+    }: {
+      id: string;
+      prompt_cache_mode: PromptCacheMode;
+      expected_revision: number;
+    }) =>
+      patchJson<Principal, { prompt_cache_mode: PromptCacheMode }>(
+        `/admin/v1/principals/${id}`,
+        { prompt_cache_mode },
         { ifMatch: expected_revision },
       ),
     onSuccess: async (_data, vars) => {

@@ -193,6 +193,41 @@ impl Fixture {
         }));
     }
 
+    pub(super) fn enable_one_hour_mode_on_next_http_dispatch(&self) {
+        let dynamic_view = Arc::clone(&self.dynamic_view);
+        self.http.run_on_next_dispatch(Arc::new(move || {
+            let current = dynamic_view.load();
+            let mut cached = principal_record_with_id("principal");
+            cached.prompt_cache_mode = cc_lb_storage_api::PromptCacheMode::OneHourNoKeepalive;
+            let view = DynamicViewBuilder::from_view(&current)
+                .principal_view(Arc::new(PrincipalView::from_db(
+                    &[cached],
+                    std::collections::HashMap::new(),
+                )))
+                .build();
+            dynamic_view.store(view);
+        }));
+    }
+
+    pub(super) fn enable_one_hour_mode(&self) {
+        self.set_prompt_cache_mode(cc_lb_storage_api::PromptCacheMode::OneHourNoKeepalive);
+    }
+
+    /// Republishes the dynamic view with the principal's prompt-cache mode, the
+    /// way a completed admin PATCH does.
+    pub(super) fn set_prompt_cache_mode(&self, mode: cc_lb_storage_api::PromptCacheMode) {
+        let current = self.dynamic_view.load();
+        let mut cached = principal_record_with_id("principal");
+        cached.prompt_cache_mode = mode;
+        let view = DynamicViewBuilder::from_view(&current)
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[cached],
+                std::collections::HashMap::new(),
+            )))
+            .build();
+        self.dynamic_view.store(view);
+    }
+
     pub(super) fn enqueuer(
         &self,
         pusher: Arc<dyn CacheKeepaliveTaskPusher>,
@@ -364,6 +399,31 @@ impl Fixture {
             )
             .expect("snapshot captures"),
         }
+    }
+
+    /// Generations of every queued-but-unstarted keep-alive task.
+    pub(super) async fn pending_keepalive_generations(&self) -> Vec<u64> {
+        let tasks = self
+            .backend
+            .backend
+            .list_keepalive_tasks(&Filter {
+                status: Some(TaskStatus::Pending),
+                page: 1,
+                page_size: Some(20),
+            })
+            .await
+            .expect("list cache keepalive tasks");
+        let mut generations: Vec<u64> = tasks
+            .into_iter()
+            .filter_map(|task| match task.args {
+                AdaptiveJob::CacheKeepalive(job) => Some(job.generation),
+                AdaptiveJob::Warmup(_)
+                | AdaptiveJob::OAuthRefresh(_)
+                | AdaptiveJob::MetadataRefresh(_) => None,
+            })
+            .collect();
+        generations.sort_unstable();
+        generations
     }
 
     pub(super) async fn pending_keepalive_job(&self, generation: u64) -> CacheKeepaliveJob {

@@ -20,6 +20,7 @@ impl SchedulerDispatch {
         snapshot: &RequestSnapshot,
         finalization: RenewalFinalization,
         hit_miss: &str,
+        keepalive_authorized: bool,
     ) -> SchedulerResult<()> {
         let source_ref_id = format!("{}:{}", job.session_key_hash, job.generation);
         let event_id = format!("renewal:{source_ref_id}");
@@ -62,6 +63,7 @@ impl SchedulerDispatch {
             usage: &finalization.usage,
             cost_micros: cost.total_micros,
             hit_miss,
+            keepalive_authorized,
             generation: job.generation,
             ts,
         });
@@ -130,6 +132,7 @@ struct RenewalProjectionInput<'a> {
     usage: &'a RenewalUsage,
     cost_micros: i64,
     hit_miss: &'a str,
+    keepalive_authorized: bool,
     generation: u64,
     ts: u64,
 }
@@ -217,13 +220,8 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             principal_id: input.record.principal_id.clone(),
             session_key_hash: Some(input.record.session_key_hash.clone()),
             upstream_id: input.record.upstream_id,
-            decision: if input.hit_miss == "hit" {
-                "reschedule"
-            } else {
-                "terminal"
-            }
-            .to_owned(),
-            reason: cache_keepalive_renewal_reason(input.hit_miss),
+            decision: renewal_decision(input.hit_miss, input.keepalive_authorized).to_owned(),
+            reason: renewal_decision_reason(input.hit_miss, input.keepalive_authorized),
             error: None,
             generation: input.generation,
             ttl: input.record.ttl,
@@ -231,6 +229,23 @@ fn renewal_projections(input: RenewalProjectionInput<'_>) -> RequestEventProject
             last_message_at_ms: input.ts.saturating_mul(1_000),
             ts: input.ts,
         },
+    }
+}
+
+/// A hit can reschedule only while the principal still authorizes renewals.
+fn renewal_decision(hit_miss: &str, keepalive_authorized: bool) -> &'static str {
+    if hit_miss == "hit" && keepalive_authorized {
+        "reschedule"
+    } else {
+        "terminal"
+    }
+}
+
+fn renewal_decision_reason(hit_miss: &str, keepalive_authorized: bool) -> String {
+    if hit_miss == "hit" && !keepalive_authorized {
+        "cache hit; keep-alive authorization revoked".to_owned()
+    } else {
+        cache_keepalive_renewal_reason(hit_miss)
     }
 }
 
@@ -244,7 +259,7 @@ fn cache_keepalive_renewal_reason(hit_miss: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cache_keepalive_renewal_reason;
+    use super::{cache_keepalive_renewal_reason, renewal_decision, renewal_decision_reason};
 
     #[test]
     fn cache_hit_reason_is_human_readable() {
@@ -256,5 +271,21 @@ mod tests {
 
         // Then: it is not the generic storage token.
         assert_eq!(reason, "cache hit");
+    }
+
+    #[test]
+    fn a_hit_reschedules_only_when_the_follow_up_permits_it() {
+        assert_eq!(renewal_decision("hit", true), "reschedule");
+        assert_eq!(renewal_decision("hit", false), "terminal");
+        assert_eq!(renewal_decision("miss", true), "terminal");
+    }
+
+    #[test]
+    fn a_suppressed_reschedule_names_the_mode_change_in_its_reason() {
+        assert_eq!(
+            renewal_decision_reason("hit", false),
+            "cache hit; keep-alive authorization revoked"
+        );
+        assert_eq!(renewal_decision_reason("miss", true), "cache miss");
     }
 }

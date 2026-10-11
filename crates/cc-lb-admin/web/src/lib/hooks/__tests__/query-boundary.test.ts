@@ -295,6 +295,7 @@ describe('query observer boundaries', () => {
       allowed_upstreams: [],
       default_limits: [],
       cache_keepalive: null,
+      prompt_cache_mode: 'preserve_client',
     });
     let revision = 7;
     let strategy = 'first-pick';

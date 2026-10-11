@@ -233,6 +233,7 @@ pub(crate) mod error_codes {
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
     pub(crate) const SIGNER_FAILED: &str = "signer_failed";
+    pub(crate) const CACHE_POLICY_FAILED: &str = "cache_policy_failed";
     pub(crate) const UPSTREAM_DISPATCH_FAILED: &str = "upstream_dispatch_failed";
     pub(crate) const UPSTREAM_4XX: &str = "upstream_4xx";
     pub(crate) const UPSTREAM_5XX: &str = "upstream_5xx";

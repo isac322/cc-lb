@@ -8,6 +8,7 @@ use cc_lb_storage_api::principal::{
 
 fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
     vec![PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: uuid::Uuid::new_v4(),
         name: "u1".to_owned(),
         kind: DbPrincipalKind::Machine,

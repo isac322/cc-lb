@@ -76,7 +76,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 | POST | `/admin/v1/principals` | Bearer | CreatePrincipalBody | PrincipalResponse | `conflict`, `unsupported_cache_keepalive_llm_judge` |
 | GET | `/admin/v1/principals` | Bearer | None | List of PrincipalResponse | None |
 | GET | `/admin/v1/principals/{id}` | Bearer | None | PrincipalResponse | `unknown_principal` |
-| PUT | `/admin/v1/principals/{id}` | Bearer | UpdatePrincipalBody | PrincipalResponse | `stale_revision`, `unsupported_cache_keepalive_llm_judge` |
+| PUT | `/admin/v1/principals/{id}` | Bearer | UpdatePrincipalBody | PrincipalResponse | `stale_revision`, `prompt_cache_mode_null_not_allowed`, `unsupported_cache_keepalive_llm_judge` |
 | DELETE | `/admin/v1/principals/{id}` | Bearer | None | None | `stale_revision` |
 | POST | `/admin/v1/principals/{id}/enable` | Bearer | None | PrincipalResponse | `stale_revision` |
 | POST | `/admin/v1/principals/{id}/disable` | Bearer | None | PrincipalResponse | `stale_revision` |
@@ -90,6 +90,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "kind": "machine",
   "allowed_models": ["claude-sonnet-4-5-20250929"],
   "default_limits": [],
+  "prompt_cache_mode": "preserve_client",
   "cache_keepalive": {
     "enabled": true,
     "refresh_lead_time_5m_secs": 30,
@@ -113,6 +114,21 @@ provider-gating rules are documented in
 `cache_keepalive.classifier.llm_judge` is reserved for a future release;
 create/update requests that set it return `unsupported_cache_keepalive_llm_judge`.
 
+`prompt_cache_mode` is optional and defaults to `preserve_client` on create:
+
+- `preserve_client` — the caller's `cache_control` markers are honored as sent,
+  and the principal's `cache_keepalive` configuration operates normally.
+- `one_hour_no_keepalive` — recognized ephemeral cache controls are promoted to
+  `ttl: "1h"`, and synthetic keep-alives are prohibited. A stored
+  `cache_keepalive` configuration stays persisted but dormant.
+
+An update that omits `prompt_cache_mode` preserves the stored mode, including
+updates that only touch `cache_keepalive`. `"prompt_cache_mode": null` is
+rejected with `prompt_cache_mode_null_not_allowed`; unknown values are rejected
+by request validation. See
+[docs/cache-keepalive-operator.md](./cache-keepalive-operator.md) for the
+runtime behavior and precedence.
+
 #### PrincipalResponse
 
 ```json
@@ -124,6 +140,7 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
   "revision": 1,
   "allowed_models": ["claude-sonnet-4-5-20250929"],
   "default_limits": [],
+  "prompt_cache_mode": "preserve_client",
   "cache_keepalive": null
 }
 ```
@@ -131,6 +148,11 @@ create/update requests that set it return `unsupported_cache_keepalive_llm_judge
 The `cache_keepalive` field mirrors whatever was persisted on the
 principal, or `null` when unset. `PATCH /admin/v1/principals/{id}` with
 `"cache_keepalive": null` clears the config.
+
+`prompt_cache_mode` is always present on create, get, and list responses. It
+reports the stored mode, not its effect: a principal in
+`one_hour_no_keepalive` still returns its persisted `cache_keepalive` object,
+which is dormant until the mode returns to `preserve_client`.
 
 Each principal receives a built-in `subscription-preference` Router chain
 entry at creation, with order `0`. Use the plugin-chain endpoints below to

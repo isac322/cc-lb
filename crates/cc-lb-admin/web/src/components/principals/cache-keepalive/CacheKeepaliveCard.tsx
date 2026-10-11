@@ -4,9 +4,11 @@ import { toast } from 'sonner';
 import { ApiError } from '../../../lib/api';
 import {
   type Principal,
+  type PromptCacheMode,
   useCacheKeepaliveSummary,
   usePrincipalWritePending,
   useUpdatePrincipalCacheKeepalive,
+  useUpdatePrincipalPromptCacheMode,
 } from '../../../lib/queries';
 import { undoToast } from '../../../lib/undoToast';
 import { DetailSection } from '../../ui/DetailPane';
@@ -57,6 +59,15 @@ function CacheKeepaliveHelpHover() {
     <HelpIcon
       label="Cache keepalive help"
       text="Keeps the Anthropic prompt cache warm by renewing its TTL — fires a tiny synthetic request just before the prompt cache expires so the next real request still hits a warm cache."
+    />
+  );
+}
+
+function OneHourCacheHelpHover() {
+  return (
+    <HelpIcon
+      label="One-hour cache help"
+      text="Requests one-hour cache lifetimes. Keep-alives are disabled."
     />
   );
 }
@@ -114,11 +125,14 @@ function MetricTile({
 
 export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const updateSettings = useUpdatePrincipalCacheKeepalive();
+  const updateCacheMode = useUpdatePrincipalPromptCacheMode();
   // Sibling principal writes bump the revision this toggle would submit, so the
   // switch stays locked for the whole shared write, not just its own request.
   const principalWritePending = usePrincipalWritePending(principal.id) > 0;
   const togglePending = updateSettings.isPending;
+  const modePending = updateCacheMode.isPending;
   const toggleLocked = togglePending || principalWritePending;
+  const modeLocked = modePending || principalWritePending;
   const summaryQ = useCacheKeepaliveSummary(principal.id);
   const summary = summaryQ.data;
 
@@ -126,6 +140,7 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   const [sessionsOpen, setSessionsOpen] = useState(false);
 
   const enabled = principal.cache_keepalive?.enabled ?? false;
+  const oneHourMode = principal.prompt_cache_mode === 'one_hour_no_keepalive';
 
   const applyEnabled = (
     nextEnabled: boolean,
@@ -185,8 +200,61 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
   };
 
   const handleToggle = () => {
-    if (toggleLocked) return;
+    if (toggleLocked || oneHourMode) return;
     applyEnabled(!enabled, principal, true);
+  };
+
+  const applyPromptCacheMode = (
+    nextMode: PromptCacheMode,
+    base: Pick<Principal, 'revision'>,
+  ) => {
+    updateCacheMode.mutate(
+      {
+        id: principal.id,
+        expected_revision: base.revision,
+        prompt_cache_mode: nextMode,
+      },
+      {
+        onSuccess: (updated) => {
+          // The mode carries both effects, so the write bumps the revision the
+          // undo has to match. Undo offers only the mode itself back.
+          undoToast({
+            message:
+              nextMode === 'one_hour_no_keepalive'
+                ? 'One-hour cache enabled'
+                : 'Client cache policy restored',
+            onUndo: () =>
+              applyPromptCacheMode(
+                nextMode === 'one_hour_no_keepalive'
+                  ? 'preserve_client'
+                  : 'one_hour_no_keepalive',
+                updated,
+              ),
+          });
+        },
+        onError: (error) => {
+          if (error instanceof ApiError && error.status === 412) {
+            toast.error(
+              'Principal was modified by another user. Please refresh and try again.',
+            );
+          } else {
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : 'Failed to update cache mode',
+            );
+          }
+        },
+      },
+    );
+  };
+
+  const handleOneHourToggle = () => {
+    if (modeLocked) return;
+    applyPromptCacheMode(
+      oneHourMode ? 'preserve_client' : 'one_hour_no_keepalive',
+      principal,
+    );
   };
 
   const headerTitle = (
@@ -210,6 +278,12 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         variant="secondary"
         iconLeft={<SlidersHorizontal />}
         size="sm"
+        disabled={oneHourMode}
+        title={
+          oneHourMode
+            ? 'Disabled by one-hour cache mode'
+            : 'Keep-alive settings'
+        }
         onClick={() => setSettingsOpen(true)}
       >
         Settings
@@ -220,13 +294,17 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         aria-label="Toggle cache keepalive"
         label={
           <span className="text-text-muted">
-            {enabled ? 'Enabled' : 'Disabled'}
+            {oneHourMode
+              ? 'Disabled by one-hour cache mode'
+              : enabled
+                ? 'Enabled'
+                : 'Disabled'}
           </span>
         }
         aria-busy={togglePending || undefined}
         checked={enabled}
         data-testid="cache-keepalive-switch"
-        disabled={toggleLocked}
+        disabled={toggleLocked || oneHourMode}
         onChange={handleToggle}
         className="ml-1 flex-row-reverse"
       />
@@ -246,7 +324,33 @@ export function CacheKeepaliveCard({ principal }: { principal: Principal }) {
         description="Renews the prompt-cache TTL during idle gaps."
         action={headerActions}
       >
-        {!enabled ? (
+        <div className="mb-5">
+          <ToggleSwitch
+            role="switch"
+            aria-label="Use one-hour cache"
+            data-testid="prompt-cache-mode-switch"
+            checked={oneHourMode}
+            disabled={modeLocked}
+            aria-busy={modePending || undefined}
+            onChange={handleOneHourToggle}
+            label={
+              <span className="flex items-center gap-2">
+                <span>Use one-hour cache</span>
+                <OneHourCacheHelpHover />
+              </span>
+            }
+            description="Requests one-hour cache lifetimes. Keep-alives are disabled."
+          />
+        </div>
+        {oneHourMode ? (
+          <p
+            className="text-body text-text-muted"
+            data-testid="cache-keepalive-dormant"
+          >
+            Keep-alives are disabled by one-hour cache mode. Saved settings
+            return when you switch it off.
+          </p>
+        ) : !enabled ? (
           <p
             className="text-body text-text-muted"
             data-testid="cache-keepalive-off"

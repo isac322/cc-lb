@@ -111,6 +111,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: "test-principal".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),

@@ -11,6 +11,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 const PRINCIPAL_ID: &str = "principal-a";
+const OTHER_PRINCIPAL_ID: &str = "principal-b";
 const UPSTREAM_ID: Uuid = Uuid::from_u128(7);
 
 async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
@@ -27,6 +28,26 @@ async fn storage() -> (tempfile::TempDir, cc_lb_storage_sqlite::SqliteStorage) {
             .await
             .expect("open sqlite");
     storage.initialize().await.expect("initialize sqlite");
+    // Session admission resolves the caller-visible principal id against the
+    // live principal table and fails closed on an id that resolves to nothing,
+    // so the fixture creates the principals its sessions name.
+    for name in [PRINCIPAL_ID, OTHER_PRINCIPAL_ID] {
+        cc_lb_storage_api::PrincipalStore::create(
+            &storage,
+            cc_lb_storage_api::principal::PrincipalCreate {
+                name: name.to_owned(),
+                kind: cc_lb_storage_api::PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+                cache_keepalive: None,
+                prompt_cache_mode: Default::default(),
+            },
+            100,
+        )
+        .await
+        .expect("create principal");
+    }
     (temp_dir, storage)
 }
 

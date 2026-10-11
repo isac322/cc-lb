@@ -245,6 +245,45 @@ fn usage_rollup_v2_preserves_upstream_id_across_renames_sqlite() {
 }
 
 #[test]
+fn prompt_cache_mode_roundtrip_and_omission_sqlite() {
+    run_sqlite_scenario(
+        "prompt_cache_mode_roundtrip_and_omission",
+        principal_store::prompt_cache_mode_roundtrip_and_omission,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_stale_revision_conflict_sqlite() {
+    run_sqlite_scenario(
+        "prompt_cache_mode_stale_revision_conflict",
+        principal_store::prompt_cache_mode_stale_revision_conflict,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_cancels_active_keepalive_sessions_sqlite() {
+    run_sqlite_scenario(
+        "prompt_cache_mode_cancels_active_keepalive_sessions",
+        principal_store::prompt_cache_mode_cancels_active_keepalive_sessions,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_rename_and_switch_retires_every_identity_sqlite() {
+    run_sqlite_scenario(
+        "prompt_cache_mode_rename_and_switch_retires_every_identity",
+        principal_store::prompt_cache_mode_rename_and_switch_retires_every_identity,
+    );
+}
+
+#[test]
+fn keepalive_session_admission_matches_principal_view_resolution_sqlite() {
+    run_sqlite_scenario(
+        "keepalive_session_admission_matches_principal_view_resolution",
+        principal_store::keepalive_session_admission_matches_principal_view_resolution,
+    );
+}
+#[test]
 fn principal_allowed_upstreams_roundtrip_sqlite() {
     run_sqlite_scenario(
         "principal_allowed_upstreams_roundtrip",

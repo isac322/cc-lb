@@ -72,6 +72,8 @@ The scheduler defines three distinct retry classes to handle different failure m
   - Backoff curve: No retries (fails fast)
 - **Cache keepalive override**: `CacheKeepaliveJob` is enqueued with `max_attempts=1` even though it is an entity-shaped Apalis row. Cache misses, stale generations, decrypt failures, unsupported providers, and dispatch errors are business outcomes recorded as terminal/noop state and metrics; they must not rely on Apalis retries.
 
+- **Cache keepalive principal authorization**: a worker re-reads the principal's current state before dispatch, after payload decryption and reservation, and once more after the upstream call. A principal in `one_hour_no_keepalive` prompt-cache mode is not authorized: a renewal that has not dispatched yet is retired without an upstream call, and a renewal that already dispatched still finalizes its usage before the session is retired and rescheduled is suppressed.
+
 ## 7. Scheduler Failures and Admin Endpoint
 
 When a job exhausts its retry class, it remains in a terminal `Failed` or `Killed` state in Apalis. The admin endpoint reads those Apalis rows directly and surfaces them to operators.

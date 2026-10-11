@@ -7,6 +7,16 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('sonner', () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
+import { toast } from 'sonner';
+import { ApiError } from '../../../../lib/api';
 import * as queries from '../../../../lib/queries';
 import { cacheKeepaliveAnimationContract } from '../__fixtures__/cacheKeepaliveContract';
 import { CacheKeepaliveCard } from '../CacheKeepaliveCard';
@@ -20,6 +30,7 @@ const mockPrincipal: queries.Principal = {
   allowed_models: [],
   allowed_upstreams: [],
   default_limits: [],
+  prompt_cache_mode: 'preserve_client',
   cache_keepalive: {
     enabled: true,
     refresh_lead_time_5m_secs: 45,
@@ -56,6 +67,12 @@ describe('CacheKeepaliveCard', () => {
       isPending: false,
     } as unknown as ReturnType<
       typeof queries.useUpdatePrincipalCacheKeepalive
+    >);
+    vi.spyOn(queries, 'useUpdatePrincipalPromptCacheMode').mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<
+      typeof queries.useUpdatePrincipalPromptCacheMode
     >);
     vi.spyOn(queries, 'usePrincipalWritePending').mockReturnValue(0);
     vi.spyOn(queries, 'useCacheKeepaliveSummary').mockReturnValue({
@@ -195,6 +212,192 @@ describe('CacheKeepaliveCard', () => {
     expect(toggle.getAttribute('aria-busy')).toBeNull();
     fireEvent.click(toggle);
     expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('Given one-hour cache mode, When rendered, Then keepalive controls read as dormant', () => {
+    renderWithProviders(
+      <CacheKeepaliveCard
+        principal={{
+          ...mockPrincipal,
+          prompt_cache_mode: 'one_hour_no_keepalive',
+        }}
+      />,
+    );
+
+    const modeToggle = screen.getByTestId(
+      'prompt-cache-mode-switch',
+    ) as HTMLInputElement;
+    expect(modeToggle.checked).toBe(true);
+
+    const toggle = screen.getByTestId('cache-keepalive-switch');
+    expect(toggle.hasAttribute('disabled')).toBe(true);
+    expect(
+      screen
+        .getByRole('switch', { name: 'Toggle cache keepalive' })
+        .closest('label')?.textContent,
+    ).toBe('Disabled by one-hour cache mode');
+
+    expect(screen.getByTestId('cache-keepalive-dormant')).toBeDefined();
+    expect(
+      screen.getByText(
+        'Keep-alives are disabled by one-hour cache mode. Saved settings return when you switch it off.',
+      ),
+    ).toBeDefined();
+    expect(
+      screen.getByRole('button', { name: 'Settings' }).hasAttribute('disabled'),
+    ).toBe(true);
+    // Historical usage stays viewable.
+    expect(
+      screen.getByRole('button', { name: 'Sessions' }).hasAttribute('disabled'),
+    ).toBe(false);
+    expect(screen.queryByText('Renewing now')).toBeNull();
+    expect(screen.queryByTestId('cache-keepalive-off')).toBeNull();
+  });
+
+  it('Given client policy, When the one-hour switch turns on, Then one atomic mode write carries the current revision', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useUpdatePrincipalPromptCacheMode).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    fireEvent.click(screen.getByTestId('prompt-cache-mode-switch'));
+
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: 'p-123',
+        expected_revision: 42,
+        prompt_cache_mode: 'one_hour_no_keepalive',
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('Given the one-hour label contains a help button, When the visible slider is clicked, Then the mode write fires', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useUpdatePrincipalPromptCacheMode).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+    const toggle = screen.getByTestId('prompt-cache-mode-switch');
+    const track = toggle.nextElementSibling;
+    if (!track) throw new Error('missing visible switch track');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'One-hour cache help' }),
+    );
+    expect(mutate).not.toHaveBeenCalled();
+    fireEvent.click(track);
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: 'p-123',
+        expected_revision: 42,
+        prompt_cache_mode: 'one_hour_no_keepalive',
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('Given one-hour cache mode, When the switch turns off, Then client policy is restored through the same single write', () => {
+    const mutate = vi.fn();
+    vi.mocked(queries.useUpdatePrincipalPromptCacheMode).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(
+      <CacheKeepaliveCard
+        principal={{
+          ...mockPrincipal,
+          prompt_cache_mode: 'one_hour_no_keepalive',
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('prompt-cache-mode-switch'));
+
+    expect(mutate).toHaveBeenCalledWith(
+      {
+        id: 'p-123',
+        expected_revision: 42,
+        prompt_cache_mode: 'preserve_client',
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('Given a stale revision, When the mode write fails, Then the conflict is surfaced', () => {
+    const mutate = vi.fn(
+      (_vars: unknown, options: { onError: (error: Error) => void }) => {
+        options.onError(
+          new ApiError(
+            412,
+            'precondition_failed',
+            { error: 'precondition_failed' },
+            'precondition_failed',
+          ),
+        );
+      },
+    );
+    vi.mocked(queries.useUpdatePrincipalPromptCacheMode).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    fireEvent.click(screen.getByTestId('prompt-cache-mode-switch'));
+
+    expect(toast.error).toHaveBeenCalledWith(
+      'Principal was modified by another user. Please refresh and try again.',
+    );
+  });
+
+  it('Given the undo action, When pressed, Then the previous mode is written back against the returned revision', () => {
+    const mutate = vi.fn(
+      (_vars: unknown, options: { onSuccess: (updated: unknown) => void }) => {
+        options.onSuccess({ ...mockPrincipal, revision: 43 });
+      },
+    );
+    vi.mocked(queries.useUpdatePrincipalPromptCacheMode).mockReturnValue({
+      mutate,
+      isPending: false,
+    } as never);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    fireEvent.click(screen.getByTestId('prompt-cache-mode-switch'));
+    expect(toast.success).toHaveBeenCalledWith(
+      'One-hour cache enabled',
+      expect.objectContaining({
+        action: expect.objectContaining({ label: 'Undo' }),
+      }),
+    );
+
+    const toastOptions = vi.mocked(toast.success).mock
+      .calls[0][1] as unknown as { action: { onClick: () => void } };
+    toastOptions.action.onClick();
+
+    expect(mutate).toHaveBeenLastCalledWith(
+      {
+        id: 'p-123',
+        expected_revision: 43,
+        prompt_cache_mode: 'preserve_client',
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('Given a pending principal write, When rendered, Then the mode switch is locked', () => {
+    vi.mocked(queries.usePrincipalWritePending).mockReturnValue(1);
+
+    renderWithProviders(<CacheKeepaliveCard principal={mockPrincipal} />);
+
+    const modeToggle = screen.getByTestId('prompt-cache-mode-switch');
+    expect(modeToggle.hasAttribute('disabled')).toBe(true);
   });
 
   it('has no Active badge and no live dot text/element', () => {

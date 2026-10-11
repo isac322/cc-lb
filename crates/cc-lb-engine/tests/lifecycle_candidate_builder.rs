@@ -287,6 +287,7 @@ fn test_view_with_principal_view(
 
 fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: name.to_owned(),
         kind: PrincipalKind::Machine,

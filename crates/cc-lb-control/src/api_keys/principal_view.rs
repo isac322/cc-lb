@@ -4,7 +4,9 @@ use std::sync::Arc;
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_routing::FilterPlugin;
 use cc_lb_storage_api::principal::Limit as DbLimit;
-use cc_lb_storage_api::{CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord};
+use cc_lb_storage_api::{
+    CacheKeepaliveConfig, PrincipalKind as DbPrincipalKind, PrincipalRecord, PromptCacheMode,
+};
 use cc_lb_upstream::UpstreamDialect;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use uuid::Uuid;
@@ -66,6 +68,7 @@ pub struct PrincipalSpecCached {
     default_router_pipeline: Arc<RouterPipelineCache>,
     dialect: DialectCache,
     cache_keepalive: Option<Arc<CacheKeepaliveConfig>>,
+    prompt_cache_mode: PromptCacheMode,
 }
 
 impl PrincipalView {
@@ -90,6 +93,7 @@ impl PrincipalView {
             updated_at_unix_secs: 0,
             router_terminal_strategy: Default::default(),
             cache_keepalive: None,
+            prompt_cache_mode: PromptCacheMode::PreserveClient,
         };
         principal_chains
             .entry(principal_id.to_owned())
@@ -138,10 +142,15 @@ impl PrincipalView {
                     principal.router_terminal_strategy.clone(),
                 ));
 
+                // Effective keep-alive state: a stored config is exposed only
+                // when it is enabled AND the principal's prompt-cache mode still
+                // permits synthetic keep-alives. Every keep-alive scheduler,
+                // snapshot-capture, and enqueue gate reads this one accessor, so
+                // the mode precedence lives here and nowhere else.
                 let cache_keepalive = principal
                     .cache_keepalive
                     .clone()
-                    .filter(|cfg| cfg.enabled)
+                    .filter(|cfg| cfg.enabled && !principal.prompt_cache_mode.prohibits_keepalive())
                     .map(Arc::new);
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -155,6 +164,7 @@ impl PrincipalView {
                     default_router_pipeline,
                     dialect,
                     cache_keepalive,
+                    prompt_cache_mode: principal.prompt_cache_mode,
                 };
 
                 (principal_id, cached)
@@ -260,8 +270,16 @@ impl PrincipalSpecCached {
         }
     }
 
+    /// Effective keep-alive configuration: `None` when the principal is in a
+    /// keep-alive-prohibiting [`PromptCacheMode`], even if a stored config is
+    /// enabled. This is the only precedence check keep-alive callers need.
     pub fn cache_keepalive(&self) -> Option<&Arc<CacheKeepaliveConfig>> {
         self.cache_keepalive.as_ref()
+    }
+
+    /// Effective prompt-cache policy for request normalization.
+    pub fn prompt_cache_mode(&self) -> PromptCacheMode {
+        self.prompt_cache_mode
     }
 }
 
@@ -310,6 +328,7 @@ mod tests {
             )),
             dialect: DialectCache::Inherit,
             cache_keepalive: None,
+            prompt_cache_mode: PromptCacheMode::PreserveClient,
         }
     }
 

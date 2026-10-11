@@ -967,10 +967,13 @@ export function ToggleSwitch({
      */
     variant?: 'card' | 'compact';
   }) {
+  const generatedId = useId();
+  const inputId = rest.id ?? generatedId;
   const compact = variant === 'compact';
   const hasText = label != null || description != null;
   return (
     <label
+      htmlFor={inputId}
       className={cx(
         compact
           ? 'flex min-h-[44px] min-w-0 cursor-pointer items-center gap-2'
@@ -1004,7 +1007,12 @@ export function ToggleSwitch({
           compact ? undefined : 'mt-0.5',
         )}
       >
-        <input {...rest} type="checkbox" className="peer sr-only" />
+        <input
+          {...rest}
+          id={inputId}
+          type="checkbox"
+          className="peer sr-only"
+        />
         <span className="absolute inset-0 rounded-full border border-subtle-strong bg-progress-track transition-colors peer-checked:border-accent peer-checked:bg-accent peer-disabled:border-dashed peer-disabled:border-border-disabled peer-disabled:bg-transparent peer-checked:peer-disabled:border-border-disabled peer-checked:peer-disabled:bg-progress-track peer-focus-visible:outline-2 peer-focus-visible:outline-accent peer-focus-visible:outline-offset-2" />
         <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-text-muted transition-transform motion-reduce:transition-none peer-checked:translate-x-4 peer-checked:bg-accent-ink peer-disabled:bg-text-disabled peer-checked:peer-disabled:bg-text-disabled" />
       </span>

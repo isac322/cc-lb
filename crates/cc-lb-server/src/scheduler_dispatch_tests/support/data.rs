@@ -3,6 +3,7 @@ use cc_lb_storage_api::{CacheKeepaliveConfig, ClassifierConfig};
 
 pub(super) fn principal_with_keepalive() -> cc_lb_storage_api::PrincipalCreate {
     cc_lb_storage_api::PrincipalCreate {
+        prompt_cache_mode: Default::default(),
         name: "principal".to_owned(),
         kind: PrincipalKind::Machine,
         allowed_models: Vec::new(),
@@ -14,6 +15,7 @@ pub(super) fn principal_with_keepalive() -> cc_lb_storage_api::PrincipalCreate {
 
 pub(super) fn principal_record_with_id(id: &str) -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: id.parse().unwrap_or_else(|_| uuid::Uuid::from_u128(1)),
         name: id.to_owned(),
         kind: PrincipalKind::Machine,

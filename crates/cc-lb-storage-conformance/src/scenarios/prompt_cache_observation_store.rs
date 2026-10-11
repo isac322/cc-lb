@@ -936,6 +936,11 @@ where
     with_conformance_fixture(backend, |storage| async move {
         let now = unix_secs(clock.now());
         let id = upstream_id(42);
+        // Durable session admission resolves the caller-visible principal id
+        // against the live principal table and fails closed on an id that
+        // resolves to nothing, so the scenario creates the principal the
+        // renewal names.
+        create_session_principal(&*storage, "principal").await?;
         let session = storage
             .replace_from_real_request(&CacheKeepaliveReplaceRequest {
                 session_key_hash: "persisted-renewal".to_owned(),
@@ -995,4 +1000,27 @@ where
         Ok(())
     })
     .await
+}
+
+/// Creates the principal a session-writing scenario names, because session
+/// admission fails closed on an id the live principal table cannot resolve.
+async fn create_session_principal<S>(storage: &S, name: &str) -> Result<()>
+where
+    S: cc_lb_storage_api::PrincipalStore + ?Sized,
+{
+    cc_lb_storage_api::PrincipalStore::create(
+        storage,
+        cc_lb_storage_api::principal::PrincipalCreate {
+            name: name.to_owned(),
+            kind: cc_lb_storage_api::PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            prompt_cache_mode: Default::default(),
+        },
+        1,
+    )
+    .await?;
+    Ok(())
 }

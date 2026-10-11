@@ -13,6 +13,8 @@ mod plugin_registry_models;
 pub mod plugin_slot_kind;
 pub mod pool_quota_history;
 pub mod principal;
+pub mod principal_identity;
+pub mod prompt_cache_mode;
 pub mod prompt_cache_observation;
 pub mod request_event_list;
 pub mod request_event_projections;
@@ -48,6 +50,8 @@ pub use plugin_registry::*;
 pub use plugin_slot_kind::*;
 pub use pool_quota_history::*;
 pub use principal::*;
+pub use principal_identity::{PrincipalIdentityRef, principal_identity_refs};
+pub use prompt_cache_mode::PromptCacheMode;
 pub use prompt_cache_observation::{
     PromptCacheObservationRecord, PromptCacheObservationStore, PromptCacheProtection,
 };

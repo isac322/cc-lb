@@ -224,6 +224,16 @@ pub struct CacheKeepaliveGenerationCheck {
 
 #[async_trait]
 pub trait CacheKeepaliveSessionStore: Send + Sync {
+    /// Starts or replaces the active session for a real request.
+    ///
+    /// The write is fenced by the principal's *current* prompt-cache policy
+    /// inside the same transaction: when the principal is in
+    /// [`PromptCacheMode::OneHourNoKeepalive`](crate::PromptCacheMode::OneHourNoKeepalive),
+    /// nothing is written and the call fails with
+    /// [`StorageError::InvalidInput`](crate::StorageError::InvalidInput)
+    /// naming `principal.prompt_cache_mode`. A request admitted before a mode
+    /// change therefore cannot recreate an active session after the mode
+    /// update retired it.
     async fn replace_from_real_request(
         &self,
         request: &CacheKeepaliveReplaceRequest,

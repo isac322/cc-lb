@@ -76,6 +76,7 @@ async fn create_principal(storage: &Storage, name: &str) -> PrincipalRecord {
     PrincipalStore::create(
         storage,
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),

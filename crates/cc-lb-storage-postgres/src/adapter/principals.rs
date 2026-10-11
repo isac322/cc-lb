@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
-    validate_identifier,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, CacheKeepaliveTerminalReason,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
+    PromptCacheMode, StorageError, StorageResult, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{AssertSqlSafe, Row};
+use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
@@ -37,7 +37,7 @@ impl PrincipalStore for PostgresStorage {
             .transpose()?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
-            "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at, cache_keepalive) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7, $8) RETURNING *",
+            "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at, cache_keepalive, prompt_cache_mode) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7, $8, $9) RETURNING *",
         )
         .bind(id)
         .bind(input.name)
@@ -47,6 +47,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(default_limits)
         .bind(now)
         .bind(cache_keepalive)
+        .bind(input.prompt_cache_mode.as_db_value())
         .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -67,7 +68,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, prompt_cache_mode FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -76,7 +77,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, prompt_cache_mode FROM principals_v1 WHERE name = $1 AND deleted_at IS NULL")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -94,7 +95,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, deleted_at, revision, created_at, updated_at, router_terminal_strategy, cache_keepalive, prompt_cache_mode FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -115,15 +116,30 @@ impl PrincipalStore for PostgresStorage {
         if let Some(name) = update.name.as_deref() {
             validate_identifier("principal.name", name)?;
         }
-        let Some(current) = self.get_by_id(id).await? else {
+        let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        // Lock the row for the whole update so the mode write and the
+        // keep-alive session fence below become visible together, and so a
+        // concurrent session write waits here instead of racing the fence.
+        let row = sqlx::query("SELECT * FROM principals_v1 WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
+        let current = principal_from_row(row)?;
         if current.revision != expected_revision {
             return Err(conflict(format!(
                 "stale postgres principal revision; current revision is {}",
                 current.revision
             )));
         }
+        // The pre-update name is part of the session fence below: a rename and
+        // a mode switch can arrive in one update.
+        let previous_name = current.name.clone();
         let name = update.name.unwrap_or(current.name);
         let allowed_models = update.allowed_models.unwrap_or(current.allowed_models);
         let allowed_upstreams = update
@@ -142,9 +158,11 @@ impl PrincipalStore for PostgresStorage {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()?;
-        let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
+        let prompt_cache_mode = update
+            .prompt_cache_mode
+            .unwrap_or(current.prompt_cache_mode);
         let row = sqlx::query(
-            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, revision = revision + 1, updated_at = $8 WHERE id = $1 AND revision = $9 RETURNING *",
+            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, prompt_cache_mode = $8, revision = revision + 1, updated_at = $9 WHERE id = $1 AND revision = $10 RETURNING *",
         )
         .bind(id)
         .bind(name)
@@ -153,12 +171,25 @@ impl PrincipalStore for PostgresStorage {
         .bind(serde_json::to_value(default_limits)?)
         .bind(router_terminal_strategy)
         .bind(cache_keepalive_value)
+        .bind(prompt_cache_mode.as_db_value())
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         let record = principal_from_row(row)?;
+        if prompt_cache_mode.prohibits_keepalive() {
+            // The session table stores second timestamps, not `timestamptz`.
+            cancel_active_keepalive_sessions_in_tx(
+                &mut tx,
+                id,
+                &previous_name,
+                &record.name,
+                u64_to_i64(now_unix_secs, "cache keepalive updated_at")?,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
         self.notify_principal_changed(record.id).await?;
         Ok(Some(record))
     }
@@ -337,6 +368,7 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
     let cache_keepalive = cache_keepalive_value
         .map(serde_json::from_value::<CacheKeepaliveConfig>)
         .transpose()?;
+    let prompt_cache_mode: String = row.try_get("prompt_cache_mode").map_err(map_sqlx_error)?;
     Ok(PrincipalRecord {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
@@ -360,7 +392,43 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
         router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy)?,
         cache_keepalive,
+        prompt_cache_mode: PromptCacheMode::from_db_value(&prompt_cache_mode)?,
     })
+}
+
+/// Retires every active keep-alive session of one principal with the same
+/// terminal transition `mark_latest_cache_keepalive_terminal` applies: the
+/// stored payload is dropped and the queued job for that generation is fenced
+/// off by its existing status check.
+async fn cancel_active_keepalive_sessions_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    principal_id: Uuid,
+    previous_name: &str,
+    current_name: &str,
+    updated_at_unix_secs: i64,
+) -> StorageResult<()> {
+    // A session records the caller-visible principal id of the request that
+    // created it: the immutable UUID, or the name in force at admission. Retire
+    // all three identities, so a session admitted under the previous name cannot
+    // outlive a rename-and-switch update.
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+            SET status = 'terminal',
+                terminal_reason = $4,
+                running_since_unix_secs = NULL,
+                encrypted_payload = ''::bytea,
+                updated_at = $5
+          WHERE (principal_id = $1 OR principal_id = $2 OR principal_id = $3) AND status = 'active'",
+    )
+    .bind(principal_id.to_string())
+    .bind(previous_name)
+    .bind(current_name)
+    .bind(CacheKeepaliveTerminalReason::Cancelled.as_str())
+    .bind(updated_at_unix_secs)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 fn terminal_strategy_from_db_value(value: &str) -> StorageResult<TerminalStrategy> {

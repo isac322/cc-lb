@@ -111,6 +111,11 @@ async fn preview_route(
             "router_pipeline_instantiation_error",
             &detail,
         ),
+        Err(RoutePreviewError::PromptCachePolicyError(detail)) => error_response(
+            StatusCode::BAD_GATEWAY,
+            "prompt_cache_policy_error",
+            &detail,
+        ),
     }
 }
 

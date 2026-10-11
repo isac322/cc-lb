@@ -567,6 +567,7 @@ fn principal_view(
 
 fn principal() -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: "principal-test".to_owned(),
         kind: PrincipalKind::Machine,

@@ -50,6 +50,7 @@ pub fn test_cache_pricing() -> cc_lb_domain::CachePricingSummary {
 
 pub fn principal_record(name: &str) -> PrincipalRecord {
     PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: name.to_owned(),
         kind: StoragePrincipalKind::Machine,

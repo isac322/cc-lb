@@ -61,6 +61,7 @@ fn map_preview_error(error: PreviewRouteError) -> RoutePreviewError {
         PreviewRouteError::PipelineInstantiationError(detail) => {
             RoutePreviewError::PipelineInstantiationError(detail)
         }
+        PreviewRouteError::PolicyError(detail) => RoutePreviewError::PromptCachePolicyError(detail),
     }
 }
 

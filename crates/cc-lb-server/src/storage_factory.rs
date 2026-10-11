@@ -58,7 +58,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use cc_lb_config::StorageConfig;
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_api::{ManagedKeyStore, Storage};
 #[cfg(feature = "postgres")]

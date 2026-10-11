@@ -18,6 +18,24 @@ async fn postgres_renewal_storage_paths_require_live_dsn() {
         .initialize()
         .await
         .expect("initialize isolated postgres schema");
+    // Durable session admission resolves the caller-visible principal id
+    // against the live principal table and fails closed on an id that resolves
+    // to nothing, so the fixture creates the principal its renewal names.
+    cc_lb_storage_api::PrincipalStore::create(
+        &storage,
+        cc_lb_storage_api::principal::PrincipalCreate {
+            name: "postgres-renewal-principal".to_owned(),
+            kind: cc_lb_storage_api::PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            prompt_cache_mode: Default::default(),
+        },
+        1,
+    )
+    .await
+    .expect("create fixture principal");
     let session = storage
         .replace_from_real_request(&CacheKeepaliveReplaceRequest {
             session_key_hash: "postgres-renewal-session".to_owned(),

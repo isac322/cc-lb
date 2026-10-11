@@ -4,7 +4,7 @@ use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveHitRefreshRequest, CacheKeepaliveReplaceRequest,
     CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
-    CacheTtl, MetaStore, cache_keepalive_job_key,
+    CacheTtl, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, cache_keepalive_job_key,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -18,7 +18,29 @@ async fn storage() -> (TempDir, SqliteStorage) {
         .await
         .expect("open sqlite");
     storage.initialize().await.expect("initialize sqlite");
+    // Session admission resolves the caller-visible principal id against the
+    // live principal table and fails closed on an id that resolves to nothing,
+    // so the fixture creates the principal its sessions name.
+    create_principal(&storage, "principal").await;
     (dir, storage)
+}
+
+async fn create_principal(storage: &SqliteStorage, name: &str) {
+    PrincipalStore::create(
+        storage,
+        PrincipalCreate {
+            name: name.to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+            prompt_cache_mode: Default::default(),
+        },
+        100,
+    )
+    .await
+    .expect("create principal");
 }
 
 fn replace_request(payload: &[u8], now: u64) -> CacheKeepaliveReplaceRequest {

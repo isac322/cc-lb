@@ -5,6 +5,7 @@ use uuid::Uuid;
 #[test]
 fn principal_record_router_terminal_strategy_defaults_to_first_pick() {
     let record = PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::nil(),
         name: "test".to_string(),
         kind: PrincipalKind::Machine,
@@ -26,6 +27,7 @@ fn principal_record_router_terminal_strategy_defaults_to_first_pick() {
 #[test]
 fn principal_record_router_terminal_strategy_serialization_roundtrip() {
     let original = PrincipalRecord {
+        prompt_cache_mode: Default::default(),
         id: Uuid::new_v4(),
         name: "test-principal".to_string(),
         kind: PrincipalKind::Human,
@@ -58,6 +60,7 @@ fn principal_record_router_terminal_strategy_all_variants() {
 
     for strategy in strategies {
         let record = PrincipalRecord {
+            prompt_cache_mode: Default::default(),
             id: Uuid::nil(),
             name: "test".to_string(),
             kind: PrincipalKind::Admin,

@@ -617,6 +617,7 @@ async fn seed_runtime_state(
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: principal_name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],

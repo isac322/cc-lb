@@ -10,7 +10,7 @@ use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
     CacheKeepaliveConfig, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore,
-    PrincipalUpdate, StorageError,
+    PrincipalUpdate, PromptCacheMode, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,6 +70,9 @@ struct CreatePrincipalBody {
     default_limits: Vec<Limit>,
     #[serde(default)]
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    /// Omitted creates default to `preserve_client`.
+    #[serde(default)]
+    prompt_cache_mode: PromptCacheMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +87,15 @@ struct UpdatePrincipalBody {
         skip_serializing_if = "Option::is_none"
     )]
     cache_keepalive: Option<Option<CacheKeepaliveConfig>>,
+    /// Omission preserves the stored mode, including on updates that only
+    /// touch keep-alive settings. An explicit `null` is rejected: unlike
+    /// `cache_keepalive`, the mode is non-nullable and has no "clear" value.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    prompt_cache_mode: Option<Option<PromptCacheMode>>,
 }
 
 fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -117,6 +129,7 @@ struct PrincipalResponse {
     default_limits: Vec<Limit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cache_keepalive: Option<CacheKeepaliveConfig>,
+    prompt_cache_mode: PromptCacheMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +139,7 @@ struct PrincipalSummaryResponse {
     kind: PrincipalKind,
     enabled: bool,
     revision: u64,
+    prompt_cache_mode: PromptCacheMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +179,7 @@ async fn create_principal(
         allowed_upstreams: body.allowed_upstreams,
         default_limits: body.default_limits,
         cache_keepalive: body.cache_keepalive,
+        prompt_cache_mode: body.prompt_cache_mode,
     };
 
     match PrincipalStore::create(storage, input, cc_lb_clock::unix_secs(state.clock.now())).await {
@@ -281,6 +296,19 @@ async fn update_principal(
     {
         return unsupported_llm_judge_response();
     }
+    let prompt_cache_mode = match body.prompt_cache_mode {
+        Some(Some(mode)) => Some(mode),
+        // Omission preserves the stored mode; an explicit null has no
+        // non-nullable value to fall back to, so the contract rejects it
+        // instead of silently preserving.
+        Some(None) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "prompt_cache_mode_null_not_allowed",
+            );
+        }
+        None => None,
+    };
     let fields_changed = update_fields_changed(&body);
     let route = format!("/admin/v1/principals/{id}");
     update_principal_record(
@@ -295,6 +323,7 @@ async fn update_principal(
             default_limits: body.default_limits,
             router_terminal_strategy: None,
             cache_keepalive: body.cache_keepalive,
+            prompt_cache_mode,
         },
         fields_changed,
         identity,
@@ -672,6 +701,7 @@ fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
         allowed_upstreams: record.allowed_upstreams,
         default_limits: record.default_limits,
         cache_keepalive: record.cache_keepalive,
+        prompt_cache_mode: record.prompt_cache_mode,
     }
 }
 
@@ -682,6 +712,7 @@ fn summary_response(record: PrincipalRecord) -> PrincipalSummaryResponse {
         kind: record.kind,
         enabled: record.enabled,
         revision: record.revision,
+        prompt_cache_mode: record.prompt_cache_mode,
     }
 }
 
@@ -701,6 +732,9 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     }
     if body.cache_keepalive.is_some() {
         fields.push("cache_keepalive");
+    }
+    if body.prompt_cache_mode.is_some() {
+        fields.push("prompt_cache_mode");
     }
     fields
 }

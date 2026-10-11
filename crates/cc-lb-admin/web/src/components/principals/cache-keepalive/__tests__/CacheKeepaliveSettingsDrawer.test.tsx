@@ -31,6 +31,7 @@ const mockPrincipal: queries.Principal = {
   allowed_models: [],
   allowed_upstreams: [],
   default_limits: [],
+  prompt_cache_mode: 'preserve_client',
   cache_keepalive: {
     enabled: true,
     refresh_lead_time_5m_secs: 45,

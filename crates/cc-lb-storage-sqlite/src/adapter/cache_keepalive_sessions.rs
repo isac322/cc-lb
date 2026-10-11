@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveGenerationCheck, CacheKeepaliveHitRefreshRequest,
     CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
-    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, StorageError,
-    StorageResult, cache_keepalive_job_key,
+    CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, PrincipalIdentityRef,
+    PromptCacheMode, StorageError, StorageResult, cache_keepalive_job_key, principal_identity_refs,
 };
-use sqlx::Row;
+use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -25,6 +25,7 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
         let mut tx = self.begin_immediate().await?;
+        ensure_keepalive_permitted_in_tx(&mut tx, &request.principal_id).await?;
         let existing = sqlx::query_as::<_, (i64, i64)>(
             "SELECT generation, created_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
         )
@@ -508,5 +509,71 @@ fn config_snapshot_from_db(
 fn missing_after_write() -> StorageError {
     StorageError::Fatal {
         message: "cache keepalive session missing after write".to_owned(),
+    }
+}
+
+/// Fences a session write on the principal's *current* prompt-cache policy,
+/// read inside the same transaction as the write. The immediate transaction
+/// already holds SQLite's write lock, so a concurrent mode update either
+/// committed before this read or waits until this transaction ends; a request
+/// admitted under the old mode can never resurrect a cancelled session.
+///
+/// The lookup resolves the caller-visible principal id exactly as
+/// `PrincipalView::get` does and *fails closed* when it resolves to nothing: a
+/// renamed, deleted, or otherwise dead id must not create a session, because
+/// the scheduler would resolve that id to no principal at all — or, if the name
+/// were reused, to a different one.
+async fn ensure_keepalive_permitted_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    principal_id: &str,
+) -> StorageResult<()> {
+    let Some(mode) = principal_prompt_cache_mode_in_tx(tx, principal_id).await? else {
+        return Err(StorageError::PrincipalNotFound {
+            id: principal_id.to_owned(),
+        });
+    };
+    if PromptCacheMode::from_db_value(&mode)?.prohibits_keepalive() {
+        return Err(keepalive_prohibited());
+    }
+    Ok(())
+}
+
+/// Reads the stored prompt-cache mode for a caller-visible principal id.
+///
+/// The identities are tried in `PrincipalView::get` order — a live principal
+/// *name* first, then the live row's UUID alias — and both exclude deleted rows,
+/// which the dynamic view drops. A UUID-shaped principal name therefore
+/// resolves as a name, not as somebody else's UUID.
+async fn principal_prompt_cache_mode_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    principal_id: &str,
+) -> StorageResult<Option<String>> {
+    for identity in principal_identity_refs(principal_id) {
+        let mode = match identity {
+            PrincipalIdentityRef::Name(name) => sqlx::query_scalar::<_, String>(
+                "SELECT prompt_cache_mode FROM principals_v1 WHERE name = ? AND deleted_at IS NULL",
+            )
+            .bind(name)
+            .fetch_optional(&mut **tx)
+            .await,
+            PrincipalIdentityRef::Id(id) => sqlx::query_scalar::<_, String>(
+                "SELECT prompt_cache_mode FROM principals_v1 WHERE id = ? AND deleted_at IS NULL",
+            )
+            .bind(id.to_string())
+            .fetch_optional(&mut **tx)
+            .await,
+        }
+        .map_err(map_sqlx_error)?;
+        if mode.is_some() {
+            return Ok(mode);
+        }
+    }
+    Ok(None)
+}
+
+fn keepalive_prohibited() -> StorageError {
+    StorageError::InvalidInput {
+        field: "principal.prompt_cache_mode".to_owned(),
+        reason: "keep-alive sessions are prohibited in one_hour_no_keepalive mode".to_owned(),
     }
 }

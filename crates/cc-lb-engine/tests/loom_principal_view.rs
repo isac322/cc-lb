@@ -60,6 +60,7 @@ mod principal_view_swap {
 
     fn view_for_generation(generation: u8) -> StdArc<PrincipalView> {
         let principals = vec![PrincipalRecord {
+            prompt_cache_mode: Default::default(),
             id: uuid::Uuid::new_v4(),
             name: PRINCIPAL_ID.to_owned(),
             kind: DbPrincipalKind::Machine,

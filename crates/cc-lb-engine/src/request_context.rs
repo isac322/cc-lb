@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use cc_lb_domain::{CacheBreakpoint, CachePricingSummary};
 use cc_lb_routing::RoutingContext;
+use cc_lb_storage_api::PromptCacheMode;
 use cc_lb_upstream::DialectShapeContext;
 use http::{HeaderMap, Method};
 
@@ -34,6 +35,12 @@ pub struct RequestContext {
     /// Pricing summary for the canonical model, loaded by the host from the
     /// in-memory price catalog before router plugins run.
     pub cache_pricing: CachePricingSummary,
+    /// Effective prompt-cache policy of the authenticated principal. It has
+    /// already been applied to `body_bytes` on the Anthropic Messages route,
+    /// where the pre-sign boundary re-asserts it; every other proxy route keeps
+    /// its client bytes. Preserve-client until authentication resolved the
+    /// principal.
+    pub prompt_cache_mode: PromptCacheMode,
 }
 
 impl RequestContext {
@@ -85,6 +92,7 @@ pub struct ParsedRequestBuilder {
     cache_breakpoints: Vec<CacheBreakpoint>,
     canonical_model_id: String,
     cache_pricing: CachePricingSummary,
+    prompt_cache_mode: PromptCacheMode,
 }
 
 impl ParsedRequestBuilder {
@@ -102,6 +110,7 @@ impl ParsedRequestBuilder {
             cache_breakpoints: Vec::new(),
             canonical_model_id: String::new(),
             cache_pricing: CachePricingSummary::default(),
+            prompt_cache_mode: PromptCacheMode::default(),
         }
     }
 
@@ -171,6 +180,12 @@ impl ParsedRequestBuilder {
         self
     }
 
+    /// Sets the effective principal prompt-cache policy.
+    pub fn prompt_cache_mode(mut self, prompt_cache_mode: PromptCacheMode) -> Self {
+        self.prompt_cache_mode = prompt_cache_mode;
+        self
+    }
+
     /// Builds the parsed request context.
     pub fn build(self) -> RequestContext {
         RequestContext {
@@ -185,6 +200,7 @@ impl ParsedRequestBuilder {
             cache_breakpoints: self.cache_breakpoints,
             canonical_model_id: self.canonical_model_id,
             cache_pricing: self.cache_pricing,
+            prompt_cache_mode: self.prompt_cache_mode,
         }
     }
 }

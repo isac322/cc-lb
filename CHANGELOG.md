@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Per-principal `prompt_cache_mode` (`preserve_client` default or `one_hour_no_keepalive`) on the admin principals API and the `Use one-hour cache` switch in the principal cache card. One-hour mode promotes the ephemeral cache controls the provider contract defines to `ttl: "1h"` and leaves controls the contract would reject exactly as sent, keeps the saved keep-alive configuration dormant, retires active keep-alive sessions in the same storage transaction as the mode write (matching the principal's UUID, its previous name, and its new name), and fences the durable enqueue boundary on the identity the dynamic view resolves — failing closed for a principal that no longer resolves. A renewal already dispatched is still finalized, and its decision row records that it was retired instead of rescheduled.
+
 ### Changed
 
 - The website now presents setup and runtime control in one operator-focused flow, with GitHub star links and a dismissible support notice.
@@ -16,6 +20,10 @@ All notable changes to this project will be documented in this file.
 - Public-master documentation site builds can embed the configured Cloudflare Web Analytics beacon; pull request, fork, private, and non-master builds omit it.
 
 ### Fixed
+
+- Toggle sliders remain clickable when their labels include interactive help buttons.
+
+- Keep-alive renewals that finish after authorization is revoked retain their actual usage accounting and record a terminal decision without scheduling another renewal.
 
 - The plugin author guide now uses the published 0.8 wire dependency required by the compatible Wasmtime PDK.
 - Installation descriptions and supported upstream, storage, and plugin details are readable in the website's light theme.

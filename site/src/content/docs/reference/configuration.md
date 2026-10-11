@@ -26,6 +26,8 @@ token_env = "CC_LB_ADMIN_TOKEN"
 
 Cache keepalive is configured per principal. The principal object controls whether the feature is enabled, its lead times, maximum refresh count, maximum duration, snapshot size, and classifier options.
 
+A principal's `prompt_cache_mode` selects whether the caller's cache controls are honored as sent (`preserve_client`, the default) or promoted to one-hour lifetimes with keepalives prohibited (`one_hour_no_keepalive`). It is set through the principal API, not the configuration file. See [Prompt-cache continuity](/docs/concepts/prompt-cache/) and the [runtime management reference](/docs/reference/source/runtime-management/).
+
 ## Scheduler storage
 
 Use SQLite for local or bounded single-node operation. Use Postgres when multiple replicas must share durable job claims, idempotency keys, and cache-keepalive fences.

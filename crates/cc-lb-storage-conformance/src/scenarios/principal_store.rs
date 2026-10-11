@@ -4,8 +4,10 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_plugin_wire::metadata::HookMetadata;
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind,
-    PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
+    AuditEntry, AuditStore, CacheKeepaliveConfigSnapshot, CacheKeepaliveReplaceRequest,
+    CacheKeepaliveSessionStatus, CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason,
+    CacheTtl, PluginChainEntryInput, PluginRegistryStore, PluginSlotKind, PrincipalStore,
+    PromptCacheMode, StorageError, WasmBlob, WasmRegistryEntryInput, default_wire_version,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
     },
@@ -43,6 +45,572 @@ where
     hard_delete_referenced_by_audit_conflicts(Arc::clone(&backend)).await?;
     validate_identifier_rejects_invalid_name(backend).await?;
     Ok(())
+}
+
+/// The stored mode is non-null with a `preserve_client` default, survives a
+/// round trip through both adapters, and is only replaced when the update
+/// carries it.
+pub async fn prompt_cache_mode_roundtrip_and_omission<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(21), BASE_TS).await?;
+        ensure!(
+            record.prompt_cache_mode == PromptCacheMode::PreserveClient,
+            "an omitted mode defaults to preserve_client"
+        );
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record exists");
+        ensure!(fetched.prompt_cache_mode == PromptCacheMode::PreserveClient);
+
+        let enabled = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::OneHourNoKeepalive),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(enabled.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive);
+        ensure!(
+            PrincipalStore::list(&*storage, 0, 10, false)
+                .await?
+                .iter()
+                .find(|list_record| list_record.id == record.id)
+                .is_some_and(|list_record| {
+                    list_record.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive
+                }),
+            "list carries the stored mode"
+        );
+
+        // An unrelated update must not clear the mode back to the default.
+        let unrelated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            enabled.revision,
+            PrincipalUpdate {
+                allowed_models: Some(vec!["claude-opus-*".to_owned()]),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 2,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            unrelated.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive,
+            "omitting the mode preserves it"
+        );
+
+        let cleared = PrincipalStore::update(
+            &*storage,
+            record.id,
+            unrelated.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::PreserveClient),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 3,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(cleared.prompt_cache_mode == PromptCacheMode::PreserveClient);
+        Ok(())
+    })
+    .await
+}
+
+/// A stale revision is rejected for a mode-only update exactly like any other
+/// principal field.
+pub async fn prompt_cache_mode_stale_revision_conflict<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(22), BASE_TS).await?;
+        let updated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::OneHourNoKeepalive),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+
+        let stale = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::PreserveClient),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 2,
+        )
+        .await;
+        ensure!(
+            matches!(stale, Err(StorageError::Conflict { .. })),
+            "a stale revision must conflict"
+        );
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record exists");
+        ensure!(
+            fetched.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive,
+            "the rejected write changed nothing"
+        );
+        ensure!(fetched.revision == updated.revision);
+        Ok(())
+    })
+    .await
+}
+
+/// Entering one-hour mode retires the principal's active keep-alive sessions in
+/// the same transaction and fences the durable enqueue boundary, so a request
+/// admitted under the previous mode cannot recreate a session afterwards.
+pub async fn prompt_cache_mode_cancels_active_keepalive_sessions<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + CacheKeepaliveSessionStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(23), BASE_TS).await?;
+        // Sessions are keyed by the principal id the caller authenticated as,
+        // which is either the UUID or the name. Cover both identification
+        // forms so the fence cannot miss a session.
+        let uuid_session_key = format!("session-{}-uuid", record.id);
+        let name_session_key = format!("session-{}-name", record.id);
+        storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &record.id.to_string(),
+                &uuid_session_key,
+            ))
+            .await?;
+        storage
+            .replace_from_real_request(&keepalive_replace_request(&record.name, &name_session_key))
+            .await?;
+        for session_key_hash in [&uuid_session_key, &name_session_key] {
+            let active = storage
+                .get_cache_keepalive_session(session_key_hash)
+                .await?
+                .expect("session exists");
+            ensure!(active.status == CacheKeepaliveSessionStatus::Active);
+        }
+
+        let updated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::OneHourNoKeepalive),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(updated.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive);
+
+        for session_key_hash in [&uuid_session_key, &name_session_key] {
+            let fenced = storage
+                .get_cache_keepalive_session(session_key_hash)
+                .await?
+                .expect("session row remains for history");
+            ensure!(
+                fenced.status == CacheKeepaliveSessionStatus::Terminal,
+                "the mode write retires the active session"
+            );
+            ensure!(
+                fenced.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled),
+                "the retired session records the cancellation reason"
+            );
+            ensure!(
+                fenced.encrypted_payload.is_empty(),
+                "the retired session drops its payload"
+            );
+        }
+        let fenced = storage
+            .get_cache_keepalive_session(&uuid_session_key)
+            .await?
+            .expect("session row remains for history");
+
+        let refused = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &record.id.to_string(),
+                &uuid_session_key,
+            ))
+            .await;
+        ensure!(
+            matches!(
+                refused,
+                Err(StorageError::InvalidInput { ref field, .. })
+                    if field == "principal.prompt_cache_mode"
+            ),
+            "one-hour mode fences the durable enqueue boundary: {refused:?}"
+        );
+        let still_terminal = storage
+            .get_cache_keepalive_session(&uuid_session_key)
+            .await?
+            .expect("session row remains");
+        ensure!(
+            still_terminal.status == CacheKeepaliveSessionStatus::Terminal,
+            "the refused enqueue left the fenced session untouched"
+        );
+
+        // Restoring client policy reopens the boundary for new real requests.
+        let restored = PrincipalStore::update(
+            &*storage,
+            record.id,
+            updated.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::PreserveClient),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 2,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(restored.prompt_cache_mode == PromptCacheMode::PreserveClient);
+        let reopened = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &record.id.to_string(),
+                &uuid_session_key,
+            ))
+            .await?;
+        ensure!(
+            reopened.status == CacheKeepaliveSessionStatus::Active,
+            "a new real request starts a new generation after the mode is restored"
+        );
+        ensure!(
+            reopened.generation > fenced.generation,
+            "the restored session advances the generation fence"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// A rename and a mode switch can arrive in one revisioned update. The
+/// retirement must cover every identity an admitted request could have
+/// recorded: the immutable UUID, the name in force before the update, and the
+/// new name — a name this principal is only now taking over, which may still
+/// carry an active session from the principal that used it before. A response
+/// admitted under the old name must not be able to create a session afterwards.
+pub async fn prompt_cache_mode_rename_and_switch_retires_every_identity<B>(
+    backend: Arc<B>,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + CacheKeepaliveSessionStore,
+{
+    with_fixture(backend, |storage| async move {
+        // The previous holder of the name this principal is about to take over.
+        // Its session survives the rename (a rename alone does not retire
+        // sessions), so the name still carries an active session.
+        let predecessor = PrincipalStore::create(&*storage, principal_create(28), BASE_TS).await?;
+        let reused_name = predecessor.name.clone();
+        let predecessor_session_key = "predecessor-name-session";
+        storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &reused_name,
+                predecessor_session_key,
+            ))
+            .await?;
+        PrincipalStore::update(
+            &*storage,
+            predecessor.id,
+            predecessor.revision,
+            PrincipalUpdate {
+                name: Some(format!("{reused_name}-retired")),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        let lingering = storage
+            .get_cache_keepalive_session(predecessor_session_key)
+            .await?
+            .expect("session row remains");
+        ensure!(
+            lingering.status == CacheKeepaliveSessionStatus::Active,
+            "a rename alone keeps the session active, so the old name can carry one"
+        );
+
+        // The successor holds that name next, with two sessions of its own: one
+        // admitted by UUID, one admitted by its previous name.
+        let target = PrincipalStore::create(&*storage, principal_create(29), BASE_TS).await?;
+        let previous_name = target.name.clone();
+        let uuid_session_key = "successor-uuid-session";
+        let previous_name_session_key = "successor-previous-name-session";
+        storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &target.id.to_string(),
+                uuid_session_key,
+            ))
+            .await?;
+        storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &previous_name,
+                previous_name_session_key,
+            ))
+            .await?;
+
+        let updated = PrincipalStore::update(
+            &*storage,
+            target.id,
+            target.revision,
+            PrincipalUpdate {
+                name: Some(reused_name.clone()),
+                prompt_cache_mode: Some(PromptCacheMode::OneHourNoKeepalive),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 2,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            updated.name == reused_name
+                && updated.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive,
+            "the update applies the rename and the mode together"
+        );
+
+        for session_key_hash in [
+            predecessor_session_key,
+            uuid_session_key,
+            previous_name_session_key,
+        ] {
+            let fenced = storage
+                .get_cache_keepalive_session(session_key_hash)
+                .await?
+                .expect("session row remains for history");
+            ensure!(
+                fenced.status == CacheKeepaliveSessionStatus::Terminal
+                    && fenced.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled),
+                "the rename-and-switch update retires session {session_key_hash}"
+            );
+            ensure!(
+                fenced.encrypted_payload.is_empty(),
+                "the retired session drops its payload"
+            );
+        }
+
+        // A response admitted under the previous name — the exact alias this
+        // storage boundary used to accept — is fenced off twice over: the name
+        // no longer resolves to a live principal, and the mode prohibits
+        // keep-alives.
+        let stale_admission = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &previous_name,
+                "rename-late-response",
+            ))
+            .await;
+        ensure!(
+            matches!(stale_admission, Err(StorageError::PrincipalNotFound { .. })),
+            "a late response holding the previous name cannot create a session: {stale_admission:?}"
+        );
+        let mode_admission = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &reused_name,
+                "rename-late-response",
+            ))
+            .await;
+        ensure!(
+            matches!(
+                mode_admission,
+                Err(StorageError::InvalidInput { ref field, .. })
+                    if field == "principal.prompt_cache_mode"
+            ),
+            "the reused name is fenced by the one-hour mode: {mode_admission:?}"
+        );
+        ensure!(
+            storage
+                .get_cache_keepalive_session("rename-late-response")
+                .await?
+                .is_none(),
+            "a refused admission writes no session row"
+        );
+
+        // Turning the mode back off must not revive anything: only a new real
+        // request may start a generation, and it starts above the retired one.
+        let restored = PrincipalStore::update(
+            &*storage,
+            target.id,
+            updated.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::PreserveClient),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 3,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(restored.prompt_cache_mode == PromptCacheMode::PreserveClient);
+        for session_key_hash in [predecessor_session_key, previous_name_session_key] {
+            let revived = storage
+                .get_cache_keepalive_session(session_key_hash)
+                .await?
+                .expect("retired session row remains");
+            ensure!(
+                revived.status == CacheKeepaliveSessionStatus::Terminal
+                    && revived.terminal_reason == Some(CacheKeepaliveTerminalReason::Cancelled),
+                "restoring client policy leaves session {session_key_hash} terminal"
+            );
+        }
+        let fresh = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &reused_name,
+                "rename-fresh-session",
+            ))
+            .await?;
+        ensure!(
+            fresh.status == CacheKeepaliveSessionStatus::Active && fresh.generation == 1,
+            "a new real request under the new name starts a fresh generation"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Session admission resolves the caller-visible principal id the way
+/// `PrincipalView::get` does and fails closed when that resolves to nothing.
+pub async fn keepalive_session_admission_matches_principal_view_resolution<B>(
+    backend: Arc<B>,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + CacheKeepaliveSessionStore,
+{
+    with_fixture(backend, |storage| async move {
+        // A UUID-shaped principal *name* is legal. `PrincipalView` keys its
+        // specs by name and keeps UUIDs only as aliases, so an id that spells
+        // one principal's name and another principal's UUID resolves as the
+        // name. Session admission must agree, or one principal's mode would
+        // decide the other principal's keep-alives.
+        let aliased_uuid_owner =
+            PrincipalStore::create(&*storage, principal_create(25), BASE_TS).await?;
+        let shaped_name = aliased_uuid_owner.id.to_string();
+        let named_after_uuid = PrincipalStore::create(
+            &*storage,
+            PrincipalCreate {
+                name: shaped_name.clone(),
+                ..principal_create(26)
+            },
+            BASE_TS,
+        )
+        .await?;
+        let switched = PrincipalStore::update(
+            &*storage,
+            aliased_uuid_owner.id,
+            aliased_uuid_owner.revision,
+            PrincipalUpdate {
+                prompt_cache_mode: Some(PromptCacheMode::OneHourNoKeepalive),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            switched.prompt_cache_mode == PromptCacheMode::OneHourNoKeepalive,
+            "the UUID owner enters one-hour mode"
+        );
+
+        let admission = storage
+            .replace_from_real_request(&keepalive_replace_request(
+                &shaped_name,
+                "uuid-shaped-session",
+            ))
+            .await;
+        ensure!(
+            admission.is_ok(),
+            "the id resolves to the principal *named* that way, which preserves client \
+             policy: {admission:?}"
+        );
+        let session = storage
+            .get_cache_keepalive_session("uuid-shaped-session")
+            .await?
+            .expect("session exists");
+        ensure!(
+            session.principal_id == shaped_name
+                && session.principal_id != named_after_uuid.id.to_string(),
+            "the session is keyed by the resolution the dynamic view would make"
+        );
+
+        // A name that belongs to no live principal fails closed instead of
+        // creating a session the scheduler could never authorize.
+        let unknown = storage
+            .replace_from_real_request(&keepalive_replace_request("no-such-principal", "ghost"))
+            .await;
+        ensure!(
+            matches!(unknown, Err(StorageError::PrincipalNotFound { .. })),
+            "an unresolvable principal id fails closed: {unknown:?}"
+        );
+
+        // A soft-deleted principal is unresolvable through both of its
+        // identities: `PrincipalView` drops deleted rows, so neither the name
+        // nor the UUID alias resolves.
+        let doomed = PrincipalStore::create(&*storage, principal_create(27), BASE_TS).await?;
+        PrincipalStore::soft_delete(&*storage, doomed.id, doomed.revision, BASE_TS + 2).await?;
+        for identity in [&doomed.name, &doomed.id.to_string()] {
+            let deleted = storage
+                .replace_from_real_request(&keepalive_replace_request(
+                    identity,
+                    "deleted-principal-session",
+                ))
+                .await;
+            ensure!(
+                matches!(deleted, Err(StorageError::PrincipalNotFound { .. })),
+                "a deleted principal's identity {identity} fails closed: {deleted:?}"
+            );
+        }
+        ensure!(
+            storage
+                .get_cache_keepalive_session("deleted-principal-session")
+                .await?
+                .is_none(),
+            "a refused admission writes no session row"
+        );
+        Ok(())
+    })
+    .await
+}
+
+fn keepalive_replace_request(
+    principal_id: &str,
+    session_key_hash: &str,
+) -> CacheKeepaliveReplaceRequest {
+    CacheKeepaliveReplaceRequest {
+        session_key_hash: session_key_hash.to_owned(),
+        principal_id: principal_id.to_owned(),
+        accounting_key_id: None,
+        upstream_id: Uuid::from_u128(9),
+        cache_anchor_at_unix_secs: BASE_TS,
+        ttl: CacheTtl::Ttl5m,
+        run_at_unix_secs: BASE_TS + 270,
+        expires_at_unix_secs: BASE_TS + 300,
+        encrypted_payload: Vec::new(),
+        display_reason: "agent-in-turn".to_owned(),
+        config_snapshot: CacheKeepaliveConfigSnapshot {
+            refresh_lead_time_5m_secs: 30,
+            refresh_lead_time_1h_secs: 300,
+            max_refreshes_per_session: 12,
+            max_total_duration_secs: 14_400,
+            snapshot_max_bytes: 524_288,
+        },
+        now_unix_secs: BASE_TS,
+    }
 }
 
 async fn create_persists_defaults<B>(backend: Arc<B>) -> Result<()>
@@ -125,6 +693,7 @@ where
                 default_limits: None,
                 router_terminal_strategy: None,
                 cache_keepalive: None,
+                prompt_cache_mode: None,
             },
             BASE_TS + 1,
         )
@@ -583,6 +1152,7 @@ where
 
 fn principal_create(index: usize) -> PrincipalCreate {
     PrincipalCreate {
+        prompt_cache_mode: Default::default(),
         name: format!("principal-{index:04}"),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["claude-sonnet-*".to_owned()],

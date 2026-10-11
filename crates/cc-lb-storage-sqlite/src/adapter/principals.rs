@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use cc_lb_domain::TerminalStrategy;
 use cc_lb_storage_api::{
-    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError, StorageResult,
-    validate_identifier,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheKeepaliveConfig, CacheKeepaliveTerminalReason,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
+    PromptCacheMode, StorageError, StorageResult, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -31,7 +31,7 @@ impl PrincipalStore for SqliteStorage {
             .transpose()?;
         let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
-            "INSERT INTO principals_v1 (id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'first-pick', ?, 0, ?, ?) RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at",
+            "INSERT INTO principals_v1 (id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, 'first-pick', ?, ?, 0, ?, ?) RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at",
         )
         .bind(id.to_string())
         .bind(input.name)
@@ -40,6 +40,7 @@ impl PrincipalStore for SqliteStorage {
         .bind(allowed_upstreams)
         .bind(default_limits)
         .bind(cache_keepalive_json)
+        .bind(input.prompt_cache_mode.as_db_value())
         .bind(now)
         .bind(now)
         .fetch_one(&mut *tx)
@@ -62,7 +63,7 @@ impl PrincipalStore for SqliteStorage {
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
         let row = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE id = ?",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(self.pool())
@@ -73,7 +74,7 @@ impl PrincipalStore for SqliteStorage {
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
         let row = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE name = ? AND deleted_at IS NULL",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE name = ? AND deleted_at IS NULL",
         )
         .bind(name)
         .fetch_optional(self.pool())
@@ -92,7 +93,7 @@ impl PrincipalStore for SqliteStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE (? OR deleted_at IS NULL) ORDER BY name ASC LIMIT ? OFFSET ?",
+            "SELECT id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at FROM principals_v1 WHERE (? OR deleted_at IS NULL) ORDER BY name ASC LIMIT ? OFFSET ?",
         )
         .bind(include_deleted)
         .bind(usize_to_i64(limit, "principal.limit")?)
@@ -145,6 +146,7 @@ impl PrincipalStore for SqliteStorage {
             router_terminal_strategy,
             update_cache_keepalive,
             cache_keepalive_json,
+            update.prompt_cache_mode,
         )
         .await
     }
@@ -169,6 +171,7 @@ impl PrincipalStore for SqliteStorage {
             None,
             false,
             None,
+            None,
         )
         .await
     }
@@ -182,7 +185,7 @@ impl PrincipalStore for SqliteStorage {
         let now = u64_to_i64(now_unix_secs, "principal.deleted_at")?;
         let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at",
+            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at",
         )
         .bind(now)
         .bind(now)
@@ -225,6 +228,15 @@ impl PrincipalStore for SqliteStorage {
     }
 }
 
+/// Applies a revisioned principal update in one immediate transaction.
+///
+/// Entering a keep-alive-prohibiting prompt-cache mode retires the principal's
+/// active keep-alive sessions in that same transaction, so the mode write and
+/// the fence become visible together: a real request admitted under the old
+/// mode can no longer start a session afterwards. A rename and a mode switch
+/// may arrive in one update, so the retirement covers every identity an
+/// admitted request could have recorded: the immutable UUID, the name in force
+/// before the update, and the new name.
 #[allow(clippy::too_many_arguments)]
 async fn update_principal(
     storage: &SqliteStorage,
@@ -239,7 +251,17 @@ async fn update_principal(
     router_terminal_strategy: Option<String>,
     update_cache_keepalive: bool,
     cache_keepalive_json: Option<String>,
+    prompt_cache_mode: Option<PromptCacheMode>,
 ) -> StorageResult<Option<PrincipalRecord>> {
+    let mut tx = storage.begin_immediate().await?;
+    // Read the pre-update name inside the same write transaction: it is part of
+    // the session fence below.
+    let previous_name =
+        sqlx::query_scalar::<_, String>("SELECT name FROM principals_v1 WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
     let row = sqlx::query(
         "UPDATE principals_v1
             SET name = COALESCE(?, name),
@@ -249,10 +271,11 @@ async fn update_principal(
                 default_limits = COALESCE(?, default_limits),
                 router_terminal_strategy = COALESCE(?, router_terminal_strategy),
                 cache_keepalive_json = CASE WHEN ? THEN ? ELSE cache_keepalive_json END,
+                prompt_cache_mode = COALESCE(?, prompt_cache_mode),
                 revision = revision + 1,
                 updated_at = ?
           WHERE id = ? AND revision = ?
-          RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, revision, created_at, updated_at, deleted_at",
+          RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, cache_keepalive_json, prompt_cache_mode, revision, created_at, updated_at, deleted_at",
     )
     .bind(name)
     .bind(enabled)
@@ -262,13 +285,64 @@ async fn update_principal(
     .bind(router_terminal_strategy)
     .bind(update_cache_keepalive)
     .bind(cache_keepalive_json)
+    .bind(prompt_cache_mode.map(PromptCacheMode::as_db_value))
     .bind(updated_at)
     .bind(id.to_string())
     .bind(u64_to_i64(expected_revision, "principal.revision")?)
-    .fetch_optional(storage.pool())
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlite_error)?;
-    optional_updated_principal(storage, id, row).await
+    let record = optional_updated_principal_in_tx(&mut tx, id, row).await?;
+    if let Some(record) = record
+        .as_ref()
+        .filter(|record| record.prompt_cache_mode.prohibits_keepalive())
+    {
+        cancel_active_keepalive_sessions_in_tx(
+            &mut tx,
+            id,
+            previous_name.as_deref(),
+            &record.name,
+            updated_at,
+        )
+        .await?;
+    }
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
+}
+
+/// Retires every active keep-alive session of one principal with the same
+/// terminal transition `mark_latest_cache_keepalive_terminal` applies: the
+/// stored payload is dropped and the queued job for that generation is fenced
+/// off by its existing status check.
+async fn cancel_active_keepalive_sessions_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    principal_id: Uuid,
+    previous_name: Option<&str>,
+    current_name: &str,
+    updated_at: i64,
+) -> StorageResult<()> {
+    // A session records the caller-visible principal id of the request that
+    // created it: the immutable UUID, or the name in force at admission. Retire
+    // all three identities, so a session admitted under the previous name cannot
+    // outlive a rename-and-switch update.
+    sqlx::query(
+        "UPDATE cache_keepalive_sessions
+            SET status = 'terminal',
+                terminal_reason = ?,
+                running_since_unix_secs = NULL,
+                encrypted_payload = X'',
+                updated_at = ?
+          WHERE (principal_id = ? OR principal_id = ? OR principal_id = ?) AND status = 'active'",
+    )
+    .bind(CacheKeepaliveTerminalReason::Cancelled.as_str())
+    .bind(updated_at)
+    .bind(principal_id.to_string())
+    .bind(previous_name.unwrap_or(current_name))
+    .bind(current_name)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlite_error)?;
+    Ok(())
 }
 
 fn cache_keepalive_binding(
@@ -279,28 +353,6 @@ fn cache_keepalive_binding(
         Some(None) => Ok((true, None)),
         Some(Some(cfg)) => Ok((true, Some(serde_json::to_string(cfg)?))),
     }
-}
-
-async fn optional_updated_principal(
-    storage: &SqliteStorage,
-    id: Uuid,
-    row: Option<SqliteRow>,
-) -> StorageResult<Option<PrincipalRecord>> {
-    if let Some(row) = row {
-        return principal_from_row(row).map(Some);
-    }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM principals_v1 WHERE id = ?")
-        .bind(id.to_string())
-        .fetch_one(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?
-        > 0;
-    if exists {
-        return Err(StorageError::Conflict {
-            message: "principal revision conflict".to_owned(),
-        });
-    }
-    Ok(None)
 }
 
 async fn optional_updated_principal_in_tx(
@@ -368,6 +420,9 @@ fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
         .as_deref()
         .map(serde_json::from_str::<CacheKeepaliveConfig>)
         .transpose()?;
+    let prompt_cache_mode = row
+        .try_get::<String, _>("prompt_cache_mode")
+        .map_err(map_sqlx_error)?;
     Ok(PrincipalRecord {
         id: Uuid::parse_str(&id).map_err(|error| StorageError::Corrupted {
             message: format!("invalid principal id {id}: {error}"),
@@ -386,6 +441,7 @@ fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {
         updated_at_unix_secs: i64_to_u64(updated_at, "principal.updated_at")?,
         router_terminal_strategy: terminal_strategy_from_db_value(&router_terminal_strategy)?,
         cache_keepalive,
+        prompt_cache_mode: PromptCacheMode::from_db_value(&prompt_cache_mode)?,
     })
 }
 

@@ -204,6 +204,7 @@ async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &st
     PrincipalStore::create(
         storage,
         PrincipalCreate {
+            prompt_cache_mode: Default::default(),
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["claude-3-*".to_owned()],

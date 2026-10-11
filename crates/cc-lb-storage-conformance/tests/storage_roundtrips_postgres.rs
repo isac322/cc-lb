@@ -403,6 +403,45 @@ fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
 }
 
 #[test]
+fn prompt_cache_mode_roundtrip_and_omission_postgres() {
+    run_postgres_scenario(
+        "prompt_cache_mode_roundtrip_and_omission",
+        principal_store::prompt_cache_mode_roundtrip_and_omission,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_stale_revision_conflict_postgres() {
+    run_postgres_scenario(
+        "prompt_cache_mode_stale_revision_conflict",
+        principal_store::prompt_cache_mode_stale_revision_conflict,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_cancels_active_keepalive_sessions_postgres() {
+    run_postgres_scenario(
+        "prompt_cache_mode_cancels_active_keepalive_sessions",
+        principal_store::prompt_cache_mode_cancels_active_keepalive_sessions,
+    );
+}
+
+#[test]
+fn prompt_cache_mode_rename_and_switch_retires_every_identity_postgres() {
+    run_postgres_scenario(
+        "prompt_cache_mode_rename_and_switch_retires_every_identity",
+        principal_store::prompt_cache_mode_rename_and_switch_retires_every_identity,
+    );
+}
+
+#[test]
+fn keepalive_session_admission_matches_principal_view_resolution_postgres() {
+    run_postgres_scenario(
+        "keepalive_session_admission_matches_principal_view_resolution",
+        principal_store::keepalive_session_admission_matches_principal_view_resolution,
+    );
+}
+#[test]
 fn principal_allowed_upstreams_roundtrip_postgres() {
     run_postgres_scenario(
         "principal_allowed_upstreams_roundtrip",
