@@ -4,6 +4,8 @@
 //!
 //! Rank expiring subscription quota while preserving comparable warm caches.
 
+#![cfg_attr(target_arch = "wasm32", no_std)]
+
 extern crate alloc;
 
 /// Pure routing decisions for host tests and the wasm adapter.
