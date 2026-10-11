@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_clock::TestClock;
-use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder};
+use cc_lb_control::{
+    ApplyStatus, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry, UpstreamStatusSnapshot,
+};
 use cc_lb_engine::{DispatchError, Lifecycle, LifecycleConfig, ProxyError, UpstreamDispatch};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamAffinityBinding, UpstreamAffinityKey,
@@ -333,6 +335,35 @@ fn lifecycle_with_config_and_clock(
         dispatcher,
         config,
         clock,
+    );
+    match store {
+        Some(store) => lifecycle.with_upstream_affinity_store(store),
+        None => lifecycle,
+    }
+}
+
+/// Like `lifecycle`, but the view carries an explicit `UpstreamStatusSnapshot`
+/// so tests can pin the apply status the real `apply_upstreams` path would
+/// have written.
+fn lifecycle_with_status(
+    records: Vec<cc_lb_storage_api::UpstreamRecord>,
+    dispatcher: Arc<RecordingDispatch>,
+    store: Option<Arc<MemoryAffinityStore>>,
+    upstream_status_snapshot: UpstreamStatusSnapshot,
+) -> Lifecycle {
+    let authn = TestAuthn::new(TestState::default());
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(records)
+        .upstream_status_snapshot(Arc::new(upstream_status_snapshot))
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn,
+        Arc::new(DynamicViewHolder::new(view)),
+        dispatcher,
+        LifecycleConfig::default(),
+        Arc::new(TestClock::new_at_secs(TEST_NOW_UNIX_SECS)),
     );
     match store {
         Some(store) => lifecycle.with_upstream_affinity_store(store),
@@ -716,6 +747,55 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
     .expect("target-unavailable request handled");
     assert_eq!(target_response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(target_dispatch.call_count(), 0);
+}
+
+/// #851: an affinity target whose apply status is `ApplyStatus::Error` is no
+/// longer a routing candidate, so the pinned request fails closed with 503
+/// `route_no_upstream_after_filter` instead of dispatching to it. Mirrors the
+/// disabled-target arm above, which takes the same path through
+/// `build_candidates` → `candidates.retain(affinity target)`.
+#[tokio::test]
+async fn affinity_pinned_to_apply_error_upstream_fails_closed() {
+    let errored = Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap();
+    let healthy = Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert(affinity_key("to-errored"), errored);
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Json(json!({})));
+    let lifecycle = lifecycle_with_status(
+        vec![
+            upstream_record(errored, "errored", true),
+            upstream_record(healthy, "healthy", true),
+        ],
+        dispatch.clone(),
+        Some(store),
+        UpstreamStatusSnapshot {
+            entries: HashMap::from([(
+                "errored".to_owned(),
+                UpstreamStatusEntry {
+                    status: ApplyStatus::Error,
+                    last_apply_error: Some("credential rejected".to_owned()),
+                    last_apply_at_unix_secs: TEST_NOW_UNIX_SECS,
+                },
+            )]),
+            applied_at_unix_secs: TEST_NOW_UNIX_SECS,
+            revision_hash: 1,
+        },
+    );
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(opaque_request(&["to-errored"], false)),
+        )
+        .await
+        .expect("apply-error-pinned request handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = serde_json::from_slice(&body).expect("error body json");
+    assert_eq!(body["error"]["type"], "route_no_upstream_after_filter");
+    assert_eq!(dispatch.call_count(), 0);
 }
 
 #[tokio::test]

@@ -1617,7 +1617,10 @@ mod tests {
             test_gate: Some(gate.clone()),
             ..PromptCacheAnalysisExecutor::default()
         };
-        let request = Arc::new(four_breakpoint_request(&"cancel-safe ".repeat(80_000)));
+        // Keep the payload small: the post-cancel work (permit return + cache
+        // completion) must stay cheap so the timeout below only detects a
+        // genuine executor wedge, never CPU-bound analysis slowness.
+        let request = Arc::new(four_breakpoint_request(&"cancel-safe ".repeat(1_000)));
         let first = {
             let executor = executor.clone();
             let request = Arc::clone(&request);

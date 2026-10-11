@@ -90,7 +90,7 @@ use cc_lb_control::api_keys::limit_engine::{
 };
 use cc_lb_control::api_keys::principal_view::PrincipalView;
 use cc_lb_control::api_keys::types::LimitKind;
-use cc_lb_control::dynamic_view::{DynamicView, DynamicViewHolder};
+use cc_lb_control::dynamic_view::{ApplyStatus, DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use cc_lb_control::{
     PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
@@ -621,6 +621,14 @@ pub(crate) fn build_candidates_with_matches(
             .filter(|upstream| request_kind.matches_upstream(upstream.kind))
             .filter(|upstream| {
                 allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id)
+            })
+            // #851: an upstream whose last apply errored cannot sign; drop it
+            // so a healthy sibling is routed instead of a guaranteed failure.
+            .filter(|upstream| {
+                view.upstream_status_snapshot
+                    .entries
+                    .get(&upstream.name)
+                    .is_none_or(|entry| entry.status != ApplyStatus::Error)
             })
         {
             let has_rate_limit_snapshot = rate_limit_cache
