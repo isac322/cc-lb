@@ -96,3 +96,5 @@ cover nested declarations and field order; conformance tests select the
 request version declared by the handler.
 
 The host validates imports, required exports, metadata, wire versions, schema fingerprints, and an upload-time runtime probe before dispatch. Uploading the same name and SHA is idempotent. Replacing an existing name may require an explicit confirmation when the new version is not higher.
+
+The repository also includes a standalone `reset-priority-wasmtime` filter example. It uses filter V2 quota snapshots and the host routing clock to prioritize expiring subscription quotas while retaining comparable cache affinity.

@@ -99,15 +99,12 @@ Build the host and all attached filter plugins from the same source revision,
 then upload matching artifacts. A V2 guest must be rebuilt against the V2 wire;
 a V1-only host on the other side of the wire rejects it. Shape/transform
 fingerprints are unchanged. The plugin remains a standalone workspace, so its
-build does not rewrite the host `Cargo.lock` or change the host's Nix
-`cargoHash`. These source changes do not update a running service.
+build does not change the server's dependency lockfile. These source changes do not update a running service.
 
 ## Build
 
-This crate is deliberately **not** a member of the cc-lb workspace: a new member
-rewrites the root `Cargo.lock`, which invalidates the `cargoHash` of the Nix
-derivation that builds the deployed server binary, and the server never builds
-this crate anyway. Build it with an explicit manifest path.
+The plugin is a standalone workspace and is built independently of the server.
+Use its manifest path.
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -136,7 +133,7 @@ candidate and can never compare reset times.
 
 ```bash
 ADMIN=http://127.0.0.1:9090
-TOKEN=$(grep CC_LB_ADMIN_TOKEN ~/ai/cc-lb/secrets.env | cut -d= -f2)
+TOKEN="$CC_LB_ADMIN_TOKEN"
 PRINCIPAL=<principal uuid>
 
 curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
