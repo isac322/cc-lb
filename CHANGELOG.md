@@ -17,6 +17,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The SQLite keep-alive queue caps idle polling backoff at two seconds so due renewals are picked up before short prompt caches expire.
+
 - The plugin author guide now uses the published 0.8 wire dependency required by the compatible Wasmtime PDK.
 - Installation descriptions and supported upstream, storage, and plugin details are readable in the website's light theme.
 - The plugin guides and SDK READMEs now show an accept-all filter that retains every input candidate, and document that omitted candidates are rejected.

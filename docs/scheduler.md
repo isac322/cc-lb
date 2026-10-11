@@ -248,3 +248,5 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
 - **Symptom**: Elevated `SQLSTATE 23505` (Postgres) or `2067` (SQLite) log lines from the scheduler storage during cron ticks.
 - **Triage**: These are expected. Every replica pushes each tick and all but one are rejected by the unique idempotency-key index; the producer logs but does not surface them as errors. If the volume becomes disruptive, downgrade the storage layer's log level for those specific SQL states.
 - **Resolution**: No action needed for correctness. Excessive rate typically indicates too many replicas relative to cron cadence; scale down or reduce cron frequency.
+
+The SQLite cache-keepalive queue caps its idle polling backoff at two seconds. This keeps scheduled renewals within short cache TTL windows; cron and adaptive queues retain their existing polling behavior.
