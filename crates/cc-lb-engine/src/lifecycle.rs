@@ -2712,6 +2712,7 @@ impl Lifecycle {
             o.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(&ctx.path));
             o.emit_request_started(body_view.stream());
         }
+        store_setup_timings(observer.as_ref(), setup_timings);
         // Authentication already succeeded: `auth` is the proof obtained from
         // `Lifecycle::authenticate` before the body was read. Resolve the
         // principal view and emit the `AuthCompleted` event before any

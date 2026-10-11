@@ -180,12 +180,13 @@ async fn streamed_response_termination_metric_carries_routed_upstream_and_model(
 
 /// Drive one authenticated request through `Lifecycle::handle` with the real
 /// lifecycle-event logger attached, wait for its terminal event, then return
-/// the rendered metrics. `config` is the `LifecycleConfig` under test and
-/// `request` is the authenticated request (already through `authenticate`).
+/// the rendered metrics, the client status, and the terminal event. `config`
+/// is the `LifecycleConfig` under test and `request` is the authenticated
+/// request (already through `authenticate`).
 async fn completed_metric_for(
     config: cc_lb_engine::LifecycleConfig,
     request: Request<Bytes>,
-) -> (Vec<Sample>, StatusCode) {
+) -> (Vec<Sample>, StatusCode, LifecycleEvent) {
     let recorder = DebuggingRecorder::new();
     let snapshotter = recorder.snapshotter();
     let _recorder_guard = metrics::set_default_local_recorder(&recorder);
@@ -215,26 +216,28 @@ async fn completed_metric_for(
     let (status, _, _) = collect_body(response).await;
     drop(lifecycle);
     settle().await;
-    timeout(Duration::from_secs(3), async {
-        while !matches!(
-            lifecycle_events
+    let terminal = timeout(Duration::from_secs(3), async {
+        loop {
+            let event = lifecycle_events
                 .recv()
                 .await
-                .expect("lifecycle broadcast stays open"),
-            LifecycleEvent::RequestTerminated { .. }
-        ) {}
+                .expect("lifecycle broadcast stays open");
+            if matches!(event, LifecycleEvent::RequestTerminated { .. }) {
+                break event;
+            }
+        }
     })
     .await
     .expect("terminal lifecycle event is published");
     logger.shutdown().await;
-    (snapshot(&snapshotter), status)
+    (snapshot(&snapshotter), status, terminal)
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn authenticated_invalid_json_still_carries_real_principal() {
     // Given an authenticated request whose body is not valid JSON.
     let request = messages_request(Bytes::from_static(b"{\"model\": not-json"));
-    let (samples, status) =
+    let (samples, status, terminal) =
         completed_metric_for(cc_lb_engine::LifecycleConfig::default(), request).await;
 
     // The 400 rejection happens after authentication, so the request keeps its
@@ -245,6 +248,15 @@ async fn authenticated_invalid_json_still_carries_real_principal() {
     let completed = completed[0];
     assert_eq!(label(completed, "principal"), Some(PRINCIPAL));
     assert_eq!(label(completed, "status"), Some("400"));
+    // The JSON parse time measured at the top of `handle` is stored before
+    // any early exit, so the terminal event (and its request row) keeps it.
+    let LifecycleEvent::RequestTerminated { setup_timings, .. } = terminal else {
+        unreachable!("helper returns the terminal event");
+    };
+    assert!(
+        setup_timings.json_parse_ms.is_some(),
+        "invalid-JSON 400 must keep the measured json_parse_ms"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -257,7 +269,7 @@ async fn authenticated_body_too_large_still_carries_real_principal() {
     let request = messages_request(Bytes::from_static(
         br#"{"model":"claude-test","messages":[]}"#,
     ));
-    let (samples, status) = completed_metric_for(config, request).await;
+    let (samples, status, _) = completed_metric_for(config, request).await;
 
     // The 413 rejection happens after authentication, so the request keeps its
     // real principal instead of the `none` fallback.
