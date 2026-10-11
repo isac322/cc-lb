@@ -1353,7 +1353,8 @@ const CONFIG_FIELD_GUIDANCE: readonly {
   {
     pattern: 'prompt_cache_shadow.subscription_failover',
     guidance: {
-      description: 'Opt in to one subscription HTTP 429 failover, using process-local conversation protection. Takes effect at startup.',
+      description:
+        'Opt in to one subscription HTTP 429 failover, using process-local conversation protection. Takes effect at startup.',
       impactDimensions: ['availability', 'cost'],
     },
   },
