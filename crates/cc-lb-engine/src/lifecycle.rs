@@ -13,9 +13,9 @@ use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
 use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
     CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, CacheScore,
-    InternalError, InternalErrorKind, InternalErrorStage, Principal, PrincipalKind, RoutingTrace,
-    StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
-    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    InternalError, InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind,
+    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream,
+    UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
@@ -452,8 +452,7 @@ pub(crate) struct SelectedCacheMatch {
     pub(crate) prefix_hash: String,
     pub(crate) content_block_index: u32,
     pub(crate) ttl_class: TtlClass,
-    pub(crate) estimated_prefix_tokens: u64,
-    pub(crate) token_estimate_source: Option<String>,
+    pub(crate) estimated_prefix_bytes: PrefixBytes,
 }
 
 #[derive(Clone, Debug)]
@@ -543,6 +542,14 @@ async fn fetch_prompt_cache_warm_entries(
                 if record.hash_schema_version != HASH_SCHEMA_VERSION {
                     continue;
                 }
+                // A size measured by another estimator is in a different
+                // unit; such a row is known-cold, not an error.
+                let Some(estimated_prefix_bytes) = PrefixBytes::from_persisted(
+                    record.estimated_prefix_tokens,
+                    &record.token_estimate_source,
+                ) else {
+                    continue;
+                };
                 warm_entries
                     .entry(record.upstream_id)
                     .or_default()
@@ -552,8 +559,7 @@ async fn fetch_prompt_cache_warm_entries(
                         ttl_class: record.ttl_class,
                         last_observed_at_unix_secs: record.last_observed_at_unix_secs,
                         content_block_index: record.prefix_content_block_index,
-                        estimated_prefix_tokens: record.estimated_prefix_tokens,
-                        token_estimate_source: record.token_estimate_source,
+                        estimated_prefix_bytes,
                         hash_schema_version: record.hash_schema_version,
                     });
             }
@@ -639,8 +645,7 @@ pub(crate) fn build_candidates_with_matches(
                             prefix_hash: matched.prefix_hash.clone(),
                             content_block_index: matched.content_block_index,
                             ttl_class: matched.entry.ttl_class,
-                            estimated_prefix_tokens: matched.entry.estimated_prefix_tokens,
-                            token_estimate_source: matched.token_estimate_source.clone(),
+                            estimated_prefix_bytes: matched.entry.estimated_prefix_bytes,
                         },
                     );
                 }
@@ -699,7 +704,9 @@ fn build_cache_score_from_match(
         return None;
     }
 
-    let matched_prefix_tokens = matched.map_or(0, |matched| matched.entry.estimated_prefix_tokens);
+    let matched_prefix_bytes = matched.map_or(PrefixBytes::default(), |matched| {
+        matched.entry.estimated_prefix_bytes
+    });
     let anchor = matched.map(|matched| (matched.content_block_index, matched.entry.ttl_class));
 
     let deepest_1h = deepest_breakpoint(request_breakpoints, TtlClass::Ephemeral1h, anchor);
@@ -708,30 +715,26 @@ fn build_cache_score_from_match(
     let mut non_monotonic = false;
     let one_hour_baseline = matched
         .filter(|matched| matched.entry.ttl_class == TtlClass::Ephemeral1h)
-        .map_or(0, |matched| matched.entry.estimated_prefix_tokens);
-    let predicted_cache_creation_tokens_1h = deepest_1h.map_or(0, |breakpoint| {
-        non_monotonic |= breakpoint.prefix_token_count < one_hour_baseline;
-        breakpoint
-            .prefix_token_count
-            .saturating_sub(one_hour_baseline)
-    });
-    let boundary = deepest_1h.map_or(matched_prefix_tokens, |breakpoint| {
-        breakpoint.prefix_token_count
-    });
-    let predicted_cache_creation_tokens_5m = deepest_5m.map_or(0, |breakpoint| {
-        non_monotonic |= breakpoint.prefix_token_count < boundary;
-        breakpoint.prefix_token_count.saturating_sub(boundary)
-    });
+        .map_or(PrefixBytes::default(), |matched| {
+            matched.entry.estimated_prefix_bytes
+        });
+    let predicted_cache_creation_bytes_1h =
+        deepest_1h.map_or(PrefixBytes::default(), |breakpoint| {
+            non_monotonic |= breakpoint.prefix_bytes < one_hour_baseline;
+            breakpoint.prefix_bytes.saturating_sub(one_hour_baseline)
+        });
+    let boundary = deepest_1h.map_or(matched_prefix_bytes, |breakpoint| breakpoint.prefix_bytes);
+    let predicted_cache_creation_bytes_5m =
+        deepest_5m.map_or(PrefixBytes::default(), |breakpoint| {
+            non_monotonic |= breakpoint.prefix_bytes < boundary;
+            breakpoint.prefix_bytes.saturating_sub(boundary)
+        });
     let ambiguity_reason = non_monotonic.then(|| "non_monotonic_token_estimate".to_owned());
 
     Some(CacheScore {
-        predicted_cache_read_tokens: saturating_u64_to_u32(matched_prefix_tokens),
-        predicted_cache_creation_tokens_5m: saturating_u64_to_u32(
-            predicted_cache_creation_tokens_5m,
-        ),
-        predicted_cache_creation_tokens_1h: saturating_u64_to_u32(
-            predicted_cache_creation_tokens_1h,
-        ),
+        predicted_cache_read_tokens: token_estimate_u32(matched_prefix_bytes),
+        predicted_cache_creation_tokens_5m: token_estimate_u32(predicted_cache_creation_bytes_5m),
+        predicted_cache_creation_tokens_1h: token_estimate_u32(predicted_cache_creation_bytes_1h),
         predicted_uncached_input_tokens: 0,
         predicted_expires_at_unix_secs: matched.map(|matched| matched.entry.expires_at_unix_secs),
         matched_breakpoint_index: matched.map(|matched| matched.matched_breakpoint_block_index),
@@ -888,14 +891,13 @@ mod cache_score_tests {
         cache_pricing_summary_for_model,
     };
     use cc_lb_domain::{
-        CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, TtlClass, WarmCacheEntry,
+        CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, PrefixBytes, TtlClass,
+        WarmCacheEntry,
     };
     use cc_lb_pricing::{
         CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, TierRate, UsdPerMillion,
     };
     use proptest::prelude::*;
-
-    use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 
     #[test]
     fn build_cache_score_counts_missing_breakpoints_as_incremental_segments_by_ttl() {
@@ -940,7 +942,7 @@ mod cache_score_tests {
             path: "messages.2.content".to_owned(),
             message_index: Some(2),
             prefix_hash: "bp-2".to_owned(),
-            prefix_token_count: 300_000,
+            prefix_bytes: PrefixBytes::new(300_000),
             requested_ttl: TtlClass::Ephemeral5m,
             lookback_prefixes: vec![
                 cc_lb_domain::CacheLookbackPrefix {
@@ -1338,7 +1340,7 @@ mod cache_score_tests {
                 }) {
                     best = Some((
                         prefix.content_block_index,
-                        entry.estimated_prefix_tokens,
+                        entry.estimated_prefix_bytes.get(),
                         entry.ttl_class,
                         entry.expires_at_unix_secs,
                     ));
@@ -1363,7 +1365,7 @@ mod cache_score_tests {
                     _ => true,
                 })
                 .max_by_key(|bp| bp.block_index)
-                .map(|bp| bp.prefix_token_count)
+                .map(|bp| bp.prefix_bytes.get())
         };
         let deepest_1h = deepest(TtlClass::Ephemeral1h);
         let deepest_5m = deepest(TtlClass::Ephemeral5m);
@@ -1410,7 +1412,7 @@ mod cache_score_tests {
                         path: format!("messages.{index}.content"),
                         message_index: Some(index),
                         prefix_hash: format!("h{index}"),
-                        prefix_token_count: tokens[position],
+                        prefix_bytes: PrefixBytes::new(tokens[position]),
                         requested_ttl: if ttl_1h[position] {
                             TtlClass::Ephemeral1h
                         } else {
@@ -1435,8 +1437,7 @@ mod cache_score_tests {
                         },
                         last_observed_at_unix_secs: 1_700_000_000,
                         content_block_index: index,
-                        estimated_prefix_tokens: tokens[position],
-                        token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+                        estimated_prefix_bytes: PrefixBytes::new(tokens[position]),
                         hash_schema_version: HASH_SCHEMA_VERSION,
                     }
                 })
@@ -1468,18 +1469,14 @@ mod cache_score_tests {
         }
     }
 
-    fn breakpoint(
-        block_index: u32,
-        prefix_token_count: u64,
-        requested_ttl: TtlClass,
-    ) -> CacheBreakpoint {
+    fn breakpoint(block_index: u32, prefix_bytes: u64, requested_ttl: TtlClass) -> CacheBreakpoint {
         CacheBreakpoint {
             block_index,
             source: CacheBreakpointSource::Message,
             path: format!("messages.{block_index}.content"),
             message_index: Some(block_index),
             prefix_hash: format!("bp-{block_index}"),
-            prefix_token_count,
+            prefix_bytes: PrefixBytes::new(prefix_bytes),
             requested_ttl,
             lookback_prefixes: vec![cc_lb_domain::CacheLookbackPrefix {
                 prefix_hash: format!("bp-{block_index}"),
@@ -1510,7 +1507,7 @@ mod cache_score_tests {
     fn warm_entry(
         prefix_hash: &str,
         ttl_class: TtlClass,
-        estimated_prefix_tokens: u64,
+        estimated_prefix_bytes: u64,
     ) -> WarmCacheEntry {
         WarmCacheEntry {
             prefix_hash: prefix_hash.to_owned(),
@@ -1518,8 +1515,7 @@ mod cache_score_tests {
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000,
             content_block_index: 0,
-            estimated_prefix_tokens,
-            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            estimated_prefix_bytes: PrefixBytes::new(estimated_prefix_bytes),
             hash_schema_version: HASH_SCHEMA_VERSION,
         }
     }
@@ -1657,6 +1653,11 @@ fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Token estimate of a prefix size, saturated to the `CacheScore` width.
+fn token_estimate_u32(bytes: PrefixBytes) -> u32 {
+    saturating_u64_to_u32(bytes.as_token_estimate())
+}
+
 #[derive(Clone)]
 pub struct PromptCacheObservationContext {
     pub(crate) upstream_id: Uuid,
@@ -1694,8 +1695,7 @@ pub(crate) struct DecodedPromptCacheObservation {
     pub(crate) ttl_class: TtlClass,
     pub(crate) expires_at_unix_secs: u64,
     pub(crate) prefix_content_block_index: u32,
-    pub(crate) estimated_prefix_tokens: u64,
-    pub(crate) token_estimate_source: Option<String>,
+    pub(crate) estimated_prefix_bytes: PrefixBytes,
     kind: DecodedPromptCacheObservationKind,
 }
 
@@ -1759,8 +1759,7 @@ pub(crate) fn decode_prompt_cache_observations_pure(
                 grace_secs,
             ),
             prefix_content_block_index: matched.content_block_index,
-            estimated_prefix_tokens: matched.estimated_prefix_tokens,
-            token_estimate_source: matched.token_estimate_source.clone(),
+            estimated_prefix_bytes: matched.estimated_prefix_bytes,
             kind: DecodedPromptCacheObservationKind::Hit,
         });
     }
@@ -1787,8 +1786,7 @@ pub(crate) fn decode_prompt_cache_observations_pure(
                     grace_secs,
                 ),
                 prefix_content_block_index: breakpoint.block_index,
-                estimated_prefix_tokens: breakpoint.prefix_token_count,
-                token_estimate_source: breakpoint.token_estimate_source.clone(),
+                estimated_prefix_bytes: breakpoint.prefix_bytes,
                 kind: DecodedPromptCacheObservationKind::Write,
             });
         }
@@ -1826,11 +1824,8 @@ pub(crate) fn publish_prompt_cache_observations(
             last_observed_at_unix_secs: now_unix_secs,
             hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: observation.prefix_content_block_index,
-            estimated_prefix_tokens: observation.estimated_prefix_tokens,
-            token_estimate_source: observation
-                .token_estimate_source
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned()),
+            estimated_prefix_tokens: observation.estimated_prefix_bytes.get(),
+            token_estimate_source: PrefixBytes::ESTIMATE_SOURCE.to_owned(),
         };
         if let Err(error) = sink.enqueue(record) {
             match error {
@@ -6601,7 +6596,9 @@ impl RequestCacheMetadata {
                 path: breakpoint.path.clone(),
                 message_index: breakpoint.message_index.map(saturating_u64_to_u32),
                 prefix_hash: breakpoint.prefix_hash.clone(),
-                prefix_token_count: breakpoint.prefix_token_count,
+                // Produced in-process by the current estimator (see
+                // `request_cache_metadata_from_value_with_analysis`).
+                prefix_bytes: PrefixBytes::new(breakpoint.prefix_token_count),
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 lookback_prefixes: breakpoint
                     .lookback_prefixes
@@ -6813,7 +6810,7 @@ fn request_cache_metadata_from_value_with_analysis(
             message_index: breakpoint.message_index,
             ttl: breakpoint.ttl.clone(),
             prefix_hash: breakpoint.prefix_key.clone(),
-            prefix_token_count: breakpoint.prefix_token_count,
+            prefix_token_count: breakpoint.prefix_bytes.get(),
             lookback_prefixes: breakpoint
                 .lookback_prefixes
                 .iter()
@@ -7354,7 +7351,7 @@ mod tests {
         let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
         assert_eq!(breakpoints.len(), 1);
         let prefix_hash = breakpoints[0].prefix_hash.clone();
-        let prefix_token_count = breakpoints[0].prefix_token_count;
+        let prefix_token_count = breakpoints[0].prefix_bytes.get();
         assert!(prefix_token_count >= 1024);
         let warm_entries = HashMap::from([(
             upstream_id,
@@ -7466,8 +7463,7 @@ mod tests {
                 ttl_class: TtlClass::Ephemeral5m,
                 last_observed_at_unix_secs: 1_700_000_100 + u64::from(50 - index),
                 content_block_index: index,
-                estimated_prefix_tokens: u64::from(index + 1),
-                token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+                estimated_prefix_bytes: PrefixBytes::new(u64::from(index + 1)),
                 hash_schema_version: HASH_SCHEMA_VERSION,
             })
             .collect::<Vec<_>>();
@@ -7782,8 +7778,7 @@ mod tests {
                 prefix_hash: "nk".to_owned(),
                 content_block_index: 0,
                 ttl_class: TtlClass::Ephemeral5m,
-                estimated_prefix_tokens: 2_000,
-                token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+                estimated_prefix_bytes: PrefixBytes::new(2_000),
             }),
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
@@ -7806,7 +7801,49 @@ mod tests {
             "refresh must target the matched N-k prefix, not the owning breakpoint"
         );
         assert_eq!(hit.prefix_content_block_index, 0);
-        assert_eq!(hit.estimated_prefix_tokens, 2_000);
+        assert_eq!(hit.estimated_prefix_bytes, PrefixBytes::new(2_000));
+    }
+
+    #[test]
+    fn hit_refresh_republishes_current_estimator_source() {
+        let upstream_id = Uuid::from_u128(76_604);
+        let now = 1_800_000_000;
+        let cache =
+            Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: Some(selected_match_hit("nk", 0, TtlClass::Ephemeral5m, 2_000)),
+            sink: cache.clone(),
+            grace_margin_secs: cache.grace_margin_secs(),
+        };
+
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 2_000,
+            },
+            now,
+        );
+        publish_prompt_cache_observations(&context, &decoded, now);
+
+        let records = cache.upserts();
+        assert_eq!(records.len(), 1, "a hit refresh publishes exactly one row");
+        let record = records.first().expect("hit refresh record");
+        assert_eq!(record.v3_prefix_key, "nk");
+        assert_eq!(record.token_estimate_source, PrefixBytes::ESTIMATE_SOURCE);
+        assert_eq!(record.estimated_prefix_tokens, 2_000);
+        assert_eq!(
+            PrefixBytes::from_persisted(
+                record.estimated_prefix_tokens,
+                &record.token_estimate_source
+            ),
+            Some(PrefixBytes::new(2_000)),
+            "the republished row must decode as the matched bytes"
+        );
     }
 
     #[test]
@@ -7950,8 +7987,7 @@ mod tests {
                 prefix_hash: "shared".to_owned(),
                 content_block_index: 10,
                 ttl_class: TtlClass::Ephemeral5m,
-                estimated_prefix_tokens: 2_400,
-                token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+                estimated_prefix_bytes: PrefixBytes::new(2_400),
             }),
             sink: cache.clone(),
             grace_margin_secs: cache.grace_margin_secs(),
@@ -8943,7 +8979,7 @@ mod tests {
         let plugin_breakpoints = metadata.plugin_cache_breakpoints();
         assert_eq!(plugin_breakpoints.len(), 1);
         assert_eq!(
-            plugin_breakpoints[0].prefix_token_count,
+            plugin_breakpoints[0].prefix_bytes.get(),
             breakpoint.prefix_token_count
         );
     }
@@ -9406,6 +9442,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_match_ignores_observation_from_other_estimator_source() {
+        let upstream_id = Uuid::from_u128(766);
+        let clock = cc_lb_clock::TestClock::new_at_secs(1_800_000_000);
+        let breakpoints = vec![cache_breakpoint(0, "prefix", 100, TtlClass::Ephemeral5m)];
+
+        // Positive control: an unexpired row from the current estimator warms
+        // the request and its prefix size is subtracted as a predicted read.
+        let current =
+            observation_record(upstream_id, "prefix", TtlClass::Ephemeral5m, 1_800_000_600);
+        let store = Arc::new(FakePromptCacheStore::new(vec![current]));
+        let view = cache_score_view_with_store(upstream_id, store.clone());
+        let snapshot = fetch_prompt_cache_warm_entries(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+            &clock,
+        )
+        .await;
+        assert_eq!(snapshot[&upstream_id].len(), 1);
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            &breakpoints,
+            &snapshot,
+            &clock,
+        );
+        let score = candidates[0].cache_score.as_ref().expect("warm score");
+        assert_eq!(score.matched_v3_cache_key.as_deref(), Some("prefix"));
+        assert_eq!(score.predicted_cache_read_tokens, 100);
+
+        // Same schema version, but the size was measured by another
+        // estimator: its unit is not comparable, so the row must be ignored
+        // and the upstream scored known-cold.
+        let mut stale =
+            observation_record(upstream_id, "prefix", TtlClass::Ephemeral5m, 1_800_000_600);
+        stale.token_estimate_source = "local_tiktoken_v1".to_owned();
+        assert_eq!(stale.hash_schema_version, HASH_SCHEMA_VERSION);
+        let store = Arc::new(FakePromptCacheStore::new(vec![stale]));
+        let view = cache_score_view_with_store(upstream_id, store.clone());
+        let snapshot = fetch_prompt_cache_warm_entries(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+            &clock,
+        )
+        .await;
+        assert_eq!(snapshot[&upstream_id].len(), 0);
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            &breakpoints,
+            &snapshot,
+            &clock,
+        );
+        let score = candidates[0]
+            .cache_score
+            .as_ref()
+            .expect("known-cold score, not unknown");
+        assert_eq!(score.matched_v3_cache_key, None);
+        assert_eq!(score.predicted_cache_read_tokens, 0);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 100);
+    }
+
+    #[tokio::test]
+    async fn warm_entries_keep_only_current_estimator_rows() {
+        let upstream_id = Uuid::from_u128(76_602);
+        let clock = cc_lb_clock::TestClock::new_at_secs(1_800_000_000);
+        let breakpoints = vec![
+            cache_breakpoint(0, "current", 100, TtlClass::Ephemeral5m),
+            cache_breakpoint(1, "tiktoken", 200, TtlClass::Ephemeral5m),
+            cache_breakpoint(2, "unknown", 300, TtlClass::Ephemeral5m),
+            cache_breakpoint(3, "empty", 400, TtlClass::Ephemeral5m),
+        ];
+        let current =
+            observation_record(upstream_id, "current", TtlClass::Ephemeral5m, 1_800_000_600);
+        let mut records = vec![current];
+        for (prefix_key, source) in [
+            ("tiktoken", "local_tiktoken_v1"),
+            ("unknown", "unknown"),
+            ("empty", ""),
+        ] {
+            let mut record = observation_record(
+                upstream_id,
+                prefix_key,
+                TtlClass::Ephemeral5m,
+                1_800_000_600,
+            );
+            record.token_estimate_source = source.to_owned();
+            records.push(record);
+        }
+        let store = Arc::new(FakePromptCacheStore::new(records));
+        let view = cache_score_view_with_store(upstream_id, store.clone());
+
+        let snapshot = fetch_prompt_cache_warm_entries(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+            &clock,
+        )
+        .await;
+
+        assert_eq!(store.lookup_count(), 1);
+        let entries = snapshot
+            .get(&upstream_id)
+            .expect("successful lookup keeps the upstream as known");
+        let keys = entries
+            .iter()
+            .map(|entry| entry.prefix_hash.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["current"]);
+        assert_eq!(
+            entries.first().map(|entry| entry.estimated_prefix_bytes),
+            Some(PrefixBytes::new(100))
+        );
+    }
+
+    #[tokio::test]
     async fn five_minute_observation_cannot_warm_one_hour_request() {
         let upstream_id = Uuid::from_u128(829);
         let store = Arc::new(FakePromptCacheStore::new(vec![observation_record(
@@ -9460,7 +9621,7 @@ mod tests {
     fn cache_breakpoint(
         index: u32,
         prefix_hash: &str,
-        prefix_token_count: u64,
+        prefix_bytes: u64,
         requested_ttl: TtlClass,
     ) -> CacheBreakpoint {
         CacheBreakpoint {
@@ -9469,7 +9630,7 @@ mod tests {
             path: format!("messages[{index}]"),
             message_index: Some(index),
             prefix_hash: prefix_hash.to_owned(),
-            prefix_token_count,
+            prefix_bytes: PrefixBytes::new(prefix_bytes),
             requested_ttl,
             lookback_prefixes: vec![CacheLookbackPrefix {
                 prefix_hash: prefix_hash.to_owned(),
@@ -9499,14 +9660,13 @@ mod tests {
         prefix_hash: &str,
         block_index: u32,
         ttl_class: TtlClass,
-        estimated_prefix_tokens: u64,
+        estimated_prefix_bytes: u64,
     ) -> SelectedCacheMatch {
         SelectedCacheMatch {
             prefix_hash: prefix_hash.to_owned(),
             content_block_index: block_index,
             ttl_class,
-            estimated_prefix_tokens,
-            token_estimate_source: Some(V3_TOKEN_ESTIMATE_SOURCE.to_owned()),
+            estimated_prefix_bytes: PrefixBytes::new(estimated_prefix_bytes),
         }
     }
 
@@ -9515,7 +9675,7 @@ mod tests {
         ttl_class: TtlClass,
         expires_at_unix_secs: u64,
         observed_offset: u64,
-        estimated_prefix_tokens: u64,
+        estimated_prefix_bytes: u64,
     ) -> WarmCacheEntry {
         WarmCacheEntry {
             prefix_hash: prefix_hash.to_owned(),
@@ -9523,8 +9683,7 @@ mod tests {
             ttl_class,
             last_observed_at_unix_secs: 1_700_000_000 + observed_offset,
             content_block_index: 0,
-            estimated_prefix_tokens,
-            token_estimate_source: V3_TOKEN_ESTIMATE_SOURCE.to_owned(),
+            estimated_prefix_bytes: PrefixBytes::new(estimated_prefix_bytes),
             hash_schema_version: HASH_SCHEMA_VERSION,
         }
     }

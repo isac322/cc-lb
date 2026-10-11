@@ -4,6 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use cc_lb_domain::PrefixBytes;
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 use tokio::sync::Semaphore;
@@ -31,12 +32,12 @@ struct TokenPrefixKey([u8; 32]);
 
 #[derive(Debug, Default)]
 struct Flight {
-    result: Mutex<Option<Option<u64>>>,
+    result: Mutex<Option<Option<PrefixBytes>>>,
     ready: Condvar,
 }
 
 impl Flight {
-    fn complete(&self, value: u64) {
+    fn complete(&self, value: PrefixBytes) {
         *self.result.lock() = Some(Some(value));
         self.ready.notify_all();
     }
@@ -46,7 +47,7 @@ impl Flight {
         self.ready.notify_all();
     }
 
-    fn wait(&self) -> Option<u64> {
+    fn wait(&self) -> Option<PrefixBytes> {
         let mut result = self.result.lock();
         while result.is_none() {
             self.ready.wait(&mut result);
@@ -56,7 +57,7 @@ impl Flight {
 }
 
 struct TokenCountCacheState {
-    values: HashMap<TokenPrefixKey, u64>,
+    values: HashMap<TokenPrefixKey, PrefixBytes>,
     insertion_order: VecDeque<TokenPrefixKey>,
     flights: HashMap<TokenPrefixKey, Arc<Flight>>,
 }
@@ -77,7 +78,7 @@ struct PromptTokenCountCache {
 }
 
 enum CacheClaim {
-    Hit(u64),
+    Hit(PrefixBytes),
     Leader(Arc<Flight>),
     Follower(Arc<Flight>),
 }
@@ -104,7 +105,7 @@ impl PromptTokenCountCache {
         CacheClaim::Leader(flight)
     }
 
-    fn complete(&self, key: TokenPrefixKey, flight: &Arc<Flight>, value: u64) {
+    fn complete(&self, key: TokenPrefixKey, flight: &Arc<Flight>, value: PrefixBytes) {
         self.insert_value(key, value);
         {
             let mut state = self.state.lock();
@@ -138,7 +139,7 @@ impl PromptTokenCountCache {
         }
     }
 
-    fn insert_value(&self, key: TokenPrefixKey, value: u64) {
+    fn insert_value(&self, key: TokenPrefixKey, value: PrefixBytes) {
         let mut state = self.state.lock();
         if state.values.contains_key(&key) {
             return;
@@ -402,18 +403,19 @@ fn compute_token_prefix_keys(
     Some(keys)
 }
 
-fn full_prefix_counts(batch: &ExactPrefixBatch) -> Vec<u64> {
+fn full_prefix_bytes(batch: &ExactPrefixBatch) -> Vec<PrefixBytes> {
     let suffix_len = batch.suffix_bytes.len() as u64;
     batch
         .breakpoint_offsets
         .iter()
         .map(|&offset| {
-            batch
+            let bytes = batch
                 .open_prefix_bytes
                 .get(..offset)
                 .map(|prefix| prefix.len() as u64)
                 .unwrap_or(0)
-                .saturating_add(suffix_len)
+                .saturating_add(suffix_len);
+            PrefixBytes::new(bytes)
         })
         .collect()
 }
@@ -493,7 +495,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
     let mut leader_guard = LeaderFlightsGuard::new(cache, leader_flights);
     let mut computed_counts = None;
     if !leader_guard.flights.is_empty() {
-        let counts = full_prefix_counts(&batch);
+        let counts = full_prefix_bytes(&batch);
         let lookup_started = Instant::now();
         for (position, claim) in claims.iter().enumerate() {
             if let CacheClaim::Leader(flight) = claim {
@@ -505,7 +507,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
         computed_counts = Some(counts);
     }
 
-    let mut prefix_token_counts = Vec::with_capacity(claims.len());
+    let mut prefix_bytes = Vec::with_capacity(claims.len());
     for (position, claim) in claims.into_iter().enumerate() {
         let value = match claim {
             CacheClaim::Hit(value) => value,
@@ -513,7 +515,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
                 .as_ref()
                 .and_then(|counts| counts.get(position))
                 .copied()
-                .unwrap_or_else(|| full_prefix_counts(&batch)[position]),
+                .unwrap_or_else(|| full_prefix_bytes(&batch)[position]),
             CacheClaim::Follower(flight) => {
                 let lookup_started = Instant::now();
                 let waited = flight.wait();
@@ -522,7 +524,7 @@ fn analyze_v3_prompt_cache_optimized_scoped(
                 match waited {
                     Some(value) => value,
                     None => {
-                        let counts = full_prefix_counts(&batch);
+                        let counts = full_prefix_bytes(&batch);
                         let value = counts[position];
                         let lookup_started = Instant::now();
                         cache.insert_value(batch.token_prefix_keys[position], value);
@@ -533,12 +535,12 @@ fn analyze_v3_prompt_cache_optimized_scoped(
                 }
             }
         };
-        prefix_token_counts.push(value);
+        prefix_bytes.push(value);
     }
 
     durations.count_lookup = Some(count_lookup_duration);
     durations.tokenize = Some(Duration::ZERO);
-    let analysis = finish_structural_analysis(structural, prefix_token_counts)
+    let analysis = finish_structural_analysis(structural, prefix_bytes)
         .unwrap_or_else(unanalyzable_prompt_cache);
     (analysis, stats, durations)
 }
@@ -1242,7 +1244,7 @@ mod tests {
             .enumerate()
         {
             assert_eq!(
-                actual.prefix_token_count, expected.prefix_token_count,
+                actual.prefix_bytes, expected.prefix_bytes,
                 "breakpoint {position} prefix token count drift"
             );
             assert_eq!(

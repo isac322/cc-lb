@@ -54,7 +54,7 @@ fn prompt_cache_byte_oracle_matches_current_behavior_over_wide_corpus() {
             let index = breakpoint.block_index as usize;
             let prefix = prefix_oracle_bytes(CANONICAL_MODEL, &analysis.blocks[..=index]);
             assert_eq!(
-                breakpoint.prefix_token_count,
+                breakpoint.prefix_bytes.get(),
                 prefix.len() as u64,
                 "live prefix size: {}",
                 case.name
@@ -108,12 +108,12 @@ fn prompt_cache_byte_oracle_prefix_preserves_cache_control() {
     );
     assert_ne!(preserved_prefix, stripped_prefix);
     assert_eq!(
-        breakpoint.prefix_token_count,
+        breakpoint.prefix_bytes.get(),
         preserved_prefix.len() as u64,
         "live prefix size must use cache_control-preserving bytes"
     );
     assert_ne!(
-        breakpoint.prefix_token_count,
+        breakpoint.prefix_bytes.get(),
         stripped_prefix.len() as u64,
         "sentinel must distinguish preserved from stripped prefix size"
     );

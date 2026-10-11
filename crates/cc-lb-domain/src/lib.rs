@@ -13,7 +13,7 @@ mod upstream;
 
 pub use cache::{
     CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, CacheScore,
-    TtlClass, WarmCacheEntry,
+    PrefixBytes, TtlClass, WarmCacheEntry,
 };
 pub use error::{InternalError, InternalErrorKind, InternalErrorStage};
 pub use identity::{Principal, PrincipalKind, PrincipalKindLite, ReplicaIdentity};

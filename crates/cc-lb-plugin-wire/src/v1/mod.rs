@@ -111,8 +111,11 @@ pub struct UpstreamCandidate {
     pub name: Box<str>,
     pub kind: Box<str>,
     pub observed_at_unix_secs: u64,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_read_tokens: u32,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_creation_tokens_5m: u32,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_creation_tokens_1h: u32,
     pub predicted_uncached_input_tokens: u32,
     pub plan_capacity_ratio: f64,
@@ -131,8 +134,11 @@ pub struct UpstreamCandidateRef<'a> {
     #[rkyv(with = InlineAsBox)]
     pub kind: &'a str,
     pub observed_at_unix_secs: u64,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_read_tokens: u32,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_creation_tokens_5m: u32,
+    /// Token estimate derived from serialized prefix bytes; not a provider-reported token count.
     pub predicted_cache_creation_tokens_1h: u32,
     pub predicted_uncached_input_tokens: u32,
     pub plan_capacity_ratio: f64,

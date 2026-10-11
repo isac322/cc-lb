@@ -17,7 +17,10 @@ pub struct PromptCacheObservationRecord {
     pub last_observed_at_unix_secs: u64,
     pub hash_schema_version: u8,
     pub prefix_content_block_index: u32,
+    /// Prefix size in the unit named by `token_estimate_source`; mirrors the
+    /// DB column. Decode only via `cc_lb_domain::PrefixBytes::from_persisted`.
     pub estimated_prefix_tokens: u64,
+    /// Estimator identity of `estimated_prefix_tokens`.
     pub token_estimate_source: String,
 }
 

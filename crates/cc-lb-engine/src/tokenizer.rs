@@ -2,6 +2,7 @@
 
 use std::sync::OnceLock;
 
+use cc_lb_domain::PrefixBytes;
 use serde_json::Value as JsonValue;
 use tiktoken_rs::o200k_base;
 
@@ -9,17 +10,28 @@ pub(crate) const CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN: usize = 8;
 // Anthropic does not expose its tokenizer. Prefixes at least 8 bytes per required
 // token are treated as clearly large; only the middle band pays for local o200k.
 
+/// Measures a serialized prefix under the current estimator
+/// ([`PrefixBytes::ESTIMATE_SOURCE`]).
+pub(crate) fn prefix_bytes_of(serialized_prefix: &[u8]) -> PrefixBytes {
+    PrefixBytes::new(u64::try_from(serialized_prefix.len()).unwrap_or(u64::MAX))
+}
+
 pub(crate) fn cache_threshold_from_byte_len(
-    byte_len: usize,
+    prefix_bytes: PrefixBytes,
     token_threshold: usize,
 ) -> Option<bool> {
     if token_threshold == 0 {
         return Some(true);
     }
-    if byte_len < token_threshold {
+    let threshold = u64::try_from(token_threshold).unwrap_or(u64::MAX);
+    // The gate measures local o200k tokens of the serialized text; byte length is an upper bound.
+    if prefix_bytes.get() < threshold {
         return Some(false);
     }
-    if byte_len >= token_threshold.saturating_mul(CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN) {
+    let fast_accept_bytes =
+        u64::try_from(token_threshold.saturating_mul(CACHE_THRESHOLD_FAST_ACCEPT_BYTES_PER_TOKEN))
+            .unwrap_or(u64::MAX);
+    if prefix_bytes.get() >= fast_accept_bytes {
         return Some(true);
     }
     None
@@ -61,7 +73,7 @@ impl PrefixTokenizer {
         token_threshold: usize,
     ) -> bool {
         if let Some(decision) =
-            cache_threshold_from_byte_len(serialized_prefix.len(), token_threshold)
+            cache_threshold_from_byte_len(prefix_bytes_of(serialized_prefix), token_threshold)
         {
             return decision;
         }
@@ -160,7 +172,10 @@ mod tests {
     #[test]
     fn cache_threshold_byte_fast_paths_skip_tokenizer() {
         reset_tokenizer_call_count();
-        assert_eq!(cache_threshold_from_byte_len(511, 512), Some(false));
+        assert_eq!(
+            cache_threshold_from_byte_len(PrefixBytes::new(511), 512),
+            Some(false)
+        );
         assert!(!PrefixTokenizer::global().meets_cache_threshold(&[b'a'; 511], 512));
         assert_eq!(tokenizer_call_count(), 0);
 
@@ -174,7 +189,10 @@ mod tests {
     fn cache_threshold_ambiguous_prefix_uses_tokenizer() {
         let prefix = br#"{"content_blocks":[{"source":"message","value":"hello world"}]}"#;
         let threshold = 8;
-        assert_eq!(cache_threshold_from_byte_len(prefix.len(), threshold), None);
+        assert_eq!(
+            cache_threshold_from_byte_len(prefix_bytes_of(prefix), threshold),
+            None
+        );
         let expected = PrefixTokenizer::global().count_tokens(std::str::from_utf8(prefix).unwrap())
             >= threshold;
 

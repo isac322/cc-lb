@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use cc_lb_domain::{
-    CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, TtlClass,
+    CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, PrefixBytes,
+    TtlClass,
 };
 use cc_lb_engine::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
 use cc_lb_engine::request_context::RequestContext;
@@ -65,7 +66,7 @@ fn breakpoint() -> CacheBreakpoint {
         path: "messages.0.content.0".to_owned(),
         message_index: Some(0),
         prefix_hash: "hash123".to_owned(),
-        prefix_token_count: 150,
+        prefix_bytes: PrefixBytes::new(150),
         requested_ttl: TtlClass::Ephemeral1h,
         lookback_prefixes: vec![CacheLookbackPrefix {
             prefix_hash: "hash123".to_owned(),
