@@ -57,3 +57,13 @@ ttl_days = 14
     assert_eq!(config.upstream_affinity.ttl_days, 14);
     assert_eq!(config.upstream_affinity.ttl_secs(), 14 * 86_400);
 }
+
+#[test]
+fn cache_safe_subscription_failover_is_default_off_and_explicitly_opt_in() {
+    let defaults: cc_lb_config::Config = toml::from_str("").unwrap();
+    assert!(!defaults.prompt_cache_shadow.subscription_failover);
+    let enabled: cc_lb_config::Config =
+        toml::from_str("[prompt_cache_shadow]\nsubscription_failover = true\n").unwrap();
+    assert!(enabled.prompt_cache_shadow.subscription_failover);
+    assert_eq!(enabled.prompt_cache_shadow.grace_margin_secs, 30);
+}

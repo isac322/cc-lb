@@ -32,3 +32,7 @@ The feature is best effort. A keepalive can miss because the cache changed, cred
 ```
 
 Keepalive state is encrypted at rest and bound to the principal, session hash, generation, upstream, and job purpose. Downstream authorization headers are not stored in the snapshot.
+
+Optional subscription 429 failover is controlled by `prompt_cache_shadow.subscription_failover` (default `false`, startup setting). One alternate subscription may be selected through the complete configured routing policy if process-local conversation protection permits it. Full-TTL protection is independent of grace-shortened cache-hit eligibility and survives delayed observation writes. Historical observations have unknown ownership after restart. See [configuration](/docs/reference/configuration/#subscription-http-429-failover) for limits.
+
+Persisted keepalive renewal anchors retain full-TTL protection after restart. Their model is encrypted, so this evidence can conservatively veto optional fallback across models until expiry; ordinary primary sharing remains available.

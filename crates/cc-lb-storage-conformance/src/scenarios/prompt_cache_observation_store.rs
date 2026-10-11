@@ -4,7 +4,9 @@ use anyhow::{Result, ensure};
 use cc_lb_clock::{ClockHandle, unix_secs};
 use cc_lb_domain::TtlClass;
 use cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION;
-use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
+use cc_lb_storage_api::{
+    CacheKeepaliveSessionStore, PromptCacheObservationRecord, PromptCacheObservationStore,
+};
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
@@ -799,6 +801,7 @@ fn observation_with_model(
         v3_prefix_key: prefix_hash.to_owned(),
         ttl_class,
         expires_at_unix_secs,
+        protection_expires_at_unix_secs: Some(expires_at_unix_secs),
         last_observed_at_unix_secs,
         hash_schema_version: HASH_SCHEMA_VERSION,
         prefix_content_block_index: 7,
@@ -813,4 +816,183 @@ fn contains_ttl(records: &[PromptCacheObservationRecord], ttl_class: TtlClass) -
 
 fn upstream_id(value: u128) -> Uuid {
     Uuid::from_u128(0x1500 + value)
+}
+
+/// Independent full TTL survives grace changes, losing route updates, and purge.
+pub async fn protection_deadline_preserves_route_winner_and_legacy_ttl<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let id = upstream_id(31);
+        let mut winner = observation(
+            id,
+            "protection-prefix",
+            TtlClass::Ephemeral1h,
+            now + 3570,
+            now,
+        );
+        winner.protection_expires_at_unix_secs = Some(now + 3600);
+        storage.upsert_observation(&winner).await?;
+        let mut losing = winner.clone();
+        // A later observation with an unrestricted larger grace loses the route comparison.
+        losing.expires_at_unix_secs = now;
+        losing.last_observed_at_unix_secs = now + 3000;
+        losing.protection_expires_at_unix_secs = Some(now + 6600);
+        losing.estimated_prefix_tokens = 1;
+        losing.token_estimate_source = "losing metadata".to_owned();
+        storage.upsert_observation(&losing).await?;
+        let mut expected = winner.clone();
+        expected.protection_expires_at_unix_secs = Some(now + 6600);
+        ensure!(
+            storage
+                .list_active_for_candidates(
+                    &[id],
+                    &winner.canonical_model_id,
+                    &[winner.v3_prefix_key.clone()],
+                    now
+                )
+                .await?
+                == vec![expected],
+            "routing metadata must remain whole while full TTL advances"
+        );
+        ensure!(
+            storage
+                .list_active_for_candidates(
+                    &[id],
+                    &winner.canonical_model_id,
+                    &[winner.v3_prefix_key.clone()],
+                    now + 4000
+                )
+                .await?
+                .is_empty(),
+            "grace-shortened route eligibility unchanged"
+        );
+        ensure!(
+            storage.purge_expired_before(now + 4000).await? == 0,
+            "purge retains independent deadline"
+        );
+        let protection = storage
+            .list_active_protection(&[id], &winner.canonical_model_id, now + 4000)
+            .await?;
+        ensure!(
+            protection.len() == 1 && protection[0].protection_expires_at_unix_secs == now + 6600,
+            "model-wide protection ignores prefix and routing expiry"
+        );
+        ensure!(
+            storage.purge_expired_before(now + 6601).await? == 1,
+            "purge removes exactly after full TTL"
+        );
+        for (ttl, seconds) in [(TtlClass::Ephemeral5m, 300), (TtlClass::Ephemeral1h, 3600)] {
+            let mut legacy = observation(id, "legacy-prefix", ttl, now, now);
+            legacy.protection_expires_at_unix_secs = None;
+            storage.upsert_observation(&legacy).await?;
+            let rows = storage
+                .list_active_protection(&[id], &legacy.canonical_model_id, now + seconds - 1)
+                .await?;
+            ensure!(
+                !rows.is_empty(),
+                "legacy nullable deadline derives full TTL from last observation"
+            );
+            ensure!(
+                storage.purge_expired_before(now + seconds - 1).await? == 0,
+                "legacy full TTL retained"
+            );
+            ensure!(
+                storage.purge_expired_before(now + seconds + 1).await? == 1,
+                "legacy full TTL expires"
+            );
+        }
+        ensure!(
+            storage
+                .list_active_protection(&[], "model", now)
+                .await?
+                .is_empty(),
+            "empty scope succeeds"
+        );
+        Ok(())
+    })
+    .await
+}
+
+/// Persisted renewals protect accounts even without prefix observations or a decrypted model.
+pub async fn persisted_keepalive_renewal_protection<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore + cc_lb_storage_api::CacheKeepaliveSessionStore,
+{
+    use cc_lb_storage_api::{
+        CacheKeepaliveConfigSnapshot, CacheKeepaliveHitRefreshRequest,
+        CacheKeepaliveReplaceRequest, CacheTtl,
+    };
+    with_conformance_fixture(backend, |storage| async move {
+        let now = unix_secs(clock.now());
+        let id = upstream_id(42);
+        let session = storage
+            .replace_from_real_request(&CacheKeepaliveReplaceRequest {
+                session_key_hash: "persisted-renewal".to_owned(),
+                principal_id: "principal".to_owned(),
+                accounting_key_id: None,
+                upstream_id: id,
+                cache_anchor_at_unix_secs: now,
+                ttl: CacheTtl::Ttl1h,
+                run_at_unix_secs: now + 3300,
+                expires_at_unix_secs: now + 14400,
+                encrypted_payload: vec![1, 2, 3],
+                display_reason: "test".to_owned(),
+                config_snapshot: CacheKeepaliveConfigSnapshot {
+                    refresh_lead_time_5m_secs: 30,
+                    refresh_lead_time_1h_secs: 300,
+                    max_refreshes_per_session: 12,
+                    max_total_duration_secs: 14400,
+                    snapshot_max_bytes: 524288,
+                },
+                now_unix_secs: now,
+            })
+            .await?;
+        storage
+            .reschedule_after_cache_hit(&CacheKeepaliveHitRefreshRequest {
+                session_key_hash: session.session_key_hash,
+                generation: session.generation,
+                cache_anchor_at_unix_secs: now + 3000,
+                run_at_unix_secs: now + 6300,
+                expires_at_unix_secs: now + 14400,
+                encrypted_payload: None,
+                now_unix_secs: now + 3000,
+            })
+            .await?;
+        let rows = storage
+            .list_active_protection(&[id], "future-model", now + 6000)
+            .await?;
+        ensure!(
+            rows.len() == 1
+                && rows[0].canonical_model_id.is_none()
+                && rows[0].protection_expires_at_unix_secs == now + 6600,
+            "renewal anchor survives the original TTL and conservatively spans encrypted models"
+        );
+        ensure!(
+            storage
+                .list_active_protection(&[upstream_id(43)], "future-model", now)
+                .await?
+                .is_empty(),
+            "renewal protection stays scoped to requested accounts"
+        );
+        ensure!(
+            storage
+                .list_active_protection(&[id], "future-model", now + 6600)
+                .await?
+                .is_empty(),
+            "renewal protection expires at full TTL, independent of session retention"
+        );
+        Ok(())
+    })
+    .await
 }

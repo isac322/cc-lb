@@ -90,7 +90,9 @@ use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, Bui
 use cc_lb_control::api_keys::limit_engine::{
     LimitEngine, RejectReason, Reservation as LimitReservation,
 };
-use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::{
+    PrincipalSpecCached, PrincipalView, RouterPipelineCache,
+};
 use cc_lb_control::api_keys::types::LimitKind;
 use cc_lb_control::dynamic_view::{ApplyStatus, DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
@@ -1670,6 +1672,7 @@ fn token_estimate_u32(bytes: PrefixBytes) -> u32 {
 
 #[derive(Clone)]
 pub struct PromptCacheObservationContext {
+    pub(crate) activity: Option<Arc<crate::upstream_activity::ActivityGuard>>,
     pub(crate) upstream_id: Uuid,
     pub(crate) canonical_model_id: String,
     pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
@@ -1704,6 +1707,7 @@ pub(crate) struct DecodedPromptCacheObservation {
     pub(crate) prefix_hash: String,
     pub(crate) ttl_class: TtlClass,
     pub(crate) expires_at_unix_secs: u64,
+    pub(crate) protection_expires_at_unix_secs: u64,
     pub(crate) prefix_content_block_index: u32,
     pub(crate) estimated_prefix_bytes: PrefixBytes,
     kind: DecodedPromptCacheObservationKind,
@@ -1734,6 +1738,7 @@ pub(crate) fn prompt_cache_observation_context(
     }
     let sink = Arc::clone(&view.prompt_cache_observation_sink);
     Some(PromptCacheObservationContext {
+        activity: None,
         upstream_id,
         canonical_model_id: canonical_model_id.to_owned(),
         cache_breakpoints: cache_breakpoints.to_vec(),
@@ -1763,6 +1768,8 @@ pub(crate) fn decode_prompt_cache_observations_pure(
         observations.push(DecodedPromptCacheObservation {
             prefix_hash: matched.prefix_hash.clone(),
             ttl_class: matched.ttl_class,
+            protection_expires_at_unix_secs: now_unix_secs
+                .saturating_add(prompt_cache_ttl_secs(matched.ttl_class)),
             expires_at_unix_secs: prompt_cache_observation_expires_at(
                 now_unix_secs,
                 matched.ttl_class,
@@ -1790,6 +1797,8 @@ pub(crate) fn decode_prompt_cache_observations_pure(
             observations.push(DecodedPromptCacheObservation {
                 prefix_hash: breakpoint.prefix_hash.clone(),
                 ttl_class: breakpoint.requested_ttl,
+                protection_expires_at_unix_secs: now_unix_secs
+                    .saturating_add(prompt_cache_ttl_secs(breakpoint.requested_ttl)),
                 expires_at_unix_secs: prompt_cache_observation_expires_at(
                     now_unix_secs,
                     breakpoint.requested_ttl,
@@ -1823,6 +1832,15 @@ pub(crate) fn publish_prompt_cache_observations(
             cc_lb_observability::cache_observation_dropped_reason::BELOW_THRESHOLD,
         );
     }
+    if let Some(activity) = &context.activity
+        && let Some(deadline) = decode
+            .observations
+            .iter()
+            .map(|observation| observation.protection_expires_at_unix_secs)
+            .max()
+    {
+        activity.observe(deadline);
+    }
     let sink = &context.sink;
     for observation in &decode.observations {
         let record = PromptCacheObservationRecord {
@@ -1831,6 +1849,7 @@ pub(crate) fn publish_prompt_cache_observations(
             v3_prefix_key: observation.prefix_hash.clone(),
             ttl_class: observation.ttl_class,
             expires_at_unix_secs: observation.expires_at_unix_secs,
+            protection_expires_at_unix_secs: Some(observation.protection_expires_at_unix_secs),
             last_observed_at_unix_secs: now_unix_secs,
             hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: observation.prefix_content_block_index,
@@ -1863,6 +1882,161 @@ fn prompt_cache_ttl_secs(ttl_class: TtlClass) -> u64 {
         TtlClass::Ephemeral5m => 5 * 60,
         TtlClass::Ephemeral1h => 60 * 60,
     }
+}
+
+fn emit_attempt_response(
+    observer: &LifecycleContext,
+    status: StatusCode,
+    headers: &HeaderMap,
+    timings: &AttemptTimings,
+) {
+    observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
+        event_id: observer.event_id().to_owned(),
+        status: status.as_u16(),
+        headers: header_snapshot_from(headers),
+        bulkhead_wait_ms: timings.bulkhead_wait_ms,
+        dns_ms: timings.dns_ms,
+        connect_ms: timings.connect_ms,
+        connection_reused: timings.connection_reused,
+        shape_ms: timings.shape_ms,
+        sign_ms: timings.sign_ms,
+        upstream_ttfb_ms: timings.upstream_ttfb_ms,
+    });
+}
+
+#[derive(Clone, Copy)]
+struct AttemptDispatchAnchor {
+    instant: Instant,
+    unix_secs: u64,
+}
+
+struct ClaimedAlternate {
+    id: Uuid,
+    activity: Arc<crate::upstream_activity::ActivityGuard>,
+    pipeline: FilterPipelineResult,
+    terminal: TerminalDecision,
+}
+
+/// Bind all selected-account contexts together for both primary and alternate.
+struct PreparedUpstream {
+    route: RouteDecision,
+    name: String,
+    base_url: Option<Url>,
+    observation: Option<PromptCacheObservationContext>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_route_event(
+    event_id: String,
+    resolved_record: &UpstreamRecord,
+    pipeline_result: &FilterPipelineResult,
+    terminal_decision: &TerminalDecision,
+    model: Option<String>,
+    route_ms: u64,
+) -> cc_lb_lifecycle::LifecycleEvent {
+    let resolved_upstream_id = resolved_record.id;
+    let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
+    let selected_quota_candidate =
+        resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
+    let selected_cache_score = pipeline_result
+        .candidates
+        .iter()
+        .find(|candidate| candidate.upstream_id == resolved_upstream_id)
+        .and_then(|candidate| candidate.cache_score.as_ref())
+        .cloned();
+    let predicted_cache_read_tokens = selected_cache_score
+        .as_ref()
+        .map_or(0, |score| score.predicted_cache_read_tokens);
+    let subscription_trace = subscription_preference_trace(&routing_trace_value);
+    cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+        event_id,
+        result: Ok(cc_lb_lifecycle::RouteInfo {
+            upstream_id: resolved_upstream_id,
+            upstream_name: resolved_record.name.clone(),
+            model,
+            upstream_kind: Some(
+                match resolved_record.kind {
+                    StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
+                    StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
+                }
+                .to_owned(),
+            ),
+            route_ms: Some(route_ms),
+            routing_trace: Some(routing_trace_value.clone()),
+            predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
+            matched_v3_cache_key: selected_cache_score
+                .as_ref()
+                .and_then(|score| score.matched_v3_cache_key.clone()),
+            breakpoint_content_block_index: selected_cache_score
+                .as_ref()
+                .and_then(|score| score.breakpoint_content_block_index),
+            matched_content_block_index: selected_cache_score
+                .as_ref()
+                .and_then(|score| score.matched_content_block_index),
+            lookback_distance: selected_cache_score
+                .as_ref()
+                .and_then(|score| score.lookback_distance),
+            predicted_cache_creation_tokens_5m: selected_cache_score
+                .as_ref()
+                .map(|score| score.predicted_cache_creation_tokens_5m),
+            predicted_cache_creation_tokens_1h: selected_cache_score
+                .as_ref()
+                .map(|score| score.predicted_cache_creation_tokens_1h),
+            token_estimate_source: selected_cache_score
+                .as_ref()
+                .and_then(|score| score.token_estimate_source.clone()),
+            cache_value_micros: subscription_trace.and_then(|trace| {
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.upstream_id == resolved_upstream_id)
+                    .and_then(|candidate| candidate.cache_value_micros)
+            }),
+            formula_winner_upstream_id: subscription_trace
+                .and_then(|trace| trace.formula_winner_upstream_id),
+            kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
+            quota_urgency_5h: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_5h),
+            quota_urgency_7d: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_7d),
+            quota_urgency_combined: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_combined),
+            quota_warning_multiplier: selected_quota_candidate
+                .map(|candidate| candidate.warning_multiplier),
+        }),
+        routing_trace: Some(routing_trace_value.clone()),
+    }
+}
+
+fn prepare_selected_upstream(
+    view: &DynamicView,
+    cached: &PrincipalSpecCached,
+    record: &UpstreamRecord,
+    ctx: &RequestContext,
+    metadata: &RequestCacheMetadata,
+    selected_match: Option<SelectedCacheMatch>,
+) -> Result<PreparedUpstream, String> {
+    let base_url = record.base_url.clone();
+    let raw_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
+        base_url: base_url.clone().unwrap_or_else(default_anthropic_base_url),
+    });
+    Ok(PreparedUpstream {
+        route: RouteDecision {
+            upstream_id: record.id,
+            upstream: upstream_for_record(record)?,
+            dialect: cached.resolved_dialect(&raw_dialect).clone(),
+        },
+        name: record.name.clone(),
+        base_url,
+        observation: prompt_cache_observation_context(
+            view,
+            record.id,
+            &ctx.canonical_model_id,
+            &ctx.cache_breakpoints,
+            &metadata.cacheable_breakpoint_prefix_keys,
+            selected_match,
+        ),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -2226,6 +2400,7 @@ impl UpstreamDispatch for HyperDispatcher {
 }
 
 pub struct Lifecycle {
+    activity: Arc<crate::upstream_activity::UpstreamActivity>,
     authn: Arc<BuiltinAuthn>,
     dynamic_view: Arc<DynamicViewHolder>,
     dispatcher: Arc<dyn UpstreamDispatch>,
@@ -2254,6 +2429,9 @@ impl Lifecycle {
         clock: ClockHandle,
     ) -> Self {
         Self {
+            activity: Arc::new(crate::upstream_activity::UpstreamActivity::new(
+                clock.clone(),
+            )),
             authn,
             dynamic_view,
             dispatcher,
@@ -2272,6 +2450,61 @@ impl Lifecycle {
             clock,
             rng: Mutex::new(rand::make_rng()),
         }
+    }
+
+    /// Bounded synchronous selection: remove unsafe accounts before every full
+    /// policy evaluation, and remove one candidate whenever atomic admission loses.
+    #[allow(clippy::too_many_arguments)]
+    fn select_safe_alternate(
+        &self,
+        pipeline: &RouterPipelineCache,
+        ctx: &RequestContext,
+        principal: &Principal,
+        mut remaining: Vec<UpstreamCandidate>,
+        owner: &Option<(String, String)>,
+        ttl: u64,
+        observer: Option<&LifecycleContext>,
+    ) -> Option<ClaimedAlternate> {
+        while !remaining.is_empty() {
+            remaining.retain(|candidate| {
+                self.activity
+                    .eligible(candidate.upstream_id, &ctx.canonical_model_id, owner, true)
+            });
+            let mut result =
+                execute_filter_pipeline(
+                    cc_lb_clock::unix_secs(self.clock.now()),
+                    &pipeline.user_filters, ctx, principal, remaining.clone(),
+                );
+            if let Some(observer) = observer {
+                for error in result.internal_errors.drain(..) {
+                    observer.record_internal_error(error);
+                }
+            }
+            let terminal =
+                self.select_terminal_upstream(pipeline.terminal.clone(), &result.candidates);
+            let id = terminal.upstream_id?;
+            if let Some(activity) =
+                self.activity
+                    .claim(id, &ctx.canonical_model_id, owner.clone(), true, ttl)
+            {
+                return Some(ClaimedAlternate {
+                    id,
+                    activity,
+                    pipeline: result,
+                    terminal,
+                });
+            }
+            remaining.retain(|candidate| candidate.upstream_id != id);
+        }
+        None
+    }
+
+    pub fn with_upstream_activity(
+        mut self,
+        activity: Arc<crate::upstream_activity::UpstreamActivity>,
+    ) -> Self {
+        self.activity = activity;
+        self
     }
 
     pub fn with_cache_keepalive_enqueuer(
@@ -2966,6 +3199,32 @@ impl Lifecycle {
             &*self.clock,
         )
         .await;
+        let failover_enabled =
+            self.config.prompt_cache_shadow.subscription_failover && ctx.path == "/v1/messages";
+        let activity_owner = cache_metadata
+            .observed_session_id
+            .as_ref()
+            .map(|session| (principal.id.clone(), session.clone()));
+        let activity_ttl = ctx
+            .cache_breakpoints
+            .iter()
+            .map(|point| prompt_cache_ttl_secs(point.requested_ttl))
+            .max()
+            .unwrap_or(3600);
+        if failover_enabled {
+            let ids: Vec<_> = view
+                .upstreams_snapshot()
+                .iter()
+                .map(|record| record.id)
+                .collect();
+            self.activity
+                .initialize(
+                    view.prompt_cache_observation_store_opt().map(AsRef::as_ref),
+                    &ids,
+                    &ctx.canonical_model_id,
+                )
+                .await;
+        }
         // Synchronous routing region: no .await is permitted while `route_guard` is held.
         let route_span = tracing::info_span!(
             "proxy.route",
@@ -2989,51 +3248,73 @@ impl Lifecycle {
             selected_cache_matches
                 .retain(|upstream_id, _| *upstream_id == affinity.target_upstream_id);
         }
-        let mut pipeline_result = execute_filter_pipeline(
-            cc_lb_clock::unix_secs(self.clock.now()),
-            &router_pipeline.user_filters,
-            &ctx,
-            &principal,
-            candidates,
-        );
-        if let Some(o) = observer.as_ref() {
-            for error in pipeline_result.internal_errors.drain(..) {
-                o.record_internal_error(error);
+        let mut remaining_candidates = candidates;
+        let (pipeline_result, terminal_decision, mut resolved_upstream_id, mut activity_guard) = loop {
+            if failover_enabled {
+                remaining_candidates.retain(|candidate| {
+                    self.activity.eligible(
+                        candidate.upstream_id,
+                        &ctx.canonical_model_id,
+                        &activity_owner,
+                        false,
+                    )
+                });
             }
-        }
-        let terminal_decision = self.select_terminal_upstream(
-            router_pipeline.terminal.clone(),
-            &pipeline_result.candidates,
-        );
-        route_span.record(
-            "cc_lb.route.candidate_count",
-            numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
-        );
-        if pipeline_result.candidates.is_empty() {
-            route_span.record("cc_lb.route.outcome", "error");
-            route_span.record("otel.status_code", "ERROR");
-            route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
-            let message = "no upstream candidates remain after routing filters";
-            self.emit_routing_failure_event(
-                observer.as_ref(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some(pipeline_result.routing_trace(terminal_decision.clone())),
+            let mut pipeline_result = execute_filter_pipeline(
+                cc_lb_clock::unix_secs(self.clock.now()),
+                &router_pipeline.user_filters,
+                &ctx,
+                &principal,
+                remaining_candidates.clone(),
             );
-            let response = anthropic_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "route_no_upstream_after_filter",
-                message,
+            if let Some(o) = observer.as_ref() {
+                for error in pipeline_result.internal_errors.drain(..) {
+                    o.record_internal_error(error);
+                }
+            }
+            let terminal_decision = self.select_terminal_upstream(
+                router_pipeline.terminal.clone(),
+                &pipeline_result.candidates,
             );
-            return Ok(response);
-        }
+            route_span.record(
+                "cc_lb.route.candidate_count",
+                numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
+            );
+            if pipeline_result.candidates.is_empty() {
+                route_span.record("cc_lb.route.outcome", "error");
+                route_span.record("otel.status_code", "ERROR");
+                route_span.record("error.type", error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER);
+                let message = "no upstream candidates remain after routing filters";
+                self.emit_routing_failure_event(
+                    observer.as_ref(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Some(pipeline_result.routing_trace(terminal_decision.clone())),
+                );
+                let response = anthropic_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "route_no_upstream_after_filter",
+                    message,
+                );
+                return Ok(response);
+            }
 
-        let routed_candidates =
-            terminal_candidates(&pipeline_result.candidates, &terminal_decision);
-
-        let resolved_upstream_id = routed_candidates
-            .first()
-            .expect("routed candidates are non-empty after terminal selection")
-            .upstream_id;
+            let id =
+                terminal_candidates(&pipeline_result.candidates, &terminal_decision)[0].upstream_id;
+            if !failover_enabled {
+                break (pipeline_result, terminal_decision, id, None);
+            }
+            if let Some(guard) = self.activity.claim(
+                id,
+                &ctx.canonical_model_id,
+                activity_owner.clone(),
+                false,
+                activity_ttl,
+            ) {
+                break (pipeline_result, terminal_decision, id, Some(guard));
+            }
+            // Losing admission removes one candidate; the initial finite pool bounds work.
+            remaining_candidates.retain(|candidate| candidate.upstream_id != id);
+        };
         let Some(resolved_record) = view
             .upstreams_snapshot()
             .iter()
@@ -3067,54 +3348,34 @@ impl Lifecycle {
             }
             return Ok(response);
         };
-        let router_chosen_upstream_name = resolved_record.name.clone();
+        let prepared = match prepare_selected_upstream(
+            &view,
+            cached,
+            resolved_record,
+            &ctx,
+            &cache_metadata,
+            selected_cache_matches.get(&resolved_upstream_id).cloned(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                tracing::warn!(%reason, "failed to prepare selected upstream");
+                self.emit_routing_failure_event(observer.as_ref(), StatusCode::BAD_GATEWAY, None);
+                return Ok(anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "route_not_configured",
+                    "no upstream route is configured for this request",
+                ));
+            }
+        };
+        let mut router_chosen_upstream_name = prepared.name;
+        let raw_passthrough_base_url = prepared.base_url;
+        let mut route = prepared.route;
+        let mut prompt_cache_observation_context = prepared.observation;
         handle_span.record("cc_lb.upstream.name", router_chosen_upstream_name.as_str());
         handle_span.record(
             "cc_lb.upstream.id",
             tracing::field::display(resolved_upstream_id),
         );
-        let raw_passthrough_base_url = resolved_record.base_url.clone();
-        let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
-            base_url: raw_passthrough_base_url
-                .clone()
-                .unwrap_or_else(default_anthropic_base_url),
-        });
-        let route_upstream = match upstream_for_record(resolved_record) {
-            Ok(upstream) => upstream,
-            Err(reason) => {
-                route_span.record("cc_lb.route.outcome", "error");
-                route_span.record("otel.status_code", "ERROR");
-                route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "route_not_configured",
-                    "no upstream route is configured for this request",
-                );
-                if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                        event_id: o.event_id().to_owned(),
-                        result: Err(cc_lb_lifecycle::RouteFailure::RouteNotConfigured),
-                        routing_trace: None,
-                    });
-                    o.terminate_failure(InternalFailure {
-                        status: StatusCode::BAD_GATEWAY,
-                        error_code: error_codes::ROUTE_NOT_CONFIGURED,
-                        error: InternalError {
-                            stage: InternalErrorStage::Router,
-                            kind: InternalErrorKind::ConfigError,
-                            message: Some(reason),
-                        },
-                    });
-                }
-                return Ok(response);
-            }
-        };
-        let dialect = cached.resolved_dialect(&route_dialect).clone();
-        let route = RouteDecision {
-            upstream_id: resolved_upstream_id,
-            upstream: route_upstream,
-            dialect,
-        };
         drop(route_guard);
         let route_ms = duration_to_ms(route_start.elapsed());
         route_span.record("cc_lb.route.outcome", "success");
@@ -3122,88 +3383,21 @@ impl Lifecycle {
             "cc_lb.route.duration_ms",
             numeric_attribute(Some(route_ms)).as_value(),
         );
-        let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
-        let selected_quota_candidate =
-            resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
-        let selected_cache_score = pipeline_result
-            .candidates
-            .iter()
-            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
-            .and_then(|candidate| candidate.cache_score.as_ref())
-            .cloned();
-        let predicted_cache_read_tokens = selected_cache_score
-            .as_ref()
-            .map_or(0, |score| score.predicted_cache_read_tokens);
-        let subscription_trace = subscription_preference_trace(&routing_trace_value);
-        if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_lifecycle::RouteInfo {
-                    upstream_id: resolved_upstream_id,
-                    upstream_name: router_chosen_upstream_name.clone(),
-                    model: body_view.model(),
-                    upstream_kind: Some(
-                        match resolved_record.kind {
-                            StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
-                            StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
-                        }
-                        .to_owned(),
-                    ),
-                    route_ms: Some(route_ms),
-                    routing_trace: Some(routing_trace_value.clone()),
-                    predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
-                    matched_v3_cache_key: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.matched_v3_cache_key.clone()),
-                    breakpoint_content_block_index: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.breakpoint_content_block_index),
-                    matched_content_block_index: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.matched_content_block_index),
-                    lookback_distance: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.lookback_distance),
-                    predicted_cache_creation_tokens_5m: selected_cache_score
-                        .as_ref()
-                        .map(|score| score.predicted_cache_creation_tokens_5m),
-                    predicted_cache_creation_tokens_1h: selected_cache_score
-                        .as_ref()
-                        .map(|score| score.predicted_cache_creation_tokens_1h),
-                    token_estimate_source: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.token_estimate_source.clone()),
-                    cache_value_micros: subscription_trace.and_then(|trace| {
-                        trace
-                            .candidates
-                            .iter()
-                            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
-                            .and_then(|candidate| candidate.cache_value_micros)
-                    }),
-                    formula_winner_upstream_id: subscription_trace
-                        .and_then(|trace| trace.formula_winner_upstream_id),
-                    kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
-                    quota_urgency_5h: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_5h),
-                    quota_urgency_7d: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_7d),
-                    quota_urgency_combined: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_combined),
-                    quota_warning_multiplier: selected_quota_candidate
-                        .map(|candidate| candidate.warning_multiplier),
-                }),
-                routing_trace: Some(routing_trace_value.clone()),
-            });
-        }
-        let prompt_cache_observation_context = prompt_cache_observation_context(
-            &view,
-            resolved_upstream_id,
-            &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
-            &cache_metadata.cacheable_breakpoint_prefix_keys,
-            selected_cache_matches.get(&resolved_upstream_id).cloned(),
-        );
+        let mut route_event = observer.as_ref().map(|o| {
+            selected_route_event(
+                o.event_id().to_owned(),
+                resolved_record,
+                &pipeline_result,
+                &terminal_decision,
+                body_view.model(),
+                route_ms,
+            )
+        });
 
+        if !failover_enabled && let (Some(o), Some(event)) = (observer.as_ref(), route_event.take())
+        {
+            o.emit_lifecycle(event);
+        }
         let limit_reserve_start = Instant::now();
         let mut active_limit = match self
             .reserve_limit(
@@ -3232,6 +3426,9 @@ impl Lifecycle {
                         },
                     });
                     o.set_termination_timings(Some(proxy_setup_ms), None, None);
+                    if let Some(event) = route_event.take() {
+                        o.emit_lifecycle(event);
+                    }
                     o.terminate_failure(InternalFailure {
                         status,
                         error_code: error_codes::LIMIT_REJECTED,
@@ -3295,6 +3492,9 @@ impl Lifecycle {
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 if let Some(o) = observer.as_ref() {
+                    if let Some(event) = route_event.take() {
+                        o.emit_lifecycle(event);
+                    }
                     o.terminate_failure(InternalFailure {
                         status: StatusCode::BAD_GATEWAY,
                         error_code: error_codes::SIGNER_FAILED,
@@ -3309,8 +3509,9 @@ impl Lifecycle {
             }
         };
 
-        let dispatch_started = Instant::now();
-        let dispatch_unix_secs = unix_now_ms(&*self.clock) / 1000;
+        let mut dispatch_started = Instant::now();
+        let request_dispatch_started = dispatch_started;
+        let mut dispatch_unix_secs = unix_now_ms(&*self.clock) / 1000;
         let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
@@ -3322,6 +3523,7 @@ impl Lifecycle {
                 upstream_id: resolved_upstream_id,
             });
         }
+        let mut attempt_num = 1;
         let first_attempt_scope = match reserved.as_ref() {
             Some(reserved) => reserved.begin_attempt(),
             None => Scoped::unreserved_for_lifecycle(),
@@ -3329,7 +3531,7 @@ impl Lifecycle {
         let mut response = match self
             .attempt(
                 self.dispatcher.as_ref(),
-                first_attempt_scope,
+                first_attempt_scope.with_activity(activity_guard.take()),
                 &ctx,
                 &principal,
                 &route,
@@ -3355,18 +3557,7 @@ impl Lifecycle {
                     );
                 }
                 if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
-                        event_id: o.event_id().to_owned(),
-                        status: status.as_u16(),
-                        headers: header_snapshot_from(response.headers()),
-                        bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
-                        dns_ms: attempt_timings.dns_ms,
-                        connect_ms: attempt_timings.connect_ms,
-                        connection_reused: attempt_timings.connection_reused,
-                        shape_ms: attempt_timings.shape_ms,
-                        sign_ms: attempt_timings.sign_ms,
-                        upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
-                    });
+                    emit_attempt_response(o, status, response.headers(), &attempt_timings);
                 }
                 response
             }
@@ -3384,6 +3575,9 @@ impl Lifecycle {
                         attempt_timings.connect_ms,
                         attempt_timings.connection_reused,
                     );
+                    if let Some(event) = route_event.take() {
+                        o.emit_lifecycle(event);
+                    }
                     o.terminate_failure(failure);
                 }
                 return Ok(response);
@@ -3398,23 +3592,41 @@ impl Lifecycle {
                 status: StatusCode::UNAUTHORIZED,
                 body: Some(unauthorized.body.clone()),
             };
-            if let RetryDecision::Refresh { new_signer } = signer
+            let retry_decision = signer
                 .on_unauthorized(&err)
                 .instrument(tracing::info_span!("proxy.refresh_signer"))
-                .await
+                .await;
+            let refresh_admitted =
+                if failover_enabled && matches!(&retry_decision, RetryDecision::Refresh { .. }) {
+                    activity_guard = self.activity.claim(
+                        resolved_upstream_id,
+                        &ctx.canonical_model_id,
+                        activity_owner.clone(),
+                        false,
+                        activity_ttl,
+                    );
+                    activity_guard.is_some()
+                } else {
+                    true
+                };
+            if let RetryDecision::Refresh { new_signer } = retry_decision
+                && refresh_admitted
             {
                 attempt_timings.reset_attempt_stages();
                 if let Some(o) = observer.as_ref() {
                     o.reset_attempt_timings();
                     o.set_io_timings(cc_lb_lifecycle::RequestIoTimings {
-                        retry_overhead_ms: Some(dispatch_started.elapsed().as_secs_f64() * 1_000.0),
+                        retry_overhead_ms: Some(
+                            request_dispatch_started.elapsed().as_secs_f64() * 1_000.0,
+                        ),
                         ..Default::default()
                     });
                 }
+                attempt_num += 1;
                 if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
                         event_id: o.event_id().to_owned(),
-                        attempt_num: 2,
+                        attempt_num,
                         upstream_id: resolved_upstream_id,
                     });
                 }
@@ -3422,10 +3634,12 @@ impl Lifecycle {
                     Some(reserved) => reserved.begin_attempt(),
                     None => Scoped::unreserved_for_lifecycle(),
                 };
+                dispatch_started = Instant::now();
+                dispatch_unix_secs = unix_secs(self.clock.now());
                 response = match self
                     .attempt(
                         self.dispatcher.as_ref(),
-                        retry_attempt_scope,
+                        retry_attempt_scope.with_activity(activity_guard.take()),
                         &ctx,
                         &principal,
                         &route,
@@ -3450,19 +3664,11 @@ impl Lifecycle {
                             );
                         }
                         if let Some(o) = observer.as_ref() {
-                            o.emit_lifecycle(
-                                cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
-                                    event_id: o.event_id().to_owned(),
-                                    status: response.status().as_u16(),
-                                    headers: header_snapshot_from(response.headers()),
-                                    bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
-                                    dns_ms: attempt_timings.dns_ms,
-                                    connect_ms: attempt_timings.connect_ms,
-                                    connection_reused: attempt_timings.connection_reused,
-                                    shape_ms: attempt_timings.shape_ms,
-                                    sign_ms: attempt_timings.sign_ms,
-                                    upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
-                                },
+                            emit_attempt_response(
+                                o,
+                                response.status(),
+                                response.headers(),
+                                &attempt_timings,
                             );
                         }
                         response
@@ -3481,6 +3687,9 @@ impl Lifecycle {
                                 attempt_timings.connect_ms,
                                 attempt_timings.connection_reused,
                             );
+                            if let Some(event) = route_event.take() {
+                                o.emit_lifecycle(event);
+                            }
                             o.terminate_failure(failure);
                         }
                         return Ok(response);
@@ -3524,12 +3733,229 @@ impl Lifecycle {
                         UpstreamErrorCode::Upstream5xx
                     };
                     o.set_upstream_error(status, code);
+                    if let Some(event) = route_event.take() {
+                        o.emit_lifecycle(event);
+                    }
                     o.finish();
                 }
                 return Ok(response);
             }
         }
 
+        if failover_enabled
+            && response.status() == StatusCode::TOO_MANY_REQUESTS
+            && request_affinity.is_none()
+            && resolved_record.kind == StorageUpstreamKind::AnthropicOauth
+        {
+            let (mut remaining, alternate_matches) = build_candidates_with_matches(
+                &view,
+                &principal.id,
+                RequestKind::AnthropicMessages,
+                &ctx.cache_breakpoints,
+                &warm_entries,
+                &*self.clock,
+            );
+            remaining.retain(|candidate| {
+                candidate.upstream_id != resolved_upstream_id
+                    && view.upstreams_snapshot().iter().any(|record| {
+                        record.id == candidate.upstream_id
+                            && record.kind == StorageUpstreamKind::AnthropicOauth
+                    })
+            });
+            if let Some(ClaimedAlternate {
+                id,
+                activity: claim,
+                pipeline: alternate_pipeline,
+                terminal,
+            }) = self.select_safe_alternate(
+                &router_pipeline,
+                &ctx,
+                &principal,
+                remaining,
+                &activity_owner,
+                activity_ttl,
+                observer.as_ref(),
+            ) && let Some(record) = view
+                .upstreams_snapshot()
+                .iter()
+                .find(|record| record.id == id)
+                && let Ok(prepared) = prepare_selected_upstream(
+                    &view,
+                    cached,
+                    record,
+                    &ctx,
+                    &cache_metadata,
+                    alternate_matches.get(&id).cloned(),
+                )
+                && let Ok(alternate_signer) = view
+                    .signer_factory
+                    .with_router_choice(prepared.name.clone())
+                    .build(&prepared.route.upstream)
+                    .await
+            {
+                attempt_timings.reset_attempt_stages();
+                attempt_num += 1;
+                if let Some(o) = observer.as_ref() {
+                    o.reset_attempt_timings();
+                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
+                        event_id: o.event_id().to_owned(),
+                        attempt_num,
+                        upstream_id: id,
+                    });
+                }
+                route_event = observer.as_ref().map(|o| {
+                    selected_route_event(
+                        o.event_id().to_owned(),
+                        record,
+                        &alternate_pipeline,
+                        &terminal,
+                        body_view.model(),
+                        route_ms,
+                    )
+                });
+                let scope = match reserved.as_ref() {
+                    Some(reserved) => reserved.begin_attempt(),
+                    None => Scoped::unreserved_for_lifecycle(),
+                }
+                .with_activity(Some(claim));
+                dispatch_started = Instant::now();
+                dispatch_unix_secs = unix_secs(self.clock.now());
+                let mut alternate = self
+                    .attempt(
+                        self.dispatcher.as_ref(),
+                        scope,
+                        &ctx,
+                        &principal,
+                        &prepared.route,
+                        prepared.base_url.as_ref(),
+                        alternate_signer.clone(),
+                        observer.as_ref(),
+                        &mut attempt_timings,
+                        if track_keepalive_response {
+                            &mut keepalive_shaped_body
+                        } else {
+                            &mut keepalive_discard_shaped_body
+                        },
+                    )
+                    .await;
+                let mut response_event_emitted = false;
+                if alternate
+                    .as_ref()
+                    .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED)
+                {
+                    let unauthorized =
+                        collect_error_response(alternate.expect("checked response")).await;
+                    if let Some(o) = observer.as_ref() {
+                        emit_attempt_response(
+                            o,
+                            StatusCode::UNAUTHORIZED,
+                            &unauthorized.headers,
+                            &attempt_timings,
+                        );
+                    }
+                    response_event_emitted = true;
+                    let error = UpstreamError::Unauthorized {
+                        status: StatusCode::UNAUTHORIZED,
+                        body: Some(unauthorized.body.clone()),
+                    };
+                    alternate = if let RetryDecision::Refresh { new_signer } =
+                        alternate_signer.on_unauthorized(&error).await
+                    {
+                        if let Some(claim) = self.activity.claim(
+                            id,
+                            &ctx.canonical_model_id,
+                            activity_owner.clone(),
+                            true,
+                            activity_ttl,
+                        ) {
+                            attempt_num += 1;
+                            attempt_timings.reset_attempt_stages();
+                            if let Some(o) = observer.as_ref() {
+                                o.reset_attempt_timings();
+                                o.emit_lifecycle(
+                                    cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
+                                        event_id: o.event_id().to_owned(),
+                                        attempt_num,
+                                        upstream_id: id,
+                                    },
+                                );
+                            }
+                            let scope = match reserved.as_ref() {
+                                Some(reserved) => reserved.begin_attempt(),
+                                None => Scoped::unreserved_for_lifecycle(),
+                            }
+                            .with_activity(Some(claim));
+                            dispatch_started = Instant::now();
+                            dispatch_unix_secs = unix_secs(self.clock.now());
+                            response_event_emitted = false;
+                            self.attempt(
+                                self.dispatcher.as_ref(),
+                                scope,
+                                &ctx,
+                                &principal,
+                                &prepared.route,
+                                prepared.base_url.as_ref(),
+                                new_signer,
+                                observer.as_ref(),
+                                &mut attempt_timings,
+                                if track_keepalive_response {
+                                    &mut keepalive_shaped_body
+                                } else {
+                                    &mut keepalive_discard_shaped_body
+                                },
+                            )
+                            .await
+                        } else {
+                            Ok(response_from_collected(unauthorized))
+                        }
+                    } else {
+                        Ok(response_from_collected(unauthorized))
+                    };
+                }
+                // Exactly one distinct alternate dispatch; no further account retries.
+                match alternate {
+                    Ok(alternate_response) => {
+                        response = alternate_response;
+                        resolved_upstream_id = id;
+                        router_chosen_upstream_name = prepared.name;
+                        handle_span
+                            .record("cc_lb.upstream.name", router_chosen_upstream_name.as_str());
+                        route = prepared.route;
+                        prompt_cache_observation_context = prepared.observation;
+                        handle_span.record("cc_lb.upstream.id", tracing::field::display(id));
+                        if let Some(o) = observer.as_ref() {
+                            o.set_attempt_timings(
+                                attempt_timings.shape_ms,
+                                attempt_timings.sign_ms,
+                                attempt_timings.upstream_ttfb_ms,
+                            );
+                            if !response_event_emitted {
+                                emit_attempt_response(
+                                    o,
+                                    response.status(),
+                                    response.headers(),
+                                    &attempt_timings,
+                                );
+                            }
+                        }
+                    }
+                    Err(failure) => {
+                        let (mut failed, failure) = failure.into_response_and_failure();
+                        self.attach_limit_headers(&mut failed, active_limit.as_ref());
+                        if let Some(o) = observer.as_ref() {
+                            if let Some(event) = route_event.take() {
+                                o.emit_lifecycle(event);
+                            }
+                            o.terminate_failure(failure);
+                        }
+                        return Ok(failed);
+                    }
+                }
+            }
+        }
+        if let (Some(o), Some(event)) = (observer.as_ref(), route_event.take()) {
+            o.emit_lifecycle(event);
+        }
         let status = response.status();
         let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
             crate::cache_keepalive::LifecycleKeepaliveContext {
@@ -3718,6 +4144,20 @@ impl Lifecycle {
         dispatch_started: Instant,
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
+        let mut response = response;
+        let (dispatch_started, dispatch_unix_secs) = response
+            .extensions_mut()
+            .remove::<AttemptDispatchAnchor>()
+            .map_or((dispatch_started, dispatch_unix_secs), |anchor| {
+                (anchor.instant, anchor.unix_secs)
+            });
+        let activity = response
+            .extensions_mut()
+            .remove::<Arc<crate::upstream_activity::ActivityGuard>>();
+        let mut prompt_cache_observation_context = prompt_cache_observation_context;
+        if let Some(context) = &mut prompt_cache_observation_context {
+            context.activity = activity.clone();
+        }
         let active_limit = active_limit;
         if active_limit
             .as_ref()
@@ -3725,6 +4165,9 @@ impl Lifecycle {
             || is_sse_response(response.headers())
         {
             let response_status = response.status();
+            if let Some(activity) = activity {
+                response.extensions_mut().insert(activity);
+            }
             let mut response = self.relay_response(
                 response,
                 response_status,
@@ -4322,6 +4765,10 @@ impl Lifecycle {
         );
 
         let dispatch_start = Instant::now();
+        let dispatch_anchor = AttemptDispatchAnchor {
+            instant: dispatch_start,
+            unix_secs: unix_secs(self.clock.now()),
+        };
         let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
         let dispatch_result = REQUEST_STAGE_TIMINGS
             .scope(stage_timings_carrier.clone(), signed.dispatch(dispatcher))
@@ -4347,7 +4794,7 @@ impl Lifecycle {
         if let Some(reused) = timings.connection_reused {
             attempt_span.record("cc_lb.upstream.connection_reused", reused);
         }
-        let response = dispatch_result.map_err(|source| {
+        let mut response = dispatch_result.map_err(|source| {
             let attempt_span = tracing::Span::current();
             attempt_span.record("otel.status_code", "ERROR");
             attempt_span.record(
@@ -4361,6 +4808,7 @@ impl Lifecycle {
             );
             AttemptFailure::Dispatch(source)
         })?;
+        response.extensions_mut().insert(dispatch_anchor);
         // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
         timings.upstream_ttfb_ms = Some(duration_to_ms(dispatch_start.elapsed()));
         if let Some(ttfb_ms) = timings.upstream_ttfb_ms {
@@ -4403,6 +4851,9 @@ impl Lifecycle {
         dispatch_unix_secs: u64,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
+        let activity = parts
+            .extensions
+            .remove::<Arc<crate::upstream_activity::ActivityGuard>>();
         let upstream_diagnostics = UpstreamBodyDiagnostics::from_parts(&parts);
         strip_hop_by_hop(&mut parts.headers);
         let decompression_output_budget_bytes =
@@ -4524,6 +4975,7 @@ impl Lifecycle {
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
         let stream = async_stream::stream! {
+            let _activity = activity;
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
             let mut upstream_diagnostics = upstream_diagnostics;
@@ -6773,7 +7225,7 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
     request_cache_metadata_from_value(headers, value.as_ref())
 }
 
-fn request_cache_metadata_from_value(
+pub(crate) fn request_cache_metadata_from_value(
     headers: &HeaderMap,
     value: Option<&Value>,
 ) -> RequestCacheMetadata {
@@ -7554,6 +8006,7 @@ mod tests {
             .with_clock_now(now),
         );
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![
@@ -7602,6 +8055,7 @@ mod tests {
             .with_clock_now(now),
         );
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
@@ -7657,6 +8111,7 @@ mod tests {
             .with_grace_secs(60),
         );
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
@@ -7699,6 +8154,7 @@ mod tests {
             1,
         )]));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
@@ -7727,6 +8183,7 @@ mod tests {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000223").unwrap();
         let cache = Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
@@ -7764,6 +8221,7 @@ mod tests {
             .with_clock_now(now),
         );
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![
@@ -7797,6 +8255,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![
@@ -7830,6 +8289,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
@@ -7913,6 +8373,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(0, "hit", 2_400, TtlClass::Ephemeral5m)],
@@ -7948,6 +8409,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(
@@ -7985,6 +8447,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![
@@ -8039,6 +8502,7 @@ mod tests {
             lookback_distance: 5,
         });
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![one_hour, five_minute],
@@ -8074,6 +8538,39 @@ mod tests {
                 ("shared", TtlClass::Ephemeral1h),
                 ("later", TtlClass::Ephemeral5m)
             ]
+        );
+    }
+
+    #[test]
+    fn full_protection_deadline_survives_unrestricted_routing_grace() {
+        let context = PromptCacheObservationContext {
+            activity: None,
+            upstream_id: Uuid::nil(),
+            canonical_model_id: "model".to_owned(),
+            cache_breakpoints: Vec::new(),
+            cacheable_breakpoint_prefix_keys: HashSet::new(),
+            selected_match: Some(SelectedCacheMatch {
+                prefix_hash: "prefix".to_owned(),
+                content_block_index: 0,
+                ttl_class: TtlClass::Ephemeral1h,
+                estimated_prefix_tokens: 1,
+                token_estimate_source: None,
+            }),
+            sink: Arc::new(RecordingPromptCacheObservationSink::new(Vec::new())),
+            grace_margin_secs: u64::MAX,
+        };
+        let decoded = decode_prompt_cache_observations_pure(
+            &context,
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 1,
+            },
+            1000,
+        );
+        assert_eq!(decoded.observations[0].expires_at_unix_secs, 0);
+        assert_eq!(
+            decoded.observations[0].protection_expires_at_unix_secs,
+            4600
         );
     }
 
@@ -9289,6 +9786,7 @@ mod tests {
             v3_prefix_key: prefix_key.to_owned(),
             ttl_class,
             expires_at_unix_secs,
+            protection_expires_at_unix_secs: None,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: 0,

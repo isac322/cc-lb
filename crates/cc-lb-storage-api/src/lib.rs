@@ -48,7 +48,9 @@ pub use plugin_registry::*;
 pub use plugin_slot_kind::*;
 pub use pool_quota_history::*;
 pub use principal::*;
-pub use prompt_cache_observation::{PromptCacheObservationRecord, PromptCacheObservationStore};
+pub use prompt_cache_observation::{
+    PromptCacheObservationRecord, PromptCacheObservationStore, PromptCacheProtection,
+};
 pub use request_event_list::*;
 pub use request_event_projections::*;
 pub use runtime_change_notifier::*;

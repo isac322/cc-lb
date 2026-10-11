@@ -53,6 +53,7 @@ fn record(index: u64) -> PromptCacheObservationRecord {
         v3_prefix_key: format!("sha256:{index}"),
         ttl_class: TtlClass::Ephemeral5m,
         expires_at_unix_secs: 1_800 + index,
+        protection_expires_at_unix_secs: None,
         last_observed_at_unix_secs: 1_500 + index,
         hash_schema_version: HASH_SCHEMA_VERSION,
         prefix_content_block_index: 0,

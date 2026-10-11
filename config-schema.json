@@ -92,7 +92,8 @@
     "prompt_cache_shadow": {
       "$ref": "#/$defs/PromptCacheShadowConfig",
       "default": {
-        "grace_margin_secs": 30
+        "grace_margin_secs": 30,
+        "subscription_failover": false
       }
     },
     "request_event_retention_days": {
@@ -641,6 +642,11 @@
           "format": "uint64",
           "default": 30,
           "minimum": 0
+        },
+        "subscription_failover": {
+          "description": "Opt in to one process-local, non-preempting subscription HTTP 429 failover.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false

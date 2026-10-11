@@ -153,3 +153,6 @@ mod tower_layer_round_trip;
 mod upstream_affinity;
 #[path = "upstream_rate_limit_cache.rs"]
 mod upstream_rate_limit_cache;
+
+#[path = "cache_safe_subscription_failover.rs"]
+mod cache_safe_subscription_failover;

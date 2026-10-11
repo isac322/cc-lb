@@ -614,3 +614,13 @@ fn warmup_attempts_clock() -> ClockHandle {
 fn system_clock() -> ClockHandle {
     Arc::new(SystemClock)
 }
+
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_protection_deadline_sqlite,
+    protection_deadline_preserves_route_winner_and_legacy_ttl
+);
+
+prompt_cache_observation_sqlite_test!(
+    prompt_cache_observation_keepalive_renewal_sqlite,
+    persisted_keepalive_renewal_protection
+);

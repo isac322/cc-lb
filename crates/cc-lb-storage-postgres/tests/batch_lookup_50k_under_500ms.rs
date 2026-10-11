@@ -159,6 +159,7 @@ fn observation(
         } else {
             NOW_UNIX_SECS + 300
         },
+        protection_expires_at_unix_secs: None,
         last_observed_at_unix_secs: NOW_UNIX_SECS.saturating_sub(60),
         hash_schema_version: FIXTURE_SCHEMA_VERSION,
         prefix_content_block_index: u32::try_from(record_index).expect("record index fits u32"),

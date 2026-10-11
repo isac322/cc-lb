@@ -188,3 +188,5 @@ Upload flow: build the plugin to `wasm32-unknown-unknown`, then POST the artifac
 ## License
 
 cc-lb is licensed under [Apache-2.0](./LICENSE).
+
+Optional [cache-safe subscription HTTP 429 failover](docs/cache-safe-subscription-failover.md) is default-off, selects at most one distinct OAuth subscription through configured routing policy, and protects observed conversation activity within a single server process.

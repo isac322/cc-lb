@@ -282,6 +282,7 @@ fn observation(
         v3_prefix_key: prefix_hash.to_owned(),
         ttl_class,
         expires_at_unix_secs,
+        protection_expires_at_unix_secs: Some(expires_at_unix_secs),
         last_observed_at_unix_secs,
         hash_schema_version: FIXTURE_SCHEMA_VERSION,
         prefix_content_block_index: 7,

@@ -1,0 +1,24 @@
+# Cache-safe subscription failover
+
+`prompt_cache_shadow.subscription_failover` defaults to `false`. When enabled at startup, `/v1/messages` can try one distinct OAuth subscription after upstream HTTP 429, before sending the downstream response. Same-account HTTP 401 credential refresh remains available on both attempts. API-key fallback and general retries are outside this setting.
+
+The alternate pool preserves principal/model authorization, enabled upstreams, configured health and quota filters, and the complete configured filter chain and terminal strategy. It excludes the rejected account and accounts with incompatible observed activity before applying filters. Hard allowlists and provider affinity, including encrypted web-search tool continuity, still constrain routing. If there is no safe permitted alternate, the original 429 status, headers, and body are returned with the normal caller limit headers. A dispatched alternate's response becomes the final response, even if it is another 429.
+
+Admission is atomic inside one server process. Primary requests continue to share accounts as before, while they register activity and honor protection acquired by fallback requests. An unrelated primary request reruns the configured filters on the remaining finite pool or receives the existing no-route response. Fallback never waits or preempts another conversation. Known conversation ownership requires the authenticated principal and an observed session identifier; a common cached prefix is insufficient. Unknown or conflicting active/warm owners veto optional fallback. Same-session continuation is allowed when there is no unknown or conflicting owner.
+
+The server shares one admission registry between proxy traffic and cache keepalive, retaining it across dynamic-view reloads. New account/model partitions are initialized from a compact storage read before tracking. Persisted observations have unknown ownership after restart; their historical deadline remains independent of local session observations. Missing/unimplemented storage or failed initialization disables optional fallback for affected partitions. Read failures have a 60s cooldown before safe reimport. Readiness bookkeeping is capped at 4096 account/model keys; evicted keys require successful reimport and become unknown meanwhile. Eviction never clears historical deadlines or local attempt protection. Ordinary primary traffic still works. This is process-local coordination, including with PostgreSQL; it provides no distributed ownership guarantee.
+
+Shaped cache controls determine provisional protection through 5m or 1h. Decoded cache usage updates process protection synchronously before the existing best-effort observation enqueue. A delayed, full, or dropped writer queue cannot create an admission gap. Signing/build failures and explicit HTTP 401/429 rejection release only that attempt; cancellation and ambiguous dispatched outcomes retain conservative potential-cache protection. Stream ownership survives through downstream drop, and established warmth survives after the stream ends. Keepalive uses its decrypted snapshot and authenticated principal/session when available; prefix-only sessions remain unknown. Fixed quota warmup sends the cache-neutral Haiku `.` prompt without cache controls and remains outside this cache-affecting admission path.
+
+Observations retain a nullable independent `protection_expires_at` deadline, computed from the original observation anchor plus full TTL before routing grace. Every upsert maximizes this deadline even when the incoming observation loses the `(expires_at, last_observed_at)` routing comparison. Routing winner metadata stays whole. Legacy null deadlines conservatively use `last_observed_at + TTL`; matching reads still use the existing grace-shortened `expires_at`. Purge uses the effective full deadline. Migration cannot recover previously purged observations or previously discarded losing writes. The setting protects server-observed evidence, not the physical provider cache.
+
+```toml
+[prompt_cache_shadow]
+subscription_failover = false
+# Routing hit eligibility still subtracts this margin; protection does not.
+grace_margin_secs = 30
+```
+
+Storage consumers constructing `PromptCacheObservationRecord` must supply the new Rust field `protection_expires_at_unix_secs`; deserializing legacy records remains compatible through its nullable default. Custom storage adapters must implement `list_active_protection` to enable optional fallback. Its default is `Unavailable`, never an empty cold snapshot.
+
+Persisted keepalive renewal anchors also contribute their full 5m/1h TTL during scoped initialization. Because the snapshot model is encrypted, this evidence conservatively protects the account across requested models after restart. Terminal scheduling status does not erase observed warmth. This is protection evidence, not a claim about physical provider cache contents or a routing score.

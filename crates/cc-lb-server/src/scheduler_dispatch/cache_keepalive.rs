@@ -115,7 +115,8 @@ impl SchedulerDispatch {
             .keepalive_dispatcher
             .dispatch(
                 &snapshot,
-                KeepaliveDispatchContext::new(reservation, source_ref_id),
+                KeepaliveDispatchContext::new(reservation, source_ref_id)
+                    .with_principal(record.principal_id.clone()),
             )
             .await;
         if !self.cache_keepalive_still_authorized(&record) {

@@ -1575,6 +1575,7 @@ mod tests {
             v3_prefix_key: "sink-wiring-prefix".to_owned(),
             ttl_class: cc_lb_domain::TtlClass::Ephemeral5m,
             expires_at_unix_secs: 4_100_000_300,
+            protection_expires_at_unix_secs: None,
             last_observed_at_unix_secs: 1_700_000_000,
             hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: 0,

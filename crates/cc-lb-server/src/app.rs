@@ -1339,11 +1339,19 @@ async fn build_app_with_storage_inner(
     > = Arc::new(tokio::sync::Mutex::new(Some(
         lifecycle_routing_tier_subscriber_handle,
     )));
-    let keepalive_dispatcher = Arc::new(AnthropicKeepaliveDispatcher::new(
+    let upstream_activity = Arc::new(cc_lb_engine::upstream_activity::UpstreamActivity::new(
+        clock.clone(),
+    ));
+    let mut keepalive_dispatcher = AnthropicKeepaliveDispatcher::new(
         Arc::clone(&dynamic_view_holder),
         Arc::clone(&stores.upstreams),
         Arc::clone(&dispatcher),
-    ));
+    );
+    if config.prompt_cache_shadow.subscription_failover {
+        keepalive_dispatcher =
+            keepalive_dispatcher.with_upstream_activity(upstream_activity.clone());
+    }
+    let keepalive_dispatcher = Arc::new(keepalive_dispatcher);
     let cache_keepalive_enqueuer = Arc::new(
         crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuer::new(
             crate::cache_keepalive_enqueuer::ServerCacheKeepaliveEnqueuerDeps {
@@ -1361,6 +1369,7 @@ async fn build_app_with_storage_inner(
         lifecycle_config,
         clock.clone(),
     );
+    lifecycle = lifecycle.with_upstream_activity(upstream_activity);
     lifecycle = lifecycle.with_upstream_affinity_store(
         storage.clone() as Arc<dyn cc_lb_storage_api::UpstreamAffinityStore>
     );

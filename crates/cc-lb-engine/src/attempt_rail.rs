@@ -1,6 +1,8 @@
 //! Type-enforced ownership transitions for one upstream proxy attempt.
 
+use crate::upstream_activity::ActivityGuard;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use cc_lb_upstream::{ShapedRequest, SignedRequest, Signer, SignerError, sign_request};
 use http::{HeaderMap, Method, Response};
@@ -43,6 +45,7 @@ impl Reserved {
     /// Starts one scoped attempt without consuming the reservation owner.
     pub fn begin_attempt(&self) -> Scoped<'_> {
         Scoped {
+            activity: None,
             _reserved: PhantomData,
         }
     }
@@ -57,19 +60,33 @@ impl Reserved {
 
 /// A shaped-and-to-be-signed attempt borrowing its reservation owner.
 pub struct Scoped<'reservation> {
+    activity: Option<Arc<ActivityGuard>>,
     _reserved: PhantomData<&'reservation Reserved>,
 }
 
 impl<'reservation> Scoped<'reservation> {
+    pub(crate) fn with_activity(mut self, activity: Option<Arc<ActivityGuard>>) -> Self {
+        self.activity = activity;
+        self
+    }
+
     /// Signs the shaped request through the plugin API's sealed signing capability.
     pub async fn sign(
         self,
         signer: &dyn Signer,
         shaped_request: ShapedRequest,
     ) -> Result<Signed<'reservation>, SignerError> {
+        if let Some(activity) = &self.activity {
+            let ttl = sonic_rs::from_slice::<serde_json::Value>(shaped_request.body())
+                .ok()
+                .map(|value| shaped_cache_ttl(&value))
+                .unwrap_or(3600);
+            activity.prepare(ttl);
+        }
         let signed_request = sign_request(signer, shaped_request).await?;
         Ok(Signed {
             signed_request,
+            activity: self.activity,
             _reserved: PhantomData,
         })
     }
@@ -78,13 +95,37 @@ impl<'reservation> Scoped<'reservation> {
 impl Scoped<'static> {
     pub(crate) fn unreserved_for_lifecycle() -> Self {
         Self {
+            activity: None,
             _reserved: PhantomData,
         }
     }
 }
 
+fn shaped_cache_ttl(value: &serde_json::Value) -> u64 {
+    match value {
+        serde_json::Value::Object(object) => {
+            let own = object
+                .get("cache_control")
+                .filter(|control| {
+                    control.get("type").and_then(serde_json::Value::as_str) == Some("ephemeral")
+                })
+                .map_or(0, |control| {
+                    if control.get("ttl").and_then(serde_json::Value::as_str) == Some("1h") {
+                        3600
+                    } else {
+                        300
+                    }
+                });
+            own.max(object.values().map(shaped_cache_ttl).max().unwrap_or(0))
+        }
+        serde_json::Value::Array(array) => array.iter().map(shaped_cache_ttl).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// A signed request that is eligible for dispatch.
 pub struct Signed<'reservation> {
+    activity: Option<Arc<ActivityGuard>>,
     signed_request: SignedRequest,
     _reserved: PhantomData<&'reservation Reserved>,
 }
@@ -111,7 +152,37 @@ impl Signed<'_> {
         self,
         dispatcher: &dyn UpstreamDispatch,
     ) -> Result<Response<Body>, DispatchError> {
-        dispatcher.dispatch(self.signed_request).await
+        if let Some(activity) = &self.activity {
+            activity.dispatched();
+        }
+        let result = dispatcher.dispatch(self.signed_request).await;
+        match result {
+            Ok(mut response) => {
+                if let Some(activity) = self.activity {
+                    if matches!(
+                        response.status(),
+                        http::StatusCode::UNAUTHORIZED | http::StatusCode::TOO_MANY_REQUESTS
+                    ) {
+                        activity.reject();
+                    } else {
+                        response.extensions_mut().insert(activity);
+                    }
+                }
+                Ok(response)
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    DispatchError::InvalidUri { .. }
+                        | DispatchError::RequestBuild { .. }
+                        | DispatchError::BulkheadFull { .. }
+                ) && let Some(activity) = self.activity
+                {
+                    activity.reject();
+                }
+                Err(error)
+            }
+        }
     }
 }
 

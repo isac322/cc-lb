@@ -143,6 +143,7 @@ impl PromptCacheObservationStore for TestPromptCacheObservationCache {
                         v3_prefix_key: entry.prefix_hash.clone(),
                         ttl_class: entry.ttl_class,
                         expires_at_unix_secs: entry.expires_at_unix_secs,
+                        protection_expires_at_unix_secs: None,
                         last_observed_at_unix_secs: entry.last_observed_at_unix_secs,
                         hash_schema_version: HASH_SCHEMA_VERSION,
                         prefix_content_block_index: entry.content_block_index,

@@ -46,6 +46,7 @@ pub trait KeepaliveDispatcher: Send + Sync + 'static {
 pub struct KeepaliveDispatchContext {
     reservation: Option<Reservation>,
     source_ref_id: String,
+    principal_id: Option<String>,
 }
 
 impl KeepaliveDispatchContext {
@@ -53,7 +54,18 @@ impl KeepaliveDispatchContext {
         Self {
             reservation,
             source_ref_id,
+            principal_id: None,
         }
+    }
+
+    /// The already-authorized principal that owns this decrypted renewal snapshot.
+    pub fn with_principal(mut self, principal_id: String) -> Self {
+        self.principal_id = Some(principal_id);
+        self
+    }
+
+    pub(crate) fn principal_id(&self) -> Option<&str> {
+        self.principal_id.as_deref()
     }
 
     pub fn source_ref_id(&self) -> &str {

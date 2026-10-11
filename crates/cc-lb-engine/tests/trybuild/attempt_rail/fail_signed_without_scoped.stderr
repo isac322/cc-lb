@@ -4,4 +4,4 @@ error: cannot construct `Signed<'_>` with struct literal syntax due to private f
 5 |     let _signed = Signed { signed_request };
   |                   ^^^^^^   -------------- private field
   |
-  = note: ...and other private field `_reserved` that was not provided
+  = note: ...and other private fields `activity` and `_reserved` that were not provided

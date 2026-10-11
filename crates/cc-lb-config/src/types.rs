@@ -501,6 +501,8 @@ impl Default for SubscriptionQuotaConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PromptCacheShadowConfig {
+    /// Opt in to one process-local, non-preempting subscription HTTP 429 failover.
+    pub subscription_failover: bool,
     #[serde(default = "default_prompt_cache_shadow_grace_margin_secs")]
     pub grace_margin_secs: u64,
 }
@@ -509,6 +511,7 @@ impl Default for PromptCacheShadowConfig {
     fn default() -> Self {
         Self {
             grace_margin_secs: 30,
+            subscription_failover: false,
         }
     }
 }

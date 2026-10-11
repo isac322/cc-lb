@@ -752,3 +752,13 @@ fn quote_ident(identifier: &str) -> String {
     );
     format!("\"{identifier}\"")
 }
+
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_protection_deadline_postgres,
+    protection_deadline_preserves_route_winner_and_legacy_ttl
+);
+
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_keepalive_renewal_postgres,
+    persisted_keepalive_renewal_protection
+);

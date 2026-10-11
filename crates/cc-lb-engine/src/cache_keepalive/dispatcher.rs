@@ -33,6 +33,7 @@ pub struct AnthropicKeepaliveDispatcher {
     upstream_store: Arc<dyn UpstreamStore>,
     http_client: Arc<dyn UpstreamDispatch>,
     timeout: Duration,
+    activity: Option<Arc<crate::upstream_activity::UpstreamActivity>>,
 }
 
 impl AnthropicKeepaliveDispatcher {
@@ -46,7 +47,16 @@ impl AnthropicKeepaliveDispatcher {
             upstream_store,
             http_client,
             timeout: DISPATCH_TIMEOUT,
+            activity: None,
         }
+    }
+
+    pub fn with_upstream_activity(
+        mut self,
+        activity: Arc<crate::upstream_activity::UpstreamActivity>,
+    ) -> Self {
+        self.activity = Some(activity);
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -88,10 +98,13 @@ impl AnthropicKeepaliveDispatcher {
         &self,
         signed: Signed<'_>,
     ) -> Result<(StatusCode, Bytes, Duration), String> {
-        let response = signed
+        let mut response = signed
             .dispatch(self.http_client.as_ref())
             .await
             .map_err(|source| source.to_string())?;
+        let _activity = response
+            .extensions_mut()
+            .remove::<Arc<crate::upstream_activity::ActivityGuard>>();
         let cache_anchor_at = Instant::now();
         let status = response.status();
         let body = response
@@ -122,6 +135,43 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             return DispatchOutcome::UnsupportedProvider(error);
         }
 
+        let parsed: Option<serde_json::Value> = sonic_rs::from_slice(&snapshot.body).ok();
+        let metadata =
+            crate::lifecycle::request_cache_metadata_from_value(&snapshot.headers, parsed.as_ref());
+        let model = parsed
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .map(crate::model_resolution::canonical_model_id)
+            .unwrap_or_default();
+        let owner = context
+            .principal_id()
+            .zip(metadata.observed_session_id.as_ref())
+            .map(|(principal, session)| (principal.to_owned(), session.clone()));
+        let ttl = match snapshot.ttl {
+            cc_lb_storage_api::CacheTtl::Ttl5m => 300,
+            cc_lb_storage_api::CacheTtl::Ttl1h => 3600,
+        };
+        let activity = if let Some(registry) = &self.activity {
+            let view = self.dynamic_view.load();
+            registry
+                .initialize(
+                    view.prompt_cache_observation_store_opt().map(AsRef::as_ref),
+                    &[snapshot.upstream_id],
+                    model,
+                )
+                .await;
+            let Some(activity) = registry.claim(snapshot.upstream_id, model, owner, false, ttl)
+            else {
+                return DispatchOutcome::Error(
+                    "upstream is protected by another conversation".to_owned(),
+                );
+            };
+            Some(activity)
+        } else {
+            None
+        };
+
         let (signer, shaped) = match self
             .keepalive_signing_input(snapshot, &upstream, context.source_ref_id())
             .await
@@ -134,7 +184,12 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
         let (dispatch_result, accounting_guard) = match context.into_reservation() {
             Some(reservation) => {
                 let reserved = AttemptIntent::from_reservation(reservation).into_reserved();
-                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+                let signed = match reserved
+                    .begin_attempt()
+                    .with_activity(activity.clone())
+                    .sign(signer.as_ref(), shaped)
+                    .await
+                {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
@@ -145,7 +200,12 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
             }
             None => {
                 let reserved = AttemptIntent::observe_only().into_reserved();
-                let signed = match reserved.begin_attempt().sign(signer.as_ref(), shaped).await {
+                let signed = match reserved
+                    .begin_attempt()
+                    .with_activity(activity.clone())
+                    .sign(signer.as_ref(), shaped)
+                    .await
+                {
                     Ok(signed) => signed,
                     Err(error) => return DispatchOutcome::Error(error.to_string()),
                 };
@@ -155,6 +215,29 @@ impl KeepaliveDispatcher for AnthropicKeepaliveDispatcher {
                 )
             }
         };
+
+        if let (Some(activity), Ok(Ok((StatusCode::OK, body, cache_anchor_age)))) =
+            (&activity, &dispatch_result)
+            && let Ok(parsed) = sonic_rs::from_slice::<KeepaliveResponseBody>(body)
+            && let Some(usage) = parsed.usage
+            && (usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0)
+            && let Some(registry) = &self.activity
+        {
+            activity.observe(
+                registry
+                    .now()
+                    .saturating_sub(cache_anchor_age.as_secs())
+                    .saturating_add(ttl),
+            );
+        }
+        if let (Some(activity), Ok(Ok((status, _, _)))) = (&activity, &dispatch_result)
+            && matches!(
+                *status,
+                StatusCode::UNAUTHORIZED | StatusCode::TOO_MANY_REQUESTS
+            )
+        {
+            activity.reject();
+        }
 
         match dispatch_result {
             Ok(Ok((StatusCode::OK, body, cache_anchor_age))) => classify_success_body(

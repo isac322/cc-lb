@@ -14,6 +14,9 @@ pub struct PromptCacheObservationRecord {
     pub v3_prefix_key: String,
     pub ttl_class: TtlClass,
     pub expires_at_unix_secs: u64,
+    /// Independent full TTL, before routing grace; legacy rows have no deadline.
+    #[serde(default)]
+    pub protection_expires_at_unix_secs: Option<u64>,
     pub last_observed_at_unix_secs: u64,
     pub hash_schema_version: u8,
     pub prefix_content_block_index: u32,
@@ -24,14 +27,23 @@ pub struct PromptCacheObservationRecord {
     pub token_estimate_source: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptCacheProtection {
+    pub upstream_id: Uuid,
+    /// None represents account-wide evidence with an encrypted/unknown model.
+    pub canonical_model_id: Option<String>,
+    pub protection_expires_at_unix_secs: u64,
+}
+
 #[async_trait]
 pub trait PromptCacheObservationStore: Send + Sync + 'static {
-    /// Atomically records an observation. Writes are monotonic: the winner is
-    /// the record with the lexicographically greater `(expires_at,
-    /// last_observed_at)` pair, so a stale write can never regress a fresher
-    /// row. On a full tie the stored row is kept whole — winner metadata is
-    /// never spliced with loser fields — and replaying an identical record is a
-    /// no-op.
+    /// Atomically records an observation. Routing fields retain the whole winner
+    /// with the lexicographically greater `(expires_at, last_observed_at)` pair;
+    /// ties keep the stored routing metadata without mixing incoming fields.
+    /// Independently, every write maximizes the effective full-TTL protection
+    /// deadline, including writes that lose the routing comparison. Legacy null
+    /// deadlines conservatively derive from `last_observed_at + TTL`. Replaying
+    /// an identical observation cannot regress either routing or protection.
     async fn upsert_observation(
         &self,
         _record: &PromptCacheObservationRecord,
@@ -66,6 +78,22 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
         })
     }
 
+    /// Compact protection, independent of prefix and hash schema. Includes model-wide
+    /// observations and account-wide keepalive renewal anchors whose model is encrypted.
+    /// The latter have no model and apply across requested models.
+    /// An empty result means the scoped keys were read successfully, not unavailable.
+    async fn list_active_protection(
+        &self,
+        _upstream_ids: &[Uuid],
+        _canonical_model_id: &str,
+        _now_unix_secs: u64,
+    ) -> StorageResult<Vec<PromptCacheProtection>> {
+        Err(StorageError::Unavailable {
+            message: "PromptCacheObservationStore::list_active_protection is not implemented"
+                .to_owned(),
+        })
+    }
+
     async fn purge_expired_before(&self, _ts_unix_secs: u64) -> StorageResult<u64> {
         Ok(0)
     }
@@ -87,6 +115,7 @@ mod tests {
             v3_prefix_key: "v3:abc123".to_owned(),
             ttl_class,
             expires_at_unix_secs: 1_800,
+            protection_expires_at_unix_secs: None,
             last_observed_at_unix_secs: 1_500,
             hash_schema_version: HASH_SCHEMA_VERSION,
             prefix_content_block_index: 7,
