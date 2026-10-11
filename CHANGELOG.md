@@ -93,6 +93,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 
 ### Added
 
+- Filter wire V2 exposes cached subscription quota windows and the host routing clock while keeping V1 filter layouts compatible.
+
 - A brand asset kit now lives in `assets/brand/`: the let-gate mark as SVG originals (dark, light, mono and currentColor variants plus a 16px-snapped small-size version), app-icon and maskable tiles with PNG renders, wordmark and lockup compositions, a README hero, a social preview image, and the favicon set (`favicon.svg`, `favicon.ico`, `apple-touch-icon.png`) now wired into the admin dashboard. (#883)
 
 ### Changed
