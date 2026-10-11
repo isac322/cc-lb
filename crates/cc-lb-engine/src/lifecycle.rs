@@ -8331,6 +8331,7 @@ mod tests {
         let cache =
             Arc::new(RecordingPromptCacheObservationSink::new(Vec::new()).with_clock_now(now));
         let context = PromptCacheObservationContext {
+            activity: None,
             upstream_id,
             canonical_model_id: TEST_MODEL.to_owned(),
             cache_breakpoints: vec![cache_breakpoint(2, "owner", 5_000, TtlClass::Ephemeral5m)],
@@ -8553,8 +8554,7 @@ mod tests {
                 prefix_hash: "prefix".to_owned(),
                 content_block_index: 0,
                 ttl_class: TtlClass::Ephemeral1h,
-                estimated_prefix_tokens: 1,
-                token_estimate_source: None,
+                estimated_prefix_bytes: PrefixBytes::new(1),
             }),
             sink: Arc::new(RecordingPromptCacheObservationSink::new(Vec::new())),
             grace_margin_secs: u64::MAX,
