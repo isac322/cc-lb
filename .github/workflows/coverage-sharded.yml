@@ -25,8 +25,11 @@
 #      `shard:` matrix list exactly 1..SHARD_TOTAL. They MUST match.
 #   3. Flip the trigger: replace the `on: workflow_dispatch` block with the same
 #      pull_request/push triggers ci.yml uses (a commented copy sits below it).
-#   4. Retire the single-runner path: delete the `nextest-cov` job from ci.yml.
-#      Do NOT run both — they duplicate the same gate.
+#   4. Retire the single-runner path: delete the `nextest-cov` job from ci.yml
+#      and from its `CI gate` needs. Do NOT run both — they duplicate the same
+#      gate. Require the merged result directly (the pull_request trigger has
+#      no path filter, so it reports on every PR) or move these jobs into
+#      ci.yml behind its `changes` job and `CI gate`.
 #   5. Keep the Rust toolchain pin and the coverage env (CARGO_PROFILE_*_DEBUG,
 #      SQLX_OFFLINE, DATABASE_URL*, etc.) in sync with ci.yml's nextest-cov job.
 #
@@ -53,7 +56,6 @@ on:
   workflow_dispatch: {}
   # ENABLE: replace the line above with ci.yml's triggers once you have nodes:
   # pull_request:
-  #   paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore', '.editorconfig']
   # push:
   #   branches: [master]
   #   paths-ignore: ['**.md', 'docs/**', 'LICENSE', '.gitignore', '.editorconfig']
