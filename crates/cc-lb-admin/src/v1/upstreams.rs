@@ -14,11 +14,14 @@ use axum::{
 use bytes::Bytes;
 use cc_lb_aead::OAuthTokenBundle;
 use cc_lb_clock::Clock;
+use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_control::anthropic_metadata::make_metadata_http_client;
-use cc_lb_control::{AuditPayload, run_metadata_refresh};
+use cc_lb_control::subscription_metadata_hook::{
+    fetch_metadata_only, store_organization_metadata, store_subscription_metadata,
+};
 use cc_lb_quota::{
     UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
@@ -43,6 +46,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
 use crate::{
     AdminState, WarmupDialectDispatchErrorKind,
@@ -491,6 +495,14 @@ impl From<SchedulerError> for UpstreamError {
     }
 }
 
+impl From<PostCommitAborted> for UpstreamError {
+    fn from(_: PostCommitAborted) -> Self {
+        Self::Internal {
+            detail: "admin post-commit continuation aborted".to_owned(),
+        }
+    }
+}
+
 async fn create_upstream(
     State(state): State<AdminState>,
     Extension(identity): Extension<AdminIdentity>,
@@ -540,42 +552,49 @@ async fn create_upstream(
         }
         Err(error) => return Err(error.into()),
     };
-    let payload = AuditPayload::UpstreamCreate {
-        upstream_id: record.id.to_string(),
-        kind: record.kind.as_str().to_owned(),
-    };
-    let action = payload.to_string();
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: &action,
-            route: "/admin/v1/upstreams",
-            target_principal_id: None,
-            target_upstream: Some(&record.name),
-            api_key_id: None,
-            status: StatusCode::CREATED.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        tracing::error!(error = %error, action = %action, "admin audit write failed");
-        return Err(UpstreamError::AuditWriteFailed);
-    }
-    let mut response = (StatusCode::CREATED, Json(upstream_response(&record))).into_response();
-    response.headers_mut().insert(
-        axum::http::header::LOCATION,
-        HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", record.id)).map_err(|error| {
-            UpstreamError::BadRequest {
-                error: "invalid_location",
-                detail: error.to_string(),
+    complete_after_commit(async move {
+        let payload = AuditPayload::UpstreamCreate {
+            upstream_id: record.id.to_string(),
+            kind: record.kind.as_str().to_owned(),
+        };
+        let action = payload.to_string();
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &action,
+                route: "/admin/v1/upstreams",
+                target_principal_id: None,
+                target_upstream: Some(&record.name),
+                api_key_id: None,
+                status: StatusCode::CREATED.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action = %action, "admin audit write failed");
+            rebuild_after_audit_failure(&state).await;
+            return Err(UpstreamError::AuditWriteFailed);
+        }
+        let location = match HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", record.id)) {
+            Ok(location) => location,
+            Err(error) => {
+                return Err(UpstreamError::BadRequest {
+                    error: "invalid_location",
+                    detail: error.to_string(),
+                });
             }
-        })?,
-    );
-    add_dynamic_rebind_headers(&mut response, &state).await;
-    Ok(response)
+        };
+        let mut response = (StatusCode::CREATED, Json(upstream_response(&record))).into_response();
+        response
+            .headers_mut()
+            .insert(axum::http::header::LOCATION, location);
+        add_dynamic_rebind_headers(&mut response, &state).await;
+        Ok(response)
+    })
+    .await?
 }
 
 async fn list_upstreams(
@@ -657,49 +676,73 @@ async fn refresh_upstream_subscription_metadata(
     let user_agent = metadata_user_agent(storage.as_ref()).await?;
     let client = make_metadata_http_client();
     let cancel = CancellationToken::new();
-    tokio::time::timeout(
-        METADATA_REFRESH_TIMEOUT,
-        run_metadata_refresh(
-            storage.clone(),
+    // One deadline covers the fetch and both metadata writes, as before the
+    // writes were split around the post-commit boundary.
+    let deadline = tokio::time::Instant::now() + METADATA_REFRESH_TIMEOUT;
+    let records = tokio::time::timeout_at(deadline, async {
+        let records = fetch_metadata_only(
             &client,
             upstream_id,
             &access_token,
             &user_agent,
             &cancel,
             &*state.clock,
-        ),
-    )
+        )
+        .await;
+        store_subscription_metadata(storage.as_ref(), &records)
+            .await
+            .map(|()| records)
+    })
     .await
     .map_err(|_| UpstreamError::MetadataRefreshTimeout)?
     .map_err(|error| UpstreamError::RefreshFailed {
         detail: error.to_string(),
     })?;
 
-    let action = "upstream_subscription_metadata_refresh";
-    let route = format!("/admin/v1/upstreams/{upstream_id}/subscription-metadata/refresh");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&upstream.name),
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        tracing::error!(error = %error, action, "admin audit write failed");
-        return Err(UpstreamError::AuditWriteFailed);
-    }
-
-    subscription_metadata_response(storage.as_ref(), upstream_id)
+    // The subscription record is committed: the organization write, the
+    // audit and the response read outlive a dropped request.
+    complete_after_commit(async move {
+        match tokio::time::timeout_at(
+            deadline,
+            store_organization_metadata(storage.as_ref(), &records),
+        )
         .await
-        .map(Json)
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(UpstreamError::RefreshFailed {
+                    detail: error.to_string(),
+                });
+            }
+            Err(_) => return Err(UpstreamError::MetadataRefreshTimeout),
+        }
+        let action = "upstream_subscription_metadata_refresh";
+        let route = format!("/admin/v1/upstreams/{upstream_id}/subscription-metadata/refresh");
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&upstream.name),
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action, "admin audit write failed");
+            return Err(UpstreamError::AuditWriteFailed);
+        }
+
+        subscription_metadata_response(storage.as_ref(), upstream_id)
+            .await
+            .map(Json)
+    })
+    .await?
 }
 
 async fn fire_now_upstream_warmup(
@@ -712,30 +755,63 @@ async fn fire_now_upstream_warmup(
         .await?
         .ok_or(UpstreamError::NotFound)?;
     let target_upstream = upstream.name.clone();
-    let response = fire_now_upstream_warmup_inner(&state, storage, upstream_id, upstream).await?;
-    let status = response.status().as_u16();
-    let action = "upstream_warmup_fire_now";
-    let route = format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&target_upstream),
-            api_key_id: None,
-            status,
-            payload: None,
-        },
-    )
-    .await
-    {
-        tracing::error!(error = %error, action, "admin audit write failed");
-        return Err(UpstreamError::AuditWriteFailed);
-    }
-    Ok(response)
+    let stage =
+        fire_now_upstream_warmup_inner(&state, storage.clone(), upstream_id, upstream).await?;
+    // Every stage has committed a warmup attempt row (or needs no write);
+    // the remaining persistence and the audit outlive a dropped request.
+    complete_after_commit(async move {
+        let response = match stage {
+            FireNowStage::Finished(response) => response,
+            FireNowStage::Attempted(attempted) => {
+                match finish_fire_now_attempt(&state, storage.as_ref(), upstream_id, attempted)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        let status = response.status().as_u16();
+        let action = "upstream_warmup_fire_now";
+        let route = format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now");
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&target_upstream),
+                api_key_id: None,
+                status,
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action, "admin audit write failed");
+            return Err(UpstreamError::AuditWriteFailed);
+        }
+        Ok(response)
+    })
+    .await?
+}
+
+/// Where a fire-now request stands once the request future hands off.
+enum FireNowStage {
+    /// The final response is known; any attempt row is already written.
+    Finished(Response),
+    /// The dispatch attempt row is committed; quota observations, warmup
+    /// status and the response still follow.
+    Attempted(FireNowAttempted),
+}
+
+struct FireNowAttempted {
+    holder: String,
+    candidate_cycle_key: i64,
+    dispatch_attempt: FireNowDispatchAttempt,
+    record: crate::ports::WarmupAttemptOutcomeSnapshot,
 }
 
 async fn fire_now_upstream_warmup_inner(
@@ -743,16 +819,18 @@ async fn fire_now_upstream_warmup_inner(
     storage: Arc<dyn Storage>,
     upstream_id: Uuid,
     upstream: UpstreamRecord,
-) -> Result<Response, UpstreamError> {
+) -> Result<FireNowStage, UpstreamError> {
     if upstream.kind != UpstreamKind::AnthropicOauth {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "warmup_unsupported_for_kind",
-                "kind": upstream.kind.as_str(),
-            })),
-        )
-            .into_response());
+        return Ok(FireNowStage::Finished(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "warmup_unsupported_for_kind",
+                    "kind": upstream.kind.as_str(),
+                })),
+            )
+                .into_response(),
+        ));
     }
     let now_unix_secs = unix_now_secs_i64(&*state.clock)?;
     if !upstream.warmup_enabled {
@@ -765,11 +843,13 @@ async fn fire_now_upstream_warmup_inner(
             None,
         )
         .await?;
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "warmup_disabled" })),
-        )
-            .into_response());
+        return Ok(FireNowStage::Finished(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "warmup_disabled" })),
+            )
+                .into_response(),
+        ));
     }
     if upstream.oauth_credentials.is_none() {
         let outcome = record_fire_now_failure(
@@ -785,10 +865,10 @@ async fn fire_now_upstream_warmup_inner(
             None,
         )
         .await?;
-        return Ok(fire_now_not_fired_response(
+        return Ok(FireNowStage::Finished(fire_now_not_fired_response(
             StatusCode::BAD_REQUEST,
             outcome,
-        ));
+        )));
     }
 
     let holder = format!("fire-now:{}", Uuid::new_v4());
@@ -818,10 +898,10 @@ async fn fire_now_upstream_warmup_inner(
             Some("warmup dialect dispatcher unavailable"),
         )
         .await?;
-        return Ok(fire_now_not_fired_response(
+        return Ok(FireNowStage::Finished(fire_now_not_fired_response(
             StatusCode::BAD_GATEWAY,
             outcome,
-        ));
+        )));
     }
     let dialect_dispatch_bundle = upstream.warmup_dialect_plugin.as_ref().and_then(|_| {
         let runtime = state.runtime.as_ref()?;
@@ -958,14 +1038,30 @@ async fn fire_now_upstream_warmup_inner(
         },
     )
     .await?;
+    Ok(FireNowStage::Attempted(FireNowAttempted {
+        holder,
+        candidate_cycle_key,
+        dispatch_attempt,
+        record,
+    }))
+}
+
+/// Post-commit half of a dispatched fire-now: persists the response's quota
+/// observations and the warmup status, then builds the response.
+async fn finish_fire_now_attempt(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    FireNowAttempted {
+        holder,
+        candidate_cycle_key,
+        dispatch_attempt,
+        record,
+    }: FireNowAttempted,
+) -> Result<Response, UpstreamError> {
     if let FireNowDispatchAttempt::Response { headers, .. } = &dispatch_attempt {
-        record_fire_now_subscription_quota_observations(
-            state,
-            storage.as_ref(),
-            upstream_id,
-            headers,
-        )
-        .await?;
+        record_fire_now_subscription_quota_observations(state, storage, upstream_id, headers)
+            .await?;
     }
     let status = fire_now_attempt_status(&dispatch_attempt);
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, status = %status, outcome = ?record.outcome, dispatch_error = record.error_detail.as_deref(), action = "dispatch_result");
@@ -974,7 +1070,7 @@ async fn fire_now_upstream_warmup_inner(
         WarmupAttemptOutcome::Success(_) => {
             let response_cycle_key = record.cycle_key.unwrap_or(candidate_cycle_key);
             tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, action = "dispatch_succeeded");
-            write_warmup_status_after_success(storage.as_ref(), upstream_id, &*state.clock).await;
+            write_warmup_status_after_success(storage, upstream_id, &*state.clock).await;
             Ok(Json(FireNowFiredResponse {
                 fired: true,
                 cycle_key: response_cycle_key,
@@ -1345,7 +1441,7 @@ async fn update_upstream(
             detail: "complete OAuth before enabling warmup".to_owned(),
         });
     }
-    match UpstreamStore::update(
+    let result = UpstreamStore::update(
         storage,
         current.id,
         expected_revision,
@@ -1363,38 +1459,54 @@ async fn update_upstream(
             warmup_dialect_plugin: body.warmup_dialect_plugin,
         },
     )
-    .await
-    {
+    .await;
+    match result {
         Ok(updated) => {
-            seed_warmup_if_toggled(&state, &current, &updated).await?;
-            let payload = AuditPayload::UpstreamUpdate {
-                upstream_id: updated.id.to_string(),
-                fields_changed,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/upstreams/{}", updated.id);
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: None,
-                    target_upstream: Some(&updated.name),
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return Err(UpstreamError::AuditWriteFailed);
-            }
-            let mut response = respond_with_etag(&updated);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            Ok(response)
+            complete_after_commit(async move {
+                if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
+                    // The update is committed even though seeding failed;
+                    // keep routing in step before returning the seed error.
+                    if let Err(rebuild_error) =
+                        super::apply_dynamic_view_after_mutation(&state).await
+                    {
+                        tracing::error!(
+                            error = %rebuild_error,
+                            "admin v1 dynamic view rebind deferred after warmup seeding failure"
+                        );
+                    }
+                    return Err(error);
+                }
+                let payload = AuditPayload::UpstreamUpdate {
+                    upstream_id: updated.id.to_string(),
+                    fields_changed,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/upstreams/{}", updated.id);
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: None,
+                        target_upstream: Some(&updated.name),
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    tracing::error!(error = %error, action = %action, "admin audit write failed");
+                    rebuild_after_audit_failure(&state).await;
+                    return Err(UpstreamError::AuditWriteFailed);
+                }
+                let mut response = respond_with_etag(&updated);
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                Ok(response)
+            })
+            .await?
         }
         Err(StorageError::Conflict { message }) => {
             stale_or_conflict(&state, &id, expected_revision, message).await
@@ -1478,35 +1590,40 @@ async fn delete_upstream(
     }
 
     let storage = storage(&state)?;
-    match UpstreamStore::soft_delete(storage, current.id, expected_revision).await {
+    let result = UpstreamStore::soft_delete(storage, current.id, expected_revision).await;
+    match result {
         Ok(()) => {
-            let payload = AuditPayload::UpstreamDelete {
-                upstream_id: current.id.to_string(),
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/upstreams/{}", current.id);
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: None,
-                    target_upstream: Some(&current.name),
-                    api_key_id: None,
-                    status: StatusCode::NO_CONTENT.as_u16(),
-                    payload: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return Err(UpstreamError::AuditWriteFailed);
-            }
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            Ok(response)
+            complete_after_commit(async move {
+                let payload = AuditPayload::UpstreamDelete {
+                    upstream_id: current.id.to_string(),
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/upstreams/{}", current.id);
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: None,
+                        target_upstream: Some(&current.name),
+                        api_key_id: None,
+                        status: StatusCode::NO_CONTENT.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    tracing::error!(error = %error, action = %action, "admin audit write failed");
+                    rebuild_after_audit_failure(&state).await;
+                    return Err(UpstreamError::AuditWriteFailed);
+                }
+                let mut response = StatusCode::NO_CONTENT.into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                Ok(response)
+            })
+            .await?
         }
         Err(StorageError::Conflict { message }) => {
             stale_or_conflict(&state, &id, expected_revision, message).await
@@ -1527,39 +1644,43 @@ async fn delete_upstream_warmup_dialect_plugin(
         .await?
         .ok_or(UpstreamError::NotFound)?;
 
-    match storage
+    let cleared = storage
         .clear_warmup_dialect_plugin(id, expected_revision)
-        .await?
-    {
+        .await?;
+    match cleared {
         Some(updated) => {
-            let payload = AuditPayload::UpstreamUpdate {
-                upstream_id: updated.id.to_string(),
-                fields_changed: vec!["warmup_dialect_plugin"],
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/upstreams/{}/warmup-dialect-plugin", updated.id);
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: None,
-                    target_upstream: Some(&updated.name),
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return Err(UpstreamError::AuditWriteFailed);
-            }
-            let mut response = respond_with_etag(&updated);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            Ok(response)
+            complete_after_commit(async move {
+                let payload = AuditPayload::UpstreamUpdate {
+                    upstream_id: updated.id.to_string(),
+                    fields_changed: vec!["warmup_dialect_plugin"],
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/upstreams/{}/warmup-dialect-plugin", updated.id);
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: None,
+                        target_upstream: Some(&updated.name),
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    tracing::error!(error = %error, action = %action, "admin audit write failed");
+                    rebuild_after_audit_failure(&state).await;
+                    return Err(UpstreamError::AuditWriteFailed);
+                }
+                let mut response = respond_with_etag(&updated);
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                Ok(response)
+            })
+            .await?
         }
         None => {
             stale_or_conflict(
@@ -1612,29 +1733,33 @@ async fn set_enabled(
     } else {
         format!("/admin/v1/upstreams/{}/disable", updated.id)
     };
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: &action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&updated.name),
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
-    .await
-    {
-        tracing::error!(error = %error, action = %action, "admin audit write failed");
-        return Err(UpstreamError::AuditWriteFailed);
-    }
+    complete_after_commit(async move {
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&updated.name),
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action = %action, "admin audit write failed");
+            rebuild_after_audit_failure(&state).await;
+            return Err(UpstreamError::AuditWriteFailed);
+        }
 
-    let mut response = respond_with_etag(&updated);
-    crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
-    Ok(response)
+        let mut response = respond_with_etag(&updated);
+        crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
+        Ok(response)
+    })
+    .await?
 }
 
 async fn stale_or_conflict(

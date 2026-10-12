@@ -20,10 +20,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use cc_lb_control::anthropic_metadata::{
-    CedarEmberClaimOutcome, CedarEmberClaimRequest, CedarEmberError, CedarEmberIdentityRecord,
-    CedarEmberPollRecord, CedarEmberStatus, cedar_ember_epoch_fence, cedar_ember_epoch_meta_key,
-    cedar_ember_identity_meta_key, cedar_ember_meta_key, claim_cedar_ember_reset,
-    fetch_oauth_profile_at, is_valid_grant_id, make_metadata_http_client,
+    CedarEmberClaimOutcome, CedarEmberClaimRequest, CedarEmberClaimResult, CedarEmberError,
+    CedarEmberIdentityRecord, CedarEmberPollRecord, CedarEmberStatus, cedar_ember_epoch_fence,
+    cedar_ember_epoch_meta_key, cedar_ember_identity_meta_key, cedar_ember_meta_key,
+    claim_cedar_ember_reset, fetch_oauth_profile_at, is_valid_grant_id, make_metadata_http_client,
     settled_cedar_ember_epoch,
 };
 use cc_lb_scheduler::error::SchedulerError;
@@ -35,6 +35,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use super::post_commit::complete_after_commit;
 use super::upstreams::{
     UpstreamError, decrypt_oauth_bundle, fresh_enough_access_token, metadata_user_agent,
     storage_arc, upstream_base_url,
@@ -191,40 +192,59 @@ pub(crate) async fn claim_upstream_limit_reset(
         .await?
         .ok_or(UpstreamError::NotFound)?;
     let target_upstream = upstream.name.clone();
-    // Audit every outcome, including errors: a 504/timeout may still have
-    // consumed the grant provider-side, so the request_id trail must exist
-    // even when the handler returns an error.
-    let result = claim_limit_reset_inner(&state, storage, upstream, &body).await;
-    let (status, outcome) = match &result {
-        Ok(response) => (response.status().as_u16(), "ok"),
-        Err(error) => (error.status().as_u16(), error.error_code()),
-    };
-    let action = "upstream_limit_reset_claim";
-    let route = format!("/admin/v1/upstreams/{upstream_id}/limit-resets/claim");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&target_upstream),
-            api_key_id: None,
-            status,
-            payload: Some(json!({
-                "grant_id": body.grant_id,
-                "request_id": body.request_id,
-                "outcome": outcome,
-            })),
-        },
-    )
-    .await
-    {
-        tracing::error!(error = %error, action, "admin audit write failed");
-        return Err(UpstreamError::AuditWriteFailed);
-    }
-    result
+    // The provider claim runs on the request future, so a request cancelled
+    // before dispatch never sends it. Once the claim result (or a refusal
+    // before dispatch) exists, settling the fence, the usage-poll trigger and
+    // the audit run to completion even if the client disconnects.
+    let dispatched = dispatch_limit_reset_claim(&state, storage.clone(), &upstream, &body).await;
+    complete_after_commit(async move {
+        let result = match dispatched {
+            Ok((fence, claim)) => {
+                settle_limit_reset_claim(&state, storage.as_ref(), upstream.id, fence, claim).await
+            }
+            Err(error) => Err(error),
+        };
+        // Audit every outcome, including errors: a 504/timeout may still have
+        // consumed the grant provider-side, so the request_id trail must exist
+        // even when the handler returns an error.
+        let (status, outcome) = match &result {
+            Ok(response) => (response.status().as_u16(), "ok"),
+            Err(error) => (error.status().as_u16(), error.error_code()),
+        };
+        let action = "upstream_limit_reset_claim";
+        let route = format!("/admin/v1/upstreams/{upstream_id}/limit-resets/claim");
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&target_upstream),
+                api_key_id: None,
+                status,
+                payload: Some(json!({
+                    "grant_id": body.grant_id,
+                    "request_id": body.request_id,
+                    "outcome": outcome,
+                })),
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action, "admin audit write failed");
+            return Err(UpstreamError::AuditWriteFailed);
+        }
+        result
+    })
+    .await?
+}
+
+/// The durable epoch fence a dispatched claim holds until it is settled.
+struct ClaimFence {
+    epoch_key: String,
+    fence: String,
 }
 
 /// 409 for a claim refused before dispatch because the upstream's epoch is
@@ -236,12 +256,15 @@ fn claim_in_progress() -> UpstreamError {
     }
 }
 
-async fn claim_limit_reset_inner(
+/// Validates the claim, acquires the epoch fence and dispatches the provider
+/// claim. Returns the held fence with the raw claim result; any error means
+/// nothing was dispatched.
+async fn dispatch_limit_reset_claim(
     state: &AdminState,
     storage: Arc<dyn Storage>,
-    upstream: UpstreamRecord,
+    upstream: &UpstreamRecord,
     body: &LimitResetClaimBody,
-) -> Result<Response, UpstreamError> {
+) -> Result<(ClaimFence, Result<CedarEmberClaimResult, CedarEmberError>), UpstreamError> {
     if !is_valid_grant_id(&body.grant_id) {
         return Err(UpstreamError::BadRequest {
             error: "invalid_grant_id",
@@ -257,10 +280,10 @@ async fn claim_limit_reset_inner(
     if upstream.kind != UpstreamKind::AnthropicOauth {
         return Err(UpstreamError::NotOauthUpstream);
     }
-    let bundle = decrypt_oauth_bundle(state, &upstream)?;
-    let access_token = fresh_enough_access_token(state, storage.clone(), &upstream, bundle).await?;
+    let bundle = decrypt_oauth_bundle(state, upstream)?;
+    let access_token = fresh_enough_access_token(state, storage.clone(), upstream, bundle).await?;
     let user_agent = metadata_user_agent(storage.as_ref()).await?;
-    let base_url = upstream_base_url(&upstream)?;
+    let base_url = upstream_base_url(upstream)?;
     let client = make_metadata_http_client();
     let cancel = CancellationToken::new();
 
@@ -317,7 +340,17 @@ async fn claim_limit_reset_inner(
         &cancel,
     )
     .await;
+    Ok((ClaimFence { epoch_key, fence }, result))
+}
 
+/// Settles the claim's own fence and maps the provider outcome.
+async fn settle_limit_reset_claim(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    ClaimFence { epoch_key, fence }: ClaimFence,
+    result: Result<CedarEmberClaimResult, CedarEmberError>,
+) -> Result<Response, UpstreamError> {
     // Settle our own fence with a fresh epoch after any outcome. Snapshots
     // from polls issued before the claim carry the old epoch and polls during
     // it wrote none (the fence was pending), so neither can match. If this
@@ -332,7 +365,7 @@ async fn claim_limit_reset_inner(
             detail: format!("cedar_ember invalidation write failed: {error}"),
         })?;
     if !settled {
-        tracing::warn!(upstream_id = %upstream.id, "cedar_ember claim fence was already recovered");
+        tracing::warn!(upstream_id = %upstream_id, "cedar_ember claim fence was already recovered");
     }
     let result = result.map_err(provider_claim_error)?;
 

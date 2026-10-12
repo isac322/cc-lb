@@ -194,7 +194,7 @@ impl PrincipalStore for SqliteStorage {
         if row.is_some() {
             cascade_plugin_chains_in_tx(&mut tx, id).await?;
         }
-        let record = optional_updated_principal_in_tx(&mut tx, id, row).await?;
+        let record = optional_updated_principal_in_tx(&mut tx, id, expected_revision, row).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(record)
     }
@@ -268,7 +268,7 @@ async fn update_principal(
     .fetch_optional(storage.pool())
     .await
     .map_err(map_sqlite_error)?;
-    optional_updated_principal(storage, id, row).await
+    optional_updated_principal(storage, id, expected_revision, row).await
 }
 
 fn cache_keepalive_binding(
@@ -284,45 +284,63 @@ fn cache_keepalive_binding(
 async fn optional_updated_principal(
     storage: &SqliteStorage,
     id: Uuid,
+    expected_revision: u64,
     row: Option<SqliteRow>,
 ) -> StorageResult<Option<PrincipalRecord>> {
     if let Some(row) = row {
         return principal_from_row(row).map(Some);
     }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM principals_v1 WHERE id = ?")
-        .bind(id.to_string())
-        .fetch_one(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?
-        > 0;
-    if exists {
-        return Err(StorageError::Conflict {
-            message: "principal revision conflict".to_owned(),
-        });
-    }
-    Ok(None)
+    let current = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT revision, deleted_at FROM principals_v1 WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(storage.pool())
+    .await
+    .map_err(map_sqlx_error)?;
+    principal_mutation_conflict(current, expected_revision)
 }
 
 async fn optional_updated_principal_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
     id: Uuid,
+    expected_revision: u64,
     row: Option<SqliteRow>,
 ) -> StorageResult<Option<PrincipalRecord>> {
     if let Some(row) = row {
         return principal_from_row(row).map(Some);
     }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM principals_v1 WHERE id = ?")
-        .bind(id.to_string())
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?
-        > 0;
-    if exists {
+    let current = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT revision, deleted_at FROM principals_v1 WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    principal_mutation_conflict(current, expected_revision)
+}
+
+/// Explains why an optimistic principal mutation matched no row.
+///
+/// A missing principal is `Ok(None)`. A live principal at a different
+/// revision reports that revision in the same message shape as the PostgreSQL
+/// adapter, so callers can answer with the current revision. Deleted rows and
+/// any other mismatch stay a generic conflict.
+fn principal_mutation_conflict(
+    current: Option<(i64, Option<i64>)>,
+    expected_revision: u64,
+) -> StorageResult<Option<PrincipalRecord>> {
+    let Some((revision, deleted_at)) = current else {
+        return Ok(None);
+    };
+    let revision = i64_to_u64(revision, "principal.revision")?;
+    if deleted_at.is_none() && revision != expected_revision {
         return Err(StorageError::Conflict {
-            message: "principal revision conflict".to_owned(),
+            message: format!("principal revision conflict; current revision is {revision}"),
         });
     }
-    Ok(None)
+    Err(StorageError::Conflict {
+        message: "principal revision conflict".to_owned(),
+    })
 }
 
 async fn cascade_plugin_chains_in_tx(

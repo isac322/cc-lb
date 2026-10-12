@@ -1417,7 +1417,7 @@ test('UI-02 preserves the real stale-revision 409 toggle behavior', async ({
   const conflict = await patch;
   expect(conflict.status()).toBe(409);
   expect(await conflict.json()).toMatchObject({
-    error: ENGINE === 'sqlite' ? 'storage_conflict' : 'stale_revision',
+    error: 'stale_revision',
   });
   await expect(
     page.locator('[data-sonner-toast][data-type="error"][data-front="true"]'),

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::audit::{AdminAuditEvent, record_admin_audit};
 use crate::{
     AdminState,
@@ -117,43 +118,51 @@ async fn issue_key(
             let (key_id, _) = secret::parse(plaintext.expose())
                 .expect("plaintext key format is guaranteed by KeyStore::create");
             let route = format!("/admin/v1/principals/{id}/keys");
-            if record_issue_audit_or_revoke(
-                key_store.as_ref(),
-                &id,
-                &key_id,
-                record_admin_audit(
-                    &state,
-                    AdminAuditEvent {
-                        identity: Some(&identity),
-                        system_component: None,
-                        action: "principal_key_issue",
-                        route: &route,
-                        target_principal_id: Some(&id),
-                        target_upstream: None,
-                        api_key_id: Some(&key_id),
-                        status: StatusCode::CREATED.as_u16(),
-                        payload: Some(json!({ "plaintext_exposed": true })),
-                    },
-                ),
-            )
-            .await
-            .is_err()
-            {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "audit_write_failed" })),
+            let state = state.clone();
+            let continuation = async move {
+                if record_issue_audit_or_revoke(
+                    key_store.as_ref(),
+                    &id,
+                    &key_id,
+                    record_admin_audit(
+                        &state,
+                        AdminAuditEvent {
+                            identity: Some(&identity),
+                            system_component: None,
+                            action: "principal_key_issue",
+                            route: &route,
+                            target_principal_id: Some(&id),
+                            target_upstream: None,
+                            api_key_id: Some(&key_id),
+                            status: StatusCode::CREATED.as_u16(),
+                            payload: Some(json!({ "plaintext_exposed": true })),
+                        },
+                    ),
                 )
-                    .into_response();
-            }
-            let response = IssueKeyResponse {
-                principal_id: id,
-                key_id,
-                plaintext_key: plaintext.expose().to_string(),
-                issued_at_unix_secs: record.issued_at_unix_secs,
+                .await
+                .is_err()
+                {
+                    rebuild_after_audit_failure(&state).await;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "audit_write_failed" })),
+                    )
+                        .into_response();
+                }
+                let response = IssueKeyResponse {
+                    principal_id: id,
+                    key_id,
+                    plaintext_key: plaintext.expose().to_string(),
+                    issued_at_unix_secs: record.issued_at_unix_secs,
+                };
+                let mut http_response = (StatusCode::CREATED, Json(response)).into_response();
+                add_dynamic_rebind_headers(&mut http_response, &state).await;
+                http_response
             };
-            let mut http_response = (StatusCode::CREATED, Json(response)).into_response();
-            add_dynamic_rebind_headers(&mut http_response, &state).await;
-            http_response
+            match complete_after_commit(continuation).await {
+                Ok(response) => response,
+                Err(PostCommitAborted) => post_commit_aborted_response(),
+            }
         }
         Err(error) => issue_key_error_response(error),
     }
@@ -175,6 +184,15 @@ fn issue_key_error_response(error: KeyStoreError) -> axum::response::Response {
                 .into_response()
         }
     }
+}
+
+/// Same body as the module's other internal failures.
+fn post_commit_aborted_response() -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "internal_error" })),
+    )
+        .into_response()
 }
 
 async fn record_issue_audit_or_revoke(
@@ -344,40 +362,48 @@ async fn revoke_key(
         Ok(_) => {
             let now = cc_lb_clock::unix_secs(state.clock.now());
             let route = format!("/admin/v1/principals/{id}/keys/{key_id}/revoke");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: "principal_key_revoke",
-                    route: &route,
-                    target_principal_id: Some(&id),
-                    target_upstream: None,
-                    api_key_id: Some(&key_id),
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
-            .await
-            {
-                tracing::error!(
-                    error = %error,
-                    action = "principal_key_revoke",
-                    "admin audit write failed"
-                );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "audit_write_failed" })),
+            let state = state.clone();
+            let continuation = async move {
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: "principal_key_revoke",
+                        route: &route,
+                        target_principal_id: Some(&id),
+                        target_upstream: None,
+                        api_key_id: Some(&key_id),
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
                 )
-                    .into_response();
-            }
-            let response = RevokeKeyResponse {
-                key_id,
-                revoked_at_unix_secs: now,
+                .await
+                {
+                    tracing::error!(
+                        error = %error,
+                        action = "principal_key_revoke",
+                        "admin audit write failed"
+                    );
+                    rebuild_after_audit_failure(&state).await;
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "error": "audit_write_failed" })),
+                    )
+                        .into_response();
+                }
+                let response = RevokeKeyResponse {
+                    key_id,
+                    revoked_at_unix_secs: now,
+                };
+                let mut http_response = Json(response).into_response();
+                add_dynamic_rebind_headers(&mut http_response, &state).await;
+                http_response
             };
-            let mut http_response = Json(response).into_response();
-            add_dynamic_rebind_headers(&mut http_response, &state).await;
-            http_response
+            match complete_after_commit(continuation).await {
+                Ok(response) => response,
+                Err(PostCommitAborted) => post_commit_aborted_response(),
+            }
         }
         Err(e) => {
             tracing::error!("Failed to revoke key: {}", e);

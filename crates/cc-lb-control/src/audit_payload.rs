@@ -74,6 +74,13 @@ pub enum AuditPayload {
         sha256_hex: String,
         supported_slots: Vec<String>,
     },
+    PluginRegistryLabelUpdate {
+        wasm_registry_id: String,
+        label: Option<String>,
+    },
+    PluginWasmGc {
+        removed_count: usize,
+    },
 }
 
 impl fmt::Display for AuditPayload {
@@ -187,6 +194,12 @@ impl fmt::Display for AuditPayload {
                 principal_id,
                 slots_changed.join(",")
             ),
+            AuditPayload::PluginRegistryLabelUpdate {
+                wasm_registry_id, ..
+            } => write!(f, "plugin_registry_label_update(id={})", wasm_registry_id),
+            AuditPayload::PluginWasmGc { removed_count } => {
+                write!(f, "plugin_wasm_gc(removed={})", removed_count)
+            }
         }
     }
 }
@@ -291,5 +304,20 @@ mod tests {
             Some(&json!(["router", "shape"]))
         );
         assert_eq!(payload.len(), 5);
+    }
+
+    #[test]
+    fn plugin_label_update_and_wasm_gc_display_stable() {
+        let label_update = AuditPayload::PluginRegistryLabelUpdate {
+            wasm_registry_id: "registry-1".to_owned(),
+            label: Some("a, b=c)".to_owned()),
+        };
+        assert_eq!(
+            label_update.to_string(),
+            "plugin_registry_label_update(id=registry-1)"
+        );
+
+        let gc = AuditPayload::PluginWasmGc { removed_count: 0 };
+        assert_eq!(gc.to_string(), "plugin_wasm_gc(removed=0)");
     }
 }

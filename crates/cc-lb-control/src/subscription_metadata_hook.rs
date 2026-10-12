@@ -81,18 +81,33 @@ pub async fn run_metadata_refresh(
 ) -> Result<(), MetadataRefreshError> {
     let records =
         fetch_metadata_only(client, upstream_id, access_token, user_agent, cancel, clock).await;
+    store_subscription_metadata(storage.as_ref(), &records).await?;
+    store_organization_metadata(storage.as_ref(), &records).await
+}
+
+/// First write of a metadata refresh: the upstream's subscription record.
+pub async fn store_subscription_metadata(
+    storage: &dyn Storage,
+    records: &MetadataRefreshRecords,
+) -> Result<(), MetadataRefreshError> {
     storage
         .put_upstream_subscription_metadata(&records.subscription_metadata_record)
         .await
-        .map_err(|error| MetadataRefreshError::Storage(error.to_string()))?;
+        .map_err(|error| MetadataRefreshError::Storage(error.to_string()))
+}
 
+/// Second write of a metadata refresh: the organization record, when the
+/// fetch produced one. Runs only after [`store_subscription_metadata`].
+pub async fn store_organization_metadata(
+    storage: &dyn Storage,
+    records: &MetadataRefreshRecords,
+) -> Result<(), MetadataRefreshError> {
     if let Some(org_record) = records.organization_metadata_record.as_ref() {
         storage
             .put_organization_metadata(org_record)
             .await
             .map_err(|error| MetadataRefreshError::Storage(error.to_string()))?;
     }
-
     Ok(())
 }
 

@@ -35,6 +35,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::AdminState;
 use crate::audit::{AdminAuditEvent, record_admin_audit};
 use crate::auth::AdminIdentity;
@@ -276,40 +277,48 @@ async fn start_oauth(
     }
     .to_string();
     let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/start");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: &audit_action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&target_upstream),
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
+    let authorize_url = handshake_state.authorize_url.to_string();
+    match complete_after_commit(async move {
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &audit_action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&target_upstream),
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                action = %audit_action,
+                "admin audit write failed"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
+
+        Json(StartResponse {
+            authorize_url,
+            state_token,
+            revision: upstream_revision,
+        })
+        .into_response()
+    })
     .await
     {
-        tracing::error!(
-            error = %error,
-            action = %audit_action,
-            "admin audit write failed"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "audit_write_failed" })),
-        )
-            .into_response();
+        Ok(response) => response,
+        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    Json(StartResponse {
-        authorize_url: handshake_state.authorize_url.to_string(),
-        state_token,
-        revision: upstream_revision,
-    })
-    .into_response()
 }
 
 async fn start_oauth_draft(
@@ -365,39 +374,47 @@ async fn start_oauth_draft(
         return response;
     }
 
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: "upstream_oauth_draft_start",
-            route: "/admin/v1/oauth/draft/start",
-            target_principal_id: None,
-            target_upstream: None,
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
+    let authorize_url = handshake_state.authorize_url.to_string();
+    match complete_after_commit(async move {
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: "upstream_oauth_draft_start",
+                route: "/admin/v1/oauth/draft/start",
+                target_principal_id: None,
+                target_upstream: None,
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                action = "upstream_oauth_draft_start",
+                "admin audit write failed"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
+
+        Json(DraftStartResponse {
+            authorize_url,
+            state_token,
+        })
+        .into_response()
+    })
     .await
     {
-        tracing::error!(
-            error = %error,
-            action = "upstream_oauth_draft_start",
-            "admin audit write failed"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "audit_write_failed" })),
-        )
-            .into_response();
+        Ok(response) => response,
+        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    Json(DraftStartResponse {
-        authorize_url: handshake_state.authorize_url.to_string(),
-        state_token,
-    })
-    .into_response()
 }
 
 async fn complete_oauth_draft(
@@ -549,45 +566,53 @@ async fn complete_oauth_draft(
         return response;
     }
 
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: "upstream_oauth_draft_complete",
-            route: "/admin/v1/oauth/draft/complete",
-            target_principal_id: None,
-            target_upstream: None,
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: Some(json!({ "initiated_by": initiated_by })),
-        },
-    )
+    let state_token = payload.state_token;
+    match complete_after_commit(async move {
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: "upstream_oauth_draft_complete",
+                route: "/admin/v1/oauth/draft/complete",
+                target_principal_id: None,
+                target_upstream: None,
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: Some(json!({ "initiated_by": initiated_by })),
+            },
+        )
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                action = "upstream_oauth_draft_complete",
+                "admin audit write failed"
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
+
+        Json(DraftCompleteResponse {
+            state_token,
+            suggested_name,
+            subscription_metadata: records.subscription_metadata_record,
+            organization_metadata: records.organization_metadata_record,
+            mode,
+            long_lived_fallback,
+            fallback_reason,
+            granted_expires_in_secs,
+        })
+        .into_response()
+    })
     .await
     {
-        tracing::error!(
-            error = %error,
-            action = "upstream_oauth_draft_complete",
-            "admin audit write failed"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "audit_write_failed" })),
-        )
-            .into_response();
+        Ok(response) => response,
+        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    Json(DraftCompleteResponse {
-        state_token: payload.state_token,
-        suggested_name,
-        subscription_metadata: records.subscription_metadata_record,
-        organization_metadata: records.organization_metadata_record,
-        mode,
-        long_lived_fallback,
-        fallback_reason,
-        granted_expires_in_secs,
-    })
-    .into_response()
 }
 
 async fn create_upstream_from_oauth_draft(
@@ -705,81 +730,98 @@ async fn create_upstream_from_oauth_draft(
         }
         Err(error) => return storage_error_response(&error),
     };
-    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &created).await {
-        return rollback_oauth_draft_creation(
-            storage.as_ref(),
-            &payload.state_token,
-            created.id,
-            format!("oauth scheduler seed failed: {error}"),
+    let storage = Arc::clone(storage);
+    let state_token = payload.state_token;
+    match complete_after_commit(async move {
+        if let Err(error) = seed_oauth_bootstrap_tasks(&state, &created).await {
+            return rollback_oauth_draft_creation(
+                &state,
+                storage.as_ref(),
+                &state_token,
+                created.id,
+                format!("oauth scheduler seed failed: {error}"),
+            )
+            .await;
+        }
+        let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
+        let mut subscription_record = completion.subscription_metadata_record;
+        subscription_record.upstream_id = created.id;
+        if let Err(error) = storage
+            .put_upstream_subscription_metadata(&subscription_record)
+            .await
+        {
+            return rollback_oauth_draft_creation(
+                &state,
+                storage.as_ref(),
+                &state_token,
+                created.id,
+                format!("subscription metadata storage failed: {error}"),
+            )
+            .await;
+        }
+        if let Some(organization_record) = completion.organization_metadata_record.as_ref()
+            && let Err(error) = storage.put_organization_metadata(organization_record).await
+        {
+            return rollback_oauth_draft_creation(
+                &state,
+                storage.as_ref(),
+                &state_token,
+                created.id,
+                format!("organization metadata storage failed: {error}"),
+            )
+            .await;
+        }
+
+        if let Err(response) = delete_pkce_flow(storage.as_ref(), &state_token).await {
+            // The upstream and its metadata are committed even though PKCE
+            // cleanup failed; keep routing in step before returning the error.
+            rebuild_after_committed_failure(&state, "oauth draft pkce cleanup").await;
+            return response;
+        }
+
+        let target_upstream = created.name.clone();
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: "upstream_create_from_oauth_draft",
+                route: "/admin/v1/upstreams/from-oauth-draft",
+                target_principal_id: None,
+                target_upstream: Some(&target_upstream),
+                api_key_id: None,
+                status: StatusCode::CREATED.as_u16(),
+                payload: Some(json!({ "initiated_by": initiated_by })),
+            },
         )
-        .await;
-    }
-    let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
-    let mut subscription_record = completion.subscription_metadata_record;
-    subscription_record.upstream_id = created.id;
-    if let Err(error) = storage
-        .put_upstream_subscription_metadata(&subscription_record)
         .await
-    {
-        return rollback_oauth_draft_creation(
-            storage.as_ref(),
-            &payload.state_token,
-            created.id,
-            format!("subscription metadata storage failed: {error}"),
-        )
-        .await;
-    }
-    if let Some(organization_record) = completion.organization_metadata_record.as_ref()
-        && let Err(error) = storage.put_organization_metadata(organization_record).await
-    {
-        return rollback_oauth_draft_creation(
-            storage.as_ref(),
-            &payload.state_token,
-            created.id,
-            format!("organization metadata storage failed: {error}"),
-        )
-        .await;
-    }
+        {
+            tracing::error!(
+                error = %error,
+                action = "upstream_create_from_oauth_draft",
+                "admin audit write failed"
+            );
+            rebuild_after_audit_failure(&state).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
 
-    if let Err(response) = delete_pkce_flow(storage.as_ref(), &payload.state_token).await {
-        return response;
-    }
-
-    let target_upstream = created.name.clone();
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: "upstream_create_from_oauth_draft",
-            route: "/admin/v1/upstreams/from-oauth-draft",
-            target_principal_id: None,
-            target_upstream: Some(&target_upstream),
-            api_key_id: None,
-            status: StatusCode::CREATED.as_u16(),
-            payload: Some(json!({ "initiated_by": initiated_by })),
-        },
-    )
+        let mut response = (StatusCode::CREATED, Json(upstream_response(&created))).into_response();
+        if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", created.id))
+        {
+            response.headers_mut().insert(header::LOCATION, location);
+        }
+        add_dynamic_rebind_headers(&mut response, &state).await;
+        response
+    })
     .await
     {
-        tracing::error!(
-            error = %error,
-            action = "upstream_create_from_oauth_draft",
-            "admin audit write failed"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "audit_write_failed" })),
-        )
-            .into_response();
+        Ok(response) => response,
+        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    let mut response = (StatusCode::CREATED, Json(upstream_response(&created))).into_response();
-    if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", created.id)) {
-        response.headers_mut().insert(header::LOCATION, location);
-    }
-    add_dynamic_rebind_headers(&mut response, &state).await;
-    response
 }
 
 async fn complete_oauth(
@@ -940,61 +982,72 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    if let Err(error) =
-        seed_oauth_reconnect_tasks(&state, &updated, bundle.expires_at_unix_secs).await
-    {
-        return scheduler_error_response(&error);
-    }
+    match complete_after_commit(async move {
+        if let Err(error) =
+            seed_oauth_reconnect_tasks(&state, &updated, bundle.expires_at_unix_secs).await
+        {
+            // The new credential is committed even though seeding failed;
+            // keep routing in step before returning the seed error.
+            rebuild_after_committed_failure(&state, "oauth reconnect scheduler seeding").await;
+            return scheduler_error_response(&error);
+        }
 
-    let target_upstream = upstream_name.clone();
-    let audit_action = AuditPayload::UpstreamOauthComplete {
-        upstream_id: upstream_id.to_string(),
-        upstream_name,
-        expires_at_unix_secs: bundle.expires_at_unix_secs,
-        access_token_fingerprint: access_token_fingerprint.clone(),
-    }
-    .to_string();
-    let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/complete");
-    if let Err(error) = record_admin_audit(
-        &state,
-        AdminAuditEvent {
-            identity: Some(&identity),
-            system_component: None,
-            action: &audit_action,
-            route: &route,
-            target_principal_id: None,
-            target_upstream: Some(&target_upstream),
-            api_key_id: None,
-            status: StatusCode::OK.as_u16(),
-            payload: None,
-        },
-    )
+        let target_upstream = upstream_name.clone();
+        let audit_action = AuditPayload::UpstreamOauthComplete {
+            upstream_id: upstream_id.to_string(),
+            upstream_name,
+            expires_at_unix_secs: bundle.expires_at_unix_secs,
+            access_token_fingerprint: access_token_fingerprint.clone(),
+        }
+        .to_string();
+        let route = format!("/admin/v1/upstreams/{upstream_id}/oauth/complete");
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &audit_action,
+                route: &route,
+                target_principal_id: None,
+                target_upstream: Some(&target_upstream),
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(
+                error = %error,
+                action = %audit_action,
+                "admin audit write failed"
+            );
+            rebuild_after_audit_failure(&state).await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "audit_write_failed" })),
+            )
+                .into_response();
+        }
+
+        let mut response = Json(CompleteResponse {
+            upstream_id: updated.id,
+            expires_at_unix_secs: bundle.expires_at_unix_secs,
+            access_token_fingerprint,
+            mode,
+            long_lived_fallback,
+            fallback_reason,
+            granted_expires_in_secs,
+        })
+        .into_response();
+        add_dynamic_rebind_headers(&mut response, &state).await;
+        response
+    })
     .await
     {
-        tracing::error!(
-            error = %error,
-            action = %audit_action,
-            "admin audit write failed"
-        );
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "audit_write_failed" })),
-        )
-            .into_response();
+        Ok(response) => response,
+        Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-
-    let mut response = Json(CompleteResponse {
-        upstream_id: updated.id,
-        expires_at_unix_secs: bundle.expires_at_unix_secs,
-        access_token_fingerprint,
-        mode,
-        long_lived_fallback,
-        fallback_reason,
-        granted_expires_in_secs,
-    })
-    .into_response();
-    add_dynamic_rebind_headers(&mut response, &state).await;
-    response
 }
 
 async fn get_oauth_status(
@@ -1346,14 +1399,33 @@ fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTas
 /// OAuth credential when a later onboarding step (bootstrap task seeding or
 /// subscription/organization metadata storage) fails, then discards the PKCE
 /// draft. Crypto failures happen before the create and never reach this.
+/// The serving view is rebuilt after compensation in both outcomes: a failed
+/// delete leaves the upstream committed, and a successful delete must not
+/// leave a view that another rebuild published meanwhile still serving it.
 async fn rollback_oauth_draft_creation(
+    state: &AdminState,
     storage: &dyn Storage,
     state_token: &str,
     upstream_id: Uuid,
     detail: String,
 ) -> Response {
     let rollback_error = UpstreamStore::hard_delete(storage, upstream_id).await.err();
-    discard_oauth_draft(storage, state_token, detail, rollback_error).await
+    let response = discard_oauth_draft(storage, state_token, detail, rollback_error).await;
+    rebuild_after_committed_failure(state, "oauth draft rollback").await;
+    response
+}
+
+/// Rebuilds the serving replica's dynamic view from the committed state left
+/// after a post-commit step failed (and any compensation ran). The caller
+/// still returns that step's original error response unchanged.
+async fn rebuild_after_committed_failure(state: &AdminState, step: &'static str) {
+    if let Err(error) = super::apply_dynamic_view_after_mutation(state).await {
+        tracing::error!(
+            error = %error,
+            step,
+            "admin v1 dynamic view rebind deferred after oauth post-commit failure"
+        );
+    }
 }
 
 /// Deletes the PKCE draft flow and returns the 500 `oauth_draft_create_failed`

@@ -91,13 +91,27 @@ impl Reconciler {
     }
 
     pub async fn reconcile_once(&self) -> StorageResult<()> {
+        self.hydrate_subscription_quota_cache().await;
+
+        // Lock-free fast path: an unchanged signature needs no rebuild.
         let hash = collect_revision_hash(&self.stores).await?;
-        let current = self.holder.load();
-        if hash == current.upstream_status_snapshot.revision_hash {
+        if hash == self.holder.load().upstream_status_snapshot.revision_hash {
             metrics::counter!("cclb_reconcile_total", "outcome" => "unchanged").increment(1);
             return Ok(());
         }
 
+        // Rebuild protocol: hold the holder's rebuild lock from the
+        // resident-generation read through installation. Another publisher
+        // may have installed a fresh view while this pass waited, so reread
+        // the resident view under the guard instead of reusing the earlier
+        // sample.
+        let _rebuild_guard = self.holder.lock_rebuild().await;
+        let current = self.holder.load();
+        let hash = collect_revision_hash(&self.stores).await?;
+        if hash == current.upstream_status_snapshot.revision_hash {
+            metrics::counter!("cclb_reconcile_total", "outcome" => "unchanged").increment(1);
+            return Ok(());
+        }
         let generation = current.generation;
         drop(current);
         match build_dynamic_view(
@@ -116,11 +130,10 @@ impl Reconciler {
         .await
         {
             Ok(view) => {
-                // Reconcile is a background rebuilder that can race with
-                // admin-triggered rebinds. If our view is stale relative
-                // to whatever the admin path just published, drop it —
-                // resurrecting a deleted slot via an old generation is
-                // the concrete failure mode Sprint 2 fixes.
+                // Defensive CAS: under the rebuild lock every live
+                // publisher builds from the resident generation, so a
+                // rejection only follows saturation or an out-of-protocol
+                // publication.
                 if self.holder.try_store_if_newer(view) {
                     metrics::counter!("cclb_reconcile_total", "outcome" => "changed").increment(1);
                 } else {
@@ -134,6 +147,31 @@ impl Reconciler {
             }
         }
         Ok(())
+    }
+
+    /// Refresh the subscription-quota cache from committed storage on every
+    /// tick. Quota observations are outside the revision hash and their
+    /// change notifications can be lost, so this periodic read is the
+    /// backstop. It never changes generation or hash, and a failure only
+    /// logs so the dynamic-view reconcile still runs.
+    async fn hydrate_subscription_quota_cache(&self) {
+        let upstream_ids = self
+            .holder
+            .load()
+            .upstreams_snapshot()
+            .iter()
+            .map(|upstream| upstream.id)
+            .collect::<Vec<Uuid>>();
+        if upstream_ids.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .subscription_quota_cache
+            .hydrate_from_store(&self.stores, &upstream_ids)
+            .await
+        {
+            tracing::warn!(%error, "periodic subscription quota cache hydrate failed");
+        }
     }
 }
 

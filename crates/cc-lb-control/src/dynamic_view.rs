@@ -78,15 +78,42 @@ fn rate_limit_observation_from_record(
     }
 }
 
+/// Process-local publication point for the serving [`DynamicView`].
+///
+/// Readers call [`DynamicViewHolder::load`], a lock-free `ArcSwap` read.
+///
+/// Writers that rebuild a view from storage and publish it MUST follow the
+/// rebuild protocol: acquire [`DynamicViewHolder::lock_rebuild`], then read the
+/// resident generation, build the next view from that generation, and install
+/// it with [`DynamicViewHolder::try_store_if_newer`] before dropping the guard.
+/// Holding the guard across the generation read, the build, and the install
+/// serializes every live rebuild-and-install path on this holder, so a
+/// publisher can neither reuse a generation another publisher is about to
+/// install nor have its committed state replaced by an older build.
+///
+/// The lock is a non-reentrant async mutex: build-only code paths (view
+/// builders and rebinders that only return a view) MUST NOT acquire it; the
+/// caller that publishes the view owns the guard. The lock does not serialize
+/// storage mutations and does not provide a cross-table storage snapshot.
 pub struct DynamicViewHolder {
     inner: ArcSwap<DynamicView>,
+    rebuild_lock: tokio::sync::Mutex<()>,
 }
 
 impl DynamicViewHolder {
     pub fn new(initial: Arc<DynamicView>) -> Self {
         Self {
             inner: ArcSwap::from(initial),
+            rebuild_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// Acquire this holder's rebuild/install lock. Waiters are queued in FIFO
+    /// order; dropping the returned guard (including by dropping or
+    /// cancelling the owning future) releases it. See the type-level
+    /// documentation for the generation-read/build/install protocol.
+    pub async fn lock_rebuild(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.rebuild_lock.lock().await
     }
 
     pub fn load(&self) -> Arc<DynamicView> {
@@ -99,8 +126,9 @@ impl DynamicViewHolder {
 
     /// Store `view` only if its `generation` is strictly greater than
     /// the currently-stored view's generation. Concurrent stores are
-    /// resolved by `arc_swap::rcu`, so a slower reconcile pass can
-    /// never overwrite a fresher admin-triggered rebind. Returns
+    /// resolved by `arc_swap::rcu`; this is a defensive publication check,
+    /// not a substitute for the rebuild protocol on
+    /// [`DynamicViewHolder::lock_rebuild`]. Returns
     /// `true` if the swap succeeded OR if an even-newer view is now
     /// resident (both are "we're up-to-date" outcomes for the caller).
     pub fn try_store_if_newer(&self, view: Arc<DynamicView>) -> bool {
@@ -403,5 +431,55 @@ mod tests {
     fn upstreams_snapshot_defaults_empty() {
         let view = test_view(0);
         assert!(view.upstreams_snapshot().is_empty());
+    }
+
+    #[test]
+    fn rebuild_lock_second_acquisition_waits_for_first_guard() {
+        use std::task::{Context, Poll, Waker};
+
+        let holder = DynamicViewHolder::new(test_view(0));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut first = std::pin::pin!(holder.lock_rebuild());
+        let first_guard = match first.as_mut().poll(&mut cx) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("uncontended rebuild lock must be acquired immediately"),
+        };
+
+        let mut second = std::pin::pin!(holder.lock_rebuild());
+        assert!(
+            second.as_mut().poll(&mut cx).is_pending(),
+            "second acquisition must wait while the first guard is held"
+        );
+        // Snapshot reads stay lock-free while the guard is held.
+        assert_eq!(holder.load().generation, 1);
+        assert_eq!(holder.generation(), 1);
+
+        drop(first_guard);
+        assert!(
+            second.as_mut().poll(&mut cx).is_ready(),
+            "second acquisition must complete once the first guard is dropped"
+        );
+    }
+
+    #[test]
+    fn rebuild_lock_is_per_holder() {
+        use std::task::{Context, Poll, Waker};
+
+        let first_holder = DynamicViewHolder::new(test_view(0));
+        let second_holder = DynamicViewHolder::new(test_view(0));
+        let mut cx = Context::from_waker(Waker::noop());
+
+        let mut first = std::pin::pin!(first_holder.lock_rebuild());
+        let first_guard = match first.as_mut().poll(&mut cx) {
+            Poll::Ready(guard) => guard,
+            Poll::Pending => panic!("uncontended rebuild lock must be acquired immediately"),
+        };
+        let mut second = std::pin::pin!(second_holder.lock_rebuild());
+        assert!(
+            second.as_mut().poll(&mut cx).is_ready(),
+            "independent holders must not share a rebuild lock"
+        );
+        drop(first_guard);
     }
 }

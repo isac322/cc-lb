@@ -24,6 +24,8 @@ mod dispatch_uses_resolved_upstream_base_url;
 mod doctor_command;
 #[path = "dynamic_view_rebind.rs"]
 mod dynamic_view_rebind;
+#[path = "dynamic_view_rebuild_serialization.rs"]
+mod dynamic_view_rebuild_serialization;
 #[path = "load_bad_cert.rs"]
 mod load_bad_cert;
 #[path = "load_certs_ok.rs"]
@@ -62,6 +64,8 @@ mod prompt_cache_observation_metrics;
 mod proxy_body_limits;
 #[path = "proxy_error_fallbacks.rs"]
 mod proxy_error_fallbacks;
+#[path = "reconcile_subscription_quota_hydration.rs"]
+mod reconcile_subscription_quota_hydration;
 #[path = "reconciliation.rs"]
 mod reconciliation;
 #[path = "reload_atomic_swap.rs"]

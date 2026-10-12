@@ -22,6 +22,8 @@ mod config_download;
 mod config_draft;
 #[path = "config_history.rs"]
 mod config_history;
+#[path = "config_post_commit_completion.rs"]
+mod config_post_commit_completion;
 #[path = "config_save.rs"]
 mod config_save;
 #[path = "config_schema.rs"]
@@ -52,8 +54,14 @@ mod insert_chain_validates_wire_version;
 mod internal_partials;
 #[path = "new_admin_modules_smoke.rs"]
 mod new_admin_modules_smoke;
+#[path = "oauth_post_commit_completion.rs"]
+mod oauth_post_commit_completion;
+#[path = "plugin_admin_audit_completion.rs"]
+mod plugin_admin_audit_completion;
 #[path = "principal_keys.rs"]
 mod principal_keys;
+#[path = "principal_post_commit.rs"]
+mod principal_post_commit;
 #[path = "principals_cache_keepalive_roundtrip.rs"]
 mod principals_cache_keepalive_roundtrip;
 #[path = "reorder_rebalance_revalidates_slot.rs"]
@@ -74,6 +82,8 @@ mod subscription_quota_slim_parity;
 mod subscription_quotas;
 #[path = "upstream_atomic_create.rs"]
 mod upstream_atomic_create;
+#[path = "upstream_post_commit_completion.rs"]
+mod upstream_post_commit_completion;
 #[path = "v1_limit_resets.rs"]
 mod v1_limit_resets;
 #[path = "v1_oauth.rs"]
