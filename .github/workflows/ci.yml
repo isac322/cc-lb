@@ -1,5 +1,15 @@
 name: ci
 
+# Pull requests always start this workflow, so the `CI gate` job reports on
+# every pull request and the master ruleset can require it. A workflow-level
+# `paths-ignore` on pull_request would skip the whole workflow for docs-only
+# changes, leaving required checks pending forever. The `changes` job applies
+# the same docs-only ignore list instead, and the code jobs skip when every
+# changed file matches it. `CI gate` passes when each needed job succeeded or
+# was skipped, and fails when any failed or was cancelled.
+#
+# Pushes to master and manual dispatch behave as before: push keeps its
+# `paths-ignore`, `changes` is skipped, and every code job runs.
 on:
   push:
     branches:
@@ -11,12 +21,6 @@ on:
       - '.gitignore'
       - '.editorconfig'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
   workflow_dispatch:
 
 concurrency:
@@ -27,7 +31,37 @@ env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
+  # `code` is false only when every changed file matches the docs-only ignore
+  # list that `push.paths-ignore` uses. Code jobs run unless this job succeeded
+  # with code=false, so a detection failure runs everything (and fails the
+  # gate).
+  changes:
+    name: Detect code changes
+    if: github.event_name == 'pull_request'
+    runs-on: cc-lb-500m
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.editorconfig'
+
   fmt:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
@@ -46,10 +80,15 @@ jobs:
 
   guard-crate-versions:
     name: guard crate versions
+    needs: changes
     # release-plz owns literal crate versions. A dedicated release PR may bump
     # the shared workspace version for cc-lb-server after strict validation.
     # release-plz's own PRs remain exempt.
-    if: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') }}
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') &&
+      github.event_name == 'pull_request' &&
+      !startsWith(github.head_ref, 'release-plz-')
     runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
@@ -255,6 +294,8 @@ jobs:
           .github/workflows/release-plz.yml
 
   clippy:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-4
     strategy:
       matrix:
@@ -285,6 +326,8 @@ jobs:
 
 
   cargo-deny:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-1
     steps:
       - uses: actions/checkout@v7
@@ -314,6 +357,8 @@ jobs:
       - run: cargo deny check
 
   promtool:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-500m
     steps:
       - uses: actions/checkout@v7
@@ -339,6 +384,8 @@ jobs:
   # See that file's header for the exact steps. Do not run both: they enforce
   # the same coverage gate.
   nextest-cov:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-4
     container:
       image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
@@ -464,6 +511,8 @@ jobs:
           fi
 
   e2e:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-4
     env:
       # Real-client E2E builds the server but does not run the fixture-backed
@@ -504,3 +553,47 @@ jobs:
           path: target/test-evidence/real-client
           retention-days: 7
           if-no-files-found: error
+
+  gate:
+    name: CI gate
+    needs:
+      - changes
+      - fmt
+      - guard-crate-versions
+      - release-pr-artifacts
+      - clippy
+      - cargo-deny
+      - promtool
+      - nextest-cov
+      - e2e
+    if: always()
+    runs-on: cc-lb-500m
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        # JOBS must list exactly the job ids in `needs` above. A job missing
+        # from the needs context, or a context that is not a JSON object,
+        # fails the gate.
+        run: |
+          set -euo pipefail
+          JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
+            cargo-deny promtool nextest-cov e2e)
+          if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
+            "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
+            echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
+            exit 1
+          fi
+          # success and skipped pass; anything else fails the gate.
+          rc=0
+          for job in "${JOBS[@]}"; do
+            result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
+            echo "$job: $result"
+            case "$result" in
+              success | skipped) ;;
+              *) echo "::error::$job: $result"; rc=1 ;;
+            esac
+          done
+          exit "$rc"
