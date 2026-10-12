@@ -77,7 +77,8 @@ Choose the smallest workflow that still proves the user-facing result.
 When the user says not to implement yet, asks for references, or wants to inspect a web mockup before production work, treat this as a hard gate:
 
 - Defer production code edits until the user explicitly approves the standalone mockup.
-- Build the mockup in an isolated temporary or staging directory and open it in a real browser for visual review.
+- Build previews inside the real cc-lb admin web (a branch build or variant route of the actual SPA, backed by seeded or real data), serve it on an address the user can open from their own browser, and send that URL. A standalone mockup or a screenshot does not substitute for an interactive preview.
+- When the design direction is open, put several clearly different variants in the preview, including the current design for comparison, so the user can compare and pick.
 - Create the later implementation checklist, but state that production implementation is not complete, not done, and must not be claimed before production files are changed and browser QA passes.
 - Mockup approval is only design-direction approval. It is not production QA and cannot satisfy the final browser QA gate.
 
@@ -86,6 +87,7 @@ When the user says not to implement yet, asks for references, or wants to inspec
 Use fan-out when it improves coverage or speed, not as theater. Each worker must own an observable slice.
 
 - UI/UX/design/styling work should prefer `category="visual-engineering"` with `frontend-ui-ux` and `agent-browser` when available.
+- Use the `impeccable` skill for every UI/UX-affecting web change: visual design, layout, information hierarchy, and status presentation. `crates/cc-lb-admin/web/PRODUCT.md` and `DESIGN.md` are its project context.
 - Browser QA workers must run `agent-browser` themselves. Do not centralize all screenshots in the lead agent and hand static images to visual workers unless the worker truly cannot drive a browser.
 - Split large work into independent slices:
   - requirement and legacy inventory;

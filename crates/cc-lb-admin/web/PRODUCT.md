@@ -47,3 +47,5 @@ Success means an operator can, within seconds, answer: is anything down or about
 4. Safe configuration: destructive or pool-affecting changes are explicit, reversible where possible, and confirmed.
 5. Same truth on every screen size: mobile shows the same facts in a different arrangement, not a reduced product.
 6. Any fleet size: a pool may have one upstream and one principal, or dozens of each. Every list works at both ends: short lists stay quiet, long lists can be searched, filtered and sorted, and the selected item's detail never gets pushed off screen by the list.
+7. Common path first: show what most operators need by default. In creation flows, put rarely used customization (custom base URL or endpoint, advanced options) behind an explicit expansion. On the entity's detail page, keep that customization visible where it applies so a value set once never becomes hidden.
+8. One path per task: never split the same function into two entry points or two pieces of guidance. Merge them into one.
