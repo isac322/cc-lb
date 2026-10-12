@@ -574,16 +574,26 @@ jobs:
       - name: Check job results
         env:
           RESULTS: ${{ toJSON(needs) }}
+        # JOBS must list exactly the job ids in `needs` above. A job missing
+        # from the needs context, or a context that is not a JSON object,
+        # fails the gate.
         run: |
           set -euo pipefail
-          # success and skipped pass; failure and cancelled fail the gate.
-          failed=$(jq -r 'to_entries[]
-            | select(.value.result != "success" and .value.result != "skipped")
-            | "\(.key)=\(.value.result)"' <<<"$RESULTS")
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
-          if [ -n "$failed" ]; then
-            while IFS= read -r entry; do
-              echo "::error::${entry%%=*}: ${entry#*=}"
-            done <<<"$failed"
+          JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
+            cargo-deny promtool nextest-cov e2e)
+          if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
+            "${JOBS[@]}" <<<"$RESULTS" >/dev/null; then
+            echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
             exit 1
           fi
+          # success and skipped pass; anything else fails the gate.
+          rc=0
+          for job in "${JOBS[@]}"; do
+            result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
+            echo "$job: $result"
+            case "$result" in
+              success | skipped) ;;
+              *) echo "::error::$job: $result"; rc=1 ;;
+            esac
+          done
+          exit "$rc"
