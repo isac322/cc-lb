@@ -123,6 +123,8 @@ The "local vs durable" rule (defined by the local-vs-durable architecture) gover
 - **Local Rule**: Operations that are low-latency, per-replica, or critical to the request path must run in-process on each replica. They do not use the distributed scheduler. Examples include local price catalog installation (a bounded latency budget) and dynamic view reconciliation.
 - **Durable Rule**: Operations that are heavy, cross-replica, or require strict coordination must be managed by the Apalis distributed scheduler. They use database-backed queues to ensure durability and cross-replica safety. Examples include warmup cycles, OAuth token refreshes, and price catalog fetching.
 
+The [Admin consistency contract](https://github.com/isac322/cc-lb/blob/master/docs/consistency-contract.md#scheduler-jobs) states what a completed enqueue or job run guarantees and which state converges later.
+
 ## 10. Operator Runbook
 
 ### Scheduler Stuck

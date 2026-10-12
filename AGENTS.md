@@ -45,6 +45,7 @@ Rules:
 - Every flake fix commit body must contain the root cause, the applied fix, and local reproduction proof (e.g. `Verified 20/20 passing runs on <sqlite|postgres|both>`).
 - If a session cannot reach the root cause, stop and escalate to a follow-up issue with the failing job URL and observed symptoms. Do not land a band-aid.
 - Never add production API (public methods, exported types, enum variants) whose only immediate consumer is a test synchronization or observation hook. Exposing a public `flush`/completion primitive on a production type solely so a test can wait deterministically is flake masking; use a test-scoped observer or wrapper instead.
+- Before asserting on admin, scheduler, token-refresh, price-catalog, or request-event state after an action, check `docs/consistency-contract.md` for the documented boundary. Assert synchronously only what it guarantees at response time, and wait on the test-scoped seam it names for the rest.
 
 ## JSON library policy
 
