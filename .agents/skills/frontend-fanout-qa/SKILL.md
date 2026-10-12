@@ -68,19 +68,19 @@ Choose the smallest workflow that still proves the user-facing result.
 
 - **Small visual/UX change**: one focused implementer, affected callsite inventory, targeted browser QA on the changed component and nearby states.
 - **Medium component/page change**: use `visual-engineering` with `frontend-ui-ux` and `agent-browser`; verify all variants and responsive/theme states touched by the change.
-- **Broad redesign or unclear design direction**: research references, create a mockup or design direction first, then implement only after approval.
+- **Broad redesign or unclear design direction**: research references, build an interactive preview of the design direction first, then implement only after approval.
 - **Integration-facing UX**: compare legacy behavior and trace backend/API truth before changing UI state rules.
 - **Large/multi-surface work**: fan out inventory, implementation, browser QA, and fix slices across subagents.
 
-## Mockup approval gate
+## Preview approval gate
 
-When the user says not to implement yet, asks for references, or wants to inspect a web mockup before production work, treat this as a hard gate:
+When the user says not to implement yet, asks for references, or wants to inspect a design before production work, treat this as a hard gate:
 
-- Defer production code edits until the user explicitly approves the standalone mockup.
+- Defer production changes (anything merged or shipped as the default UI) until the user explicitly approves a design in the preview. Preview variants live on a branch build or a variant route and are not production work.
 - Build previews inside the real cc-lb admin web (a branch build or variant route of the actual SPA, backed by seeded or real data), serve it on an address the user can open from their own browser, and send that URL. A standalone mockup or a screenshot does not substitute for an interactive preview.
 - When the design direction is open, put several clearly different variants in the preview, including the current design for comparison, so the user can compare and pick.
 - Create the later implementation checklist, but state that production implementation is not complete, not done, and must not be claimed before production files are changed and browser QA passes.
-- Mockup approval is only design-direction approval. It is not production QA and cannot satisfy the final browser QA gate.
+- Preview approval is only design-direction approval. It is not production QA and cannot satisfy the final browser QA gate.
 
 ## Delegation pattern
 
