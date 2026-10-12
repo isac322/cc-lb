@@ -587,10 +587,9 @@ jobs:
         # cancelled after `changes` but before the code jobs start skips them
         # all, and this gate may still start afterwards with cancelled() false,
         # so `skipped` alone must never pass. startsWith() in expressions is
-        # case-insensitive, hence nocasematch.
+        # case-insensitive, so its two mirrors compare lowercased values.
         run: |
           set -euo pipefail
-          shopt -s nocasematch
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
             cargo-deny promtool nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
@@ -610,7 +609,7 @@ jobs:
           docs_only=false
           [[ $changes == success && $code != true ]] && docs_only=true
           guard_skip_ok=false
-          if $docs_only || ! $is_pr || [[ $HEAD_REF == "release-plz-"* ]]; then
+          if $docs_only || ! $is_pr || [[ ${HEAD_REF,,} == "release-plz-"* ]]; then
             guard_skip_ok=true
           fi
           skip_ok() {
@@ -619,7 +618,7 @@ jobs:
               guard-crate-versions) $guard_skip_ok ;;
               release-pr-artifacts)
                 # Its own `if:`, or a legitimately skipped guard it needs.
-                ! $is_pr || [[ $PR_TITLE != "chore: release cc-lb v"* ]] ||
+                ! $is_pr || [[ ${PR_TITLE,,} != "chore: release cc-lb v"* ]] ||
                   { [[ $(result_of guard-crate-versions) == skipped ]] && $guard_skip_ok; } ;;
               *) $docs_only ;;
             esac
