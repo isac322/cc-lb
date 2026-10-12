@@ -122,6 +122,7 @@ export default defineConfig({
             { label: 'Metrics', slug: 'docs/reference/metrics' },
             { label: 'Curated source notes', slug: 'docs/reference/source/runtime-management' },
             { label: 'Scheduler source notes', slug: 'docs/reference/source/scheduler' },
+            { label: 'Consistency contract source notes', slug: 'docs/reference/source/consistency-contract' },
             { label: 'Upstream warm-up source notes', slug: 'docs/reference/source/upstream-warmup' },
           ],
         },

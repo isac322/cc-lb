@@ -31,3 +31,5 @@ The server does not rewrite operator key files automatically.
 ## Dynamic rebinding
 
 A successful runtime update rebuilds the routing view. In a multi-replica Postgres deployment, replicas use database notifications and a periodic reconciliation fallback to converge their local views.
+
+The [consistency contract source notes](/docs/reference/source/consistency-contract/) list what each admin response guarantees about persistence, audit records, the routing-view rebuild, and convergence across replicas.

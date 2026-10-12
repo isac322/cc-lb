@@ -14,6 +14,7 @@ All notable changes to this project will be documented in this file.
 - New server container releases include OCI build provenance and SPDX SBOM attestations.
 - The documentation site builds before repository publication and deploys to Pages only from public `master`; a manual trigger supports the first deployment after IaC provisioning.
 - Public-master documentation site builds can embed the configured Cloudflare Web Analytics beacon; pull request, fork, private, and non-master builds omit it.
+- The admin consistency contract is documented in `docs/consistency-contract.md`. For each admin, scheduler, token-refresh, price-catalog, and request-event subsystem it lists what a successful response guarantees and how tests should wait for the asynchronous parts. ([#265](https://github.com/isac322/cc-lb/issues/265))
 
 ### Fixed
 

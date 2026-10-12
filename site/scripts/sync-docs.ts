@@ -34,6 +34,25 @@ const sources = [
     description: 'Curated source sections for the Wasmtime plugin contract.',
     sections: ['Runtime model', 'Quick Start', 'Authoring a Plugin', 'Hook Contracts', 'Metadata Contract', 'Wire Versioning'],
   },
+  {
+    source: 'docs/consistency-contract.md',
+    target: 'src/content/docs/reference/source/consistency-contract.md',
+    title: 'Admin consistency contract source notes',
+    description: 'What each admin response guarantees about persistence, audit, and convergence.',
+    sections: [
+      'Guarantee classes',
+      'Summary',
+      'Admin mutations and audit records',
+      'Dynamic routing view',
+      'Configuration draft and save',
+      'Scheduler jobs',
+      'OAuth token refresh',
+      'Price catalog',
+      'Request events and dashboards',
+      'Subscription quota observations',
+      'Writing tests against this contract',
+    ],
+  },
 ];
 
 function sectionName(line: string): string | undefined {

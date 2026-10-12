@@ -6,6 +6,8 @@ slug: docs/reference/admin-api
 
 Admin endpoints use the Bearer token from the configured authentication provider. Resource changes are database-backed and use optimistic concurrency.
 
+The [consistency contract](/docs/reference/source/consistency-contract/) lists what a successful response guarantees for each admin action: which writes and audit records are durable, whether the serving replica's routing view is already rebuilt, and how other replicas and background work converge.
+
 ## Core resources
 
 | Resource | Common endpoints |
