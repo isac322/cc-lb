@@ -2,6 +2,7 @@ use apalis_core::task::Task;
 use serde::{Deserialize, Serialize};
 
 use crate::jobs::apalis_housekeeping::ApalisHousekeepingJob;
+use crate::jobs::api_key_usage_poll::ApiKeyUsagePollCronJob;
 use crate::jobs::cache_keepalive::CacheKeepaliveJob;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::metadata_refresh::MetadataRefreshJob;
@@ -44,6 +45,7 @@ pub enum CronJob {
     OAuthUsagePoll(OAuthUsagePollCronJob),
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
     PoolQuotaSnapshot(PoolQuotaSnapshotCronJob),
+    ApiKeyUsagePoll(ApiKeyUsagePollCronJob),
 }
 
 impl CronJob {
@@ -60,6 +62,7 @@ impl CronJob {
             Self::OAuthUsagePoll(_) => "oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "anthropic_compat_refresh",
             Self::PoolQuotaSnapshot(_) => "pool_quota_snapshot",
+            Self::ApiKeyUsagePoll(_) => "api_key_usage_poll",
         }
     }
 }
@@ -125,6 +128,7 @@ impl TraceparentCarrier for CronJob {
             Self::OAuthUsagePoll(job) => job.traceparent(),
             Self::AnthropicCompatRefresh(job) => job.traceparent(),
             Self::PoolQuotaSnapshot(job) => job.traceparent(),
+            Self::ApiKeyUsagePoll(job) => job.traceparent(),
         }
     }
 
@@ -141,6 +145,7 @@ impl TraceparentCarrier for CronJob {
             Self::OAuthUsagePoll(job) => job.set_traceparent(traceparent),
             Self::AnthropicCompatRefresh(job) => job.set_traceparent(traceparent),
             Self::PoolQuotaSnapshot(job) => job.set_traceparent(traceparent),
+            Self::ApiKeyUsagePoll(job) => job.set_traceparent(traceparent),
         }
     }
 }
@@ -211,5 +216,35 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn api_key_usage_poll_payload_round_trips() {
+        let upstream_id = uuid::Uuid::from_u128(7);
+        let job = CronJob::ApiKeyUsagePoll(ApiKeyUsagePollCronJob::for_upstream(
+            1_800_000_000,
+            upstream_id,
+        ));
+        assert_eq!(job.kind(), "api_key_usage_poll");
+        let value = serde_json::to_value(&job).expect("serialize api-key usage poll");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "api_key_usage_poll",
+                "payload": {
+                    "tick_unix_secs": 1_800_000_000_u64,
+                    "upstream_id": upstream_id,
+                },
+            })
+        );
+        let decoded: CronJob = serde_json::from_value(value).expect("deserialize");
+        assert!(matches!(
+            decoded,
+            CronJob::ApiKeyUsagePoll(ApiKeyUsagePollCronJob {
+                tick_unix_secs: 1_800_000_000,
+                upstream_id: Some(id),
+                traceparent: None,
+            }) if id == upstream_id
+        ));
     }
 }

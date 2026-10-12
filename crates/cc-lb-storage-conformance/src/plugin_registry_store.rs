@@ -1823,6 +1823,8 @@ fn warmup_upstream(name: &str, wasm_registry_id: Uuid) -> UpstreamCreate {
             config: json!({}),
             wire_version: None,
         }),
+        workspace_id: None,
+        api_key_access: None,
     }
 }
 

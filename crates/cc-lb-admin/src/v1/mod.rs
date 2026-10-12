@@ -3,6 +3,7 @@ use axum::{
     response::Response,
 };
 
+pub(crate) mod api_key;
 pub mod keys;
 pub(crate) mod limit_resets;
 pub mod oauth;

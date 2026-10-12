@@ -56,6 +56,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             warmup_enabled: create.warmup_enabled,
             warmup_dialect_plugin: create.warmup_dialect_plugin,
             last_warmup_at_unix_secs: None,
+            workspace_id: create.workspace_id,
         };
         records.push(record.clone());
         Ok(record)
@@ -379,6 +380,8 @@ async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamReco
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await
         .unwrap()
@@ -600,6 +603,8 @@ scenario!(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .unwrap_err();
@@ -646,6 +651,8 @@ scenario!(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect_err("creating a duplicate of a live upstream name must fail");

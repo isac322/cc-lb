@@ -321,6 +321,9 @@ impl Default for PostgresPoolConfig {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub separate_pool: SchedulerPoolConfig,
+    /// Built-in recurring jobs by name. `api_key_usage_poll` (default every
+    /// 300 s, 15 s jitter) requires `60 <= interval_secs <= 604800` and
+    /// `jitter_secs < interval_secs`.
     #[serde(
         default = "default_scheduler_recurring_jobs",
         deserialize_with = "deserialize_recurring_jobs",
@@ -889,6 +892,10 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
             recurring_job_config(9360, scheduler_jitter_secs(9360)),
         ),
         ("oauth_usage_poll".to_owned(), recurring_job_config(60, 0)),
+        (
+            "api_key_usage_poll".to_owned(),
+            recurring_job_config(300, 15),
+        ),
         (
             "pool_quota_snapshot".to_owned(),
             recurring_job_config(60, 0),

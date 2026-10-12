@@ -121,8 +121,12 @@ fn handle_event(
             result: Ok(info),
             routing_trace,
         } => {
-            let partial = partials.remove(&event_id);
-            let principal_id = partial.as_ref().and_then(|p| p.principal_id.as_deref());
+            // Keep the partial until `RequestTerminated`: a failover re-emits
+            // `RouteCompleted` for the next upstream and must keep the
+            // principal label.
+            let principal_id = partials
+                .get(&event_id)
+                .and_then(|p| p.principal_id.as_deref());
             if let Some(trace) = routing_trace.as_ref().or(info.routing_trace.as_ref()) {
                 for stage in &trace.stages {
                     if let Some(subscription_preference) = &stage.subscription_preference {

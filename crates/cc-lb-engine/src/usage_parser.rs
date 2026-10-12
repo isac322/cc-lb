@@ -10,9 +10,16 @@
 //! See `docs.anthropic.com/en/api/messages-streaming` for the event catalog
 //! and `anthropic-sdk-typescript`/`MessageDeltaUsage` for the field schema.
 
+use std::borrow::Cow;
+
+use cc_lb_upstream::Signer;
 use serde_json::Value;
 
 const UPSTREAM_ERROR_MESSAGE_MAX_BYTES: usize = 1024;
+/// Message bytes kept before the signer scrubs them: the store cap plus room
+/// for the longest accepted credential (512 bytes), so a secret straddling
+/// the cap is still whole when it is masked.
+const UPSTREAM_ERROR_MESSAGE_COLLECT_BYTES: usize = UPSTREAM_ERROR_MESSAGE_MAX_BYTES + 512;
 const UPSTREAM_ERROR_TYPE_MAX_BYTES: usize = 256;
 const TRUNCATION_MARKER: &str = "...";
 
@@ -83,27 +90,53 @@ impl BoundedErrorType {
     }
 }
 
+/// Raw `error.message` text bounded to the collect window (not yet the store
+/// cap); `.1` records that the source exceeded the window. The store cap is
+/// applied only after the signer scrubbed the text, in [`Self::finish`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct BoundedErrorMessage(String);
+struct BoundedErrorMessage(String, bool);
 
 impl BoundedErrorMessage {
     fn parse(value: &str) -> Self {
-        if value.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES {
-            return Self(value.to_owned());
+        if value.len() <= UPSTREAM_ERROR_MESSAGE_COLLECT_BYTES {
+            return Self(value.to_owned(), false);
         }
-        let mut end = UPSTREAM_ERROR_MESSAGE_MAX_BYTES - TRUNCATION_MARKER.len();
+        let mut end = UPSTREAM_ERROR_MESSAGE_COLLECT_BYTES;
         while !value.is_char_boundary(end) {
             end -= 1;
         }
-        let mut bounded = String::with_capacity(end + TRUNCATION_MARKER.len());
-        bounded.push_str(&value[..end]);
-        bounded.push_str(TRUNCATION_MARKER);
-        Self(bounded)
+        Self(value.get(..end).unwrap_or(value).to_owned(), true)
     }
 
-    fn into_string(self) -> String {
-        self.0
+    /// Masks the signer's secret, then applies the store cap and marker.
+    fn finish(self, signer: Option<&dyn Signer>) -> String {
+        let Self(text, source_truncated) = self;
+        let mut text = scrub_string(signer, text);
+        if !source_truncated && text.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES {
+            return text;
+        }
+        let mut end = text
+            .len()
+            .min(UPSTREAM_ERROR_MESSAGE_MAX_BYTES - TRUNCATION_MARKER.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(TRUNCATION_MARKER);
+        text
     }
+}
+
+/// Applies the signer's scrubber, reusing `text` when nothing matched.
+fn scrub_string(signer: Option<&dyn Signer>, text: String) -> String {
+    let Some(signer) = signer else {
+        return text;
+    };
+    let scrubbed = match signer.scrub_secrets(&text) {
+        Cow::Owned(scrubbed) => Some(scrubbed),
+        Cow::Borrowed(_) => None,
+    };
+    scrubbed.unwrap_or(text)
 }
 
 /// A structured upstream error extracted from an HTTP error response body.
@@ -118,14 +151,20 @@ pub(crate) struct CanonicalUpstreamError {
 }
 
 impl CanonicalUpstreamError {
-    /// `(error_type, error_message)`; each is `None` when the upstream body
-    /// carried no usable value, so callers can fall back per field (e.g. a
-    /// bounded raw body for a missing message) instead of emitting a
-    /// zero-value fake message.
-    pub(crate) fn into_parts(self) -> (Option<String>, Option<String>) {
+    /// `(error_type, error_message)` with `signer`'s secret masked before the
+    /// store cap is applied; each is `None` when the upstream body carried no
+    /// usable value, so callers can fall back per field (e.g. a bounded raw
+    /// body for a missing message) instead of emitting a zero-value fake
+    /// message.
+    pub(crate) fn into_parts(self, signer: &dyn Signer) -> (Option<String>, Option<String>) {
+        self.into_parts_with(Some(signer))
+    }
+
+    fn into_parts_with(self, signer: Option<&dyn Signer>) -> (Option<String>, Option<String>) {
         (
-            self.error_type.map(BoundedErrorType::into_string),
-            self.error_message.map(BoundedErrorMessage::into_string),
+            self.error_type
+                .map(|error_type| scrub_string(signer, error_type.into_string())),
+            self.error_message.map(|message| message.finish(signer)),
         )
     }
 }
@@ -422,8 +461,19 @@ pub(crate) fn observe_http_error_body(body: &[u8]) -> Option<CanonicalUpstreamEr
 }
 
 /// Detect a mid-stream `event: error` (or `data: {"type":"error",...}`)
-/// emission. Returns the upstream error's `type` and `message` if found.
-pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<UpstreamStreamError> {
+/// emission. Returns the upstream error's `type` and `message` if found, with
+/// `signer`'s secret masked before the message cap is applied.
+pub(crate) fn detect_mid_stream_error(
+    event: &ParsedSseEvent<'_>,
+    signer: &dyn Signer,
+) -> Option<UpstreamStreamError> {
+    detect_mid_stream_error_with(event, Some(signer))
+}
+
+fn detect_mid_stream_error_with(
+    event: &ParsedSseEvent<'_>,
+    signer: Option<&dyn Signer>,
+) -> Option<UpstreamStreamError> {
     let value = event.value().ok().flatten()?;
     let type_str = value.get("type").and_then(Value::as_str);
     if !event.named_error && type_str != Some("error") {
@@ -431,8 +481,8 @@ pub(crate) fn detect_mid_stream_error(event: &ParsedSseEvent<'_>) -> Option<Upst
     }
     let (error_type, error_message) = bounded_upstream_error(value);
     Some(UpstreamStreamError {
-        error_type: error_type.map(BoundedErrorType::into_string),
-        error_message: error_message.map(BoundedErrorMessage::into_string),
+        error_type: error_type.map(|error_type| scrub_string(signer, error_type.into_string())),
+        error_message: error_message.map(|message| message.finish(signer)),
     })
 }
 
@@ -606,7 +656,7 @@ mod tests {
 
     fn detect_raw_mid_stream_error(raw: &[u8]) -> Option<UpstreamStreamError> {
         let event = parse_sse_event(raw);
-        detect_mid_stream_error(&event)
+        detect_mid_stream_error_with(&event, None)
     }
 
     #[test]
@@ -647,7 +697,7 @@ mod tests {
         let raw = "event: message_delta\nevent:\u{a0}error\u{a0}\ndata: {\"type\":\"message_delta\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"later named error\"}}\n\n";
         let event = parse_sse_event(raw.as_bytes());
 
-        let error = detect_mid_stream_error(&event).expect("later event:error detected");
+        let error = detect_mid_stream_error_with(&event, None).expect("later event:error detected");
 
         assert_eq!(event.event_name(), Some(b"message_delta".as_slice()));
         assert_eq!(error.error_type.as_deref(), Some("overloaded_error"));
@@ -897,7 +947,7 @@ mod tests {
             .expect("canonical error with long message");
 
         // Then
-        let message = error.error_message.expect("message").0;
+        let message = error.error_message.expect("message").finish(None);
         assert_eq!(message.len(), UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
         assert!(message.is_char_boundary(1021));
         assert_eq!(message, format!("{}...", "a".repeat(1021)));
@@ -923,7 +973,7 @@ mod tests {
             let error = observe_non_stream_json_body(body.as_bytes())
                 .canonical_error
                 .expect("canonical error");
-            let extracted = error.error_message.expect("message").0;
+            let extracted = error.error_message.expect("message").finish(None);
             assert!(extracted.len() <= UPSTREAM_ERROR_MESSAGE_MAX_BYTES);
             assert_eq!(extracted.ends_with("..."), truncated);
             if !truncated {
@@ -1056,7 +1106,7 @@ mod tests {
 
         // Then
         assert_eq!(
-            error.into_parts(),
+            error.into_parts_with(None),
             (None, Some("bare upstream message".to_owned()))
         );
     }
@@ -1080,7 +1130,10 @@ mod tests {
         // When / Then
         for (body, error_type) in bodies.iter().zip(expected) {
             let error = observe_http_error_body(body).expect("type preserved");
-            assert_eq!(error.into_parts(), (Some(error_type.to_owned()), None),);
+            assert_eq!(
+                error.into_parts_with(None),
+                (Some(error_type.to_owned()), None),
+            );
         }
     }
 

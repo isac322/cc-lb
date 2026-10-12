@@ -112,6 +112,10 @@ If the tagged source is defective:
 
 Explicit resume always rebuilds or verifies artifacts from the existing immutable tag. It is not a way to publish later `master` content under an old version.
 
+## Storage migrations and rollback
+
+Server releases apply their SQLite and PostgreSQL migrations at startup, and migrations are forward-only. After a release that adds migrations has run against a database, an earlier server version is not supported on that database. For example, SQLite `0096` and PostgreSQL `0133` add the API-key workspace column and the key-access and reported-usage tables. Fix a defective release forward with the next patch version, as described above. To roll back, restore a database backup taken before the upgrade.
+
 ## Inconsistent tag and Release state
 
 The orchestrator fails closed when the tag and GitHub Release disagree. Examples include a tag without a Release, a draft Release without its tag, or a tag that points to a different commit.

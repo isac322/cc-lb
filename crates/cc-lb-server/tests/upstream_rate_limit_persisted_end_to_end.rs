@@ -44,6 +44,8 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await?;

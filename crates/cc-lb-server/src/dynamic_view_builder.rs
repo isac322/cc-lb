@@ -7,6 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_clock::{unix_millis, unix_secs};
+use cc_lb_control::anthropic_api_key::credential::{ApiKeyResolutionError, resolve_api_key};
 use cc_lb_control::api_keys::principal_view::{
     DialectCache, PrincipalRoutingArtifacts, PrincipalView, RouterPipelineCache, ShapePluginCache,
 };
@@ -219,6 +220,7 @@ pub async fn build_dynamic_view(
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, &aead, now).await?;
+
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
         upstreams.clone(),
         stores.upstreams.clone(),
@@ -494,7 +496,7 @@ fn normalized_option_eq(left: Option<&str>, right: Option<&str>) -> bool {
         .eq_ignore_ascii_case(right.unwrap_or_default())
 }
 
-async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
+pub(crate) async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
     let mut all = Vec::new();
     let mut after = None;
     loop {
@@ -910,48 +912,6 @@ async fn apply_upstreams(
     Ok(statuses)
 }
 
-/// Why an anthropic api-key credential could not be resolved. Callers map each
-/// reason onto their own error type; the variants carry no key material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApiKeyResolutionError {
-    Missing,
-    NotDecryptable,
-    NotUtf8,
-    InvalidHeaderValue,
-}
-
-/// Resolve the operator-configured anthropic api key for an upstream record.
-///
-/// `api_key_ciphertext` is sealed with AAD `upstream.id` over the raw UTF-8
-/// key bytes. Resolution fails closed: any error means no credential, never a
-/// fallback to the downstream caller's key.
-fn resolve_api_key(
-    aead: &AeadService,
-    record: &UpstreamRecord,
-) -> Result<zeroize::Zeroizing<String>, ApiKeyResolutionError> {
-    let ciphertext = record
-        .api_key_ciphertext
-        .as_deref()
-        .ok_or(ApiKeyResolutionError::Missing)?;
-    let plaintext = aead
-        .decrypt(ciphertext, record.id.as_bytes())
-        .map(zeroize::Zeroizing::new)
-        .map_err(|_| ApiKeyResolutionError::NotDecryptable)?;
-    // The key must reach the upstream byte-identical to what the operator
-    // stored, so it is neither trimmed nor rewritten.
-    let key = std::str::from_utf8(&plaintext)
-        .map_err(|_| ApiKeyResolutionError::NotUtf8)?
-        .to_owned();
-    let key = zeroize::Zeroizing::new(key);
-    // The signer applies `HeaderValue::from_str` to this value at request time;
-    // reject here so a malformed key surfaces as a view-build error instead of
-    // a runtime signing failure.
-    if key.trim().is_empty() || http::HeaderValue::from_str(&key).is_err() {
-        return Err(ApiKeyResolutionError::InvalidHeaderValue);
-    }
-    Ok(key)
-}
-
 fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<(), String> {
     match upstream.kind {
         UpstreamKind::AnthropicApiKey => {
@@ -970,6 +930,10 @@ fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<()
                     }
                     ApiKeyResolutionError::InvalidHeaderValue => {
                         "anthropic api-key upstream credential is not a valid header value"
+                            .to_owned()
+                    }
+                    ApiKeyResolutionError::LegacyEncoding => {
+                        "anthropic api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream"
                             .to_owned()
                     }
                 });
@@ -1060,12 +1024,16 @@ impl SignerFactory for DbCompositeSignerFactory {
                                     .to_owned()
                             }
                             ApiKeyResolutionError::InvalidHeaderValue => "anthropic api-key upstream credential is not a valid header value; re-set api_key_value for this upstream".to_owned(),
+                            ApiKeyResolutionError::LegacyEncoding => "anthropic api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream".to_owned(),
                         },
                     }
                 })?;
-                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(api_key.as_str())
-                    .build(upstream)
-                    .await
+                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(
+                    api_key.as_str(),
+                    record.workspace_id.as_deref(),
+                )?
+                .build(upstream)
+                .await
             }
             UpstreamKind::AnthropicOauth => {
                 let factory =
@@ -1158,6 +1126,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await
@@ -1241,6 +1211,8 @@ mod tests {
                     oauth_tokens: None,
                     warmup_enabled: false,
                     warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    api_key_access: None,
                 },
             )
             .await
@@ -1488,6 +1460,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await
@@ -1634,73 +1608,568 @@ mod tests {
         assert_eq!(dynamic_view.prompt_cache_grace_margin_secs, 99);
     }
 
-    fn api_key_record(name: &str, ciphertext: Option<Vec<u8>>) -> UpstreamRecord {
-        UpstreamRecord {
-            id: Uuid::new_v4(),
-            name: name.to_owned(),
-            kind: UpstreamKind::AnthropicApiKey,
-            api_key_ciphertext: ciphertext,
-            ..UpstreamRecord::default()
+    struct DirectDialect;
+
+    impl cc_lb_upstream::UpstreamDialect for DirectDialect {
+        fn shape(
+            &self,
+            _context: &cc_lb_upstream::DialectShapeContext,
+            _upstream: &Upstream,
+            _principal: &cc_lb_domain::Principal,
+            builder: &mut cc_lb_upstream::ShapedRequestBuilder,
+        ) -> Result<cc_lb_upstream::ShapedRequest, cc_lb_upstream::DialectError> {
+            Ok(builder.shaped_request(
+                "https://api.anthropic.com/v1/messages"
+                    .parse()
+                    .expect("url"),
+                http::Method::POST,
+                http::HeaderMap::new(),
+                bytes::Bytes::from_static(b"{}"),
+            ))
         }
     }
 
-    #[test]
-    fn resolve_api_key_reads_canonical_raw_id_aad_shape() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let mut record = api_key_record("canonical", None);
-        record.api_key_ciphertext = Some(
-            aead.encrypt(b"sk-ant-canonical", record.id.as_bytes())
-                .expect("encrypt"),
+    fn shaped_request() -> cc_lb_upstream::ShapedRequest {
+        let context = cc_lb_upstream::DialectShapeContext {
+            request_id: "req-1".to_owned(),
+            downstream_headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: bytes::Bytes::from_static(b"{}"),
+        };
+        let principal = cc_lb_domain::Principal {
+            id: "principal".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::ApiKey,
+        };
+        cc_lb_upstream::shape_request(
+            &DirectDialect,
+            &context,
+            &Upstream::AnthropicDirect { base_url: None },
+            &principal,
+        )
+        .expect("shape request")
+    }
+
+    /// SGN-03: the composite factory builds the API-key signer from the
+    /// record's own `workspace_id`.
+    #[tokio::test]
+    async fn sgn_03_api_key_signer_carries_record_workspace() {
+        let (_dir, storage) = storage_fixture(23).await;
+        let stored = create_upstream(&storage, "workspace-key").await;
+        for workspace_id in [Some("wrkspc_P"), None] {
+            let mut record = stored.clone();
+            record.workspace_id = workspace_id.map(str::to_owned);
+            let factory = DbCompositeSignerFactory::new(
+                vec![record],
+                storage.clone(),
+                Arc::new(AeadService::from_master_key([19; 32])),
+                None,
+                Arc::new(TestClock::new_at_secs(1_700_000_000)),
+            )
+            .with_router_choice_state("workspace-key".to_owned());
+
+            let signer = factory
+                .build(&Upstream::AnthropicDirect { base_url: None })
+                .await
+                .expect("signer builds");
+            let signed = cc_lb_upstream::sign_request(signer.as_ref(), shaped_request())
+                .await
+                .expect("request signs");
+
+            let header = |name: &str| {
+                signed
+                    .headers()
+                    .get(name)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            assert_eq!(
+                header(cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER).as_deref(),
+                workspace_id
+            );
+            assert_eq!(
+                header("x-api-key").as_deref(),
+                Some("sk-ant-fixture-secret")
+            );
+        }
+    }
+
+    /// Rate-limit store wrapper whose first `list_for_upstream_ids` call,
+    /// made by `build_dynamic_view` after it sampled the revision hash and
+    /// listed upstreams, first persists a reconnect-required refresh failure.
+    /// This deterministically lands a runtime 401 after the build's hash
+    /// sample and upstream read.
+    struct ReconnectMidBuildRateLimits {
+        storage: Arc<Storage>,
+        upstream_id: Uuid,
+        expected_oauth_token_generation: u64,
+        injected: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl UpstreamRateLimitStateStore for ReconnectMidBuildRateLimits {
+        async fn put_observation(
+            &self,
+            record: &UpstreamRateLimitObservationRecord,
+        ) -> StorageResult<()> {
+            UpstreamRateLimitStateStore::put_observation(self.storage.as_ref(), record).await
+        }
+
+        async fn list_for_upstream_ids(
+            &self,
+            upstream_ids: &[Uuid],
+        ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>> {
+            if !self.injected.swap(true, Ordering::SeqCst) {
+                UpstreamStore::set_status(
+                    self.storage.as_ref(),
+                    self.upstream_id,
+                    UpstreamStatusUpdate {
+                        last_apply_error: Some(Some("status_401".to_owned())),
+                        expected_oauth_token_generation: Some(self.expected_oauth_token_generation),
+                        ..UpstreamStatusUpdate::default()
+                    },
+                )
+                .await?;
+            }
+            UpstreamRateLimitStateStore::list_for_upstream_ids(self.storage.as_ref(), upstream_ids)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_required_write_during_build_triggers_next_reconcile_rebuild() {
+        let (dir, storage) = storage_fixture(24).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let created = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "mid-build-oauth".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("oauth upstream created");
+        let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+            &aead,
+            &cc_lb_aead::OAuthTokenBundle {
+                access_token: "valid-access".to_owned(),
+                refresh_token: "valid-refresh".to_owned(),
+                expires_at_unix_secs: 1_900_000_000,
+                refresh_token_expires_at_unix_secs: None,
+                scopes: vec!["messages".to_owned()],
+                never_refresh: false,
+            },
+            created.id.as_bytes(),
+        )
+        .expect("encrypt credential");
+        let stored = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            created.id,
+            created.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("oauth credential stored");
+        let installed =
+            UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, true)
+                .await
+                .expect("oauth upstream enabled");
+        let mut stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        stores.upstream_rate_limits = Arc::new(ReconnectMidBuildRateLimits {
+            storage: storage.clone(),
+            upstream_id: installed.id,
+            expected_oauth_token_generation: installed.oauth_token_generation,
+            injected: std::sync::atomic::AtomicBool::new(false),
+        });
+        let stores = Arc::new(stores);
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+
+        let raced = build_view(&stores, &runtime, dir.path()).await;
+        let raced_status = raced
+            .upstream_status_snapshot
+            .entries
+            .get(&installed.name)
+            .expect("raced status");
+        assert_eq!(
+            raced_status.last_apply_error, None,
+            "the build must have installed the pre-failure record"
+        );
+        let persisted = UpstreamStore::get_by_id(storage.as_ref(), installed.id)
+            .await
+            .expect("load upstream")
+            .expect("upstream exists");
+        assert_eq!(persisted.last_apply_error.as_deref(), Some("status_401"));
+        assert_ne!(
+            raced.upstream_status_snapshot.revision_hash,
+            crate::reconcile::collect_revision_hash(&stores)
+                .await
+                .expect("current hash"),
+            "the installed hash must be the pre-content sample, not include the mid-build write"
         );
 
-        let resolved = resolve_api_key(&aead, &record).expect("canonical shape resolves");
-        assert_eq!(resolved.as_str(), "sk-ant-canonical");
+        let holder = Arc::new(cc_lb_control::DynamicViewHolder::new(Arc::clone(&raced)));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let reconciler = crate::reconcile::Reconciler::new(
+            stores.clone(),
+            holder.clone(),
+            runtime,
+            aead,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            dir.path().to_path_buf(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            0,
+            Arc::new(sink),
+            1800,
+            clock,
+        );
+
+        reconciler.reconcile_once().await.expect("reconcile runs");
+        let rebuilt = holder.load();
+        assert_eq!(
+            rebuilt.generation,
+            raced.generation + 1,
+            "reconcile must rebuild the view that missed the mid-build write"
+        );
+        assert_eq!(
+            rebuilt
+                .upstream_status_snapshot
+                .entries
+                .get(&installed.name)
+                .expect("rebuilt status")
+                .last_apply_error
+                .as_deref(),
+            Some("status_401")
+        );
+
+        reconciler.reconcile_once().await.expect("reconcile reruns");
+        assert_eq!(
+            holder.generation(),
+            rebuilt.generation,
+            "a view built from current records must not rebuild again"
+        );
     }
 
-    #[test]
-    fn resolve_api_key_rejects_ciphertext_under_unrelated_aad() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let record = api_key_record("bound-elsewhere", None);
-        let ciphertext = aead
-            .encrypt(b"sk-ant-bound-elsewhere", b"some-other-aad")
-            .expect("encrypt");
-        let record = UpstreamRecord {
-            api_key_ciphertext: Some(ciphertext),
-            ..record
-        };
+    const PRINCIPAL_LIST_PASSTHROUGH: u8 = 0;
+    const PRINCIPAL_LIST_INJECT_RECONNECT_REQUIRED: u8 = 1;
+    const PRINCIPAL_LIST_FAIL: u8 = 2;
 
-        assert!(matches!(
-            resolve_api_key(&aead, &record),
-            Err(ApiKeyResolutionError::NotDecryptable)
-        ));
+    /// Principal store wrapper that scripts its next `list` call. The
+    /// revision hash lists principals right after its upstream read, so an
+    /// armed injection persists a reconnect-required refresh failure between
+    /// a build's hash sample and its upstream content read, and an armed
+    /// failure aborts the next build with one transient storage error.
+    struct ScriptedPrincipals {
+        storage: Arc<Storage>,
+        upstream_id: Uuid,
+        expected_oauth_token_generation: u64,
+        next_list: std::sync::atomic::AtomicU8,
     }
 
-    #[test]
-    fn resolve_api_key_rejects_key_with_invalid_header_byte() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let record = api_key_record("bad-key", None);
-        let ciphertext = aead
-            .encrypt(b"sk-ant-\nnewline", record.id.as_bytes())
-            .expect("encrypt");
-        let record = UpstreamRecord {
-            api_key_ciphertext: Some(ciphertext),
-            ..record
-        };
+    #[async_trait]
+    impl PrincipalStore for ScriptedPrincipals {
+        async fn create(
+            &self,
+            input: cc_lb_storage_api::PrincipalCreate,
+            now_unix_secs: u64,
+        ) -> StorageResult<PrincipalRecord> {
+            PrincipalStore::create(self.storage.as_ref(), input, now_unix_secs).await
+        }
 
-        assert!(matches!(
-            resolve_api_key(&aead, &record),
-            Err(ApiKeyResolutionError::InvalidHeaderValue)
-        ));
+        async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
+            PrincipalStore::get_by_id(self.storage.as_ref(), id).await
+        }
+
+        async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
+            PrincipalStore::get_by_name(self.storage.as_ref(), name).await
+        }
+
+        async fn list(
+            &self,
+            offset: usize,
+            limit: usize,
+            include_deleted: bool,
+        ) -> StorageResult<Vec<PrincipalRecord>> {
+            match self
+                .next_list
+                .swap(PRINCIPAL_LIST_PASSTHROUGH, Ordering::SeqCst)
+            {
+                PRINCIPAL_LIST_INJECT_RECONNECT_REQUIRED => {
+                    UpstreamStore::set_status(
+                        self.storage.as_ref(),
+                        self.upstream_id,
+                        UpstreamStatusUpdate {
+                            last_apply_error: Some(Some("status_401".to_owned())),
+                            expected_oauth_token_generation: Some(
+                                self.expected_oauth_token_generation,
+                            ),
+                            ..UpstreamStatusUpdate::default()
+                        },
+                    )
+                    .await?;
+                }
+                PRINCIPAL_LIST_FAIL => {
+                    return Err(StorageError::Unavailable {
+                        message: "injected transient principal read failure".to_owned(),
+                    });
+                }
+                _ => {}
+            }
+            PrincipalStore::list(self.storage.as_ref(), offset, limit, include_deleted).await
+        }
+
+        async fn update(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+            update: cc_lb_storage_api::PrincipalUpdate,
+            now_unix_secs: u64,
+        ) -> StorageResult<Option<PrincipalRecord>> {
+            PrincipalStore::update(
+                self.storage.as_ref(),
+                id,
+                expected_revision,
+                update,
+                now_unix_secs,
+            )
+            .await
+        }
+
+        async fn set_enabled(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+            enabled: bool,
+            now_unix_secs: u64,
+        ) -> StorageResult<Option<PrincipalRecord>> {
+            PrincipalStore::set_enabled(
+                self.storage.as_ref(),
+                id,
+                expected_revision,
+                enabled,
+                now_unix_secs,
+            )
+            .await
+        }
+
+        async fn soft_delete(
+            &self,
+            id: Uuid,
+            expected_revision: u64,
+            now_unix_secs: u64,
+        ) -> StorageResult<Option<PrincipalRecord>> {
+            PrincipalStore::soft_delete(self.storage.as_ref(), id, expected_revision, now_unix_secs)
+                .await
+        }
+
+        async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
+            PrincipalStore::hard_delete(self.storage.as_ref(), id).await
+        }
     }
 
-    #[test]
-    fn resolve_api_key_reports_missing_ciphertext() {
-        let aead = AeadService::from_master_key([19; 32]);
-        let record = api_key_record("no-credential", None);
+    fn oauth_bundle(access_token: &str, refresh_token: &str) -> cc_lb_aead::OAuthTokenBundle {
+        cc_lb_aead::OAuthTokenBundle {
+            access_token: access_token.to_owned(),
+            refresh_token: refresh_token.to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        }
+    }
 
-        assert!(matches!(
-            resolve_api_key(&aead, &record),
-            Err(ApiKeyResolutionError::Missing)
-        ));
+    /// Replica B samples a clear reconnect marker at OAuth generation G,
+    /// captures the reconnect-required record a terminal 401 then persists,
+    /// and installs it after an operator reconnect on another replica
+    /// advanced the generation and cleared the marker. B's
+    /// notification-triggered rebuild fails once; the next healthy periodic
+    /// reconcile must still detect the drift and rebuild.
+    #[tokio::test]
+    async fn reconnect_after_captured_failure_is_repaired_by_periodic_reconcile() {
+        let (dir, storage) = storage_fixture(25).await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        let created = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "reconnect-aba-oauth".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("oauth upstream created");
+        let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+            &aead,
+            &oauth_bundle("valid-access", "valid-refresh"),
+            created.id.as_bytes(),
+        )
+        .expect("encrypt credential");
+        let stored = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            created.id,
+            created.revision,
+            encrypted,
+            false,
+        )
+        .await
+        .expect("oauth credential stored");
+        let installed =
+            UpstreamStore::set_enabled(storage.as_ref(), stored.id, stored.revision, true)
+                .await
+                .expect("oauth upstream enabled");
+        let principals = Arc::new(ScriptedPrincipals {
+            storage: storage.clone(),
+            upstream_id: installed.id,
+            expected_oauth_token_generation: installed.oauth_token_generation,
+            next_list: std::sync::atomic::AtomicU8::new(PRINCIPAL_LIST_PASSTHROUGH),
+        });
+        let mut stores = stores(
+            storage.clone(),
+            Arc::new(FakePromptCacheObservationStore::new()),
+        );
+        stores.principals = principals.clone();
+        let stores = Arc::new(stores);
+        let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine"));
+
+        let clear_hash = crate::reconcile::collect_revision_hash(&stores)
+            .await
+            .expect("clear-marker hash");
+        principals
+            .next_list
+            .store(PRINCIPAL_LIST_INJECT_RECONNECT_REQUIRED, Ordering::SeqCst);
+        let raced = build_view(&stores, &runtime, dir.path()).await;
+        assert_eq!(
+            raced.upstream_status_snapshot.revision_hash, clear_hash,
+            "the build must have sampled the clear marker at the original generation"
+        );
+        assert_eq!(
+            raced
+                .upstream_status_snapshot
+                .entries
+                .get(&installed.name)
+                .expect("raced status")
+                .last_apply_error
+                .as_deref(),
+            Some("status_401"),
+            "the build must have captured the reconnect-required record"
+        );
+
+        let replacement = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+            &aead,
+            &oauth_bundle("reconnected-access", "reconnected-refresh"),
+            installed.id.as_bytes(),
+        )
+        .expect("encrypt replacement credential");
+        let reconnected = UpstreamStore::store_oauth_tokens(
+            storage.as_ref(),
+            installed.id,
+            installed.revision,
+            replacement,
+            false,
+        )
+        .await
+        .expect("operator reconnect");
+        assert_eq!(reconnected.revision, installed.revision);
+        assert!(reconnected.oauth_token_generation > installed.oauth_token_generation);
+        assert_eq!(reconnected.last_apply_error, None);
+
+        let holder = Arc::new(cc_lb_control::DynamicViewHolder::new(Arc::clone(&raced)));
+        let clock: cc_lb_clock::ClockHandle = Arc::new(TestClock::new_at_secs(1_700_000_000));
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
+        );
+        let sink: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+
+        principals
+            .next_list
+            .store(PRINCIPAL_LIST_FAIL, Ordering::SeqCst);
+        let forced = build_dynamic_view(
+            &stores,
+            aead.clone(),
+            None,
+            holder.generation(),
+            &runtime,
+            dir.path(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            0,
+            sink.clone(),
+            1800,
+            clock.clone(),
+        )
+        .await;
+        assert!(
+            matches!(
+                forced,
+                Err(RebindError::Storage(StorageError::Unavailable { .. }))
+            ),
+            "the notification-triggered rebuild must fail once"
+        );
+        assert_eq!(holder.generation(), raced.generation);
+
+        let reconciler = crate::reconcile::Reconciler::new(
+            stores.clone(),
+            holder.clone(),
+            runtime,
+            aead,
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            dir.path().to_path_buf(),
+            Arc::new(SubscriptionQuotaCache::new()),
+            0,
+            sink,
+            1800,
+            clock,
+        );
+        reconciler.reconcile_once().await.expect("reconcile runs");
+        let rebuilt = holder.load();
+        assert_eq!(
+            rebuilt.generation,
+            raced.generation + 1,
+            "a healthy periodic reconcile must replace the captured reconnect-required view"
+        );
+        assert_eq!(
+            rebuilt
+                .upstream_status_snapshot
+                .entries
+                .get(&installed.name)
+                .expect("rebuilt status")
+                .last_apply_error,
+            None,
+            "the rebuilt view must route the reconnected credential"
+        );
+
+        reconciler.reconcile_once().await.expect("reconcile reruns");
+        assert_eq!(
+            holder.generation(),
+            rebuilt.generation,
+            "a view built from current records must not rebuild again"
+        );
     }
 }

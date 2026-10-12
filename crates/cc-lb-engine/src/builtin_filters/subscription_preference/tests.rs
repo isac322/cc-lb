@@ -165,6 +165,25 @@ fn base_blocked_overage_ok_picks_overage() {
 }
 
 #[test]
+fn base_blocked_overage_ok_is_preferred_over_api_key() {
+    // Paid extra usage on a subscription is chosen before the Console API key
+    // once the base quota is exhausted; the API key is the fallback only when
+    // overage is unavailable too.
+    let overage = oauth_with(
+        "overage",
+        1,
+        vec![
+            fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build(),
+            fresh(WINDOW_OVERAGE).util(0.3).status("allowed").build(),
+        ],
+    );
+    let key = api_key("api-key", 2);
+    let output = filter_for_model(&[overage.clone(), key], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![overage.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
 fn base_blocked_overage_blocked_drops_candidate() {
     let dead = oauth_with(
         "dead",

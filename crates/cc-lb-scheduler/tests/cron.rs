@@ -98,6 +98,41 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
     Ok(())
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn cron_sqlite_fires_elapsed_tick_instead_of_erroring()
+-> Result<(), Box<dyn std::error::Error>> {
+    use apalis_sqlite::{PoolOptions, Sqlite, SqliteStorage};
+
+    let queue = "cron_elapsed_tick_sqlite";
+    let pool = PoolOptions::<Sqlite>::new()
+        .max_connections(1)
+        .connect(":memory:")
+        .await?;
+    SqliteStorage::setup(&pool).await?;
+
+    // A tick that is already in the past by the time the worker polls it
+    // must fire immediately: a stalled poll or a schedule lagging the wall
+    // clock yields a negative delay, which has to saturate to zero rather
+    // than surface an out-of-range stream error.
+    let elapsed = DateTime::<Utc>::from(SystemClock.now()) - Duration::seconds(30);
+    let worker = WorkerBuilder::singleton_queue_factory(
+        FixedTicks::once(elapsed),
+        SqliteStorage::<CronConformanceJob, (), ()>::new_in_queue(&pool, queue),
+        conformance_factory(),
+    )
+    .max_ticks(1);
+
+    tokio::time::timeout(Duration::seconds(10).to_std()?, worker.run()).await??;
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = ?")
+        .bind(queue)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(count, 1);
+    Ok(())
+}
+
 #[cfg(feature = "postgres")]
 mod postgres_tests {
     use super::*;

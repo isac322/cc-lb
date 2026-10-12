@@ -9,7 +9,6 @@ type UpstreamFixture = {
   enabled: boolean;
   spec_revision: number;
   base_url: string;
-  api_key_env?: string | null;
   warmup_enabled: boolean;
   warmup_dialect_plugin: WarmupPlugin;
   status: {
@@ -75,7 +74,6 @@ function apiKeyUpstream(): UpstreamFixture {
     enabled: true,
     spec_revision: 7,
     base_url: 'https://api.anthropic.com',
-    api_key_env: 'ANTHROPIC_API_KEY',
     warmup_enabled: false,
     warmup_dialect_plugin: null,
     status: {

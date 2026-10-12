@@ -442,9 +442,9 @@ export function DetailRow({
       {...rest}
     >
       <div className="min-w-0">
-        <div className="text-label text-text-muted">{label}</div>
+        <div className="text-label text-text-faint">{label}</div>
         {description ? (
-          <div className="mt-0.5 text-caption text-text-faint">
+          <div className="mt-0.5 text-caption text-text-muted">
             {description}
           </div>
         ) : null}
@@ -488,7 +488,7 @@ export function DetailFact({
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="text-label text-text-muted">{label}</dt>
+      <dt className="text-label text-text-faint">{label}</dt>
       <dd className="min-w-0 break-words text-body text-text">
         {children}
         {hint ? (

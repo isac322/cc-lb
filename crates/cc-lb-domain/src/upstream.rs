@@ -75,6 +75,12 @@ pub const BUILTIN_SUBSCRIPTION_PREFERENCE_ID: Uuid = Uuid::from_u128(2);
 /// Stable registry name for the built-in subscription-preference router filter.
 pub const BUILTIN_SUBSCRIPTION_PREFERENCE_NAME: &str = "subscription-preference";
 
+/// Anthropic request/response header naming the workspace an org-scoped API key acts in.
+pub const ANTHROPIC_WORKSPACE_ID_HEADER: &str = "anthropic-workspace-id";
+
 /// Anthropic identity header slots projected into lifecycle header snapshots.
-pub const ANTHROPIC_IDENTITY_HEADERS: &[&str] =
-    &["anthropic-organization-id", "anthropic-account-uuid"];
+pub const ANTHROPIC_IDENTITY_HEADERS: &[&str] = &[
+    "anthropic-organization-id",
+    "anthropic-account-uuid",
+    ANTHROPIC_WORKSPACE_ID_HEADER,
+];

@@ -1,5 +1,7 @@
 #[path = "admin_next_run.rs"]
 mod admin_next_run;
+#[path = "api_key_usage_poll_wiring.rs"]
+mod api_key_usage_poll_wiring;
 #[path = "cron.rs"]
 mod cron;
 #[path = "cron_sqlite_partial_index.rs"]

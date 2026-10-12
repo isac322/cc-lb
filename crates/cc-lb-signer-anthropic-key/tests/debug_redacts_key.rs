@@ -3,8 +3,8 @@ use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 
 #[test]
 fn debug_redacts_key() {
-    let signer = AnthropicKeySigner::new("sk-ant-secret-value");
-    let factory = AnthropicKeySignerFactory::new("sk-ant-secret-value");
+    let signer = AnthropicKeySigner::new("sk-ant-secret-value", None).expect("signer");
+    let factory = AnthropicKeySignerFactory::new("sk-ant-secret-value", None).expect("factory");
     let debug = format!("{:?}", signer);
     let factory_debug = format!("{:?}", factory);
 

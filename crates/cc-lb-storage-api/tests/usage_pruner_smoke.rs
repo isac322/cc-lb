@@ -1,11 +1,14 @@
 use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_secs};
+use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamStore};
 use cc_lb_storage_api::{
-    AuditEntry, AuditQueryScope, AuditStore, MetaStore, RequestEvent, RequestEventStore,
-    RequestEventStreamFilters,
-    usage_pruner::{PruneResult, UsagePruner},
+    ApiKeyUsagePollOutcome, ApiUsageAttribution, AuditEntry, AuditQueryScope, AuditStore,
+    MetaStore, RequestEvent, RequestEventStore, RequestEventStreamFilters, UpstreamApiKeyStore,
+    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketWrite,
+    usage_pruner::{PruneResult, UsagePruner, utc_month_start_unix_secs},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
 use std::sync::Arc;
+use uuid::Uuid;
 
 const DAY_MS: u64 = 86_400_000;
 const DAY_SECS: u64 = 86_400;
@@ -73,6 +76,148 @@ async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(remaining.len(), 0);
     Ok(())
+}
+
+/// 2026-10-20T13:45:00Z, day 20 of the month.
+const DAY_20: u64 = 1_792_503_900;
+/// 2026-10-01T00:00:00Z.
+const OCT_1: u64 = 1_790_812_800;
+
+/// POL-21: with 7-day retention on day 20, reported daily buckets from the
+/// 1st survive the prune, so the month summary still starts on the 1st.
+#[tokio::test]
+async fn pol21_prune_keeps_the_current_month() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, storage) = new_storage().await?;
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(DAY_20));
+    assert_eq!(utc_month_start_unix_secs(DAY_20), OCT_1);
+    let upstream_id = seed_usage_buckets(
+        storage.as_ref(),
+        &[
+            OCT_1 - 40 * DAY_SECS,
+            OCT_1 - 3_600,
+            OCT_1,
+            OCT_1 + DAY_SECS,
+            OCT_1 + 19 * DAY_SECS,
+        ],
+    )
+    .await?;
+
+    let result = UsagePruner::new(Arc::clone(&storage), 7, clock)
+        .prune_once()
+        .await;
+
+    assert_eq!(result.upstream_api_usage_removed, 2);
+    assert_eq!(
+        bucket_starts(storage.as_ref(), upstream_id).await?,
+        vec![OCT_1, OCT_1 + DAY_SECS, OCT_1 + 19 * DAY_SECS]
+    );
+    Ok(())
+}
+
+/// POL-18: buckets older than the retention horizon are pruned, recent ones
+/// and the current month are kept, and retention 0 never prunes them.
+#[tokio::test]
+async fn pol18_prune_follows_retention_horizon() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, storage) = new_storage().await?;
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(DAY_20));
+    let horizon = DAY_20 - 30 * DAY_SECS;
+    let upstream_id = seed_usage_buckets(
+        storage.as_ref(),
+        &[horizon - 2 * DAY_SECS, horizon + DAY_SECS, OCT_1 + DAY_SECS],
+    )
+    .await?;
+
+    let disabled = UsagePruner::new(Arc::clone(&storage), 0, Arc::clone(&clock))
+        .prune_once()
+        .await;
+    assert_eq!(disabled, PruneResult::default());
+    assert_eq!(bucket_starts(storage.as_ref(), upstream_id).await?.len(), 3);
+
+    let result = UsagePruner::new(Arc::clone(&storage), 30, clock)
+        .prune_once()
+        .await;
+
+    assert_eq!(result.upstream_api_usage_removed, 1);
+    assert_eq!(
+        bucket_starts(storage.as_ref(), upstream_id).await?,
+        vec![horizon + DAY_SECS, OCT_1 + DAY_SECS]
+    );
+    Ok(())
+}
+
+async fn seed_usage_buckets(
+    storage: &SqliteStorage,
+    bucket_starts: &[u64],
+) -> Result<Uuid, Box<dyn std::error::Error>> {
+    let upstream = UpstreamStore::create(
+        storage,
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "api-key-prune".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?;
+    let buckets = bucket_starts
+        .iter()
+        .map(|start| UpstreamApiUsageBucketWrite {
+            attribution: ApiUsageAttribution::ApiKey,
+            subject_id: "apikey_01".to_owned(),
+            bucket_width_secs: 86_400,
+            bucket_start_unix_secs: *start,
+            model: "claude-sonnet-4-5".to_owned(),
+            uncached_input_tokens: 10,
+            cache_creation_5m_input_tokens: 0,
+            cache_creation_1h_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            output_tokens: 5,
+            list_cost_micros: 0,
+        })
+        .collect();
+    storage
+        .write_api_key_usage_poll_outcome(
+            upstream.id,
+            upstream.revision,
+            &ApiKeyUsagePollOutcome {
+                attempted_at_unix_secs: DAY_20,
+                usage_report_state: None,
+                access_revision_seen: 0,
+                consecutive_failures: 0,
+                next_poll_after_unix_secs: None,
+                last_success_at_unix_secs: Some(DAY_20),
+                legacy_key_hint: None,
+                claim_token: None,
+                buckets,
+            },
+        )
+        .await?;
+    Ok(upstream.id)
+}
+
+async fn bucket_starts(
+    storage: &SqliteStorage,
+    upstream_id: Uuid,
+) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    Ok(storage
+        .query_upstream_api_usage_buckets(&UpstreamApiUsageBucketQuery {
+            upstream_id,
+            attribution: ApiUsageAttribution::ApiKey,
+            subject_id: "apikey_01".to_owned(),
+            bucket_width_secs: 86_400,
+            start_unix_secs: 0,
+            end_unix_secs: i64::MAX as u64,
+        })
+        .await?
+        .into_iter()
+        .map(|bucket| bucket.bucket_start_unix_secs)
+        .collect())
 }
 
 async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>

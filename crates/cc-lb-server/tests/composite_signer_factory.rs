@@ -80,6 +80,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream created");
@@ -114,6 +116,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream created");
@@ -140,6 +144,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream created");
@@ -186,8 +192,10 @@ async fn apikey_upstream_routes_to_key_signer() {
     let _upstream_id = fixture.create_apikey_upstream("apikey-test").await;
 
     let factory = cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(
-        "sk-ant-test-api-key-12345".to_owned(),
-    );
+        "sk-ant-test-api-key-12345",
+        None,
+    )
+    .expect("factory");
 
     let signer = factory
         .build(&Upstream::AnthropicDirect { base_url: None })

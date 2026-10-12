@@ -132,47 +132,87 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
     );
 }
 
+#[test]
+fn build_candidates_excludes_reconnect_required_oauth() {
+    let reconnect_errors = ["status_400", "status_401", "refresh_token_expired"];
+    let kept_errors = ["network", "status_429"];
+    let mut upstreams = Vec::new();
+    let mut expected_kept = Vec::new();
+    for (index, error) in reconnect_errors.iter().enumerate() {
+        let mut record = upstream(
+            Uuid::from_u128(10 + index as u128),
+            UpstreamKind::AnthropicOauth,
+            true,
+            None,
+        );
+        record.last_apply_error = Some((*error).to_owned());
+        upstreams.push(record);
+    }
+    for (index, error) in kept_errors.iter().enumerate() {
+        let id = Uuid::from_u128(20 + index as u128);
+        let mut record = upstream(id, UpstreamKind::AnthropicOauth, true, None);
+        record.last_apply_error = Some((*error).to_owned());
+        upstreams.push(record);
+        expected_kept.push(id);
+    }
+    let api_key_id = Uuid::from_u128(30);
+    let mut api_key = upstream(api_key_id, UpstreamKind::AnthropicApiKey, true, None);
+    api_key.last_apply_error = Some("status_401".to_owned());
+    upstreams.push(api_key);
+    expected_kept.push(api_key_id);
+    let view = test_view(vec![principal("all", Vec::new())], upstreams);
+
+    let candidates = build_candidates(
+        &view,
+        "all",
+        RequestKind::AnthropicMessages,
+        &[],
+        &HashMap::new(),
+        &cc_lb_clock::SystemClock,
+    );
+
+    assert_eq!(candidate_ids(&candidates), expected_kept);
+}
+
 // #851: an upstream whose last apply errored cannot sign a request, so the
 // candidate builder must drop it; `Active` entries and upstreams with no
 // snapshot entry stay eligible.
 #[test]
-fn build_candidates_excludes_apply_status_error_upstreams() {
-    let errored = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-    let active = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-    let missing_entry = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
-    let upstreams = vec![
-        upstream(errored, UpstreamKind::AnthropicApiKey, true, None),
-        upstream(active, UpstreamKind::AnthropicApiKey, true, None),
-        upstream(missing_entry, UpstreamKind::AnthropicApiKey, true, None),
+fn build_candidates_excludes_apply_status_error() {
+    let oauth_error = Uuid::from_u128(1);
+    let api_key_error = Uuid::from_u128(2);
+    let oauth_active = Uuid::from_u128(3);
+    let api_key_active = Uuid::from_u128(4);
+    let no_status_entry = Uuid::from_u128(5);
+    let records = vec![
+        upstream(oauth_error, UpstreamKind::AnthropicOauth, true, None),
+        upstream(api_key_error, UpstreamKind::AnthropicApiKey, true, None),
+        upstream(oauth_active, UpstreamKind::AnthropicOauth, true, None),
+        upstream(api_key_active, UpstreamKind::AnthropicApiKey, true, None),
+        upstream(no_status_entry, UpstreamKind::AnthropicApiKey, true, None),
     ];
-    let mut entries = HashMap::new();
-    entries.insert(
-        upstreams[0].name.clone(),
-        UpstreamStatusEntry {
-            status: ApplyStatus::Error,
-            last_apply_error: Some("apply failed".to_owned()),
-            last_apply_at_unix_secs: 1,
-        },
-    );
-    entries.insert(
-        upstreams[1].name.clone(),
-        UpstreamStatusEntry {
-            status: ApplyStatus::Active,
-            last_apply_error: None,
-            last_apply_at_unix_secs: 1,
-        },
-    );
+    let entry = |status: ApplyStatus| UpstreamStatusEntry {
+        status,
+        last_apply_error: None,
+        last_apply_at_unix_secs: 0,
+    };
+    let entries = HashMap::from([
+        (records[0].name.clone(), entry(ApplyStatus::Error)),
+        (records[1].name.clone(), entry(ApplyStatus::Error)),
+        (records[2].name.clone(), entry(ApplyStatus::Active)),
+        (records[3].name.clone(), entry(ApplyStatus::Active)),
+    ]);
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(TestSignerFactory))
         .principal_view(Arc::new(PrincipalView::from_db(
             &[principal("all", Vec::new())],
             HashMap::new(),
         )))
-        .upstream_records(upstreams)
+        .upstream_records(records)
         .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot {
             entries,
-            applied_at_unix_secs: 1,
-            revision_hash: 1,
+            applied_at_unix_secs: 0,
+            revision_hash: 0,
         }))
         .build();
 
@@ -185,7 +225,10 @@ fn build_candidates_excludes_apply_status_error_upstreams() {
         &cc_lb_clock::SystemClock,
     );
 
-    assert_eq!(candidate_ids(&candidates), vec![active, missing_entry]);
+    assert_eq!(
+        candidate_ids(&candidates),
+        vec![oauth_active, api_key_active, no_status_entry]
+    );
 }
 
 #[tokio::test]
@@ -328,6 +371,7 @@ fn upstream(
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
+        workspace_id: None,
     }
 }
 

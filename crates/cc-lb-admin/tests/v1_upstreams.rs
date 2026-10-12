@@ -45,6 +45,8 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: Arc::new(cc_lb_clock::SystemClock),
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     }
 }
 
@@ -142,7 +144,8 @@ async fn create_with_invalid_name_returns_structured_bad_request() {
         Some(json!({
             "name": "system.blocked",
             "kind": "anthropic_api_key",
-            "api_key_value": "sk-ant-api03-test"
+            "api_key_value": "sk-ant-api03-test",
+            "skip_preflight": true
         })),
         None,
     )
@@ -185,7 +188,8 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
             "name": "base-url-roundtrip",
             "kind": "anthropic_api_key",
             "base_url": "https://gateway.example.com/v1/",
-            "api_key_value": secret
+            "api_key_value": secret,
+            "skip_preflight": true
         })),
         None,
     )
@@ -198,8 +202,11 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
     );
     assert!(!body(&created).to_string().contains(secret));
     assert!(body(&created).get("api_key_value").is_none());
-    assert!(body(&created).get("api_key_env").is_none());
     let id = body(&created)["id"].as_str().unwrap();
+    // Storing the key is itself a spec write, so the created revision is the
+    // baseline rather than a fixed 1.
+    let base = body(&created)["spec_revision"].as_u64().unwrap();
+    let rev = |n: u64| format!("W/\"{}\"", base + n - 1);
 
     let detail = request(
         app.clone(),
@@ -228,8 +235,8 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         app.clone(),
         "PUT",
         &format!("/admin/v1/upstreams/{id}"),
-        Some(json!({ "base_url": "https://replacement.example.com/api/" })),
-        Some("W/\"1\""),
+        Some(json!({ "base_url": "https://replacement.example.com/api/", "skip_preflight": true })),
+        Some(rev(1).as_str()),
     )
     .await;
     assert_eq!(updated.status, StatusCode::OK);
@@ -273,7 +280,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         "PATCH",
         &format!("/admin/v1/upstreams/{id}"),
         Some(json!({ "name": "base-url-renamed" })),
-        Some("W/\"2\""),
+        Some(rev(2).as_str()),
     )
     .await;
     assert_eq!(renamed.status, StatusCode::OK);
@@ -289,7 +296,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         "PUT",
         &format!("/admin/v1/upstreams/{id}"),
         Some(json!({ "base_url": null })),
-        Some("W/\"2\""),
+        Some(rev(2).as_str()),
     )
     .await;
     assert_eq!(stale_preserve.status, StatusCode::CONFLICT);
@@ -302,7 +309,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         "PATCH",
         &format!("/admin/v1/upstreams/{id}"),
         Some(json!({ "base_url": null })),
-        Some("W/\"3\""),
+        Some(rev(3).as_str()),
     )
     .await;
     assert_eq!(preserved.status, StatusCode::OK);
@@ -322,7 +329,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
             "base_url": "https://contradiction.example.com/",
             "clear_base_url": true
         })),
-        Some("W/\"3\""),
+        Some(rev(3).as_str()),
     )
     .await;
     assert_eq!(contradictory.status, StatusCode::BAD_REQUEST);
@@ -339,7 +346,7 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
             "base_url": "https://contradiction.example.com/",
             "clear_base_url": true
         })),
-        Some("W/\"2\""),
+        Some(rev(2).as_str()),
     )
     .await;
     assert_eq!(stale_contradictory.status, StatusCode::CONFLICT);
@@ -363,8 +370,8 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         app.clone(),
         "PATCH",
         &format!("/admin/v1/upstreams/{id}"),
-        Some(json!({ "clear_base_url": true })),
-        Some("W/\"3\""),
+        Some(json!({ "clear_base_url": true, "skip_preflight": true })),
+        Some(rev(3).as_str()),
     )
     .await;
     assert_eq!(cleared.status, StatusCode::OK);
@@ -386,8 +393,8 @@ async fn base_url_roundtrips_across_create_list_get_and_update_without_exposing_
         app,
         "PUT",
         &format!("/admin/v1/upstreams/{id}"),
-        Some(json!({ "base_url": "https://restored.example.com/" })),
-        Some("W/\"4\""),
+        Some(json!({ "base_url": "https://restored.example.com/", "skip_preflight": true })),
+        Some(rev(4).as_str()),
     )
     .await;
     assert_eq!(restored.status, StatusCode::OK);

@@ -231,13 +231,16 @@ async fn api_key_upstream_without_stored_credential_fails_closed() {
         .await
         .expect("response body")
         .to_bytes();
-    // Apply validation marks the credential-less upstream ApplyStatus::Error, so
-    // candidate building excludes it and routing answers 503
-    // `route_no_upstream_after_filter` rather than falling back to the
-    // downstream caller's key.
+    // A missing credential fails apply, so routing excludes the upstream; the
+    // request must fail rather than fall back to the downstream client's key.
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(
+        String::from_utf8_lossy(&body).contains("route_no_upstream_after_filter"),
         "{}",
         String::from_utf8_lossy(&body)
     );
@@ -292,7 +295,7 @@ async fn api_key_upstream_rejects_credential_that_is_not_a_valid_header_value() 
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "{}",
+        "credential that fails apply is excluded from routing: {}",
         String::from_utf8_lossy(&body)
     );
     let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
@@ -328,7 +331,7 @@ async fn api_key_upstream_fails_closed_when_ciphertext_uses_unknown_aad() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "{}",
+        "credential that fails apply is excluded from routing: {}",
         String::from_utf8_lossy(&body)
     );
     let error_body: serde_json::Value = serde_json::from_slice(&body).expect("error body json");
@@ -570,6 +573,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await
@@ -647,6 +652,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await

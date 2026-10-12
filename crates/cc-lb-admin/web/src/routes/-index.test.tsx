@@ -2040,7 +2040,6 @@ describe('Overview OAuth reconnect summary', () => {
     enabled: true,
     spec_revision: 1,
     base_url: null,
-    api_key_env: null,
     warmup_enabled: false,
     warmup_dialect_plugin: null,
     status: {

@@ -8,5 +8,9 @@ pub mod sse;
 pub mod weather;
 
 pub use oauth_pause::OAuthRefreshPause;
-pub use routes::{AppConfig, MessageScript, RecordedMessageRequest, ScriptedMessageResponse, app};
+pub use routes::{
+    AppConfig, FakeApiKey, FakeWorkspace, IDENTITY_LINKED_MESSAGE, KeyPolicies, KeyPolicy,
+    MessageScript, RecordedMessageRequest, RecordedRequest, RequestRecorder, Script, ScriptSteps,
+    ScriptedMessageResponse, app,
+};
 pub use weather::WeatherConfig;

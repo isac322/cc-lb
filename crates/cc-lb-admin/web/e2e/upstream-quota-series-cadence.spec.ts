@@ -61,7 +61,6 @@ async function installAppFixtures(
     enabled: true,
     spec_revision: 1,
     base_url: 'https://api.anthropic.com',
-    api_key_env: null,
     warmup_enabled: false,
     warmup_dialect_plugin: null,
     status: {

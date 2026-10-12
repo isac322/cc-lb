@@ -2,13 +2,48 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use ring::digest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::helpers::{error_response, json_response};
+use super::key_policy::KeyPolicy;
 use super::state::AppState;
+
+/// `POST /__key_policies` body; a `null` policy removes the key's policy.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SetKeyPolicyRequest {
+    key: String,
+    #[serde(default)]
+    policy: Option<KeyPolicy>,
+}
+
+pub(crate) async fn set_key_policy(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SetKeyPolicyRequest>,
+) -> Response {
+    match request.policy {
+        Some(policy) => state.config.key_policies.set(request.key, policy),
+        None => state.config.key_policies.remove(&request.key),
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub(crate) async fn clear_key_policies(State(state): State<Arc<AppState>>) -> Response {
+    state.config.key_policies.clear();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub(crate) async fn recorded_requests(State(state): State<Arc<AppState>>) -> Response {
+    Json(state.config.recorder.snapshot()).into_response()
+}
+
+pub(crate) async fn clear_recorded_requests(State(state): State<Arc<AppState>>) -> Response {
+    state.config.recorder.clear();
+    StatusCode::NO_CONTENT.into_response()
+}
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct InjectedUsage {

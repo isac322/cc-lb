@@ -152,7 +152,6 @@ describe('query observer boundaries', () => {
       enabled: true,
       spec_revision: 7,
       base_url: null,
-      api_key_env: null,
       warmup_enabled: true,
       warmup_dialect_plugin: {
         wasm_registry_id: pluginId,

@@ -130,16 +130,27 @@ export async function fetchWithAuth(
         body = await res.json();
         if (body && typeof body === 'object') {
           const b = body as Record<string, unknown>;
-          if ('code' in b) {
-            code = String(b.code);
-          } else if ('error' in b) {
-            code = String(b.error);
+          // API-key create/update failures nest the §5 code:
+          // `{ error: { code, message | detail } }`. Older endpoints send
+          // flat `{ code | error, message | detail }` strings.
+          const nested =
+            b.error && typeof b.error === 'object'
+              ? (b.error as Record<string, unknown>)
+              : null;
+          const src = nested ?? b;
+          if ('code' in src) {
+            code = String(src.code);
+          } else if ('error' in src) {
+            code = String(src.error);
           }
 
-          if ('message' in b) {
-            message = String(b.message);
-          } else if ('detail' in b) {
-            message = String(b.detail);
+          if ('message' in src) {
+            message = String(src.message);
+          } else if ('detail' in src) {
+            message = String(src.detail);
+          } else if ('reason' in src) {
+            // Flat `invalid_input` names the offending field and why.
+            message = String(src.reason);
           }
         }
       } catch {
@@ -789,13 +800,371 @@ export interface ConfigHistoryResponse {
   entries: ConfigHistoryItem[];
 }
 
+// ─── Anthropic API-key access ────────────────────────────────────────────────
+// One contract for every API-key surface: the connect dialog's preflight,
+// the upstream pane's Access section and the usage card's provenance. The
+// backend implements these under `crates/cc-lb-admin/src/v1/upstreams.rs`.
+
+/** What the key is, as classified by prefix and the `count_tokens` probe. */
+export type ApiKeyClass =
+  | 'admin'
+  | 'enterprise'
+  | 'oauth_token'
+  | 'workspace_bound'
+  | 'org_scoped'
+  | 'unknown';
+/** Inference probe result: `unverified` when Anthropic was not asked. */
+export type ApiKeyInference = 'ok' | 'denied' | 'unverified';
+/**
+ * Org Admin API capability: `denied` = 401/403 (a permission verdict);
+ * `error` = any other answer or a timeout (temporary, re-check later);
+ * `not_applicable` for keys that can never call it.
+ */
+export type ApiKeyOrgCapability = 'ok' | 'denied' | 'error' | 'not_applicable';
+/** Console's key owner type; `null` when it could not be introspected. */
+export type ApiKeyType = 'personal' | 'service_account' | 'workspace';
+
+export const AnthropicWorkspaceSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+export type AnthropicWorkspace = z.infer<typeof AnthropicWorkspaceSchema>;
+
+/**
+ * `bound`: a check found the key works without a workspace header; `id` is
+ * set when Anthropic named the workspace.
+ * `selected`: cc-lb sends the chosen `anthropic-workspace-id` (`id`).
+ * `required`: no `id`. The key needs a workspace, or no check has worked
+ * yet (never checked, rejected, or unreachable).
+ */
+export const ApiKeyWorkspaceSchema = z.object({
+  mode: z.enum(['bound', 'required', 'selected']),
+  id: z.string().optional(),
+  name: z.string().optional(),
+});
+export type ApiKeyWorkspace = z.infer<typeof ApiKeyWorkspaceSchema>;
+
+/** Stored capability snapshot of an `anthropic_api_key` upstream. */
+export const ApiKeyAccessSchema = z.object({
+  /** False until a probe succeeds: migrated keys and "Save without checking". */
+  verified: z.boolean(),
+  checked_at_unix_secs: z.number().int().nonnegative().nullable(),
+  key_class: z.enum([
+    'admin',
+    'enterprise',
+    'oauth_token',
+    'workspace_bound',
+    'org_scoped',
+    'unknown',
+  ]),
+  inference: z.enum(['ok', 'denied', 'unverified']),
+  workspace: ApiKeyWorkspaceSchema,
+  workspace_list: z.enum(['ok', 'denied', 'error', 'not_applicable']),
+  usage_report: z.enum(['ok', 'denied', 'error', 'not_applicable']),
+  key_type: z.enum(['personal', 'service_account', 'workspace']).nullable(),
+  /** Last probe failure, already phrased for operators. */
+  last_error: z.string().nullable(),
+});
+export type ApiKeyAccess = z.infer<typeof ApiKeyAccessSchema>;
+
+/**
+ * The single remediation vocabulary (plan §5): preflight `remediation[].code`,
+ * create/update `error.code` and usage `fix.code` all carry these, and every
+ * code maps to exactly one UI surface. Order and spelling match the Rust
+ * `RemediationCode::ALL` (`src/lib/__contract__/remediation_codes.json`).
+ */
+export const REMEDIATION_CODES = [
+  'key_admin',
+  'key_enterprise_scoped',
+  'key_oat',
+  'key_invalid',
+  'key_forbidden',
+  'workspace_required',
+  'workspace_not_found',
+  'workspace_id_malformed',
+  'workspace_list_denied',
+  'key_workspace_scoped_usage_unavailable',
+  'role_insufficient',
+  'key_id_unresolved',
+  'usage_never_checked',
+  'non_anthropic_base_url',
+  'probe_unreachable',
+  'usage_poll_failed',
+] as const;
+export type RemediationCode = (typeof REMEDIATION_CODES)[number];
+
+export interface Remediation {
+  code: RemediationCode;
+}
+
+/**
+ * `POST /admin/v1/upstreams/preflight`: checks a candidate key and saves
+ * nothing. The inference probes run against `base_url` (the key travels with
+ * every proxied request anyway). Only the org Admin API probes — workspaces
+ * list, usage report, api_keys resolution — are restricted to
+ * `https://api.anthropic.com`; a custom `base_url` answers
+ * `non_anthropic_base_url` for those, with usage staying estimated.
+ */
+export interface PreflightRequest {
+  api_key_value?: string;
+  workspace_id?: string;
+  base_url?: string;
+}
+
+export type PreflightVerdict =
+  | 'ok'
+  | 'needs_workspace'
+  | 'rejected'
+  | 'unreachable';
+
+const ApiKeyOrgCapabilitySchema = z.enum([
+  'ok',
+  'denied',
+  'error',
+  'not_applicable',
+]);
+
+/**
+ * Preflight wire envelope (plan §7), shared by the candidate and the stored
+ * key re-check. Always HTTP 200: the verdict is data. Parsed before
+ * `normalizePreflight` so a contract drift fails loudly.
+ */
+export const PreflightWireResponseSchema = z.object({
+  verdict: z.enum(['ok', 'needs_workspace', 'rejected', 'unreachable']),
+  /** Recognizable fragment such as `sk-ant-api03-…AbCd`; never the key. */
+  key_hint: z.string().nullable(),
+  classification: z.object({
+    key_class: ApiKeyAccessSchema.shape.key_class,
+    needs_workspace: z.boolean(),
+    workspace: ApiKeyWorkspaceSchema,
+    key_type: ApiKeyAccessSchema.shape.key_type,
+  }),
+  /** `items` is filled when `state` is `ok`. */
+  workspaces: z.object({
+    state: ApiKeyOrgCapabilitySchema,
+    items: z.array(AnthropicWorkspaceSchema),
+  }),
+  capabilities: z.object({
+    /** `ok_limited`: `count_tokens` answered 429 — the key works. */
+    inference: z.enum(['ok', 'ok_limited', 'denied', 'unverified']),
+    workspace_list: ApiKeyOrgCapabilitySchema,
+    usage_report: ApiKeyOrgCapabilitySchema,
+    /** Whether usage can be attributed to this key (`api_keys` hint match). */
+    api_key_resolution: z.enum(['resolved', 'unresolved', 'not_applicable']),
+  }),
+  remediation: z.array(z.object({ code: z.enum(REMEDIATION_CODES) })),
+  /** Unix seconds. */
+  checked_at: z.number().int().nonnegative(),
+});
+export type PreflightWireResponse = z.infer<typeof PreflightWireResponseSchema>;
+
+/** The connect dialog's flat view of a preflight; see `normalizePreflight`. */
+export interface PreflightResponse {
+  verdict: PreflightVerdict;
+  key_class: ApiKeyClass;
+  inference: ApiKeyInference;
+  workspace: ApiKeyWorkspace;
+  /** Present when `workspace_list` is `ok`. */
+  workspaces?: AnthropicWorkspace[];
+  workspace_list: ApiKeyOrgCapability;
+  usage_report: ApiKeyOrgCapability;
+  key_type: ApiKeyType | null;
+  remediation: Remediation[];
+}
+
+/** The one adapter from the preflight wire envelope to the UI's flat view. */
+export function normalizePreflight(
+  wire: PreflightWireResponse,
+): PreflightResponse {
+  const { classification, capabilities } = wire;
+  return {
+    verdict: wire.verdict,
+    key_class: classification.key_class,
+    inference:
+      capabilities.inference === 'ok_limited' ? 'ok' : capabilities.inference,
+    workspace: classification.workspace,
+    workspaces:
+      wire.workspaces.state === 'ok' ? wire.workspaces.items : undefined,
+    workspace_list: capabilities.workspace_list,
+    usage_report: capabilities.usage_report,
+    key_type: classification.key_type,
+    remediation: wire.remediation,
+  };
+}
+
+export async function preflightApiKey(
+  body: PreflightRequest,
+): Promise<PreflightResponse> {
+  return normalizePreflight(
+    PreflightWireResponseSchema.parse(
+      await postJson<unknown, PreflightRequest>(
+        '/admin/v1/upstreams/preflight',
+        body,
+      ),
+    ),
+  );
+}
+
+/**
+ * `POST /admin/v1/upstreams/{id}/preflight`: re-probes the stored key; the
+ * server persists the new `api_key_access`.
+ */
+export async function recheckApiKey(
+  upstreamId: string,
+): Promise<PreflightResponse> {
+  return normalizePreflight(
+    PreflightWireResponseSchema.parse(
+      await postJson<unknown, Record<string, never>>(
+        `/admin/v1/upstreams/${upstreamId}/preflight`,
+        {},
+      ),
+    ),
+  );
+}
+
+/**
+ * `GET /admin/v1/upstreams/{id}/workspaces`: 403 when listing is refused —
+ * `workspace_list_denied` (role), or `non_anthropic_base_url` (custom host).
+ */
+export interface UpstreamWorkspacesResponse {
+  workspaces: AnthropicWorkspace[];
+}
+
+/**
+ * `GET /admin/v1/upstreams/{id}/usage?range=&step=` (plan §7): the usage
+ * card's series for one API-key upstream.
+ */
+export interface UpstreamKeyUsageResponse extends DashboardUsageResponse {
+  /** `real`: token counts from Anthropic's usage report; `estimated`: cc-lb's request log. */
+  source: 'real' | 'estimated';
+  /**
+   * `api_key`: everything the key did, including traffic outside cc-lb.
+   * `workspace`: the key could not be matched (`key_id_unresolved`), so the
+   * figures are the whole workspace's.
+   */
+  attribution: 'api_key' | 'workspace';
+  /**
+   * The workspace a `workspace` attribution sums: the figures' own subject,
+   * which a just-saved workspace edit does not change. `null` for `api_key`.
+   */
+  attribution_workspace_id: string | null;
+  /** The last real snapshot, kept while reports fail. */
+  stale: boolean;
+  /**
+   * When the poller last got a usable report from Anthropic, independent of
+   * `range`; `null` when no poll has succeeded.
+   */
+  last_reported_unix_secs: number | null;
+  totals: { cost_usd_micros: number; cost_is_estimate: true };
+  fix: Remediation | null;
+  /** This calendar month (UTC), independent of `range`: the card's credit strip. */
+  month: KeyUsageMonth;
+}
+
+/**
+ * Why Anthropic stopped serving this upstream's requests for billing reasons,
+ * classified from the latest terminal request event cc-lb logged for it:
+ * `credits_exhausted` (400 "credit balance"), `billing_error` (402),
+ * `tier_spend_cap` (429 tier monthly cap), `spend_limit` (400 self-set
+ * org/workspace limit). Any later non-billing outcome replaces the event,
+ * so it clears.
+ */
+export type KeyBillingStopKind =
+  | 'credits_exhausted'
+  | 'billing_error'
+  | 'tier_spend_cap'
+  | 'spend_limit';
+
+export interface KeyUsageMonth {
+  /** 1st 00:00 UTC; later when request-log retention cuts in (estimated source). */
+  start_unix_secs: number;
+  /** Next 1st 00:00 UTC. */
+  end_unix_secs: number;
+  /** Total tokens; source/attribution/stale are the response's top-level fields. */
+  tokens: number;
+  /** At list price — always an estimate. */
+  cost_usd_micros: number;
+  billing_stop: {
+    kind: KeyBillingStopKind;
+    observed_at_unix_secs: number;
+  } | null;
+}
+
+/** What the usage card needs to label its figures; see `keyUsageProvenance`. */
+export interface KeyUsageProvenance {
+  source: 'reported' | 'estimated';
+  /**
+   * Reported figures are Anthropic's last snapshot, kept while reports
+   * fail: still reported data, just not current.
+   */
+  stale: boolean;
+  /**
+   * Anthropic refuses the reports (401/403, `usage_poll_failed`): the Stopped
+   * banner and its fix. A transient outage is `stale` without `stopped`.
+   */
+  stopped: boolean;
+  /**
+   * Reported data only: when Anthropic last answered a usage poll (the
+   * stored success time, not a bucket or window edge); `null` if unknown.
+   */
+  last_reported_unix_secs: number | null;
+  /**
+   * Access says Reported but no report has landed yet: the first poll is
+   * queued and the figures are still cc-lb's estimate.
+   */
+  pending_first_report: boolean;
+  attribution: 'api_key' | 'workspace';
+  /**
+   * Name (or id) of the workspace a `workspace` attribution sums, from the
+   * response's own subject: the access name only when it is that workspace.
+   */
+  workspace: string | null;
+  verified: boolean;
+  key_class: ApiKeyClass;
+  fix: RemediationCode | null;
+}
+
+/** The response's own workspace, named when access still describes it. */
+function attributedWorkspace(
+  usage: UpstreamKeyUsageResponse,
+  access: ApiKeyAccess,
+): string | null {
+  const id = usage.attribution_workspace_id;
+  if (id === null) return null;
+  return access.workspace.id === id ? (access.workspace.name ?? id) : id;
+}
+
+export function keyUsageProvenance(
+  usage: UpstreamKeyUsageResponse,
+  access: ApiKeyAccess,
+): KeyUsageProvenance {
+  const reported = usage.source === 'real';
+  const fix = usage.fix?.code ?? null;
+  return {
+    source: reported ? 'reported' : 'estimated',
+    stale: reported && usage.stale,
+    // R2-2: only Anthropic's refusal stops reports; a 5xx streak is stale.
+    stopped: fix === 'usage_poll_failed',
+    last_reported_unix_secs: reported ? usage.last_reported_unix_secs : null,
+    pending_first_report:
+      !reported && fix === null && access.usage_report === 'ok',
+    attribution: usage.attribution,
+    workspace: attributedWorkspace(usage, access),
+    verified: access.verified,
+    key_class: access.key_class,
+    fix,
+  };
+}
+
 export const UpstreamSchema = z.object({
   id: z.string(),
   name: z.string(),
   kind: z.enum(['anthropic_api_key', 'anthropic_oauth']),
   enabled: z.boolean(),
   base_url: z.string().nullable(),
-  api_key_env: z.string().nullable().optional(),
+
+  /** `anthropic_api_key` upstreams only; absent on rows never checked. */
+  api_key_access: ApiKeyAccessSchema.nullable().optional(),
   warmup_enabled: z.boolean(),
   warmup_dialect_plugin: z
     .object({
@@ -813,6 +1182,28 @@ export const UpstreamSchema = z.object({
 });
 
 export type Upstream = z.infer<typeof UpstreamSchema>;
+
+/** Snapshot of an API-key upstream saved before key checks existed. */
+export const API_KEY_ACCESS_NOT_CHECKED: ApiKeyAccess = {
+  verified: false,
+  checked_at_unix_secs: null,
+  key_class: 'unknown',
+  inference: 'unverified',
+  workspace: { mode: 'required' },
+  workspace_list: 'not_applicable',
+  usage_report: 'not_applicable',
+  key_type: null,
+  last_error: null,
+};
+
+/**
+ * An API-key upstream's capability snapshot; a missing one reads as never
+ * checked (unverified). `null` for OAuth upstreams.
+ */
+export function apiKeyAccessOf(upstream: Upstream): ApiKeyAccess | null {
+  if (upstream.kind !== 'anthropic_api_key') return null;
+  return upstream.api_key_access ?? API_KEY_ACCESS_NOT_CHECKED;
+}
 
 export type OAuthTokenMode = 'long_lived_365d' | 'refreshing';
 

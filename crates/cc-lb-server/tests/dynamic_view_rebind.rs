@@ -80,6 +80,8 @@ async fn create_api_key_upstream(
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -212,6 +214,8 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -291,6 +295,8 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await
@@ -455,6 +461,8 @@ async fn repaired_upstream_leaves_apply_error_and_becomes_routable() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await

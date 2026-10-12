@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::Upstream;
-use cc_lb_storage_api::{StorageError, UpstreamRecord, UpstreamStore};
+use cc_lb_storage_api::{StorageError, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore};
 use cc_lb_upstream::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, UpstreamError,
@@ -24,6 +24,9 @@ use uuid::Uuid;
 
 const OAUTH_EXPIRY_SKEW_SECS: u64 = 30;
 const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
+/// `last_apply_error` for a rejected credential; `refresh_requires_reconnect`
+/// treats it as reconnect-required, matching the usage poll.
+const LONG_LIVED_REJECTED_REASON: &str = "status_401";
 
 pub use http_client::{
     HyperOAuthHttpClient, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
@@ -263,6 +266,17 @@ impl AnthropicOAuthSignerFactory {
 
         ensure_oauth_upstream_usable(&record, self.allow_disabled_upstream)?;
         let tokens = decrypt_upstream_tokens(&self.aead, &record)?;
+        if tokens.never_refresh
+            && cc_lb_oauth_protocol::refresh_requires_reconnect(record.last_apply_error.as_deref())
+        {
+            // A rejected long-lived credential cannot recover without an
+            // operator reconnect; refuse it before dispatch so the request
+            // fails over without another upstream round-trip.
+            return Err(SignerError::ExpiredToken {
+                reason: "long-lived oauth access token rejected; reauthorization required"
+                    .to_owned(),
+            });
+        }
         Ok((record, tokens))
     }
 }
@@ -367,7 +381,7 @@ impl PersistedAnthropicOAuthSigner {
         let lock = single_flight::lock_for(&self.refresh_locks, "upstream", &upstream_key);
         let _guard = lock.lock().await;
 
-        let current = self.load_current_tokens().await?;
+        let (oauth_token_generation, current) = self.load_current_tokens().await?;
         if self.storage_has_newer_usable_token(&current) {
             return Ok(current);
         }
@@ -375,7 +389,10 @@ impl PersistedAnthropicOAuthSigner {
         if current.never_refresh {
             // A long-lived credential was rejected by Anthropic. Rotating it here
             // would destroy the 365-day grant and yield an 8-hour token at best,
-            // so surface a terminal error that asks the operator to reauthorize.
+            // so record the reconnect-required state routing honors and surface
+            // a terminal error that asks the operator to reauthorize.
+            self.persist_reconnect_required(oauth_token_generation)
+                .await;
             return Err(SignerError::ExpiredToken {
                 reason: "long-lived oauth access token rejected; reauthorization required"
                     .to_owned(),
@@ -395,7 +412,7 @@ impl PersistedAnthropicOAuthSigner {
                 reason: source.to_string(),
             })?;
 
-        let refreshed = self.load_current_tokens().await?;
+        let (_, refreshed) = self.load_current_tokens().await?;
         if persisted_token_is_usable(refreshed.expires_at_unix_secs, self.clock.as_ref()) {
             Ok(refreshed)
         } else {
@@ -405,7 +422,8 @@ impl PersistedAnthropicOAuthSigner {
         }
     }
 
-    async fn load_current_tokens(&self) -> Result<OAuthTokenBundle, SignerError> {
+    /// Load the stored credential with the token generation it belongs to.
+    async fn load_current_tokens(&self) -> Result<(u64, OAuthTokenBundle), SignerError> {
         let record = self
             .store
             .get_by_id(self.upstream_id)
@@ -415,7 +433,27 @@ impl PersistedAnthropicOAuthSigner {
                 reason: "oauth upstream not found".to_owned(),
             })?;
         ensure_oauth_upstream_usable(&record, self.allow_disabled_upstream)?;
-        decrypt_upstream_tokens(&self.aead, &record)
+        let tokens = decrypt_upstream_tokens(&self.aead, &record)?;
+        Ok((record.oauth_token_generation, tokens))
+    }
+
+    /// Record the same reconnect-required reason the usage poll writes for a
+    /// rejected credential. The generation guard keeps a reconnect that
+    /// replaced the credential meanwhile from being marked.
+    async fn persist_reconnect_required(&self, oauth_token_generation: u64) {
+        let status = UpstreamStatusUpdate {
+            last_apply_error: Some(Some(LONG_LIVED_REJECTED_REASON.to_owned())),
+            expected_oauth_token_generation: Some(oauth_token_generation),
+            ..UpstreamStatusUpdate::default()
+        };
+        match self.store.set_status(self.upstream_id, status).await {
+            Ok(()) | Err(StorageError::Conflict { .. }) => {}
+            Err(error) => tracing::warn!(
+                upstream_id = %self.upstream_id,
+                %error,
+                "failed to record reconnect-required state for rejected long-lived oauth credential",
+            ),
+        }
     }
 
     fn storage_has_newer_usable_token(&self, current: &OAuthTokenBundle) -> bool {
@@ -493,6 +531,8 @@ impl Signer for PersistedAnthropicOAuthSigner {
         let header_value = bearer_header_value(self.access_token.expose_secret())?;
         let headers = shaped.headers_mut();
         headers.remove("x-api-key");
+        // A workspace only scopes API keys; an OAuth request never carries one.
+        headers.remove(cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER);
         headers.insert(AUTHORIZATION, header_value);
         merge_anthropic_beta(headers)?;
         Ok(SignedRequest::from_shaped(shaped, capability))
@@ -678,6 +718,7 @@ mod tests {
                 warmup_enabled: create.warmup_enabled,
                 warmup_dialect_plugin: None,
                 last_warmup_at_unix_secs: None,
+                workspace_id: create.workspace_id,
             };
             records.push(record.clone());
             Ok(record)
@@ -1093,6 +1134,40 @@ mod tests {
         );
     }
 
+    /// OAU-04 / OAU-05: an OAuth request drops an inherited `x-api-key` and
+    /// every client `anthropic-workspace-id`, and carries only the bearer.
+    #[tokio::test]
+    async fn oau_04_signer_strips_api_key_and_workspace_headers() {
+        let signer = persisted_signer().await;
+        let mut shaped = shaped_request();
+        let headers = shaped.headers_mut();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-inherited"));
+        headers.append(
+            cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER,
+            HeaderValue::from_static("wrkspc_client"),
+        );
+        headers.append(
+            cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER,
+            HeaderValue::from_static("wrkspc_client2"),
+        );
+
+        let signed = sign_request(signer.as_ref(), shaped).await.unwrap();
+
+        assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(
+            !signed
+                .headers()
+                .contains_key(cc_lb_domain::ANTHROPIC_WORKSPACE_ID_HEADER)
+        );
+        assert_eq!(
+            signed
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer access-token")
+        );
+    }
+
     #[tokio::test]
     async fn merge_anthropic_beta_preserves_client_flags_persisted_signer() {
         let signer = persisted_signer().await;
@@ -1295,6 +1370,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .unwrap()

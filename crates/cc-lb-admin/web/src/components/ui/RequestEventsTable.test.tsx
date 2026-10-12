@@ -56,8 +56,11 @@ describe('RequestEventsTable', () => {
   const principalNameMap = new Map<string, string>();
 
   it('skips unchanged row work across identical and single-event updates', () => {
+    // Row skipping is a per-row property: one changed row between two
+    // unchanged neighbours proves it. Mounting a large table only adds
+    // jsdom render time that runner CPU throttling can push past the timeout.
     const events: RequestEventWithPhase[] = Array.from(
-      { length: 200 },
+      { length: 3 },
       (_, index) => ({
         event_id: `evt_${index}`,
         request_id: `req_${index}`,
@@ -75,14 +78,17 @@ describe('RequestEventsTable', () => {
       />,
     );
 
-    expect(requestOutcomeWork).toHaveBeenCalledTimes(200);
-    const unchangedRow = container.querySelector<HTMLTableRowElement>(
-      'tr[aria-label="View request evt_72"]',
-    );
-    const changedRow = container.querySelector<HTMLTableRowElement>(
-      'tr[aria-label="View request evt_73"]',
-    );
-    if (!unchangedRow || !changedRow) throw new Error('Expected request rows');
+    expect(requestOutcomeWork).toHaveBeenCalledTimes(3);
+    const rowFor = (eventId: string) =>
+      container.querySelector<HTMLTableRowElement>(
+        `tr[aria-label="View request ${eventId}"]`,
+      );
+    const unchangedBefore = rowFor('evt_0');
+    const changedRow = rowFor('evt_1');
+    const unchangedAfter = rowFor('evt_2');
+    if (!unchangedBefore || !changedRow || !unchangedAfter) {
+      throw new Error('Expected request rows');
+    }
 
     requestOutcomeWork.mockClear();
     rerender(
@@ -94,9 +100,9 @@ describe('RequestEventsTable', () => {
     expect(requestOutcomeWork).not.toHaveBeenCalled();
 
     const changedEvents = [...events];
-    const changedEvent = changedEvents[73];
+    const changedEvent = changedEvents[1];
     if (!changedEvent) throw new Error('Expected changed event');
-    changedEvents[73] = { ...changedEvent, status: 500 };
+    changedEvents[1] = { ...changedEvent, status: 500 };
 
     requestOutcomeWork.mockClear();
     rerender(
@@ -107,12 +113,9 @@ describe('RequestEventsTable', () => {
     );
 
     expect(requestOutcomeWork).toHaveBeenCalledTimes(1);
-    expect(
-      container.querySelector('tr[aria-label="View request evt_72"]'),
-    ).toBe(unchangedRow);
-    expect(
-      container.querySelector('tr[aria-label="View request evt_73"]'),
-    ).toBe(changedRow);
+    expect(rowFor('evt_0')).toBe(unchangedBefore);
+    expect(rowFor('evt_1')).toBe(changedRow);
+    expect(rowFor('evt_2')).toBe(unchangedAfter);
     expect(changedRow.textContent).toContain('500');
   });
 

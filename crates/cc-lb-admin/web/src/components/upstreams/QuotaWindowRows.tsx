@@ -165,21 +165,27 @@ export function QuotaWindowRow({
         />
       </div>
       <span className={USED_CELL_CLASS}>{used}</span>
-      {facts.length ? (
-        <span data-slot="window-facts" className={FACTS_CELL_CLASS}>
-          {facts.map((fact, index) => (
-            <span key={index} className="inline-flex items-center gap-x-2">
-              {index > 0 ? (
-                <span aria-hidden="true" className="text-text-faint">
-                  ·
-                </span>
-              ) : null}
-              {fact}
-            </span>
-          ))}
-        </span>
-      ) : null}
+      <FactsCell facts={facts} />
     </div>
+  );
+}
+
+/** The muted, ` · `-separated facts cell shared by every row kind. */
+function FactsCell({ facts }: { facts: ReactNode[] }) {
+  if (!facts.length) return null;
+  return (
+    <span data-slot="window-facts" className={FACTS_CELL_CLASS}>
+      {facts.map((fact, index) => (
+        <span key={index} className="inline-flex items-center gap-x-2">
+          {index > 0 ? (
+            <span aria-hidden="true" className="text-text-faint">
+              ·
+            </span>
+          ) : null}
+          {fact}
+        </span>
+      ))}
+    </span>
   );
 }
 

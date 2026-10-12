@@ -12,11 +12,12 @@ use cc_lb_storage_api::{
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
+use super::upstream_api_key::{reset_api_key_poll_state_in_tx, write_api_key_access_in_tx};
 use crate::{SqliteStorage, map_sqlx_error};
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, COALESCE(token.never_refresh, 0) AS oauth_never_refresh, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, COALESCE(token.never_refresh, 0) AS oauth_never_refresh, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin, spec.workspace_id"
     };
 }
 
@@ -25,6 +26,9 @@ macro_rules! split_upstream_joins {
         " FROM upstream_spec_v1 spec LEFT JOIN upstream_api_key_secret_v1 secret ON secret.upstream_id = spec.id LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id "
     };
 }
+
+pub(crate) use split_upstream_columns;
+pub(crate) use split_upstream_joins;
 
 #[async_trait]
 impl UpstreamStore for SqliteStorage {
@@ -203,7 +207,7 @@ async fn create_split(
     let mut tx = storage.begin_immediate().await?;
     let id = create.id;
     sqlx::query(
-        "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, spec_revision, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, 1, unixepoch(), unixepoch())",
+        "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, workspace_id, spec_revision, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, 1, unixepoch(), unixepoch())",
     )
     .bind(id.to_string())
     .bind(&create.name)
@@ -211,6 +215,7 @@ async fn create_split(
     .bind(create.base_url.as_ref().map(ToString::to_string))
     .bind(create.warmup_enabled)
     .bind(json_string(create.warmup_dialect_plugin.as_ref())?)
+    .bind(create.workspace_id.as_deref())
     .execute(&mut *tx)
     .await
     .map_err(map_sqlite_error)?;
@@ -237,6 +242,11 @@ async fn create_split(
         .await
         .map_err(map_sqlx_error)?;
         clear_split_apply_error_in_tx(&mut tx, id).await?;
+    }
+
+    if let Some(access) = create.api_key_access.as_ref() {
+        let now = now_unix_secs_u64(storage.clock())?;
+        write_api_key_access_in_tx(&mut tx, id, access, now).await?;
     }
 
     let record = require_split_in_tx(&mut tx, id).await?;
@@ -334,15 +344,22 @@ async fn update_split(
     expected_revision: u64,
     mut update: UpstreamUpdate,
 ) -> StorageResult<UpstreamRecord> {
+    // An api-key secret replace counts as a spec update: replicas must
+    // rebind the credential, and the spec_revision bump makes in-flight
+    // expected-revision guards fail rather than overwrite the new key.
     let has_spec_update = update.name.is_some()
         || update.base_url.is_some()
         || update.enabled.is_some()
         || update.warmup_enabled.is_some()
-        || update.warmup_dialect_plugin.is_some();
+        || update.warmup_dialect_plugin.is_some()
+        || update.workspace_id.is_some()
+        || update.api_key_ciphertext.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_token_generation = update.oauth_token_generation.take();
-    // Spec, api-key, and generation updates share one transaction so a partial
-    // update can never commit independently.
+    let api_key_access = update.api_key_access.take();
+    let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
+    // Spec, api-key, generation, and details updates share one transaction so
+    // a partial update can never commit independently.
     let mut tx = storage.begin_immediate().await?;
     if has_spec_update {
         update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
@@ -355,6 +372,14 @@ async fn update_split(
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation_in_tx(&mut tx, id, generation).await?;
     }
+    write_split_details_in_tx(
+        storage,
+        &mut tx,
+        id,
+        api_key_access.as_ref(),
+        reset_api_key_poll_state,
+    )
+    .await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -364,16 +389,48 @@ async fn update_split_spec(
     storage: &SqliteStorage,
     id: Uuid,
     expected_revision: u64,
-    update: UpstreamUpdate,
+    mut update: UpstreamUpdate,
 ) -> StorageResult<UpstreamRecord> {
     if let Some(name) = update.name.as_deref() {
         validate_identifier("upstream.name", name)?;
     }
+    let api_key_access = update.api_key_access.take();
+    let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
     let mut tx = storage.begin_immediate().await?;
     update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    write_split_details_in_tx(
+        storage,
+        &mut tx,
+        id,
+        api_key_access.as_ref(),
+        reset_api_key_poll_state,
+    )
+    .await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
+}
+
+/// Details-row side of a spec update, inside the caller's transaction (which
+/// already validated the spec revision). `None`/`false` leave the row as is.
+async fn write_split_details_in_tx(
+    storage: &SqliteStorage,
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+    access: Option<&cc_lb_storage_api::ApiKeyAccessWrite>,
+    reset_api_key_poll_state: bool,
+) -> StorageResult<()> {
+    if access.is_none() && !reset_api_key_poll_state {
+        return Ok(());
+    }
+    let now = now_unix_secs_u64(storage.clock())?;
+    if let Some(access) = access {
+        write_api_key_access_in_tx(tx, id, access, now).await?;
+    }
+    if reset_api_key_poll_state {
+        reset_api_key_poll_state_in_tx(tx, id, now).await?;
+    }
+    Ok(())
 }
 
 async fn update_split_spec_in_tx(
@@ -389,6 +446,8 @@ async fn update_split_spec_in_tx(
         .as_ref()
         .and_then(Option::as_ref)
         .map(url::Url::as_str);
+    let workspace_id_present = update.workspace_id.is_some();
+    let workspace_id = update.workspace_id.as_ref().and_then(Option::as_deref);
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET name = COALESCE(?, name),
@@ -396,17 +455,20 @@ async fn update_split_spec_in_tx(
                enabled = COALESCE(?, enabled),
                warmup_enabled = COALESCE(?, warmup_enabled),
                warmup_dialect_plugin = COALESCE(?, warmup_dialect_plugin),
+               workspace_id = CASE WHEN ? THEN ? ELSE workspace_id END,
                spec_revision = spec_revision + 1,
                updated_at = unixepoch()
          WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL
          RETURNING id",
     )
-    .bind(update.name)
+    .bind(update.name.as_deref())
     .bind(base_url_present)
     .bind(base_url)
     .bind(update.enabled)
     .bind(update.warmup_enabled)
     .bind(warmup_dialect_plugin)
+    .bind(workspace_id_present)
+    .bind(workspace_id)
     .bind(id.to_string())
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
     .fetch_optional(&mut **tx)
@@ -425,6 +487,7 @@ async fn update_split_api_key_secret(
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
+    bump_split_spec_revision_in_tx(&mut tx, id).await?;
     let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(record)
@@ -570,6 +633,29 @@ async fn clear_split_apply_error_in_tx(
     Ok(())
 }
 
+/// Spec revision bump (same tx) for writes that are not full spec updates
+/// but still change what a replica applies, e.g. an api-key credential
+/// replace. Requires the caller to have verified the row is active first.
+async fn bump_split_spec_revision_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<()> {
+    let row = sqlx::query(
+        "UPDATE upstream_spec_v1
+           SET spec_revision = spec_revision + 1, updated_at = unixepoch()
+         WHERE id = ? AND deleted_at IS NULL
+         RETURNING id",
+    )
+    .bind(id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlite_error)?;
+    if row.is_none() {
+        return Err(conflict("upstream not found"));
+    }
+    Ok(())
+}
+
 async fn ensure_split_spec_revision_in_tx(
     tx: &mut Transaction<'static, Sqlite>,
     id: Uuid,
@@ -682,7 +768,7 @@ async fn set_split_status_in_tx(
     Ok(())
 }
 
-fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
+pub(crate) fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
     let id = row.try_get::<String, _>("id").map_err(map_sqlx_error)?;
     let kind = parse_kind(row.try_get::<String, _>("kind").map_err(map_sqlx_error)?)?;
     let base_url = row
@@ -750,6 +836,7 @@ fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
             row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
             "last_warmup_at",
         )?,
+        workspace_id: row.try_get("workspace_id").map_err(map_sqlx_error)?,
     })
 }
 
@@ -790,33 +877,33 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
     }
 }
 
-fn optional_i64_to_u64(value: Option<i64>, field: &str) -> StorageResult<Option<u64>> {
+pub(crate) fn optional_i64_to_u64(value: Option<i64>, field: &str) -> StorageResult<Option<u64>> {
     value.map(|value| i64_to_u64(value, field)).transpose()
 }
 
-fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {
+pub(crate) fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::Fatal {
         message: format!("{field} cannot be represented as sqlite integer"),
     })
 }
 
-fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
+pub(crate) fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::Fatal {
         message: format!("{field} cannot be represented as sqlite integer"),
     })
 }
 
-fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
+pub(crate) fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} is negative"),
     })
 }
 
-fn now_unix_secs_u64(clock: &dyn Clock) -> StorageResult<u64> {
+pub(crate) fn now_unix_secs_u64(clock: &dyn Clock) -> StorageResult<u64> {
     Ok(unix_secs(clock.now()))
 }
 
-fn conflict(message: impl Into<String>) -> StorageError {
+pub(crate) fn conflict(message: impl Into<String>) -> StorageError {
     StorageError::Conflict {
         message: message.into(),
     }

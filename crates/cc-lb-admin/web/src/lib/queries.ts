@@ -17,6 +17,7 @@ import {
 import { useMemo } from 'react';
 import {
   type AggregateResponse,
+  type AnthropicWorkspace,
   ApiError,
   type Upstream as ApiUpstream,
   type AuditQueryResponse,
@@ -43,14 +44,18 @@ import {
   type PoolHistoryResponse,
   patchJson,
   postJson,
+  preflightApiKey,
   putJson,
   type RecentEventsPayload,
   type RequestEvent,
+  recheckApiKey,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
   startOauthDraft,
   triggerSubscriptionMetadataRefresh,
+  type UpstreamKeyUsageResponse,
   type UpstreamOAuthStatusResponse,
+  type UpstreamWorkspacesResponse,
 } from './api';
 
 import {
@@ -284,6 +289,9 @@ export const qk = {
     ] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
+  upstreamWorkspaces: (id: string) => ['upstream-workspaces', id] as const,
+  upstreamKeyUsage: (id: string, range: string, step: string) =>
+    ['upstream-key-usage', id, range, step] as const,
   principals: ['principals'] as const,
   principal: (id: string) => ['principal', id] as const,
   routerTerminal: (id: string) => ['router-terminal', id] as const,
@@ -899,12 +907,21 @@ export interface CreateUpstreamRequest {
   name: string;
   kind: string;
   base_url?: string | null;
-  api_key_env?: string | null;
   api_key_value?: string | null;
+  /** Org-scoped API keys: the `anthropic-workspace-id` every request carries. */
+  workspace_id?: string | null;
+  /** Save an API key Anthropic could not be asked about; stored unverified. */
+  skip_preflight?: boolean;
 }
+/**
+ * The connect dialog is the only caller: a refused save goes back to the step
+ * that owns its fix, anything else is a `role="alert"` notice there. Never a
+ * toast (one surface per failure).
+ */
 export function useCreateUpstream() {
   const qc = useQueryClient();
   return useMutation({
+    meta: { inlineError: true },
     mutationFn: (body: CreateUpstreamRequest) =>
       postJson<Upstream, CreateUpstreamRequest>('/admin/v1/upstreams', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
@@ -927,8 +944,15 @@ export interface UpdateUpstreamRequest {
   name?: string | null;
   base_url?: string | null;
   clear_base_url?: boolean;
-  api_key_env?: string | null;
   api_key_value?: string | null;
+  /**
+   * Org-scoped API keys only; the server re-probes before persisting. Like
+   * `base_url`, `null` keeps the stored value: clearing needs
+   * `clear_workspace_id`.
+   */
+  workspace_id?: string | null;
+  clear_workspace_id?: boolean;
+  skip_preflight?: boolean;
 }
 
 export interface UpdateUpstreamWarmupSettingsRequest {
@@ -947,9 +971,15 @@ export type FireNowResponse =
   | { fired: false; reason: 'lease_held'; held_by: string }
   | { fired: false; reason: FireNowErrorReason };
 
-export function useUpdateUpstream() {
+/** `inlineError`: the caller renders failures next to the input, no toast. */
+export function useUpdateUpstream({
+  inlineError = false,
+}: {
+  inlineError?: boolean;
+} = {}) {
   const qc = useQueryClient();
   return useMutation({
+    meta: { inlineError },
     mutationFn: ({
       id,
       body,
@@ -967,8 +997,102 @@ export function useUpdateUpstream() {
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
+      // Key, workspace and endpoint edits change whose usage the card reads
+      // and which workspaces the key lists.
+      qc.invalidateQueries({ queryKey: qk.upstreamWorkspaces(vars.id) });
+      qc.invalidateQueries({ queryKey: ['upstream-key-usage', vars.id] });
     },
   });
+}
+
+/** Classify a key before saving it; failures render inline, never a toast. */
+export function usePreflightApiKey() {
+  return useMutation({
+    mutationKey: ['upstreams', 'preflight'],
+    mutationFn: preflightApiKey,
+    meta: { inlineError: true },
+  });
+}
+
+/** Re-check a stored key; the server persists the new `api_key_access`. */
+export function useRecheckApiKey() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: ['upstreams', 'recheck-key'],
+    mutationFn: recheckApiKey,
+    meta: { inlineError: true },
+    onSuccess: async (_response, id) => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: qk.upstreams }),
+        qc.invalidateQueries({ queryKey: qk.upstream(id) }),
+        qc.invalidateQueries({ queryKey: qk.upstreamWorkspaces(id) }),
+        qc.invalidateQueries({ queryKey: ['upstream-key-usage', id] }),
+      ]);
+    },
+  });
+}
+
+export type UpstreamWorkspacesResult =
+  | { status: 'ok'; workspaces: AnthropicWorkspace[] }
+  | { status: 'denied' | 'not_applicable' };
+
+/**
+ * Workspaces the stored key can list. A 403 is an expected answer, not a
+ * failure, so it resolves instead of toasting: `not_applicable` when the
+ * upstream points away from api.anthropic.com (`non_anthropic_base_url`),
+ * otherwise `denied` (role too low). Other failures stay errors, rendered
+ * inline by the workspace editor (`meta.inlineError`: no toast).
+ */
+export function useUpstreamWorkspaces(upstreamId: string | null) {
+  return useQuery({
+    queryKey: qk.upstreamWorkspaces(upstreamId ?? ''),
+    enabled: upstreamId !== null,
+    retry: false,
+    meta: { inlineError: true },
+    queryFn: async ({ signal }): Promise<UpstreamWorkspacesResult> => {
+      try {
+        const res = await getJson<UpstreamWorkspacesResponse>(
+          `/admin/v1/upstreams/${upstreamId}/workspaces`,
+          { signal },
+        );
+        return { status: 'ok', workspaces: res.workspaces };
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 403) {
+          return {
+            status:
+              error.code === 'non_anthropic_base_url'
+                ? 'not_applicable'
+                : 'denied',
+          };
+        }
+        throw error;
+      }
+    },
+  });
+}
+
+/**
+ * Reported-or-estimated usage series for one API-key upstream (plan §7).
+ * The card renders load failures itself (`meta.inlineError`: no toast).
+ */
+export function useUpstreamKeyUsage(
+  upstreamId: string | null,
+  range: string,
+  step: string,
+) {
+  return usePolledData(
+    {
+      queryKey: qk.upstreamKeyUsage(upstreamId ?? '', range, step),
+      enabled: upstreamId !== null,
+      meta: { inlineError: true },
+      queryFn: ({ signal }) =>
+        getJson<UpstreamKeyUsageResponse>(
+          `/admin/v1/upstreams/${upstreamId}/usage?${new URLSearchParams({ range, step })}`,
+          { signal },
+        ),
+    },
+    POLLING_INTERVALS.USAGE_MS,
+  );
 }
 export function useFireNowUpstreamWarmup() {
   const qc = useQueryClient();

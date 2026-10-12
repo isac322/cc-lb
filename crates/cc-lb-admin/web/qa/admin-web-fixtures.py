@@ -858,7 +858,7 @@ def prepare_fixture(args: argparse.Namespace) -> None:
             "name": "qa-api-active",
             "kind": "anthropic_api_key",
             "base_url": loopback_origin(args.fake_upstream_url, "fake upstream URL"),
-            "api_key_value": "sk-ant-admin-web-qa-" + secrets.token_urlsafe(24),
+            "api_key_value": "sk-ant-api03-admin-web-qa-" + secrets.token_urlsafe(24),
             "warmup_enabled": False,
         },
     )
@@ -868,7 +868,7 @@ def prepare_fixture(args: argparse.Namespace) -> None:
             "name": "qa-api-disabled",
             "kind": "anthropic_api_key",
             "base_url": loopback_origin(args.fake_upstream_url, "fake upstream URL"),
-            "api_key_value": "sk-ant-admin-web-qa-" + secrets.token_urlsafe(24),
+            "api_key_value": "sk-ant-api03-admin-web-qa-" + secrets.token_urlsafe(24),
             "warmup_enabled": False,
         },
     )
@@ -894,7 +894,7 @@ def prepare_fixture(args: argparse.Namespace) -> None:
             "name": "qa-upstream-delete-target",
             "kind": "anthropic_api_key",
             "base_url": loopback_origin(args.fake_upstream_url, "fake upstream URL"),
-            "api_key_value": "sk-ant-admin-web-qa-" + secrets.token_urlsafe(24),
+            "api_key_value": "sk-ant-api03-admin-web-qa-" + secrets.token_urlsafe(24),
             "warmup_enabled": False,
         },
     )

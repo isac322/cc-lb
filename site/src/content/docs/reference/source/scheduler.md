@@ -13,7 +13,7 @@ The system consists of the following components:
 - **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles and OAuth token refreshes.
 - **Singleton Jobs**: Periodic maintenance tasks that must produce at most one queued job per tick across the cluster. Examples include usage rollups, database pruning, and quota garbage collection.
 - **Watchdogs**: Periodic singleton jobs that scan active upstreams and enqueue missing entity jobs into Apalis storage.
-- **Cron Producers**: Every replica runs its own `apalis-cron` `CronStream`. Duplicate pushes for the same tick collide on the storage-level unique `(job_type, idempotency_key)` index, so exactly one job per tick is queued. Any Apalis worker on any replica can then claim and execute it. This follows the maintainer-recommended clustered-cron pattern (see [apalis#281](https://github.com/apalis-dev/apalis/issues/281) option 3).
+- **Cron Producers**: Every replica polls its own `apalis_cron::Schedule` and sleeps until each tick; a tick that has already elapsed fires immediately instead of erroring. Duplicate pushes for the same tick collide on the storage-level unique `(job_type, idempotency_key)` index, so exactly one job per tick is queued. Any Apalis worker on any replica can then claim and execute it. This follows the maintainer-recommended clustered-cron pattern (see [apalis#281](https://github.com/apalis-dev/apalis/issues/281) option 3).
 
 ### Worker Layout Diagram
 
@@ -90,7 +90,7 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
   - Cardinality: bounded registered job types * 6 statuses; includes `adaptive:cache_keepalive`.
 - `cclb_scheduler_job_duration_seconds` (Histogram): Tracks job handler execution duration.
   - Labels: `job_type`
-  - Cardinality: 12
+  - Cardinality: 15 (one per registered job type)
 - `cclb_scheduler_failures_total` (Counter): Tracks terminal job failures.
   - Labels: `job_type`
   - Cardinality: bounded registered job types; includes `adaptive:cache_keepalive`.
@@ -105,8 +105,8 @@ Cache keepalive-specific operator notes:
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.
   - Cardinality: 1
 - `cclb_scheduler_prune_rows_removed_total` (Counter): Tracks pruned rows.
-  - Labels: `table` (request_events, audit_log, upstream_affinity)
-  - Cardinality: 3
+  - Labels: `table` (request_events, audit_log, upstream_affinity, upstream_api_usage)
+  - Cardinality: 4
 - `cclb_scheduler_price_catalog_status_total` (Counter): Tracks price catalog refresh outcomes.
   - Labels: `status` (applied, noop)
   - Cardinality: 2
@@ -115,6 +115,10 @@ Cache keepalive-specific operator notes:
 - `cclb_scheduler_metadata_refresh_status_total` (Counter): Tracks metadata refresh outcomes.
   - Labels: `status`
   - Cardinality: Variable (low)
+
+- `cclb_scheduler_api_key_usage_poll_total` (Counter): Tracks API-key usage poll outcomes; one per polled upstream per tick.
+  - Labels: `outcome` (success, probed, denied, rate_limited, failed, decrypt_failed, not_applicable, no_subject, conflict, claim_lost, lease_spent, storage_error)
+  - Cardinality: 12
 
 ## 9. "Local vs Durable" Rule
 

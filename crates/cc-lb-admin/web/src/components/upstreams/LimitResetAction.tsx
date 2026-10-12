@@ -14,7 +14,7 @@ import {
   isUnknownClaimError,
   type LimitResetGrant,
   loadPendingLimitResetOp,
-  newLimitResetRequestId,
+  newUuid,
   type PendingLimitResetOp,
   savePendingLimitResetOp,
   useClaimLimitReset,
@@ -156,7 +156,7 @@ export function LimitResetAction({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null);
   // One request_id per confirmation, generated when the dialog opens.
-  const [requestId, setRequestId] = useState(() => newLimitResetRequestId());
+  const [requestId, setRequestId] = useState(() => newUuid());
   const [pendingOp, setPendingOp] = useState<PendingLimitResetOp | null>(() =>
     loadPendingLimitResetOp(upstream.id),
   );
@@ -272,7 +272,7 @@ export function LimitResetAction({
   const openDialog = () => {
     if (actionDisabled) return;
     setSelectedGrantId(null);
-    setRequestId(newLimitResetRequestId());
+    setRequestId(newUuid());
     setDismissArmed(false);
     setDialogOpen(true);
   };

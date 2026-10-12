@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use cc_lb_aead::AeadService;
+use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::Config;
 use cc_lb_server::app::build_app_with_storage;
-use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     ApiKeyMutation, IssueParams, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind,
     PrincipalStore, RequestEventStore, Storage as StorageTrait, StorageError, StorageResult,
@@ -40,6 +40,8 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await?;
@@ -87,6 +89,178 @@ async fn readyz_uses_declared_runtime_readiness_without_proxy_traffic() -> TestR
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["ready"], true);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OAuthFixture {
+    /// Credentials encrypted under another master key: well-formed, so apply
+    /// keeps the upstream Active, but they never decrypt.
+    Undecryptable,
+    /// Decryptable credentials whose account needs an operator reconnect.
+    ReconnectRequired,
+}
+
+/// Builds the app over one OAuth upstream in the given state, plus an
+/// API-key upstream when `with_api_key`, and returns the `/readyz` status and
+/// JSON body.
+async fn readyz_with_oauth(
+    oauth: OAuthFixture,
+    with_api_key: bool,
+) -> TestResult<(StatusCode, Value)> {
+    let clock: cc_lb_clock::ClockHandle = Arc::new(cc_lb_clock::SystemClock);
+    let dir = tempfile::tempdir()?;
+    let storage_path = dir.path().join("storage.sqlite");
+    let storage_arc = sqlite_storage(&storage_path).await?;
+    let aead = Arc::new(AeadService::from_master_key([0; 32]));
+    if with_api_key {
+        let upstream = UpstreamStore::create(
+            storage_arc.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: "healthy-api-key".to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await?;
+        let ciphertext = aead.encrypt(b"sk-ant-fixture-secret", upstream.id.as_bytes())?;
+        UpstreamStore::update_api_key_secret(storage_arc.as_ref(), upstream.id, Some(ciphertext))
+            .await?;
+    }
+    let oauth_upstream = UpstreamStore::create(
+        storage_arc.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "broken-oauth".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?;
+    let credential_key = match oauth {
+        OAuthFixture::Undecryptable => AeadService::from_master_key([9; 32]),
+        OAuthFixture::ReconnectRequired => AeadService::from_master_key([0; 32]),
+    };
+    let tokens = EncryptedOAuthTokens::encrypt(
+        &credential_key,
+        &OAuthTokenBundle {
+            access_token: "oauth-access".to_owned(),
+            refresh_token: "oauth-refresh".to_owned(),
+            expires_at_unix_secs: u64::MAX / 2,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: false,
+        },
+        oauth_upstream.id.as_bytes(),
+    )?;
+    let stored = UpstreamStore::store_oauth_tokens(
+        storage_arc.as_ref(),
+        oauth_upstream.id,
+        oauth_upstream.revision,
+        tokens,
+        false,
+    )
+    .await?;
+    if matches!(oauth, OAuthFixture::ReconnectRequired) {
+        UpstreamStore::set_status(
+            storage_arc.as_ref(),
+            stored.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some("status_401".to_owned())),
+                expected_oauth_token_generation: Some(stored.oauth_token_generation),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await?;
+    }
+    PrincipalStore::create(
+        storage_arc.as_ref(),
+        PrincipalCreate {
+            name: "declared-principal".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            cache_keepalive: None,
+        },
+        1,
+    )
+    .await?;
+
+    let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
+    let storage: Arc<dyn StorageTrait> = storage_arc.clone();
+    let mut config = Config {
+        storage: cc_lb_config::StorageConfig::Sqlite { path: storage_path },
+        ..Default::default()
+    };
+    config.runtime.data_dir = Some(dir.path().to_path_buf());
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    let app = build_app_with_storage(config, None, managed_store, storage, aead, clock).await?;
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/readyz")
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+#[tokio::test]
+async fn readyz_stays_ready_with_api_key_when_oauth_credentials_undecryptable() -> TestResult<()> {
+    let (status, json) = readyz_with_oauth(OAuthFixture::Undecryptable, true).await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ready"], true);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["reason"], "oauth_credentials_not_decryptable");
+    Ok(())
+}
+
+#[tokio::test]
+async fn readyz_not_ready_when_only_oauth_credentials_undecryptable() -> TestResult<()> {
+    let (status, json) = readyz_with_oauth(OAuthFixture::Undecryptable, false).await?;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["ready"], false);
+    assert_eq!(json["reason"], "no_ready_upstream");
+    Ok(())
+}
+
+#[tokio::test]
+async fn readyz_not_ready_when_only_oauth_requires_reconnect() -> TestResult<()> {
+    let (status, json) = readyz_with_oauth(OAuthFixture::ReconnectRequired, false).await?;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["reason"], "no_ready_upstream");
+    Ok(())
+}
+
+#[tokio::test]
+async fn readyz_ready_with_api_key_when_oauth_requires_reconnect() -> TestResult<()> {
+    let (status, json) = readyz_with_oauth(OAuthFixture::ReconnectRequired, true).await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ready"], true);
+    assert!(json.get("reason").is_none(), "{json}");
     Ok(())
 }
 

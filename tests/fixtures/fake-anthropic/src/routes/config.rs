@@ -14,6 +14,7 @@ use tokio::time::sleep;
 use crate::oauth_pause::OAuthRefreshPause;
 use crate::weather::WeatherConfig;
 
+use super::key_policy::{KeyPolicies, RequestRecorder};
 use super::state::with_fixture_headers;
 
 #[derive(Clone, Debug)]
@@ -22,8 +23,16 @@ pub struct AppConfig {
     pub files_cap_bytes: usize,
     pub tokens_expire_in: u64,
     pub oauth_refresh_pause: Option<OAuthRefreshPause>,
+    /// Holds every org usage-report response until released, after the
+    /// request is recorded; lets a test keep one poll in flight.
+    pub usage_report_pause: Option<OAuthRefreshPause>,
     pub message_script: Option<MessageScript>,
     pub weather: WeatherConfig,
+    /// Per-key scripted answers; keys without a policy keep the default
+    /// behavior.
+    pub key_policies: KeyPolicies,
+    /// Log of every non-debug request.
+    pub recorder: RequestRecorder,
 }
 
 impl Default for AppConfig {
@@ -33,8 +42,11 @@ impl Default for AppConfig {
             files_cap_bytes: 104_857_600,
             tokens_expire_in: 3600,
             oauth_refresh_pause: None,
+            usage_report_pause: None,
             message_script: None,
             weather: WeatherConfig::default(),
+            key_policies: KeyPolicies::default(),
+            recorder: RequestRecorder::default(),
         }
     }
 }

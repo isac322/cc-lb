@@ -2,6 +2,8 @@
 mod auth_required;
 #[path = "cache_stats_injection.rs"]
 mod cache_stats_injection;
+#[path = "key_policies.rs"]
+mod key_policies;
 #[path = "long_error_mode.rs"]
 mod long_error_mode;
 #[path = "ok_path.rs"]

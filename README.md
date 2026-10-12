@@ -17,7 +17,7 @@ cc-lb is an operator-managed endpoint for Anthropic-compatible traffic. It keeps
 
 The current public upstream contract supports:
 
-- `anthropic_api_key`: an operator-configured Anthropic API-key upstream.
+- `anthropic_api_key`: an operator-configured Anthropic API-key upstream. Standard Console keys (workspace keys `sk-ant-api03-…` and personal or service-account keys `sk-ant-usr-…`) are checked before they are saved; Admin keys, Enterprise management keys, and OAuth tokens are rejected. Per-key usage is Anthropic's reported figures when the key's access allows it and cc-lb's estimates otherwise. Costs are list-price estimates, and the credit balance is not available through Anthropic's API.
 - `anthropic_oauth`: an Anthropic OAuth upstream managed through the admin surface.
 
 Other provider kinds are not part of the current supported scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
@@ -74,18 +74,17 @@ CC_LB_VERSION="$(
 CC_LB_IMAGE="ghcr.io/isac322/cc-lb:${CC_LB_VERSION}"
 ```
 
-Generate the master key and admin token into a local `.env` file without printing them, then add your upstream credential:
+Generate the master key and admin token into a local `.env` file without printing them:
 
 ```bash
 umask 077
 {
   printf 'CC_LB_MASTER_KEY=%s\n' "$(openssl rand -hex 32)"
   printf 'CC_LB_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 24)"
-  printf 'ANTHROPIC_API_KEY=%s\n' "replace-with-your-upstream-secret"
 } > .env
 ```
 
-Edit `.env` and replace the `ANTHROPIC_API_KEY` placeholder with a real Anthropic API key. The container reads it from the server process environment when you create an `anthropic_api_key` upstream (see the [install guide](https://cc-lb.bhyoo.com/docs/getting-started/install/)). Keep the file out of source control.
+Keep the file out of source control. The Anthropic upstream credential is supplied separately when you create an `anthropic_api_key` upstream — see the [install guide](https://cc-lb.bhyoo.com/docs/getting-started/install/).
 
 Create the container configuration `cc-lb.container.toml`:
 

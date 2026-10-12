@@ -122,6 +122,8 @@ async fn harness_with_scheduler(
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     };
     Harness {
         _dir: dir,
@@ -241,6 +243,8 @@ async fn oauth_complete_audit_failure_still_rebuilds_view() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -468,6 +472,8 @@ async fn oauth_complete_seed_failure_still_rebuilds_view() {
             oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await

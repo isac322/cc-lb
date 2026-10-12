@@ -133,6 +133,8 @@ impl Fixture {
             event_bus: None,
             storage_tail: cc_lb_admin::events::storage_tail_channel(),
             clock: clock.clone(),
+            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+                .expect("production Anthropic origin parses"),
         };
 
         Self {
@@ -160,6 +162,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("create upstream")
@@ -817,7 +821,6 @@ async fn create_from_oauth_draft_returns_the_stored_base_url_without_secrets() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(created["base_url"], base_url);
     assert!(created.get("api_key_value").is_none());
-    assert!(created.get("api_key_env").is_none());
     assert!(created.get("access_token").is_none());
     assert!(created.get("refresh_token").is_none());
 

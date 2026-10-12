@@ -182,6 +182,8 @@ async fn harness_with(
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     };
     Harness {
         _dir: dir,
@@ -258,7 +260,8 @@ async fn create_upstream(harness: &mut Harness, name: &str) -> Uuid {
                 "name": name,
                 "kind": "anthropic_api_key",
                 "base_url": "https://example.com",
-                "api_key_value": "sk-ant-post-commit"
+                "api_key_value": "sk-ant-post-commit",
+                "skip_preflight": true
             })),
             None,
         ))
@@ -360,6 +363,86 @@ async fn upstream_disable_audit_failure_still_rebuilds_view() {
 async fn upstream_patch_disable_audit_failure_still_rebuilds_view() {
     assert_disable_with_failed_audit_rebuilds_view("PATCH", "", Some(json!({ "enabled": false })))
         .await;
+}
+
+/// Hides the details table so every `get_api_key_details` read fails while
+/// spec writes, audit inserts, and view rebuilds keep working.
+async fn fail_details_reads(storage: &SqliteStorage) {
+    sqlx::query(
+        "ALTER TABLE upstream_api_key_details_v1 RENAME TO upstream_api_key_details_v1_hidden",
+    )
+    .execute(storage.pool())
+    .await
+    .expect("details table hidden");
+}
+
+/// Sends a disabling mutation while the API-key details projection cannot be
+/// read and checks the mutation still answers 200, omits the display-only
+/// `api_key_access` projection, and the serving view still reflects the
+/// committed disable.
+async fn assert_disable_with_failed_details_read_rebuilds_view(
+    method: &str,
+    uri_suffix: &str,
+    body: Option<Value>,
+) {
+    let mut harness = harness(Arc::new(cc_lb_clock::SystemClock)).await;
+    let id = create_upstream(&mut harness, "post-commit-details-failure").await;
+    assert_eq!(view_upstream_enabled(&harness.holder, id), Some(true));
+    fail_details_reads(&harness.storage).await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(admin_request(
+            method,
+            &format!("/admin/v1/upstreams/{id}{uri_suffix}"),
+            body,
+            Some("W/\"1\""),
+        ))
+        .await
+        .expect("disable request");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("x-cc-lb-generation").is_some());
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).expect("response is JSON");
+    assert_eq!(body["enabled"], false);
+    assert_eq!(
+        body["api_key_access"],
+        Value::Null,
+        "a failed details read drops the display-only projection"
+    );
+
+    let stored = UpstreamStore::get_by_id(&*harness.storage, id)
+        .await
+        .expect("stored upstream read")
+        .expect("upstream exists");
+    assert!(!stored.enabled, "the disable is committed");
+    assert_eq!(
+        view_upstream_enabled(&harness.holder, id),
+        Some(false),
+        "the serving view must stop offering the committed-disabled upstream"
+    );
+}
+
+#[tokio::test]
+async fn upstream_disable_details_read_failure_still_rebuilds_view() {
+    assert_disable_with_failed_details_read_rebuilds_view("POST", "/disable", None).await;
+}
+
+#[tokio::test]
+async fn upstream_patch_disable_details_read_failure_still_rebuilds_view() {
+    assert_disable_with_failed_details_read_rebuilds_view(
+        "PATCH",
+        "",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -483,6 +566,8 @@ async fn seed_warmup_oauth_upstream(storage: &SqliteStorage, base_url: &str) -> 
             oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await

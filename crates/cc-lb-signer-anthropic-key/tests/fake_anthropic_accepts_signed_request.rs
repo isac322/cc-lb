@@ -52,7 +52,8 @@ async fn fake_anthropic_accepts_signed_request() {
     )
     .expect("shape request");
 
-    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
+    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key", None)
+        .expect("factory")
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");

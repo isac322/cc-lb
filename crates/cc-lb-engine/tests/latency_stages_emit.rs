@@ -302,6 +302,7 @@ fn upstream_record(base_url: Url) -> UpstreamRecord {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
+        workspace_id: None,
     }
 }
 

@@ -464,6 +464,8 @@ async fn create_upstream(storage: &PostgresStorage, name: &str) -> TestResult<Uu
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await?

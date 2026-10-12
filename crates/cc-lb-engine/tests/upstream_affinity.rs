@@ -38,6 +38,7 @@ enum ResponseSpec {
         body: Bytes,
         content_encoding: &'static str,
     },
+    Status(StatusCode, Value),
 }
 
 #[derive(Default)]
@@ -72,6 +73,7 @@ impl UpstreamDispatch for RecordingDispatch {
             .expect("dispatch response lock")
             .pop_front()
             .unwrap_or_else(|| ResponseSpec::Json(json!({"type":"message"})));
+        let mut status = StatusCode::OK;
         let (content_type, content_encoding, body) = match response {
             ResponseSpec::Json(value) => (
                 "application/json",
@@ -102,9 +104,17 @@ impl UpstreamDispatch for RecordingDispatch {
                 Some(content_encoding),
                 Body::from(body),
             ),
+            ResponseSpec::Status(response_status, value) => {
+                status = response_status;
+                (
+                    "application/json",
+                    None,
+                    Body::from(Bytes::from(value.to_string())),
+                )
+            }
         };
         let mut response = Response::new(body);
-        *response.status_mut() = StatusCode::OK;
+        *response.status_mut() = status;
         response
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -290,6 +300,7 @@ fn upstream_record(id: Uuid, name: &str, enabled: bool) -> cc_lb_storage_api::Up
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
+        workspace_id: None,
     }
 }
 
@@ -618,6 +629,48 @@ async fn response_learning_pins_a_later_request_and_learns_pending_keys() {
     assert_eq!(
         store.upstream_for(&affinity_key("opaque-pending")),
         Some(origin)
+    );
+}
+
+#[tokio::test]
+async fn no_failover_when_request_affinity_pinned() {
+    let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let origin = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let store = Arc::new(MemoryAffinityStore::default());
+    store.insert_binding(UpstreamAffinityBinding {
+        key: affinity_key("opaque-pinned"),
+        upstream_id: origin,
+        observed_at_unix_secs: TEST_NOW_UNIX_SECS,
+        expires_at_unix_secs: None,
+    });
+    let rate_limited = json!({
+        "type": "error",
+        "error": {"type": "rate_limit_error", "message": "quota exhausted"}
+    });
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Status(
+        StatusCode::TOO_MANY_REQUESTS,
+        rate_limited,
+    ));
+    let pinned = lifecycle(
+        vec![
+            upstream_record(first, "first", true),
+            upstream_record(origin, "origin", true),
+        ],
+        dispatch.clone(),
+        Some(store),
+    );
+
+    let response = handle_authenticated(
+        &pinned,
+        messages_request(opaque_request(&["opaque-pinned"], false)),
+    )
+    .await
+    .expect("pinned request handled");
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        dispatch.urls.lock().expect("dispatch URL lock").as_slice(),
+        &["http://origin.local/v1/messages".to_owned()]
     );
 }
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -43,6 +44,13 @@ pub trait Signer: Send + Sync {
 
     /// Handles an unauthorized upstream response, optionally refreshing credentials.
     async fn on_unauthorized(&self, error: &UpstreamError) -> RetryDecision;
+
+    /// Masks this signer's stored secret in `text` before it reaches a stored
+    /// or logged sink. Called only on error paths. Signers without a static
+    /// secret keep the default, which returns `text` unchanged.
+    fn scrub_secrets<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        Cow::Borrowed(text)
+    }
 }
 
 /// Factory that builds upstream-specific signers.

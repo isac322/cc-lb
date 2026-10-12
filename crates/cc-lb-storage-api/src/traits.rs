@@ -384,6 +384,7 @@ pub trait Storage:
     + crate::pool_quota_history::PoolQuotaHistoryStore
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
+    + crate::upstream_api_key::UpstreamApiKeyStore
     + UpstreamAffinityStore
     + RequestEventStore
     + CacheKeepaliveProjectionStore
@@ -419,6 +420,7 @@ impl<T> Storage for T where
         + crate::pool_quota_history::PoolQuotaHistoryStore
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
+        + crate::upstream_api_key::UpstreamApiKeyStore
         + UpstreamAffinityStore
         + RequestEventStore
         + CacheKeepaliveProjectionStore

@@ -134,6 +134,11 @@
             "interval_secs": 3600,
             "jitter_secs": 30
           },
+          "api_key_usage_poll": {
+            "enabled": true,
+            "interval_secs": 300,
+            "jitter_secs": 15
+          },
           "oauth_refresh_watchdog": {
             "enabled": true,
             "interval_secs": 9360,
@@ -714,6 +719,7 @@
           "minimum": 0
         },
         "recurring_jobs": {
+          "description": "Built-in recurring jobs by name. `api_key_usage_poll` (default every\n300 s, 15 s jitter) requires `60 <= interval_secs <= 604800` and\n`jitter_secs < interval_secs`.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/RecurringJobConfig"
@@ -728,6 +734,11 @@
               "enabled": true,
               "interval_secs": 3600,
               "jitter_secs": 30
+            },
+            "api_key_usage_poll": {
+              "enabled": true,
+              "interval_secs": 300,
+              "jitter_secs": 15
             },
             "oauth_refresh_watchdog": {
               "enabled": true,

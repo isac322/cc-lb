@@ -4,7 +4,7 @@ use cc_lb_upstream::{RetryDecision, Signer, UpstreamError};
 
 #[tokio::test]
 async fn on_unauthorized_returns_fail() {
-    let signer = AnthropicKeySigner::new("sk-ant-test-key");
+    let signer = AnthropicKeySigner::new("sk-ant-test-key", None).expect("signer");
     let decision = signer
         .on_unauthorized(&UpstreamError::Unauthorized {
             status: http::StatusCode::UNAUTHORIZED,

@@ -319,6 +319,7 @@ fn registered_oauth_upstream() -> UpstreamRecord {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
+        workspace_id: None,
     }
 }
 
@@ -449,6 +450,8 @@ impl DispatchFixture {
             keepalive_dispatcher: Arc::new(NoopKeepaliveDispatcher),
             event_bus: Arc::new(cc_lb_control::InMemoryBus::new()) as Arc<dyn RequestEventBus>,
             clock,
+            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+                .expect("production Anthropic origin parses"),
         });
         Self {
             _dir: dir,
@@ -478,6 +481,8 @@ impl DispatchFixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await

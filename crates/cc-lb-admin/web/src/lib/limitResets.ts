@@ -149,7 +149,7 @@ export function useClaimLimitReset() {
 
 /** crypto.randomUUID is unavailable on insecure (non-localhost http) origins,
  *  so fall back to a getRandomValues-built v4 UUID for LAN deployments. */
-export function newLimitResetRequestId(): string {
+export function newUuid(): string {
   const c = globalThis.crypto;
   if (typeof c?.randomUUID === 'function') return c.randomUUID();
   if (typeof c?.getRandomValues === 'function') {

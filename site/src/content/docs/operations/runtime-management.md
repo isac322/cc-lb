@@ -33,3 +33,9 @@ The server does not rewrite operator key files automatically.
 A successful runtime update rebuilds the routing view. In a multi-replica Postgres deployment, replicas use database notifications and a periodic reconciliation fallback to converge their local views.
 
 The [consistency contract source notes](/docs/reference/source/consistency-contract/) list what each admin response guarantees about persistence, audit records, the routing-view rebuild, and convergence across replicas.
+
+## Readiness
+
+`/healthz` on the proxy listener answers `200` once the process is up. `/readyz` answers `200` only when the server has started, at least one principal is active, and at least one upstream is usable: enabled, applied, and, for OAuth, holding decryptable credentials that do not need a reconnect. Otherwise it answers `503` with `reason` set to `draining`, `startup_not_ready`, `no_ready_principal`, or `no_ready_upstream`.
+
+One broken OAuth upstream does not take a ready instance out of rotation. Routing skips it, and `/readyz` stays `200` with `reason: "oauth_credentials_not_decryptable"`. API-key preflight results, capability snapshots, and usage-report failures are not part of readiness; check them on the upstream instead.

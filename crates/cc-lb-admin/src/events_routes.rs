@@ -349,11 +349,12 @@ impl StreamEmitState {
         Some(sse)
     }
 
-    fn partial_message_event(&mut self, partial: &RequestEventPartial) -> Option<Event> {
+    // Partials are not recorded in `max_emitted_by_id`: that map dedupes
+    // finals by cursor, and a partial bookmarked at a cursor that already
+    // covers its own row would suppress the final queued behind it.
+    fn partial_message_event(&self, partial: &RequestEventPartial) -> Option<Event> {
         let update = RequestEventUpdate::partial(partial.clone());
-        let sse = message_event(&update, self.last_finalized_cursor)?;
-        self.remember_event_id(partial.event_id.clone(), self.last_finalized_cursor);
-        Some(sse)
+        message_event(&update, self.last_finalized_cursor)
     }
 
     fn partial_is_finalized(&self, partial: &RequestEventPartial) -> bool {

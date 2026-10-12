@@ -49,6 +49,8 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -79,6 +81,8 @@ async fn export_contains_no_plaintext_oauth_tokens() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -194,6 +198,8 @@ async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
