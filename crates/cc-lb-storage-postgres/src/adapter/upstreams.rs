@@ -130,10 +130,7 @@ impl UpstreamStore for PostgresStorage {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        complete_split_refresh(self, id, holder, tokens).await?;
-        get_split_by_id(&self.pool, id)
-            .await?
-            .ok_or_else(|| conflict("upstream not found"))
+        complete_split_refresh(self, id, holder, tokens).await
     }
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
@@ -229,10 +226,7 @@ async fn create_split(
     }
 
     notify(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(&storage.pool, id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    commit_with_record(tx, id).await
 }
 
 async fn get_split_by_name(
@@ -252,7 +246,10 @@ async fn get_split_by_name(
     row.map(split_row_to_record).transpose()
 }
 
-async fn get_split_by_id(pool: &sqlx::PgPool, id: Uuid) -> StorageResult<Option<UpstreamRecord>> {
+async fn get_split_by_id<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    id: Uuid,
+) -> StorageResult<Option<UpstreamRecord>> {
     let row = sqlx::query(concat!(
         "SELECT ",
         split_upstream_columns!(),
@@ -260,10 +257,24 @@ async fn get_split_by_id(pool: &sqlx::PgPool, id: Uuid) -> StorageResult<Option<
         "WHERE spec.id = $1"
     ))
     .bind(id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(map_sqlx_error)?;
     row.map(split_row_to_record).transpose()
+}
+
+/// Reads the mutated upstream inside its own transaction, then commits, so a
+/// successful COMMIT is the final await and the returned record is exactly the
+/// committed row. A read/decode failure rolls the mutation back.
+async fn commit_with_record(
+    mut tx: Transaction<'_, Postgres>,
+    id: Uuid,
+) -> StorageResult<UpstreamRecord> {
+    let record = get_split_by_id(&mut *tx, id)
+        .await?
+        .ok_or_else(|| conflict("upstream not found"))?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
 }
 
 async fn list_split(
@@ -330,10 +341,7 @@ async fn update_split(
     if changed {
         notify(&mut tx, id).await?;
     }
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(&storage.pool, id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    commit_with_record(tx, id).await
 }
 
 async fn update_split_spec(
@@ -348,10 +356,7 @@ async fn update_split_spec(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
     notify(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(&storage.pool, id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    commit_with_record(tx, id).await
 }
 
 async fn update_split_spec_in_tx(
@@ -409,10 +414,7 @@ async fn update_split_api_key_secret(
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
     notify(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(&storage.pool, id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    commit_with_record(tx, id).await
 }
 
 async fn update_split_api_key_secret_in_tx(
@@ -466,10 +468,7 @@ async fn update_split_oauth_token(
     .map_err(map_sqlx_error)?;
     clear_split_apply_error_in_tx(&mut tx, id).await?;
     notify(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(&storage.pool, id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    commit_with_record(tx, id).await
 }
 
 async fn update_split_oauth_token_generation_in_tx(
@@ -498,7 +497,7 @@ async fn complete_split_refresh(
     id: Uuid,
     _holder: Uuid,
     tokens: EncryptedOAuthTokens,
-) -> StorageResult<()> {
+) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
@@ -516,7 +515,7 @@ async fn complete_split_refresh(
     .map_err(map_sqlx_error)?;
     clear_split_apply_error_in_tx(&mut tx, id).await?;
     notify(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)
+    commit_with_record(tx, id).await
 }
 
 async fn read_split_oauth_token_generation(
@@ -719,18 +718,22 @@ async fn clear_split_warmup_dialect_plugin(
     id: Uuid,
     expected_revision: u64,
 ) -> StorageResult<Option<UpstreamRecord>> {
+    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     let row = sqlx::query(
         "UPDATE upstream_spec_v1 SET warmup_dialect_plugin = NULL, spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id",
     )
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
     if row.is_none() {
+        tx.commit().await.map_err(map_sqlx_error)?;
         return Ok(None);
     }
-    get_split_by_id(pool, id).await
+    let record = get_split_by_id(&mut *tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
 }
 
 async fn notify(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> StorageResult<()> {

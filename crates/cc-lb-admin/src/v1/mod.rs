@@ -8,6 +8,7 @@ pub(crate) mod limit_resets;
 pub mod oauth;
 pub mod plugins;
 pub mod plugins_wasm;
+pub(crate) mod post_commit;
 pub mod principal_cache_keepalive;
 pub mod principals;
 pub mod router;
@@ -26,13 +27,18 @@ pub async fn apply_dynamic_view_after_mutation(state: &AdminState) -> anyhow::Re
         .dynamic_view_rebinder
         .clone()
         .ok_or_else(|| anyhow::anyhow!("dynamic view rebinder unavailable"))?;
+    // Follow the holder's rebuild protocol: hold the rebuild lock across
+    // the resident-generation read, the build, and the install so no other
+    // live publisher can reuse this generation or replace this mutation's
+    // view with an older build. The rebinder itself is build-only and must
+    // not take the lock.
+    let _rebuild_guard = state.dynamic_view.lock_rebuild().await;
     let current_generation = state.dynamic_view.generation();
     let view = rebinder.rebuild_dynamic_view(current_generation).await?;
     let attempted_generation = view.generation;
-    // CAS on generation so a slower reconcile / notify rebind can't
-    // overwrite this admin-triggered rebuild. If a newer generation
-    // is already resident (e.g. a concurrent admin mutation) the
-    // config is still applied; return whichever generation is now
+    // Defensive CAS on generation. With every live publisher following the
+    // rebuild protocol, rejection only happens on generation saturation or
+    // an out-of-protocol publication; report whichever generation is now
     // authoritative.
     if state.dynamic_view.try_store_if_newer(view) {
         Ok(attempted_generation)

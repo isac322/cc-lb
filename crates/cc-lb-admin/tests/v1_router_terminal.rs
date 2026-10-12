@@ -108,7 +108,10 @@ async fn put_router_terminal_stale_revision_returns_409() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "storage_conflict");
+    assert_eq!(
+        body,
+        json!({ "error": "stale_revision", "current_revision": current_revision })
+    );
     assert!(current_revision > created["revision"].as_u64().unwrap());
 }
 

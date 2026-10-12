@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use cc_lb_config::{
     ADMIN_AUTH_PROVIDERS_JSON_ENV, Config, ConfigEnvOverride, ConfigError, ConfigOverrides,
@@ -295,13 +296,65 @@ pub async fn validate_draft(
     Ok(report)
 }
 
-pub async fn save_config_file(
+/// A config file that [`write_config_file`] has atomically replaced. The
+/// validated draft is not cleared and no history is recorded until
+/// [`WrittenConfigFile::finish`] runs.
+pub struct WrittenConfigFile {
+    storage: Arc<dyn Storage>,
+    expected_revision: u64,
+    fingerprint: String,
+}
+
+impl WrittenConfigFile {
+    /// Clears the saved draft and records config history. Failures here are
+    /// logged only: the file on disk is already the new configuration.
+    pub async fn finish(self, saved_at_unix_secs: u64) -> SaveConfigFileResponse {
+        let revision = match self
+            .storage
+            .put_config_draft(ConfigDraftState::default(), self.expected_revision)
+            .await
+        {
+            Ok(revision) => {
+                if let Err(error) = self
+                    .storage
+                    .append_config_history(revision, saved_at_unix_secs)
+                    .await
+                {
+                    tracing::error!(
+                        %error,
+                        revision,
+                        "config file was saved but config history metadata could not be recorded"
+                    );
+                }
+                revision
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    revision = self.expected_revision,
+                    "config file was saved but the validated draft could not be cleared"
+                );
+                self.expected_revision
+            }
+        };
+
+        SaveConfigFileResponse {
+            revision,
+            saved_at_unix_secs,
+            fingerprint: self.fingerprint,
+        }
+    }
+}
+
+pub async fn write_config_file(
     state: &AdminState,
     active_provider_id: &str,
     request: SaveConfigFileRequest,
-    saved_at_unix_secs: u64,
-) -> Result<SaveConfigFileResponse, SettingsError> {
-    let storage = config_storage(state)?;
+) -> Result<WrittenConfigFile, SettingsError> {
+    let storage = state
+        .storage
+        .clone()
+        .ok_or(SettingsError::StorageUnavailable)?;
     let draft_state = storage.get_config_draft().await?;
     ensure_revision(&draft_state, request.expected_revision)?;
     if draft_state.last_validated_revision != Some(request.expected_revision) {
@@ -350,36 +403,10 @@ pub async fn save_config_file(
         &materialized.bytes,
         request.expected_fingerprint.as_deref(),
     )?;
-    let revision = match storage
-        .put_config_draft(ConfigDraftState::default(), request.expected_revision)
-        .await
-    {
-        Ok(revision) => {
-            if let Err(error) = storage
-                .append_config_history(revision, saved_at_unix_secs)
-                .await
-            {
-                tracing::error!(
-                    %error,
-                    revision,
-                    "config file was saved but config history metadata could not be recorded"
-                );
-            }
-            revision
-        }
-        Err(error) => {
-            tracing::error!(
-                %error,
-                revision = request.expected_revision,
-                "config file was saved but the validated draft could not be cleared"
-            );
-            request.expected_revision
-        }
-    };
 
-    Ok(SaveConfigFileResponse {
-        revision,
-        saved_at_unix_secs,
+    Ok(WrittenConfigFile {
+        storage,
+        expected_revision: request.expected_revision,
         fingerprint,
     })
 }

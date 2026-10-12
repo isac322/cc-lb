@@ -27,6 +27,7 @@ use tower::ServiceBuilder;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use super::wasm_cache::{data_dir, wasm_cache_path};
 use crate::{
     AdminState,
@@ -37,6 +38,7 @@ use crate::{
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
 const MIN_WASM_BYTES: usize = 8;
 const UPLOAD_ROUTE: &str = "/admin/v1/plugins/wasm";
+const GC_ROUTE: &str = "/admin/v1/plugins/wasm/gc";
 const UPLOAD_WINDOW: Duration = Duration::from_secs(60);
 const UPLOAD_LIMIT: usize = 10;
 
@@ -82,7 +84,7 @@ pub fn router() -> Router<AdminState> {
 
     Router::new()
         .route(UPLOAD_ROUTE, post(upload_wasm).route_layer(upload_layers))
-        .route("/admin/v1/plugins/wasm/gc", post(gc_wasm))
+        .route(GC_ROUTE, post(gc_wasm))
         .layer(DefaultBodyLimit::max(
             (MAX_WASM_BLOB_BYTES as usize) + 4 * 1024 * 1024,
         ))
@@ -157,47 +159,56 @@ async fn upload_wasm(
         }
     }
     match upload_wasm_inner(&state, &identity, multipart).await {
-        Ok((status, response)) => {
-            let payload = AuditPayload::PluginRegistryUpload {
-                sha256: response.sha256_hex.clone(),
-                size_bytes: response.size_bytes,
-                original_filename: response.original_filename.clone(),
-            };
-            let action = payload.to_string();
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: UPLOAD_ROUTE,
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: status.as_u16(),
-                    payload: None,
-                },
-            )
+        Ok((status, response, replaced_sha256_hex)) => {
+            let state = state.clone();
+            finish_after_commit(async move {
+                if let Some(replaced_sha256_hex) = replaced_sha256_hex {
+                    remove_cache_file(&state, &replaced_sha256_hex).await;
+                }
+                let payload = AuditPayload::PluginRegistryUpload {
+                    sha256: response.sha256_hex.clone(),
+                    size_bytes: response.size_bytes,
+                    original_filename: response.original_filename.clone(),
+                };
+                let action = payload.to_string();
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: UPLOAD_ROUTE,
+                        target_principal_id: None,
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: status.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    let response = audit_write_failed(error, &action);
+                    rebuild_after_audit_failure(&state).await;
+                    return response;
+                }
+                let mut builder = Response::builder().status(status);
+                if status == StatusCode::CREATED {
+                    builder = builder.header(
+                        header::LOCATION,
+                        format!("/admin/v1/plugins/registry/{}", response.id),
+                    );
+                }
+                let mut response = builder
+                    .header("X-Idempotent", response.idempotent.to_string())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&response).unwrap_or_default(),
+                    ))
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut builder = Response::builder().status(status);
-            if status == StatusCode::CREATED {
-                builder = builder.header(
-                    header::LOCATION,
-                    format!("/admin/v1/plugins/registry/{}", response.id),
-                );
-            }
-            let mut response = builder
-                .header("X-Idempotent", response.idempotent.to_string())
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&response).unwrap_or_default(),
-                ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Err(error) => {
             let status = error.status().as_u16();
@@ -225,11 +236,14 @@ async fn upload_wasm(
     }
 }
 
+/// Validates and commits an upload. Returns the response status and body plus
+/// the cache key of a replaced blob, whose cache file the caller removes as
+/// part of the post-commit completion.
 async fn upload_wasm_inner(
     state: &AdminState,
     identity: &AdminIdentity,
     multipart: Multipart,
-) -> Result<(StatusCode, UploadResponse), Box<Response>> {
+) -> Result<(StatusCode, UploadResponse, Option<String>), Box<Response>> {
     let storage = state.storage.as_deref().ok_or_else(|| {
         Box::new(json_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -370,10 +384,6 @@ async fn upload_wasm_inner(
         }
     };
 
-    if let Some(old_sha256_hex) = old_sha256_hex {
-        remove_cache_file(state, &old_sha256_hex).await;
-    }
-
     Ok((
         status,
         UploadResponse {
@@ -386,6 +396,7 @@ async fn upload_wasm_inner(
             idempotent,
             action,
         },
+        old_sha256_hex,
     ))
 }
 
@@ -568,8 +579,11 @@ fn replacement_confirmation_required(
         .into_response()
 }
 
-async fn gc_wasm(State(state): State<AdminState>) -> Response {
-    let Some(storage) = state.storage.as_deref() else {
+async fn gc_wasm(
+    State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
+) -> Response {
+    let Some(storage) = state.storage.clone() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "storage_unavailable",
@@ -580,28 +594,77 @@ async fn gc_wasm(State(state): State<AdminState>) -> Response {
         Ok(orphaned) => orphaned,
         Err(error) => return storage_response(error),
     };
-    let mut removed = Vec::new();
-    for sha in orphaned {
-        let sha_hex = hex_sha256(sha);
+    let mut orphaned = orphaned.into_iter();
+    // Removals run on the request future until one actually deletes a blob:
+    // before that nothing has changed, so a cancelled request must not delete
+    // anything. Each removal commits on its own, so after the first deletion
+    // the rest of the loop and the audit row run to completion even if the
+    // client disconnects.
+    let mut first_removed = None;
+    for sha in orphaned.by_ref() {
         match storage.decrement_blob_refcount_or_delete(sha).await {
             Ok(true) => {
-                let cache_path = wasm_cache_path(&state, &sha_hex);
-                match tokio::fs::remove_file(&cache_path).await {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        tracing::warn!(%error, path = %cache_path.display(), "failed to remove wasm cache file")
-                    }
-                }
-                tracing::info!(sha256 = %sha_hex, "removed orphan wasm blob");
-                removed.push(sha_hex);
+                first_removed = Some(sha);
+                break;
             }
             Ok(false) => {}
             Err(error) => return storage_response(error),
         }
     }
-    let count = removed.len();
-    Json(json!({ "removed": removed, "count": count })).into_response()
+    finish_after_commit(async move {
+        let mut removed = Vec::new();
+        if let Some(sha) = first_removed {
+            removed.push(remove_orphan_cache_file(&state, sha).await);
+        }
+        for sha in orphaned {
+            match storage.decrement_blob_refcount_or_delete(sha).await {
+                Ok(true) => removed.push(remove_orphan_cache_file(&state, sha).await),
+                Ok(false) => {}
+                Err(error) => return storage_response(error),
+            }
+        }
+        let count = removed.len();
+        let action = AuditPayload::PluginWasmGc {
+            removed_count: count,
+        }
+        .to_string();
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &action,
+                route: GC_ROUTE,
+                target_principal_id: None,
+                target_upstream: None,
+                api_key_id: None,
+                status: StatusCode::OK.as_u16(),
+                payload: Some(json!({ "removed": removed })),
+            },
+        )
+        .await
+        {
+            return audit_write_failed(error, &action);
+        }
+        Json(json!({ "removed": removed, "count": count })).into_response()
+    })
+    .await
+}
+
+/// Removes the cache file of an orphan blob whose storage row GC just deleted
+/// and returns the blob's hex SHA-256 for the GC report.
+async fn remove_orphan_cache_file(state: &AdminState, sha: [u8; 32]) -> String {
+    let sha_hex = hex_sha256(sha);
+    let cache_path = wasm_cache_path(state, &sha_hex);
+    match tokio::fs::remove_file(&cache_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, path = %cache_path.display(), "failed to remove wasm cache file")
+        }
+    }
+    tracing::info!(sha256 = %sha_hex, "removed orphan wasm blob");
+    sha_hex
 }
 
 #[allow(clippy::result_large_err)]
@@ -822,6 +885,21 @@ fn audit_write_failed(error: StorageError, action: &str) -> Response {
         Json(json!({ "error": "audit_write_failed" })),
     )
         .into_response()
+}
+
+/// Finishes a committed mutation on a task that a dropped request cannot cancel.
+async fn finish_after_commit<F>(continuation: F) -> Response
+where
+    F: Future<Output = Response> + Send + 'static,
+{
+    match complete_after_commit(continuation).await {
+        Ok(response) => response,
+        Err(PostCommitAborted) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "storage_error",
+            "storage operation failed",
+        ),
+    }
 }
 
 fn admin_id(identity: &AdminIdentity) -> Uuid {

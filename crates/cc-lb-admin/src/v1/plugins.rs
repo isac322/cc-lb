@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use super::wasm_cache::wasm_cache_path;
 use crate::{
     AdminState,
@@ -226,6 +227,7 @@ async fn get_registry(
 
 async fn patch_registry(
     State(state): State<AdminState>,
+    Extension(identity): Extension<AdminIdentity>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
     Json(body): Json<PatchRegistryBody>,
@@ -233,20 +235,54 @@ async fn patch_registry(
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
     }
-    match storage
+    match storage_handle
         .update_registry_label(id, expected_revision, body.label)
         .await
     {
         Ok(entry) => {
-            let mut response = registry_with_etag(storage, entry).await;
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
+            let state = state.clone();
+            let storage_handle = Arc::clone(&storage_handle);
+            finish_after_commit(async move {
+                let wasm_registry_id = entry.id.to_string();
+                let audit_payload = json!({
+                    "wasm_registry_id": wasm_registry_id,
+                    "label": entry.label,
+                });
+                let payload = AuditPayload::PluginRegistryLabelUpdate {
+                    wasm_registry_id,
+                    label: entry.label.clone(),
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/plugins/registry/{id}");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: None,
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: Some(audit_payload),
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut response = registry_with_etag(&*storage_handle, entry).await;
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
+            .await
         }
         Err(error) => storage_mutation_error(error),
     }
@@ -292,7 +328,7 @@ async fn delete_registry(
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
     if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
@@ -305,22 +341,77 @@ async fn delete_registry(
                 "reference_fingerprint_required",
             );
         };
-        return match storage
+        return match storage_handle
             .cascade_delete_registry_entry(id, expected_revision, fingerprint)
             .await
         {
             Ok(Some(deleted)) => {
-                let size_bytes = match registry_size_bytes(storage, deleted.entry.sha256).await {
-                    Ok(size_bytes) => size_bytes,
-                    Err(error) => return storage_error(error),
-                };
-                remove_wasm_cache_file(&state, deleted.entry.sha256).await;
+                let state = state.clone();
+                let storage_handle = Arc::clone(&storage_handle);
+                finish_after_commit(async move {
+                    let size_bytes =
+                        match registry_size_bytes(&*storage_handle, deleted.entry.sha256).await {
+                            Ok(size_bytes) => size_bytes,
+                            Err(error) => return post_commit_storage_error(&state, error).await,
+                        };
+                    remove_wasm_cache_file(&state, deleted.entry.sha256).await;
+                    let payload = AuditPayload::PluginRegistryDelete {
+                        sha256: hex_sha256(deleted.entry.sha256),
+                    };
+                    let action = payload.to_string();
+                    let route = format!("/admin/v1/plugins/registry/{id}");
+                    if let Some(response) = audit_committed_change(
+                        &state,
+                        AdminAuditEvent {
+                            identity: Some(&identity),
+                            system_component: None,
+                            action: &action,
+                            route: &route,
+                            target_principal_id: None,
+                            target_upstream: None,
+                            api_key_id: None,
+                            status: StatusCode::OK.as_u16(),
+                            payload: None,
+                        },
+                    )
+                    .await
+                    {
+                        return response;
+                    }
+                    let reference_fingerprint = fingerprint_hex(
+                        &WasmRegistryReferenceFingerprint::from_references(&deleted.references),
+                    );
+                    let mut response = Json(RegistryCascadeDeleteResponse {
+                        deleted: registry_response(deleted.entry, size_bytes),
+                        reference_fingerprint,
+                        removed_references: deleted.references,
+                    })
+                    .into_response();
+                    add_dynamic_rebind_headers(&mut response, &state).await;
+                    response
+                })
+                .await
+            }
+            Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+            Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
+            Err(StorageError::StalePluginRegistryReferences) => references_changed(),
+            Err(error) => storage_mutation_error(error),
+        };
+    }
+    match storage_handle
+        .delete_registry_entry(id, expected_revision)
+        .await
+    {
+        Ok(Some(deleted)) => {
+            let state = state.clone();
+            finish_after_commit(async move {
+                remove_wasm_cache_file(&state, deleted.sha256).await;
                 let payload = AuditPayload::PluginRegistryDelete {
-                    sha256: hex_sha256(deleted.entry.sha256),
+                    sha256: hex_sha256(deleted.sha256),
                 };
                 let action = payload.to_string();
                 let route = format!("/admin/v1/plugins/registry/{id}");
-                if let Err(error) = record_admin_audit(
+                if let Some(response) = audit_committed_change(
                     &state,
                     AdminAuditEvent {
                         identity: Some(&identity),
@@ -330,61 +421,19 @@ async fn delete_registry(
                         target_principal_id: None,
                         target_upstream: None,
                         api_key_id: None,
-                        status: StatusCode::OK.as_u16(),
+                        status: StatusCode::NO_CONTENT.as_u16(),
                         payload: None,
                     },
                 )
                 .await
                 {
-                    return audit_write_failed(error, &action);
+                    return response;
                 }
-                let reference_fingerprint = fingerprint_hex(
-                    &WasmRegistryReferenceFingerprint::from_references(&deleted.references),
-                );
-                let mut response = Json(RegistryCascadeDeleteResponse {
-                    deleted: registry_response(deleted.entry, size_bytes),
-                    reference_fingerprint,
-                    removed_references: deleted.references,
-                })
-                .into_response();
+                let mut response = StatusCode::NO_CONTENT.into_response();
                 add_dynamic_rebind_headers(&mut response, &state).await;
                 response
-            }
-            Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
-            Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
-            Err(StorageError::StalePluginRegistryReferences) => references_changed(),
-            Err(error) => storage_mutation_error(error),
-        };
-    }
-    match storage.delete_registry_entry(id, expected_revision).await {
-        Ok(Some(deleted)) => {
-            remove_wasm_cache_file(&state, deleted.sha256).await;
-            let payload = AuditPayload::PluginRegistryDelete {
-                sha256: hex_sha256(deleted.sha256),
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/plugins/registry/{id}");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::NO_CONTENT.as_u16(),
-                    payload: None,
-                },
-            )
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
         Err(StorageError::PluginRegistryReferenced { id }) => plugin_registry_referenced(id),
@@ -450,46 +499,50 @@ async fn insert_chain(
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {
-            let audit_metadata = audit_metadata
-                .unwrap_or_else(|| empty_plugin_chain_audit_metadata(entry.wasm_registry_id));
-            let target_principal_id = principal_id.to_string();
-            let payload = AuditPayload::PluginChainUpdate {
-                principal_id: target_principal_id.clone(),
-                slots_changed: vec![slot.as_str()],
-                wasm_registry_id: audit_metadata.wasm_registry_id,
-                sha256_hex: audit_metadata.sha256_hex,
-                supported_slots: audit_metadata.supported_slots,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/principals/{principal_id}/plugin-chain");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&target_principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::CREATED.as_u16(),
-                    payload: None,
-                },
-            )
+            let state = state.clone();
+            finish_after_commit(async move {
+                let audit_metadata = audit_metadata
+                    .unwrap_or_else(|| empty_plugin_chain_audit_metadata(entry.wasm_registry_id));
+                let target_principal_id = principal_id.to_string();
+                let payload = AuditPayload::PluginChainUpdate {
+                    principal_id: target_principal_id.clone(),
+                    slots_changed: vec![slot.as_str()],
+                    wasm_registry_id: audit_metadata.wasm_registry_id,
+                    sha256_hex: audit_metadata.sha256_hex,
+                    supported_slots: audit_metadata.supported_slots,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/principals/{principal_id}/plugin-chain");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&target_principal_id),
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::CREATED.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut headers = HeaderMap::new();
+                insert_header(
+                    &mut headers,
+                    header::LOCATION,
+                    &format!("/admin/v1/plugin-chain-entries/{}", entry.id),
+                );
+                insert_header(&mut headers, header::ETAG, &etag(entry.revision));
+                let mut response = (StatusCode::CREATED, headers, Json(entry)).into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut headers = HeaderMap::new();
-            insert_header(
-                &mut headers,
-                header::LOCATION,
-                &format!("/admin/v1/plugin-chain-entries/{}", entry.id),
-            );
-            insert_header(&mut headers, header::ETAG, &etag(entry.revision));
-            let mut response = (StatusCode::CREATED, headers, Json(entry)).into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Err(StorageError::PrincipalNotFound { id }) => unknown_principal(id),
         Err(StorageError::PluginChainConflict {
@@ -512,9 +565,10 @@ async fn update_chain(
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
+    let storage: &dyn Storage = &*storage_handle;
     if plugin_chain_update_empty(&update) {
         return error(StatusCode::BAD_REQUEST, "empty_update");
     }
@@ -543,42 +597,51 @@ async fn update_chain(
         .await
     {
         Ok(Some(entry)) => {
-            let audit_metadata =
-                match fetch_plugin_chain_audit_metadata(storage, entry.wasm_registry_id).await {
+            let state = state.clone();
+            let storage_handle = Arc::clone(&storage_handle);
+            finish_after_commit(async move {
+                let audit_metadata = match fetch_plugin_chain_audit_metadata(
+                    &*storage_handle,
+                    entry.wasm_registry_id,
+                )
+                .await
+                {
                     Ok(metadata) => metadata,
-                    Err(error) => return storage_error(error),
+                    Err(error) => return post_commit_storage_error(&state, error).await,
                 };
-            let target_principal_id = entry.principal_id.to_string();
-            let payload = AuditPayload::PluginChainUpdate {
-                principal_id: target_principal_id.clone(),
-                slots_changed: vec![entry.slot.as_str()],
-                wasm_registry_id: audit_metadata.wasm_registry_id,
-                sha256_hex: audit_metadata.sha256_hex,
-                supported_slots: audit_metadata.supported_slots,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/plugin-chain-entries/{id}");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&target_principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+                let target_principal_id = entry.principal_id.to_string();
+                let payload = AuditPayload::PluginChainUpdate {
+                    principal_id: target_principal_id.clone(),
+                    slots_changed: vec![entry.slot.as_str()],
+                    wasm_registry_id: audit_metadata.wasm_registry_id,
+                    sha256_hex: audit_metadata.sha256_hex,
+                    supported_slots: audit_metadata.supported_slots,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/plugin-chain-entries/{id}");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&target_principal_id),
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut response = chain_with_etag(entry);
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut response = chain_with_etag(entry);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(StorageError::InvalidInput { reason, .. }) if reason.contains("empty_update") => {
@@ -609,9 +672,10 @@ async fn reorder_chain(
     Path(principal_id): Path<Uuid>,
     Json(body): Json<ReorderBody>,
 ) -> axum::response::Response {
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
+    let storage: &dyn Storage = &*storage_handle;
     let orders = body
         .entries
         .iter()
@@ -634,41 +698,47 @@ async fn reorder_chain(
         .collect();
     match storage.reorder_chain(principal_id, slot, new_orders).await {
         Ok(entries) => {
-            let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
-                Ok(metadata) => metadata,
-                Err(error) => return storage_error(error),
-            };
-            let target_principal_id = principal_id.to_string();
-            let payload = AuditPayload::PluginChainUpdate {
-                principal_id: target_principal_id.clone(),
-                slots_changed: vec![slot.as_str()],
-                wasm_registry_id: audit_metadata.wasm_registry_id,
-                sha256_hex: audit_metadata.sha256_hex,
-                supported_slots: audit_metadata.supported_slots,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/principals/{principal_id}/plugin-chain/reorder");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&target_principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            let state = state.clone();
+            let storage_handle = Arc::clone(&storage_handle);
+            finish_after_commit(async move {
+                let audit_metadata =
+                    match first_plugin_chain_audit_metadata(&*storage_handle, &entries).await {
+                        Ok(metadata) => metadata,
+                        Err(error) => return post_commit_storage_error(&state, error).await,
+                    };
+                let target_principal_id = principal_id.to_string();
+                let payload = AuditPayload::PluginChainUpdate {
+                    principal_id: target_principal_id.clone(),
+                    slots_changed: vec![slot.as_str()],
+                    wasm_registry_id: audit_metadata.wasm_registry_id,
+                    sha256_hex: audit_metadata.sha256_hex,
+                    supported_slots: audit_metadata.supported_slots,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/principals/{principal_id}/plugin-chain/reorder");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&target_principal_id),
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut response = Json(ChainListResponse { entries }).into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut response = Json(ChainListResponse { entries }).into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Err(StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::InvalidOrderGap,
@@ -683,9 +753,10 @@ async fn rebalance_chain(
     Path(principal_id): Path<Uuid>,
     Query(query): Query<SlotQuery>,
 ) -> axum::response::Response {
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
+    let storage: &dyn Storage = &*storage_handle;
     let slot = query.slot;
     let existing = match storage.list_chain_for_principal(principal_id, slot).await {
         Ok(entries) => entries,
@@ -696,41 +767,47 @@ async fn rebalance_chain(
     }
     match storage.rebalance_chain(principal_id, slot).await {
         Ok(entries) => {
-            let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
-                Ok(metadata) => metadata,
-                Err(error) => return storage_error(error),
-            };
-            let target_principal_id = principal_id.to_string();
-            let payload = AuditPayload::PluginChainUpdate {
-                principal_id: target_principal_id.clone(),
-                slots_changed: vec![slot.as_str()],
-                wasm_registry_id: audit_metadata.wasm_registry_id,
-                sha256_hex: audit_metadata.sha256_hex,
-                supported_slots: audit_metadata.supported_slots,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&target_principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            let state = state.clone();
+            let storage_handle = Arc::clone(&storage_handle);
+            finish_after_commit(async move {
+                let audit_metadata =
+                    match first_plugin_chain_audit_metadata(&*storage_handle, &entries).await {
+                        Ok(metadata) => metadata,
+                        Err(error) => return post_commit_storage_error(&state, error).await,
+                    };
+                let target_principal_id = principal_id.to_string();
+                let payload = AuditPayload::PluginChainUpdate {
+                    principal_id: target_principal_id.clone(),
+                    slots_changed: vec![slot.as_str()],
+                    wasm_registry_id: audit_metadata.wasm_registry_id,
+                    sha256_hex: audit_metadata.sha256_hex,
+                    supported_slots: audit_metadata.supported_slots,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&target_principal_id),
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut response = Json(ChainListResponse { entries }).into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut response = Json(ChainListResponse { entries }).into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Err(error) => storage_error(error),
     }
@@ -749,47 +826,59 @@ async fn delete_chain(
         }
         Err(IfMatchError::Malformed) => return error(StatusCode::BAD_REQUEST, "invalid_if_match"),
     };
-    let Some(storage) = state.storage.as_deref() else {
+    let Some(storage_handle) = state.storage.clone() else {
         return storage_unavailable();
     };
-    match storage.delete_chain_entry(id, expected_revision).await {
+    match storage_handle
+        .delete_chain_entry(id, expected_revision)
+        .await
+    {
         Ok(Some(entry)) => {
-            let audit_metadata =
-                match fetch_plugin_chain_audit_metadata(storage, entry.wasm_registry_id).await {
+            let state = state.clone();
+            let storage_handle = Arc::clone(&storage_handle);
+            finish_after_commit(async move {
+                let audit_metadata = match fetch_plugin_chain_audit_metadata(
+                    &*storage_handle,
+                    entry.wasm_registry_id,
+                )
+                .await
+                {
                     Ok(metadata) => metadata,
-                    Err(error) => return storage_error(error),
+                    Err(error) => return post_commit_storage_error(&state, error).await,
                 };
-            let target_principal_id = entry.principal_id.to_string();
-            let payload = AuditPayload::PluginChainUpdate {
-                principal_id: target_principal_id.clone(),
-                slots_changed: vec![entry.slot.as_str()],
-                wasm_registry_id: audit_metadata.wasm_registry_id,
-                sha256_hex: audit_metadata.sha256_hex,
-                supported_slots: audit_metadata.supported_slots,
-            };
-            let action = payload.to_string();
-            let route = format!("/admin/v1/plugin-chain-entries/{id}");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&target_principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::NO_CONTENT.as_u16(),
-                    payload: None,
-                },
-            )
+                let target_principal_id = entry.principal_id.to_string();
+                let payload = AuditPayload::PluginChainUpdate {
+                    principal_id: target_principal_id.clone(),
+                    slots_changed: vec![entry.slot.as_str()],
+                    wasm_registry_id: audit_metadata.wasm_registry_id,
+                    sha256_hex: audit_metadata.sha256_hex,
+                    supported_slots: audit_metadata.supported_slots,
+                };
+                let action = payload.to_string();
+                let route = format!("/admin/v1/plugin-chain-entries/{id}");
+                if let Some(response) = audit_committed_change(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action: &action,
+                        route: &route,
+                        target_principal_id: Some(&target_principal_id),
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::NO_CONTENT.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return response;
+                }
+                let mut response = StatusCode::NO_CONTENT.into_response();
+                add_dynamic_rebind_headers(&mut response, &state).await;
+                response
+            })
             .await
-            {
-                return audit_write_failed(error, &action);
-            }
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
@@ -1256,6 +1345,51 @@ fn error(status: StatusCode, code: &str) -> axum::response::Response {
 fn audit_write_failed(storage_error: StorageError, action: &str) -> axum::response::Response {
     tracing::error!(error = %storage_error, action, "admin audit write failed");
     error(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed")
+}
+
+/// Finishes a committed mutation on a task that a dropped request cannot cancel.
+async fn finish_after_commit<F>(continuation: F) -> axum::response::Response
+where
+    F: Future<Output = axum::response::Response> + Send + 'static,
+{
+    match complete_after_commit(continuation).await {
+        Ok(response) => response,
+        Err(PostCommitAborted) => error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error"),
+    }
+}
+
+/// Appends the audit row for a committed routing-relevant change. When the
+/// write fails, the serving view is still rebuilt from committed storage and
+/// the unchanged audit-failure response is returned as `Some`.
+async fn audit_committed_change(
+    state: &AdminState,
+    event: AdminAuditEvent<'_>,
+) -> Option<axum::response::Response> {
+    let action = event.action;
+    match record_admin_audit(state, event).await {
+        Ok(()) => None,
+        Err(error) => {
+            let response = audit_write_failed(error, action);
+            rebuild_after_audit_failure(state).await;
+            Some(response)
+        }
+    }
+}
+
+/// Returns the error of a failed post-commit read after rebuilding the serving
+/// view, because the domain change it follows has already committed.
+async fn post_commit_storage_error(
+    state: &AdminState,
+    storage_error_value: StorageError,
+) -> axum::response::Response {
+    let response = storage_error(storage_error_value);
+    if let Err(error) = super::apply_dynamic_view_after_mutation(state).await {
+        tracing::error!(
+            error = %error,
+            "admin v1 dynamic view rebind deferred after post-commit storage error"
+        );
+    }
+    response
 }
 
 fn hex_sha256(sha256: [u8; 32]) -> String {

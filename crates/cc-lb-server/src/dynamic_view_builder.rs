@@ -175,6 +175,11 @@ pub async fn build_dynamic_view(
     subscription_quota_routing_max_staleness_secs: u64,
     clock: cc_lb_clock::ClockHandle,
 ) -> Result<Arc<DynamicView>, RebindError> {
+    // Collect the change signature before any content read. A mutation that
+    // commits while this build is reading contents then changes the stored
+    // signature after this early sample, so a later reconcile detects the
+    // drift instead of trusting a signature newer than the contents.
+    let revision_hash = collect_revision_hash(stores).await?;
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
         .iter()
@@ -214,7 +219,6 @@ pub async fn build_dynamic_view(
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_secs(clock.now());
     let statuses = apply_upstreams(stores, &upstreams, &aead, now).await?;
-    let revision_hash = collect_revision_hash(stores).await?;
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
         upstreams.clone(),
         stores.upstreams.clone(),

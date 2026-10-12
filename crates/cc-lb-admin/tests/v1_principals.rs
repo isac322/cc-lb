@@ -289,7 +289,10 @@ async fn update_stale_if_match_returns_conflict() {
         .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "storage_conflict");
+    assert_eq!(
+        body,
+        json!({ "error": "stale_revision", "current_revision": current_revision })
+    );
     assert!(current_revision > created["revision"].as_u64().unwrap());
 }
 

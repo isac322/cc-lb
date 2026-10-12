@@ -19,6 +19,7 @@ use crate::{
     audit::{AdminAuditEvent, record_admin_audit},
     auth::{AdminAction, AdminIdentity, authorize, require_admin_auth},
     static_assets::{serve_asset, serve_index},
+    v1::post_commit::{PostCommitAborted, complete_after_commit},
 };
 
 pub fn with_request_tracing(router: Router) -> Router {
@@ -340,30 +341,38 @@ async fn put_config_draft(
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, true),
     };
-    match crate::settings::put_draft(storage, request, cc_lb_clock::unix_secs(state.clock.now()))
-        .await
-    {
+    let result =
+        crate::settings::put_draft(storage, request, cc_lb_clock::unix_secs(state.clock.now()))
+            .await;
+    match result {
         Ok(response) => {
-            let action = "config_draft_put";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/draft",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            match complete_after_commit(async move {
+                let action = "config_draft_put";
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action,
+                        route: "/admin/v1/config/draft",
+                        target_principal_id: None,
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return audit_write_failed_response(action, &error);
+                }
+                Json(response).into_response()
+            })
             .await
             {
-                return audit_write_failed_response(action, &error);
+                Ok(response) => response,
+                Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
-            Json(response).into_response()
         }
         Err(error) => settings_error_response(error, true),
     }
@@ -412,28 +421,36 @@ async fn validate_config_draft(
     Extension(identity): Extension<AdminIdentity>,
     Json(request): Json<crate::settings::ValidateConfigDraftRequest>,
 ) -> axum::response::Response {
-    match crate::settings::validate_draft(&state, request).await {
+    let result = crate::settings::validate_draft(&state, request).await;
+    match result {
         Ok(response) => {
-            let action = "config_draft_validate";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/draft/validate",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            match complete_after_commit(async move {
+                let action = "config_draft_validate";
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action,
+                        route: "/admin/v1/config/draft/validate",
+                        target_principal_id: None,
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: None,
+                    },
+                )
+                .await
+                {
+                    return audit_write_failed_response(action, &error);
+                }
+                Json(response).into_response()
+            })
             .await
             {
-                return audit_write_failed_response(action, &error);
+                Ok(response) => response,
+                Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
-            Json(response).into_response()
         }
         Err(error) => settings_error_response(error, true),
     }
@@ -448,43 +465,45 @@ async fn save_config_file(
         return dashboard_error(StatusCode::FORBIDDEN, "forbidden");
     }
     let saved_at_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
-    match crate::settings::save_config_file(
-        &state,
-        &identity.provider_id,
-        request,
-        saved_at_unix_secs,
-    )
-    .await
-    {
-        Ok(response) => {
-            let action = "config_save";
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action,
-                    route: "/admin/v1/config/save",
-                    target_principal_id: None,
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: Some(json!({
-                        "revision": response.revision,
-                        "saved_at_unix_secs": response.saved_at_unix_secs,
-                        "fingerprint": response.fingerprint.clone(),
-                    })),
-                },
-            )
+    let result = crate::settings::write_config_file(&state, &identity.provider_id, request).await;
+    match result {
+        Ok(written) => {
+            match complete_after_commit(async move {
+                let response = written.finish(saved_at_unix_secs).await;
+                let action = "config_save";
+                if let Err(error) = record_admin_audit(
+                    &state,
+                    AdminAuditEvent {
+                        identity: Some(&identity),
+                        system_component: None,
+                        action,
+                        route: "/admin/v1/config/save",
+                        target_principal_id: None,
+                        target_upstream: None,
+                        api_key_id: None,
+                        status: StatusCode::OK.as_u16(),
+                        payload: Some(json!({
+                            "revision": response.revision,
+                            "saved_at_unix_secs": response.saved_at_unix_secs,
+                            "fingerprint": response.fingerprint.clone(),
+                        })),
+                    },
+                )
+                .await
+                {
+                    tracing::error!(
+                        %error,
+                        action,
+                        "config file was saved but its success audit could not be recorded"
+                    );
+                }
+                Json(response).into_response()
+            })
             .await
             {
-                tracing::error!(
-                    %error,
-                    action,
-                    "config file was saved but its success audit could not be recorded"
-                );
+                Ok(response) => response,
+                Err(PostCommitAborted) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
-            Json(response).into_response()
         }
         Err(error) => {
             let status = settings_error_status(&error);

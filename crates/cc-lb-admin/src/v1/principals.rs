@@ -17,6 +17,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::{
     AdminState,
     audit::{AdminAuditEvent, record_admin_audit},
@@ -175,33 +176,20 @@ async fn create_principal(
                 principal_kind: principal_kind_name(record.kind).to_owned(),
             };
             let action = payload.to_string();
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: "/admin/v1/principals",
-                    target_principal_id: Some(&principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::CREATED.as_u16(),
-                    payload: None,
-                },
-            )
+            let audit = PrincipalMutationAudit {
+                action,
+                route: "/admin/v1/principals".to_owned(),
+                principal_id,
+                status: StatusCode::CREATED,
+            };
+            complete_principal_mutation(state.clone(), identity, audit, move || {
+                let location = format!("/admin/v1/principals/{}", record.id);
+                let mut headers = HeaderMap::new();
+                insert_header(&mut headers, header::LOCATION, &location);
+                insert_header(&mut headers, header::ETAG, &etag(record.revision));
+                (StatusCode::CREATED, headers, Json(summary_response(record))).into_response()
+            })
             .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
-            }
-            let location = format!("/admin/v1/principals/{}", record.id);
-            let mut headers = HeaderMap::new();
-            insert_header(&mut headers, header::LOCATION, &location);
-            insert_header(&mut headers, header::ETAG, &etag(record.revision));
-            let mut response =
-                (StatusCode::CREATED, headers, Json(summary_response(record))).into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Err(error @ StorageError::Conflict { .. }) => {
             match PrincipalStore::get_by_name(storage, &name).await {
@@ -358,28 +346,16 @@ async fn set_enabled(
             } else {
                 format!("/admin/v1/principals/{principal_id}/disable")
             };
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            let audit = PrincipalMutationAudit {
+                action,
+                route,
+                principal_id,
+                status: StatusCode::OK,
+            };
+            complete_principal_mutation(state.clone(), identity, audit, move || {
+                respond_with_etag(record)
+            })
             .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
-            }
-            let mut response = respond_with_etag(record);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
@@ -417,28 +393,16 @@ async fn delete_principal(
             };
             let action = payload.to_string();
             let route = format!("/admin/v1/principals/{principal_id}");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::NO_CONTENT.as_u16(),
-                    payload: None,
-                },
-            )
+            let audit = PrincipalMutationAudit {
+                action,
+                route,
+                principal_id,
+                status: StatusCode::NO_CONTENT,
+            };
+            complete_principal_mutation(state.clone(), identity, audit, || {
+                StatusCode::NO_CONTENT.into_response()
+            })
             .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
-            }
-            let mut response = StatusCode::NO_CONTENT.into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
@@ -557,28 +521,16 @@ async fn update_router_terminal(
             };
             let action = payload.to_string();
             let route = format!("/admin/v1/principals/{principal_id}/router-terminal");
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            let audit = PrincipalMutationAudit {
+                action,
+                route,
+                principal_id,
+                status: StatusCode::OK,
+            };
+            complete_principal_mutation(state.clone(), identity, audit, move || {
+                router_terminal_with_etag(record)
+            })
             .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
-            }
-            let mut response = router_terminal_with_etag(record);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
@@ -617,31 +569,79 @@ async fn update_principal_record(
                 fields_changed,
             };
             let action = payload.to_string();
-            if let Err(error) = record_admin_audit(
-                &state,
-                AdminAuditEvent {
-                    identity: Some(&identity),
-                    system_component: None,
-                    action: &action,
-                    route: &route,
-                    target_principal_id: Some(&principal_id),
-                    target_upstream: None,
-                    api_key_id: None,
-                    status: StatusCode::OK.as_u16(),
-                    payload: None,
-                },
-            )
+            let audit = PrincipalMutationAudit {
+                action,
+                route,
+                principal_id,
+                status: StatusCode::OK,
+            };
+            complete_principal_mutation(state.clone(), identity, audit, move || {
+                respond_with_etag(record)
+            })
             .await
-            {
-                tracing::error!(error = %error, action = %action, "admin audit write failed");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
-            }
-            let mut response = respond_with_etag(record);
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
+    }
+}
+
+/// Audit metadata for a committed principal mutation.
+struct PrincipalMutationAudit {
+    action: String,
+    route: String,
+    principal_id: String,
+    status: StatusCode,
+}
+
+/// Finishes a committed principal mutation: audit, then rebuild the dynamic
+/// view, then answer with `respond`. Runs through [`complete_after_commit`] so
+/// a client disconnect cannot abandon it. An audit failure still rebuilds the
+/// view before returning the unchanged `audit_write_failed` error.
+async fn complete_principal_mutation<R>(
+    state: AdminState,
+    identity: AdminIdentity,
+    audit: PrincipalMutationAudit,
+    respond: R,
+) -> axum::response::Response
+where
+    R: FnOnce() -> axum::response::Response + Send + 'static,
+{
+    let continuation = async move {
+        let PrincipalMutationAudit {
+            action,
+            route,
+            principal_id,
+            status,
+        } = audit;
+        if let Err(error) = record_admin_audit(
+            &state,
+            AdminAuditEvent {
+                identity: Some(&identity),
+                system_component: None,
+                action: &action,
+                route: &route,
+                target_principal_id: Some(&principal_id),
+                target_upstream: None,
+                api_key_id: None,
+                status: status.as_u16(),
+                payload: None,
+            },
+        )
+        .await
+        {
+            tracing::error!(error = %error, action = %action, "admin audit write failed");
+            rebuild_after_audit_failure(&state).await;
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_write_failed");
+        }
+        let mut response = respond();
+        add_dynamic_rebind_headers(&mut response, &state).await;
+        response
+    };
+    match complete_after_commit(continuation).await {
+        Ok(response) => response,
+        Err(PostCommitAborted) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+        }
     }
 }
 

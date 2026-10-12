@@ -332,10 +332,11 @@ impl PluginRegistryStore for SqliteStorage {
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        self.get_registry_entry_by_id(id)
+        let entry = registry_by_id_in_tx(&mut tx, id)
             .await?
-            .ok_or_else(|| conflict("updated plugin registry row disappeared"))
+            .ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(entry)
     }
 
     async fn delete_registry_entry(

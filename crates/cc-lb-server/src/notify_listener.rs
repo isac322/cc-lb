@@ -129,6 +129,14 @@ impl NotifyListener {
             return;
         }
 
+        // Rebuild protocol: hold the holder's rebuild lock from the
+        // resident-generation read through installation. Waiting for the
+        // lock stays cancellation-aware so shutdown never waits behind
+        // another publisher's slow build.
+        let _rebuild_guard = tokio::select! {
+            _ = self.cancel.cancelled() => return,
+            guard = self.holder.lock_rebuild() => guard,
+        };
         let current_generation = self.holder.load().generation;
         let started = Instant::now();
         match dynamic_view_builder::build_dynamic_view(
