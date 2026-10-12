@@ -5,8 +5,9 @@ name: ci
 # `paths-ignore` on pull_request would skip the whole workflow for docs-only
 # changes, leaving required checks pending forever. The `changes` job applies
 # the same docs-only ignore list instead, and the code jobs skip when every
-# changed file matches it. `CI gate` passes when each needed job succeeded or
-# was skipped, and fails when any failed or was cancelled.
+# changed file matches it. `CI gate` passes when each needed job succeeded, or
+# was skipped for a reason its own `if:` gives (docs-only change, not a pull
+# request, release-plz branch, non-release title), and fails otherwise.
 #
 # Pushes to master and manual dispatch behave as before: push keeps its
 # `paths-ignore`, `changes` is skipped, and every code job runs.
@@ -574,11 +575,22 @@ jobs:
       - name: Check job results
         env:
           RESULTS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         # JOBS must list exactly the job ids in `needs` above. A job missing
         # from the needs context, or a context that is not a JSON object,
         # fails the gate.
+        #
+        # A job passes on success. It passes on skipped only when its own `if:`
+        # explains the skip; keep skip_ok in sync with those conditions. A run
+        # cancelled after `changes` but before the code jobs start skips them
+        # all, and this gate may still start afterwards with cancelled() false,
+        # so `skipped` alone must never pass. startsWith() in expressions is
+        # case-insensitive, hence nocasematch.
         run: |
           set -euo pipefail
+          shopt -s nocasematch
           JOBS=(changes fmt guard-crate-versions release-pr-artifacts clippy
             cargo-deny promtool nextest-cov e2e)
           if ! jq -e --args 'type == "object" and (keys == ($ARGS.positional | sort))' \
@@ -586,13 +598,44 @@ jobs:
             echo "::error::needs context does not match the expected jobs: ${JOBS[*]}"
             exit 1
           fi
-          # success and skipped pass; anything else fails the gate.
+          result_of() {
+            jq -er --arg job "$1" '.[$job].result // "missing"' <<<"$RESULTS"
+          }
+          changes=$(result_of changes)
+          code=$(jq -er '.changes.outputs.code // ""' <<<"$RESULTS")
+          is_pr=false
+          [[ $EVENT_NAME == pull_request ]] && is_pr=true
+          # Code jobs skip only when change detection succeeded and found no
+          # code change.
+          docs_only=false
+          [[ $changes == success && $code != true ]] && docs_only=true
+          guard_skip_ok=false
+          if $docs_only || ! $is_pr || [[ $HEAD_REF == "release-plz-"* ]]; then
+            guard_skip_ok=true
+          fi
+          skip_ok() {
+            case "$1" in
+              changes) ! $is_pr ;;
+              guard-crate-versions) $guard_skip_ok ;;
+              release-pr-artifacts)
+                # Its own `if:`, or a legitimately skipped guard it needs.
+                ! $is_pr || [[ $PR_TITLE != "chore: release cc-lb v"* ]] ||
+                  { [[ $(result_of guard-crate-versions) == skipped ]] && $guard_skip_ok; } ;;
+              *) $docs_only ;;
+            esac
+          }
           rc=0
           for job in "${JOBS[@]}"; do
-            result=$(jq -er --arg job "$job" '.[$job].result // "missing"' <<<"$RESULTS")
+            result=$(result_of "$job")
             echo "$job: $result"
             case "$result" in
-              success | skipped) ;;
+              success) ;;
+              skipped)
+                if ! skip_ok "$job"; then
+                  echo "::error::$job: skipped without a matching condition (run cancelled?)"
+                  rc=1
+                fi
+                ;;
               *) echo "::error::$job: $result"; rc=1 ;;
             esac
           done
