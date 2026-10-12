@@ -27,7 +27,7 @@ Each operation is described with one of three classes, or with a hybrid that nam
 | Price catalog | Catalog fetch and install | Async guaranteed fetch; async best-effort install | Snapshot in storage and the disk cache (fetch job only) | Each replica's 60 s local installer |
 | Request events | Proxy request rows | Async best-effort | Nothing at proxy response time | Lifecycle assembler insert with bounded retries |
 | Dashboards | Summary and usage reads | Read of a materialized rollup | Not applicable | Usage rollup job every 30 s (3 s jitter); 2 s response cache |
-| Subscription quotas | Observations from upstream headers | Async best-effort for the serving replica's cache and for persistence | Nothing at proxy response time | Lifecycle subscriber updates the cache; batched writer (256 rows or 100 ms); Postgres peers hydrate on `NOTIFY` |
+| Subscription quotas | Observations from upstream headers | Async best-effort for the serving replica's cache and for persistence | Nothing at proxy response time | Lifecycle subscriber updates the cache; batched writer (256 rows or 100 ms); Postgres peers hydrate on a single best-effort `NOTIFY` or their next dynamic view build |
 
 ## Admin mutations and audit records
 
@@ -62,7 +62,14 @@ Two mutating routes write no audit row:
 
 Rejected authentication is audited synchronously. `require_admin_auth` awaits `record_auth_rejected` before it returns 401. If that write fails, it logs a warning and still returns 401, after a fixed 100 ms delay (`crates/cc-lb-admin/src/auth/mod.rs`). Some read routes also write synchronous audit rows (`audit_query`, `config_editor_read`, `config_draft_read`, `config_history_read`). A row written by `GET /admin/v1/audit` does not appear in that same response.
 
-Optimistic concurrency: principal, upstream, plugin registry, and plugin chain resources return `ETag: W/"<revision>"`. Their update and delete routes require `If-Match`, and return `428 if_match_required` when it is missing. A stale revision returns `409 stale_revision` with `current_revision` for principals, upstreams, and OAuth completion, and `412 stale_revision` with `current` for plugin registry and chain entries. Configuration draft routes carry `expected_revision` in the request body instead.
+Optimistic concurrency: principal, upstream, plugin registry, and plugin chain resources return `ETag: W/"<revision>"`. Most of their update and delete routes require `If-Match`, and return `428 if_match_required` when it is missing. A stale revision returns `409 stale_revision` with `current_revision` for principals, upstreams, and OAuth completion, and `412 stale_revision` with `current` for plugin registry and chain entries. Some routes take the revision another way:
+
+- `PUT /admin/v1/principals/{id}/allowed_models` reads `expected_revision` from the JSON body, not `If-Match`.
+- `POST /admin/v1/principals/{principal_id}/plugin-chain/reorder` takes an `expected_revision` for each entry in the body.
+- `POST /admin/v1/plugins/wasm` never reads `If-Match`. An upload that replaces an existing registry entry of the same name with different bytes is handled in one of two ways. An explicitly confirmed replacement sends the multipart part `confirm_replacement=true` and must also send `replace_registry_id` and `expected_revision`. An automatic replacement, allowed without confirmation when the incoming version is a higher semver than the current one, may omit both parts. When `expected_revision` is omitted, the server uses the revision it just read from storage, so no client-supplied revision is checked and a concurrent change between the client's read and the upload is not detected.
+- `POST /admin/v1/upstreams/{id}/oauth/complete` checks the upstream revision captured when the flow was started with `/oauth/start`, stored in the PKCE flow row.
+- `POST /admin/v1/principals/{principal_id}/plugin-chain/rebalance` takes no revision at all.
+- Configuration draft routes carry `expected_revision` in the request body.
 
 | Routes | State | Audit | Dynamic view on serving replica |
 |---|---|---|---|
@@ -188,13 +195,13 @@ Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on 
 
 ## Subscription quota observations
 
-Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycle_subscription_quota_subscriber.rs`, `crates/cc-lb-engine/src/subscription_quota_events.rs`, `crates/cc-lb-admin/src/subscription_quotas.rs`.
+Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycle_subscription_quota_subscriber.rs`, `crates/cc-lb-engine/src/subscription_quota_events.rs`, `crates/cc-lb-storage-postgres/src/adapter/upstream_subscription_quota.rs`, `crates/cc-lb-server/src/notify_listener.rs`, `crates/cc-lb-admin/src/subscription_quotas.rs`.
 
 **Async best-effort, in three stages.** The proxy path does not update the quota cache itself. The event bus hands lifecycle events to a separate subscriber task over a bounded channel (capacity 4096) with a non-blocking send. When that channel is full, the event is dropped and counted as `lifecycle_subscription_quota_full`, and its observation never reaches the cache or storage. The proxy response can finish before the subscriber has processed the events. When the subscriber handles an `UpstreamResponseStarted` event for a 2xx or 429 response, it does three things:
 
 1. **Serving replica cache.** It upserts the observation into the in-process `subscription_quota_cache`. This happens on the subscriber task, independently of the proxy response, so it may land before or after the client receives the response. It is not guaranteed at response time.
 2. **Storage, async best-effort.** It enqueues the observation on the writer's bounded channel (`subscription_quota.writer_channel_capacity`, 4096 by default). When that channel is full, the observation is dropped from storage and counted as `subscription_quota_full`. The writer flushes batches of up to 256 records, or every 100 ms. A failed write is logged and the cache keeps the observation.
-3. **Peer replicas, Postgres only.** After a batch commits, the writer sends `NOTIFY`. Peers debounce for 250 ms and then reload their caches from storage. A failed `NOTIFY` only delays that reload.
+3. **Peer replicas, Postgres only.** After a batch commits, the writer sends one `NOTIFY` per affected upstream, once, outside the transaction. Peers debounce for 250 ms and then reload those upstreams' latest quota rows from storage. A failed `NOTIFY` is logged and not retried; the committed rows survive, but peers do not see them until something else hydrates their cache. A peer's quota cache is otherwise reloaded only when that peer builds a dynamic view, because every build hydrates the cache for all upstreams: at startup, on a rebind notification for upstreams, principals, keys, or plugins, on the synthetic event after a `LISTEN` reconnect, when the in-process broadcast lags, or on a reconcile pass that finds a changed revision hash. The reconcile hash covers only upstream, principal, plugin registry, and plugin chain revisions, not quota samples, so reconcile alone never notices a missed quota notification. A failed hydrate is logged and the cache keeps its previous values. On SQLite there is no cross-process quota notification at all.
 
 | Read | Source | Shows a new observation |
 |---|---|---|
@@ -207,7 +214,7 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 Assert right after a 2xx admin response:
 
 - Domain state through the storage API or a follow-up `GET`, and the audit row through `query_recent_audit`. Both are committed before the response. For example, `crates/cc-lb-admin/tests/v1_principals.rs` checks the audit row right after the response.
-- The new `ETag` revision, which can go straight into the next `If-Match`.
+- The new `ETag` revision, which can go straight into the next `If-Match`, or into the body `expected_revision` for the routes listed under optimistic concurrency.
 - For "Rebuilt" routes, `x-cc-lb-generation` means that generation, or a newer one, is resident on the serving replica. It proves the view includes the mutation only when no other rebuild ran in that process during the request (see [Dynamic routing view](#dynamic-routing-view)). Assert the view or send proxy traffic right after the response only in a harness where the admin route is the only source of rebuilds. `crates/cc-lb-admin/tests/v1_synchronous_rebind.rs` relies on exactly that: it builds `AdminState` with a test `SnapshotRebinder` and no `NotifyListener` or `Reconciler`, sends a single mutation, then checks that the resident generation equals the header and that the view contains the new upstream. In a full server, where notification and reconcile rebuilds can overlap, wait on a rebind seam instead (see below). When the response carries `x-cc-lb-rebind-status: deferred`, do not assert the view.
 - Job rows enqueued by the handler: assert that a row with the expected idempotency key exists, not its status. For example, after warmup is turned on, the warmup bootstrap row exists, but a worker may already have claimed or finished it. Assert `Pending` only when the test controls the scheduler worker, for example when no worker is running.
 
@@ -218,7 +225,7 @@ Do not assert right after a response. Wait on the named seam instead:
 - **Scheduler job execution.** Inject a dispatch closure that reports each job over a channel, like `dispatching_scheduler_ctx` in `crates/cc-lb-scheduler/tests/worker.rs`, and wait on that channel with a deadline. Do not assert the extra usage poll after a limit-reset claim.
 - **Lazy OAuth refresh.** Use `read_oauth_token_generation` and the controllable fixtures in the test module of `crates/cc-lb-server/src/refresh.rs` (`TestOAuthRefreshClaims::wait_for_contention`, `LazyRefreshFixture::hold_refresh_response`, `wait_for_refresh_start`).
 - **Price catalog.** Seed it with the test helper and wait with `wait_for_price_catalog` in `tests/integration/managed_api_key_full_flow.rs`.
-- **Request event rows.** Subscribe to the bus and wait for `RequestEventUpdate::Final` (`crates/cc-lb-engine/tests/lifecycle_request_events.rs`). In server-level tests, use `wait_for_row_count` or `settled_row_count` in `crates/cc-lb-server/tests/rfc_0002_fix_live_qa.rs`.
+- **Request event rows.** Subscribe to the bus and wait for `RequestEventUpdate::Final` for the specific request (`crates/cc-lb-engine/tests/lifecycle_request_events.rs`), or install a test-scoped observer. In server-level tests where the exact number of expected rows is known, `wait_for_row_count` in `crates/cc-lb-server/tests/rfc_0002_fix_live_qa.rs` polls storage until the count equals that number and panics after a 10 s deadline. Do not use `settled_row_count` from the same file as a completion signal: it returns once the count stops changing for a few 300 ms reads, or after 15 s, which is a timing heuristic, not proof that a row was written.
 - **Dashboards.** Call `rollup_usage_once()` on the storage directly after seeding events (`crates/cc-lb-admin/tests/dashboard_summary.rs`, `crates/cc-lb-admin/tests/dashboard_usage.rs`). On Postgres, call `wait_for_events_visible_for_rollup` first (`crates/cc-lb-storage-conformance/tests/storage_roundtrips_postgres.rs`).
 - **Stream tailing on Postgres.** Wait on the `StorageTailPoller` broadcast receiver, as in `crates/cc-lb-engine/tests/storage_tail_poller.rs`.
 
