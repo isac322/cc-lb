@@ -15,6 +15,8 @@ The scheduler separates request-path work from durable background tasks. Apalis 
 
 Warm-up is enabled by default for OAuth upstreams after credentials exist. It does not apply to API-key upstreams.
 
+The [consistency contract source notes](/docs/reference/source/consistency-contract/) describe what an enqueued or completed scheduler job guarantees and which state converges later.
+
 ## Retry classes
 
 | Class | Use | Attempts |
