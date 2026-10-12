@@ -19,6 +19,14 @@ Forbidden shortcuts:
 - Moving a body read, JSON parse, or upstream call above the authentication call "just to measure it" or "just for this one path".
 - Registering a new unauthenticated route on the proxy or admin listener without explicit user approval.
 
+## Observability stays off the proxy path
+
+Monitoring exists to observe the proxy, so it must never slow the proxy down.
+
+Rules:
+- Instrumentation (Prometheus metrics, OTel spans and attributes, overhead measurement) must not add blocking work, extra body parsing, locks, or awaits to request handling. Record cheaply on the request path; aggregate and export off it.
+- Choose metrics, spans, and span attributes from what people who deploy, operate, or use cc-lb need to know, not from what is easy to instrument in the code.
+
 ## SQLite Storage Backend
 
 SQLite is now the default storage backend for local development and CI. The historical redb backend has been removed entirely.
@@ -65,6 +73,13 @@ Forbidden shortcuts:
 - `sleep`, retry loops, or weakened assertions to hide a race.
 - Silently removing, moving, or renaming the failing test to bypass CI matching.
 - Adding a public `flush`/`persist_now`/completion/notification method on a production type whose only immediate consumer is a test — that is masking the missing test seam by contaminating the production API surface.
+
+## Deployment-independent design
+
+cc-lb is open source and runs in environments we never see.
+
+Rules:
+- Do not derive formulas, thresholds, forecasts, or defaults from one deployment's traffic history, including the owner's. Find a general model, and use observed deployment data only to validate it.
 
 ## Public surface parity
 
