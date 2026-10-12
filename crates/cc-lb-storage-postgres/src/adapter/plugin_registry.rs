@@ -324,16 +324,19 @@ impl PluginRegistryStore for PostgresStorage {
         let row = sqlx::query("UPDATE wasm_registry_v2 SET label=$1, revision=revision+1 WHERE id=$2 AND revision=$3 RETURNING *")
             .bind(label).bind(id).bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
             .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
-        let row = row.ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
+        if row.is_none() {
+            return Err(conflict("updated plugin registry row disappeared"));
+        }
+        let entry = registry_by_id_in_tx(&mut tx, id)
+            .await?
+            .ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
         sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        self.get_registry_entry_by_id(row.try_get("id").map_err(map_sqlx_error)?)
-            .await?
-            .ok_or_else(|| conflict("updated plugin registry row disappeared"))
+        Ok(entry)
     }
 
     async fn delete_registry_entry(

@@ -9,8 +9,8 @@
 //! so real SQLite storage is used; SQLite emits no quota notification, which
 //! stands in for a lost NOTIFY.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -28,6 +28,7 @@ use cc_lb_storage_api::{
     UpstreamStore, UpstreamSubscriptionQuotaStore,
 };
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -76,11 +77,20 @@ fn sample(
 
 /// Pass-through quota store whose latest-observation read can be switched to
 /// fail, to show that a failed periodic hydration does not fail reconcile. It
-/// also counts latest-observation reads.
+/// also counts latest-observation reads, and an armed [`ReadGate`] holds the
+/// next successful read result until the test releases it.
 struct SwitchableQuotaStore {
     inner: Arc<Storage>,
     fail_reads: AtomicBool,
     latest_reads: AtomicUsize,
+    read_gate: Mutex<Option<ReadGate>>,
+}
+
+/// Signals once the storage read has returned, then waits for release before
+/// handing the result to the caller.
+struct ReadGate {
+    read_returned: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
 }
 
 #[async_trait]
@@ -102,9 +112,18 @@ impl UpstreamSubscriptionQuotaStore for SwitchableQuotaStore {
                 message: "injected quota read failure".to_owned(),
             });
         }
-        self.inner
+        let records = self
+            .inner
             .list_latest_subscription_quota_for_upstreams(upstream_ids)
-            .await
+            .await?;
+        let gate = self.read_gate.lock().expect("read gate lock").take();
+        if let Some(gate) = gate {
+            gate.read_returned
+                .send(())
+                .expect("test awaits the read signal");
+            gate.release.await.expect("test releases the read");
+        }
+        Ok(records)
     }
 
     async fn put_subscription_quota_checkpoints(
@@ -119,6 +138,8 @@ struct Peer {
     _dir: tempfile::TempDir,
     storage: Arc<Storage>,
     quota_store: Arc<SwitchableQuotaStore>,
+    stores: Arc<Stores>,
+    quota: Arc<SubscriptionQuotaCache>,
     holder: Arc<DynamicViewHolder>,
     reconciler: Reconciler,
 }
@@ -180,6 +201,7 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
         inner: storage.clone(),
         fail_reads: AtomicBool::new(false),
         latest_reads: AtomicUsize::new(0),
+        read_gate: Mutex::new(None),
     });
     let stores = Arc::new(Stores {
         upstreams: storage.clone(),
@@ -214,14 +236,14 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
     .expect("initial view");
     let holder = Arc::new(DynamicViewHolder::new(initial));
     let reconciler = Reconciler::new(
-        stores,
+        stores.clone(),
         holder.clone(),
         runtime,
         aead,
         None,
         CancellationToken::new(),
         dir.path().to_path_buf(),
-        quota,
+        quota.clone(),
         30,
         Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
         STALENESS_SECS,
@@ -232,6 +254,8 @@ async fn peer(upstream_names: &[&str]) -> (Peer, Vec<UpstreamRecord>) {
             _dir: dir,
             storage,
             quota_store,
+            stores,
+            quota,
             holder,
             reconciler,
         },
@@ -320,4 +344,97 @@ async fn reconcile_skips_quota_hydration_without_upstreams() {
         "no quota read may be issued for an empty upstream id list"
     );
     assert_eq!(peer.holder.generation(), generation);
+}
+
+/// Periodic hydration applies only strictly newer stored observations: a
+/// resident observation with the same timestamp survives an unchanged-hash
+/// tick, a strictly newer stored one replaces it, and the tick never
+/// publishes a new view.
+#[tokio::test]
+async fn reconcile_keeps_resident_quota_on_equal_observed_at() {
+    let (peer, upstreams) = peer(&["quota-upstream"]).await;
+    let upstream = &upstreams[0];
+    let generation = peer.holder.generation();
+    let observed_at = now_millis();
+
+    peer.storage
+        .record_subscription_quota_samples(&[sample(upstream.id, observed_at, 0.42)])
+        .await
+        .expect("stored observation A@T committed");
+    peer.quota
+        .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.77));
+
+    peer.reconciler.reconcile_once().await.expect("reconcile");
+    assert_eq!(
+        peer.five_hour_utilization(upstream.id),
+        Some(0.77),
+        "periodic hydration must not replace resident B@T with stored A@T"
+    );
+    assert_eq!(peer.holder.generation(), generation);
+
+    peer.storage
+        .record_subscription_quota_samples(&[sample(upstream.id, observed_at + 1, 0.9)])
+        .await
+        .expect("stored observation A@T+1 committed");
+    peer.reconciler.reconcile_once().await.expect("reconcile");
+    assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.9));
+    assert_eq!(peer.holder.generation(), generation);
+}
+
+/// A periodic read that returned A@T before a same-timestamp observation B@T
+/// was installed locally applies after B and must not restore A.
+#[tokio::test]
+async fn reconcile_delayed_read_does_not_restore_equal_observed_at() {
+    let (peer, upstreams) = peer(&["quota-upstream"]).await;
+    let upstream = &upstreams[0];
+    let generation = peer.holder.generation();
+    let observed_at = now_millis();
+
+    peer.storage
+        .record_subscription_quota_samples(&[sample(upstream.id, observed_at, 0.42)])
+        .await
+        .expect("stored observation A@T committed");
+    let (read_returned_tx, read_returned_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    *peer.quota_store.read_gate.lock().expect("read gate lock") = Some(ReadGate {
+        read_returned: read_returned_tx,
+        release: release_rx,
+    });
+
+    let install_local = async {
+        read_returned_rx.await.expect("storage read returned A@T");
+        peer.quota
+            .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.77));
+        release_tx.send(()).expect("reconcile awaits release");
+    };
+    let (reconciled, ()) = tokio::join!(peer.reconciler.reconcile_once(), install_local);
+    reconciled.expect("reconcile");
+
+    assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.77));
+    assert_eq!(peer.holder.generation(), generation);
+}
+
+/// Builder/NOTIFY hydration and direct upserts keep their existing policy:
+/// an equal-timestamp observation replaces the resident one.
+#[tokio::test]
+async fn hydrate_from_store_and_upsert_replace_on_equal_observed_at() {
+    let (peer, upstreams) = peer(&["quota-upstream"]).await;
+    let upstream = &upstreams[0];
+    let observed_at = now_millis();
+
+    peer.quota
+        .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.77));
+    peer.quota
+        .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.55));
+    assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.55));
+
+    peer.storage
+        .record_subscription_quota_samples(&[sample(upstream.id, observed_at, 0.42)])
+        .await
+        .expect("stored observation A@T committed");
+    peer.quota
+        .hydrate_from_store(&peer.stores, &[upstream.id])
+        .await
+        .expect("hydrate from store");
+    assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.42));
 }

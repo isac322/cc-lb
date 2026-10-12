@@ -1,3 +1,5 @@
+#[path = "adapter_commit_last.rs"]
+mod adapter_commit_last;
 #[path = "api_key_usage.rs"]
 mod api_key_usage;
 #[path = "audit.rs"]

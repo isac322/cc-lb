@@ -125,10 +125,7 @@ impl UpstreamStore for SqliteStorage {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        complete_split_refresh(self, id, holder, tokens).await?;
-        get_split_by_id(self.pool(), id)
-            .await?
-            .ok_or_else(|| conflict("upstream not found"))
+        complete_split_refresh(self, id, holder, tokens).await
     }
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
@@ -187,11 +184,13 @@ impl UpstreamStore for SqliteStorage {
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
         if row.is_none() {
+            tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         }
-        get_split_by_id(self.pool(), id).await
+        let record = get_split_by_id_in_tx(&mut tx, id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(record)
     }
 }
 
@@ -240,10 +239,9 @@ async fn create_split(
         clear_split_apply_error_in_tx(&mut tx, id).await?;
     }
 
+    let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    Ok(record)
 }
 
 async fn get_split_by_name(pool: &SqlitePool, name: &str) -> StorageResult<Option<UpstreamRecord>> {
@@ -260,18 +258,43 @@ async fn get_split_by_name(pool: &SqlitePool, name: &str) -> StorageResult<Optio
     row.map(split_row_to_record).transpose()
 }
 
+const SELECT_SPLIT_BY_ID_SQL: &str = concat!(
+    "SELECT ",
+    split_upstream_columns!(),
+    split_upstream_joins!(),
+    "WHERE spec.id = ?"
+);
+
 async fn get_split_by_id(pool: &SqlitePool, id: Uuid) -> StorageResult<Option<UpstreamRecord>> {
-    let row = sqlx::query(concat!(
-        "SELECT ",
-        split_upstream_columns!(),
-        split_upstream_joins!(),
-        "WHERE spec.id = ?"
-    ))
-    .bind(id.to_string())
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
+    let row = sqlx::query(SELECT_SPLIT_BY_ID_SQL)
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await
+        .map_err(map_sqlx_error)?;
     row.map(split_row_to_record).transpose()
+}
+
+/// Reads and decodes the mutated row inside the mutation's transaction so
+/// COMMIT stays the final await of every successful mutation.
+async fn get_split_by_id_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<Option<UpstreamRecord>> {
+    let row = sqlx::query(SELECT_SPLIT_BY_ID_SQL)
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.map(split_row_to_record).transpose()
+}
+
+async fn require_split_in_tx(
+    tx: &mut Transaction<'static, Sqlite>,
+    id: Uuid,
+) -> StorageResult<UpstreamRecord> {
+    get_split_by_id_in_tx(tx, id)
+        .await?
+        .ok_or_else(|| conflict("upstream not found"))
 }
 
 async fn list_split(
@@ -332,10 +355,9 @@ async fn update_split(
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation_in_tx(&mut tx, id, generation).await?;
     }
+    let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    Ok(record)
 }
 
 async fn update_split_spec(
@@ -349,10 +371,9 @@ async fn update_split_spec(
     }
     let mut tx = storage.begin_immediate().await?;
     update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
+    let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    Ok(record)
 }
 
 async fn update_split_spec_in_tx(
@@ -404,10 +425,9 @@ async fn update_split_api_key_secret(
 ) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
     update_split_api_key_secret_in_tx(&mut tx, id, api_key_ciphertext).await?;
+    let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    Ok(record)
 }
 
 async fn update_split_api_key_secret_in_tx(
@@ -460,10 +480,9 @@ async fn update_split_oauth_token(
     .await
     .map_err(map_sqlx_error)?;
     clear_split_apply_error_in_tx(&mut tx, id).await?;
+    let record = require_split_in_tx(&mut tx, id).await?;
     tx.commit().await.map_err(map_sqlx_error)?;
-    get_split_by_id(storage.pool(), id)
-        .await?
-        .ok_or_else(|| conflict("upstream not found"))
+    Ok(record)
 }
 
 async fn update_split_oauth_token_generation_in_tx(
@@ -492,7 +511,7 @@ async fn complete_split_refresh(
     id: Uuid,
     _holder: Uuid,
     tokens: EncryptedOAuthTokens,
-) -> StorageResult<()> {
+) -> StorageResult<UpstreamRecord> {
     let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
@@ -509,7 +528,9 @@ async fn complete_split_refresh(
     .await
     .map_err(map_sqlx_error)?;
     clear_split_apply_error_in_tx(&mut tx, id).await?;
-    tx.commit().await.map_err(map_sqlx_error)
+    let record = require_split_in_tx(&mut tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)?;
+    Ok(record)
 }
 
 async fn read_split_oauth_token_generation(

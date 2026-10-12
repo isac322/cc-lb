@@ -61,8 +61,8 @@ impl PrincipalStore for PostgresStorage {
         .await
         .map_err(map_sqlx_error)?;
         let record = principal_from_row(row)?;
+        notify_principal_changed(&mut tx, record.id).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        self.notify_principal_changed(record.id).await?;
         Ok(record)
     }
 
@@ -143,6 +143,7 @@ impl PrincipalStore for PostgresStorage {
             .map(serde_json::to_value)
             .transpose()?;
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
             "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, cache_keepalive = $7, revision = revision + 1, updated_at = $8 WHERE id = $1 AND revision = $9 RETURNING *",
         )
@@ -155,11 +156,12 @@ impl PrincipalStore for PostgresStorage {
         .bind(cache_keepalive_value)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         let record = principal_from_row(row)?;
-        self.notify_principal_changed(record.id).await?;
+        notify_principal_changed(&mut tx, record.id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(record))
     }
 
@@ -299,27 +301,34 @@ impl PostgresStorage {
         let sql = format!(
             "UPDATE principals_v1 SET {field} = $3, updated_at = $4, revision = revision + 1 WHERE id = $1 AND revision = $2 RETURNING *"
         );
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(AssertSqlSafe(sql))
             .bind(id)
             .bind(u64_to_i64(expected_revision, "principal.revision")?)
             .bind(enabled)
             .bind(now)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         let record = principal_from_row(row)?;
-        self.notify_principal_changed(record.id).await?;
+        notify_principal_changed(&mut tx, record.id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(record))
     }
+}
 
-    async fn notify_principal_changed(&self, id: Uuid) -> StorageResult<()> {
-        sqlx::query("SELECT pg_notify('cclb_principal_changed', $1)")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
-    }
+/// Queues the principal-change notification inside the mutation's transaction
+/// so it is delivered exactly when the change commits; a failure rolls back.
+async fn notify_principal_changed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query("SELECT pg_notify('cclb_principal_changed', $1)")
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalRecord> {

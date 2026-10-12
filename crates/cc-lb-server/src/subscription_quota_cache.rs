@@ -53,6 +53,14 @@ struct SourceSnapshots {
     api: Option<MergedQuotaSnapshot>,
 }
 
+/// What an incoming observation does to a resident one with the same
+/// `observed_at_unix_millis` in its `(upstream, window, source)` slot.
+#[derive(Clone, Copy, Debug)]
+enum EqualObservedAt {
+    Replace,
+    Keep,
+}
+
 #[derive(Debug, Default)]
 pub struct SubscriptionQuotaCache {
     inner: Arc<RwLock<HashMap<Uuid, HashMap<SubscriptionQuotaWindow, SourceSnapshots>>>>,
@@ -68,17 +76,49 @@ impl SubscriptionQuotaCache {
         stores: &Stores,
         upstream_ids: &[Uuid],
     ) -> StorageResult<()> {
+        self.hydrate_with_tie_policy(stores, upstream_ids, EqualObservedAt::Replace)
+            .await
+    }
+
+    /// Periodic-reconcile hydration: a stored observation replaces the
+    /// resident one only when strictly newer, so a backstop read that raced
+    /// a local or notified observation with the same timestamp cannot
+    /// restore the older read's content. Empty slots still hydrate.
+    pub(crate) async fn hydrate_strictly_newer_from_store(
+        &self,
+        stores: &Stores,
+        upstream_ids: &[Uuid],
+    ) -> StorageResult<()> {
+        self.hydrate_with_tie_policy(stores, upstream_ids, EqualObservedAt::Keep)
+            .await
+    }
+
+    async fn hydrate_with_tie_policy(
+        &self,
+        stores: &Stores,
+        upstream_ids: &[Uuid],
+        tie: EqualObservedAt,
+    ) -> StorageResult<()> {
         let records = stores
             .upstream_subscription_quotas
             .list_latest_subscription_quota_for_upstreams(upstream_ids)
             .await?;
         for record in records {
-            self.upsert_observation(record.upstream_id, &record);
+            self.upsert_with_tie_policy(record.upstream_id, &record, tie);
         }
         Ok(())
     }
 
     pub fn upsert_observation(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
+        self.upsert_with_tie_policy(upstream_id, record, EqualObservedAt::Replace);
+    }
+
+    fn upsert_with_tie_policy(
+        &self,
+        upstream_id: Uuid,
+        record: &SubscriptionQuotaSample,
+        tie: EqualObservedAt,
+    ) {
         let snapshot = MergedQuotaSnapshot::from_record(record);
         let mut guard = self.inner.write();
         let sources = guard
@@ -90,10 +130,15 @@ impl SubscriptionQuotaCache {
             SubscriptionQuotaSource::Header => &mut sources.header,
             SubscriptionQuotaSource::Api => &mut sources.api,
         };
-        if slot
-            .as_ref()
-            .is_none_or(|current| record.observed_at_unix_millis >= current.observed_at_unix_millis)
-        {
+        let accept = slot.as_ref().is_none_or(|current| match tie {
+            EqualObservedAt::Replace => {
+                record.observed_at_unix_millis >= current.observed_at_unix_millis
+            }
+            EqualObservedAt::Keep => {
+                record.observed_at_unix_millis > current.observed_at_unix_millis
+            }
+        });
+        if accept {
             *slot = Some(snapshot);
         }
     }

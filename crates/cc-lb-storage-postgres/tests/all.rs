@@ -1,3 +1,5 @@
+#[path = "admin_mutation_commit_boundary.rs"]
+mod admin_mutation_commit_boundary;
 #[path = "api_key_usage.rs"]
 mod api_key_usage;
 #[path = "audit.rs"]
