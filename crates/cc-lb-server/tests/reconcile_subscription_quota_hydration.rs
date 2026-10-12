@@ -346,36 +346,36 @@ async fn reconcile_skips_quota_hydration_without_upstreams() {
     assert_eq!(peer.holder.generation(), generation);
 }
 
-/// Periodic hydration applies only strictly newer stored observations: a
-/// resident observation with the same timestamp survives an unchanged-hash
-/// tick, a strictly newer stored one replaces it, and the tick never
-/// publishes a new view.
+/// Another replica persisted B@T over a slot this peer holds as A@T, and the
+/// notification was lost. With no concurrent install during the read, an
+/// unchanged-hash tick recovers B; a strictly newer stored observation then
+/// replaces it, and the tick never publishes a new view.
 #[tokio::test]
-async fn reconcile_keeps_resident_quota_on_equal_observed_at() {
+async fn reconcile_recovers_equal_observed_at_after_lost_notification() {
     let (peer, upstreams) = peer(&["quota-upstream"]).await;
     let upstream = &upstreams[0];
     let generation = peer.holder.generation();
     let observed_at = now_millis();
 
-    peer.storage
-        .record_subscription_quota_samples(&[sample(upstream.id, observed_at, 0.42)])
-        .await
-        .expect("stored observation A@T committed");
     peer.quota
-        .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.77));
+        .upsert_observation(upstream.id, &sample(upstream.id, observed_at, 0.42));
+    peer.storage
+        .record_subscription_quota_samples(&[sample(upstream.id, observed_at, 0.77)])
+        .await
+        .expect("stored observation B@T committed");
 
     peer.reconciler.reconcile_once().await.expect("reconcile");
     assert_eq!(
         peer.five_hour_utilization(upstream.id),
         Some(0.77),
-        "periodic hydration must not replace resident B@T with stored A@T"
+        "periodic hydration must recover stored B@T over resident A@T"
     );
     assert_eq!(peer.holder.generation(), generation);
 
     peer.storage
         .record_subscription_quota_samples(&[sample(upstream.id, observed_at + 1, 0.9)])
         .await
-        .expect("stored observation A@T+1 committed");
+        .expect("stored observation C@T+1 committed");
     peer.reconciler.reconcile_once().await.expect("reconcile");
     assert_eq!(peer.five_hour_utilization(upstream.id), Some(0.9));
     assert_eq!(peer.holder.generation(), generation);

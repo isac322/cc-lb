@@ -152,10 +152,11 @@ impl Reconciler {
     /// Refresh the subscription-quota cache from committed storage on every
     /// tick. Quota observations are outside the revision hash and their
     /// change notifications can be lost, so this periodic read is the
-    /// backstop. It applies only strictly newer observations, so a read that
-    /// raced a same-timestamp local or notified observation cannot restore
-    /// the older content. It never changes generation or hash, and a failure
-    /// only logs so the dynamic-view reconcile still runs.
+    /// backstop. A stored observation replaces the cached one when strictly
+    /// newer, or on an equal timestamp when no other path replaced that slot
+    /// during the read, so a read that raced a local or notified observation
+    /// cannot restore older content. It never changes generation or hash, and
+    /// a failure only logs so the dynamic-view reconcile still runs.
     async fn hydrate_subscription_quota_cache(&self) {
         let upstream_ids = self
             .holder
@@ -169,7 +170,7 @@ impl Reconciler {
         }
         if let Err(error) = self
             .subscription_quota_cache
-            .hydrate_strictly_newer_from_store(&self.stores, &upstream_ids)
+            .hydrate_from_store_unless_raced(&self.stores, &upstream_ids)
             .await
         {
             tracing::warn!(%error, "periodic subscription quota cache hydrate failed");

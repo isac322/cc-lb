@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,17 +54,60 @@ struct SourceSnapshots {
     api: Option<MergedQuotaSnapshot>,
 }
 
+/// One `(upstream, window)` entry: the per-source observations plus a
+/// per-slot version that every replacement of that slot bumps, whichever
+/// path installed it.
+#[derive(Debug, Default)]
+struct WindowSlots {
+    sources: SourceSnapshots,
+    header_version: u64,
+    api_version: u64,
+}
+
+impl WindowSlots {
+    fn versions(&self) -> SourceVersions {
+        SourceVersions {
+            header: self.header_version,
+            api: self.api_version,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SourceVersions {
+    header: u64,
+    api: u64,
+}
+
+impl SourceVersions {
+    fn get(self, source: SubscriptionQuotaSource) -> u64 {
+        match source {
+            SubscriptionQuotaSource::Header => self.header,
+            SubscriptionQuotaSource::Api => self.api,
+        }
+    }
+}
+
+/// Slot versions captured before a storage read. A slot absent here had
+/// version 0 when captured, which is also the version of a new slot.
+type SlotVersions = HashMap<(Uuid, SubscriptionQuotaWindow), SourceVersions>;
+
 /// What an incoming observation does to a resident one with the same
 /// `observed_at_unix_millis` in its `(upstream, window, source)` slot.
+/// Strictly newer observations always replace, older ones never do, and an
+/// empty slot always accepts.
 #[derive(Clone, Copy, Debug)]
-enum EqualObservedAt {
+enum EqualObservedAt<'a> {
     Replace,
-    Keep,
+    /// Replace only if the slot has not been replaced since these versions
+    /// were captured, so a read that raced a concurrent install cannot
+    /// restore older content.
+    ReplaceIfUnchangedSince(&'a SlotVersions),
 }
 
 #[derive(Debug, Default)]
 pub struct SubscriptionQuotaCache {
-    inner: Arc<RwLock<HashMap<Uuid, HashMap<SubscriptionQuotaWindow, SourceSnapshots>>>>,
+    inner: Arc<RwLock<HashMap<Uuid, HashMap<SubscriptionQuotaWindow, WindowSlots>>>>,
 }
 
 impl SubscriptionQuotaCache {
@@ -76,37 +120,59 @@ impl SubscriptionQuotaCache {
         stores: &Stores,
         upstream_ids: &[Uuid],
     ) -> StorageResult<()> {
-        self.hydrate_with_tie_policy(stores, upstream_ids, EqualObservedAt::Replace)
-            .await
-    }
-
-    /// Periodic-reconcile hydration: a stored observation replaces the
-    /// resident one only when strictly newer, so a backstop read that raced
-    /// a local or notified observation with the same timestamp cannot
-    /// restore the older read's content. Empty slots still hydrate.
-    pub(crate) async fn hydrate_strictly_newer_from_store(
-        &self,
-        stores: &Stores,
-        upstream_ids: &[Uuid],
-    ) -> StorageResult<()> {
-        self.hydrate_with_tie_policy(stores, upstream_ids, EqualObservedAt::Keep)
-            .await
-    }
-
-    async fn hydrate_with_tie_policy(
-        &self,
-        stores: &Stores,
-        upstream_ids: &[Uuid],
-        tie: EqualObservedAt,
-    ) -> StorageResult<()> {
-        let records = stores
-            .upstream_subscription_quotas
-            .list_latest_subscription_quota_for_upstreams(upstream_ids)
-            .await?;
+        let records = self.read_latest(stores, upstream_ids).await?;
         for record in records {
-            self.upsert_with_tie_policy(record.upstream_id, &record, tie);
+            self.upsert_with_tie_policy(record.upstream_id, &record, EqualObservedAt::Replace);
         }
         Ok(())
+    }
+
+    /// Periodic-reconcile hydration. It captures the target slots' versions
+    /// before the storage read; a stored observation then replaces the
+    /// resident one when strictly newer, or when its timestamp is equal and
+    /// no other path replaced the slot during the read. A same-timestamp
+    /// observation persisted by another replica whose notification was lost
+    /// is therefore recovered, while a read that raced a local or notified
+    /// install cannot restore the older content. Empty slots always hydrate.
+    pub(crate) async fn hydrate_from_store_unless_raced(
+        &self,
+        stores: &Stores,
+        upstream_ids: &[Uuid],
+    ) -> StorageResult<()> {
+        let versions = self.slot_versions(upstream_ids);
+        let records = self.read_latest(stores, upstream_ids).await?;
+        for record in records {
+            self.upsert_with_tie_policy(
+                record.upstream_id,
+                &record,
+                EqualObservedAt::ReplaceIfUnchangedSince(&versions),
+            );
+        }
+        Ok(())
+    }
+
+    async fn read_latest(
+        &self,
+        stores: &Stores,
+        upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<SubscriptionQuotaSample>> {
+        stores
+            .upstream_subscription_quotas
+            .list_latest_subscription_quota_for_upstreams(upstream_ids)
+            .await
+    }
+
+    fn slot_versions(&self, upstream_ids: &[Uuid]) -> SlotVersions {
+        let guard = self.inner.read();
+        let mut versions = SlotVersions::new();
+        for upstream_id in upstream_ids {
+            if let Some(windows) = guard.get(upstream_id) {
+                for (window, slots) in windows {
+                    versions.insert((*upstream_id, *window), slots.versions());
+                }
+            }
+        }
+        versions
     }
 
     pub fn upsert_observation(&self, upstream_id: Uuid, record: &SubscriptionQuotaSample) {
@@ -117,29 +183,45 @@ impl SubscriptionQuotaCache {
         &self,
         upstream_id: Uuid,
         record: &SubscriptionQuotaSample,
-        tie: EqualObservedAt,
+        tie: EqualObservedAt<'_>,
     ) {
         let snapshot = MergedQuotaSnapshot::from_record(record);
         let mut guard = self.inner.write();
-        let sources = guard
+        let slots = guard
             .entry(upstream_id)
             .or_default()
             .entry(record.window)
             .or_default();
-        let slot = match record.source {
-            SubscriptionQuotaSource::Header => &mut sources.header,
-            SubscriptionQuotaSource::Api => &mut sources.api,
+        let (slot, version) = match record.source {
+            SubscriptionQuotaSource::Header => {
+                (&mut slots.sources.header, &mut slots.header_version)
+            }
+            SubscriptionQuotaSource::Api => (&mut slots.sources.api, &mut slots.api_version),
         };
-        let accept = slot.as_ref().is_none_or(|current| match tie {
-            EqualObservedAt::Replace => {
-                record.observed_at_unix_millis >= current.observed_at_unix_millis
-            }
-            EqualObservedAt::Keep => {
-                record.observed_at_unix_millis > current.observed_at_unix_millis
-            }
-        });
+        let accept = match slot.as_ref() {
+            None => true,
+            Some(current) => match record
+                .observed_at_unix_millis
+                .cmp(&current.observed_at_unix_millis)
+            {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                Ordering::Equal => match tie {
+                    EqualObservedAt::Replace => true,
+                    EqualObservedAt::ReplaceIfUnchangedSince(captured) => {
+                        let captured = captured
+                            .get(&(upstream_id, record.window))
+                            .copied()
+                            .unwrap_or_default()
+                            .get(record.source);
+                        captured == *version
+                    }
+                },
+            },
+        };
         if accept {
             *slot = Some(snapshot);
+            *version = version.wrapping_add(1);
         }
     }
 
@@ -156,9 +238,12 @@ impl SubscriptionQuotaCache {
             .copied()
             .map(
                 |window| match windows.and_then(|by_window| by_window.get(&window)) {
-                    Some(sources) => {
-                        candidate_from_sources(window, sources, now_unix_millis, max_staleness_secs)
-                    }
+                    Some(slots) => candidate_from_sources(
+                        window,
+                        &slots.sources,
+                        now_unix_millis,
+                        max_staleness_secs,
+                    ),
                     None => unobserved_candidate(window, max_staleness_secs),
                 },
             )
