@@ -33,6 +33,8 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await
         .expect("upstream creates");

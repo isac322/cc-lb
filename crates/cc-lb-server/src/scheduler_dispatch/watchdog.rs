@@ -117,6 +117,23 @@ mod tests {
         assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
     }
 
+    /// OAU-03: no OAuth refresh, warmup-watchdog, or OAuth usage job is ever
+    /// listed for an API-key upstream, even one carrying OAuth-shaped fields.
+    #[test]
+    fn oau03_no_oauth_job_filter_matches_api_key_upstream() {
+        let mut upstream = registered_oauth_upstream();
+        upstream.kind = UpstreamKind::AnthropicApiKey;
+        upstream.warmup_enabled = true;
+
+        for filter in [
+            WatchdogUpstreamFilter::Warmup,
+            WatchdogUpstreamFilter::OAuth,
+            WatchdogUpstreamFilter::OAuthUsagePoll,
+        ] {
+            assert!(!filter.matches(&upstream));
+        }
+    }
+
     #[test]
     fn oauth_filter_rejects_never_refresh_credentials() {
         let mut long_lived = registered_oauth_upstream();
@@ -170,6 +187,7 @@ mod tests {
             warmup_enabled: false,
             warmup_dialect_plugin: None,
             last_warmup_at_unix_secs: None,
+            workspace_id: None,
         }
     }
 }

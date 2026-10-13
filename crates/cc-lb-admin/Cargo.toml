@@ -79,6 +79,7 @@ rkyv = { workspace = true, features = ["std", "bytecheck"] }
 insta.workspace = true
 tempfile.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 apalis-postgres = "^1.0.0-rc.8"

@@ -27,6 +27,6 @@ pub use routing::{
     RoutingTrace, StageDecision, SubscriptionPreferenceTrace, TerminalDecision, TerminalStrategy,
 };
 pub use upstream::{
-    ANTHROPIC_IDENTITY_HEADERS, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    ANTHROPIC_IDENTITY_HEADERS, ANTHROPIC_WORKSPACE_ID_HEADER, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
     BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, Upstream, UpstreamCandidate, UpstreamKind,
 };

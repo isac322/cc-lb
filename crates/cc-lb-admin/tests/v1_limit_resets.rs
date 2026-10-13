@@ -168,6 +168,8 @@ async fn seed_oauth_upstream(server: &SpawnedAdminServer, base_url: &str) -> Ups
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -439,6 +441,8 @@ async fn get_limit_resets_rejects_non_oauth_upstream() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await

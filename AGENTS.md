@@ -86,3 +86,10 @@ Rules:
 Code, repository documentation, the documentation site, and registry listings MUST describe the same shipped behavior. A mismatch is a defect and MUST block the pull request until it is corrected.
 
 Use `positioning.yml` as the source of truth for public identity, category, description, topics, homepage, license, and public claims. Use the API schema, generated references, and release metadata as the source of truth for technical contracts and versions. Before merging a public-surface change, update every affected surface and run the repository's documentation, site, CI, and parity checks. The pull request template records the commands and results.
+
+## Admin web product and design docs
+
+The admin web has two governing documents under `crates/cc-lb-admin/web/`: `PRODUCT.md` (`## Product Principles`) for durable UX and product principles, and `DESIGN.md` for the visual system and component interaction contracts.
+
+Rules:
+- Read both before changing anything under `crates/cc-lb-admin/web/`; they are authoritative and their rules are not restated elsewhere.

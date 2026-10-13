@@ -2,6 +2,14 @@
 mod admin_security_headers;
 #[path = "admin_separate_listener.rs"]
 mod admin_separate_listener;
+#[path = "api_key_full_stack.rs"]
+mod api_key_full_stack;
+#[path = "api_key_poller.rs"]
+mod api_key_poller;
+#[path = "api_key_proxy.rs"]
+mod api_key_proxy;
+#[path = "api_key_secret_hygiene.rs"]
+mod api_key_secret_hygiene;
 #[path = "bad_postgres_url_fatal.rs"]
 mod bad_postgres_url_fatal;
 #[path = "build_metadata_present.rs"]
@@ -36,6 +44,8 @@ mod managed_key_multi_instance;
 mod metrics_endpoint_reachable;
 #[path = "middleware_order.rs"]
 mod middleware_order;
+#[path = "migration_api_key_details_upgrade.rs"]
+mod migration_api_key_details_upgrade;
 #[path = "missing_aead_key_fatal.rs"]
 mod missing_aead_key_fatal;
 #[path = "multi_instance_storage_tail.rs"]

@@ -5,6 +5,7 @@ import {
   fmtChartTooltipTs,
   fmtMsCompact,
   fmtSetupMs,
+  fmtUsdCents,
   formatBigInteger,
   formatCostMicros,
   formatCount,
@@ -192,6 +193,17 @@ describe('formatUsdAmount', () => {
     expect(formatUsdAmount(Number.POSITIVE_INFINITY)).toBe('—');
     expect(formatUsdAmount(-1)).toBe('—');
     expect(formatUsdAmount(Number.MAX_SAFE_INTEGER + 1)).toBe('—');
+  });
+});
+
+describe('fmtUsdCents', () => {
+  it('shows micros to the cent, sub-cent as <$0.01', () => {
+    expect(fmtUsdCents(412_300_000)).toBe('$412.30');
+    expect(fmtUsdCents(0)).toBe('$0.00');
+    expect(fmtUsdCents(4_000)).toBe('<$0.01');
+    expect(fmtUsdCents(10_000)).toBe('$0.01');
+    expect(fmtUsdCents(1_234_500_000)).toBe('$1,235');
+    expect(fmtUsdCents(null)).toBe('—');
   });
 });
 

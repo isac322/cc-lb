@@ -101,6 +101,8 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -298,6 +300,81 @@ async fn reconciler_rebuilds_after_registry_entry_update() {
     reconciler.reconcile_once().await.expect("reconcile tick");
 
     assert!(holder.load().generation > generation);
+}
+
+#[tokio::test]
+async fn revision_hash_changes_when_oauth_becomes_reconnect_required() {
+    let (dir, storage) = storage_fixture().await;
+    create_principal(&storage, "principal-reconnect").await;
+    let oauth = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "oauth-reconnect".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .expect("oauth upstream created");
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let holder = initial_holder(&stores, &runtime, dir.path()).await;
+    let reconciler = reconciler(
+        stores,
+        holder.clone(),
+        runtime,
+        CancellationToken::new(),
+        dir.path(),
+    );
+    let initial_hash = holder.load().upstream_status_snapshot.revision_hash;
+    let initial_generation = holder.load().generation;
+
+    UpstreamStore::set_status(
+        storage.as_ref(),
+        oauth.id,
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("network".to_owned())),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await
+    .expect("non-reconnect status");
+    reconciler.reconcile_once().await.expect("reconcile tick");
+    assert_eq!(holder.load().generation, initial_generation);
+    assert_eq!(
+        holder.load().upstream_status_snapshot.revision_hash,
+        initial_hash
+    );
+
+    UpstreamStore::set_status(
+        storage.as_ref(),
+        oauth.id,
+        UpstreamStatusUpdate {
+            last_apply_error: Some(Some("status_400".to_owned())),
+            ..UpstreamStatusUpdate::default()
+        },
+    )
+    .await
+    .expect("reconnect status");
+    reconciler.reconcile_once().await.expect("reconcile tick");
+    let reconnect_generation = holder.load().generation;
+    let reconnect_hash = holder.load().upstream_status_snapshot.revision_hash;
+    assert!(reconnect_generation > initial_generation);
+    assert_ne!(reconnect_hash, initial_hash);
+
+    reconciler.reconcile_once().await.expect("reconcile tick");
+    assert_eq!(holder.load().generation, reconnect_generation);
+    assert_eq!(
+        holder.load().upstream_status_snapshot.revision_hash,
+        reconnect_hash
+    );
 }
 
 #[tokio::test]

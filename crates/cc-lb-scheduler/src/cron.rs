@@ -1,6 +1,6 @@
 //! Cron job scheduling and tick generation.
 //!
-//! Each replica runs its own [`CronStream`] and pushes ticks to the shared
+//! Each replica polls its own [`Schedule`] and pushes ticks to the shared
 //! Apalis storage keyed by `cron:{kind}:{tick_secs}`. The storage's unique
 //! index on `(job_type, idempotency_key)` collapses simultaneous pushes from
 //! every replica to exactly one queued job per tick, so no external leader
@@ -9,9 +9,8 @@
 use apalis_core::backend::pipe::{Pipe, PipeExt};
 use apalis_core::backend::{TaskSink, TaskSinkError};
 use apalis_core::task::builder::TaskBuilder;
-use apalis_cron::{CronStream, Schedule};
+use apalis_cron::Schedule;
 use chrono::Utc;
-use futures_util::StreamExt;
 use thiserror::Error;
 
 pub trait CronStreamPipeToStorageExt<Storage, Args, Ctx>: Sized {
@@ -86,23 +85,34 @@ where
     /// sibling replicas are absorbed by the storage-level unique index on
     /// `(job_type, idempotency_key)`, so exactly one job per tick makes it
     /// into the queue.
+    ///
+    /// The schedule is driven directly rather than through
+    /// `apalis_cron::CronStream`: `CronStream` samples `Utc::now()` after
+    /// `next_tick()` returns and converts `tick - now` with
+    /// `chrono::Duration::to_std`, which fails whenever the tick has already
+    /// elapsed (a stalled poll, clock drift, or a schedule that lags the wall
+    /// clock) — and the error repeats forever because the stream never
+    /// advances. Here a negative wait saturates to zero so an elapsed tick
+    /// fires immediately instead of killing the producer.
     pub async fn run(mut self) -> Result<(), CronError> {
-        let mut stream = CronStream::new(self.schedule);
         let mut tick_count = 0_usize;
         while self
             .max_ticks
             .is_none_or(|max_ticks| tick_count < max_ticks)
         {
-            let Some(tick) = stream.next().await else {
+            let Some(tick) = self.schedule.next_tick(&Utc) else {
                 break;
             };
-            let tick = tick.map_err(|error| CronError::Stream {
-                message: error.to_string(),
+            let wait = tick
+                .signed_duration_since(Utc::now())
+                .to_std()
+                .unwrap_or_default();
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+            let tick_secs = u64::try_from(tick.timestamp()).map_err(|_| CronError::Stream {
+                message: "cron tick timestamp is before the unix epoch".to_owned(),
             })?;
-            let tick_secs =
-                u64::try_from(tick.get_timestamp().timestamp()).map_err(|_| CronError::Stream {
-                    message: "cron tick timestamp is before the unix epoch".to_owned(),
-                })?;
             let job = self.job_factory.call(tick_secs);
             let kind = job.singleton_kind();
             let task = TaskBuilder::<Job, Storage::Context, Storage::IdType>::new(job)

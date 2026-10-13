@@ -1,16 +1,15 @@
 // One dialog for every way an operator attaches an account to cc-lb. "New
 // upstream" starts with the connection type (Claude subscription or API key)
 // and continues in the same dialog; Connect and Reconnect on an existing
-// upstream open the same dialog at the sign-in step. A left-hand step rail
-// keeps the journey legible, and the sign-in step shows a miniature of
-// Claude's post-approval page so the code to copy is recognizable before the
-// operator ever leaves cc-lb.
+// upstream open the same dialog at the sign-in step, and Replace key on an
+// API-key upstream opens it at the key step. A left-hand step rail keeps the
+// journey legible, and the sign-in step shows a miniature of Claude's
+// post-approval page so the code to copy is recognizable before the operator
+// ever leaves cc-lb.
 
-import { Radio as BaseRadio } from '@base-ui/react/radio';
 import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import {
   Check,
-  CheckCircle2,
   CornerUpLeft,
   ExternalLink,
   KeyRound,
@@ -19,15 +18,12 @@ import {
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
 import type { Upstream } from '../../../lib/api';
-import { DEFAULT_ANTHROPIC_BASE_URL } from '../../../lib/constants';
 import {
   useCreateFromOauthDraft,
-  useCreateUpstream,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
 } from '../../../lib/queries';
 import {
-  Badge,
   Button,
   ConfirmDialog,
   cx,
@@ -36,22 +32,30 @@ import {
   Modal,
   Notice,
 } from '../../ui/primitives';
+import { apiKeyUsable } from '../ApiKeyNotice';
+import { isAnthropicBaseUrl } from './apiKeyCopy';
 import {
   AccountCard,
   CodePasteField,
   CopyLinkButton,
+  CustomEndpointDisclosure,
   IdentityVerdictNotice,
+  KindOption,
   SessionStartError,
   SessionTimer,
   SignInLink,
+  StepHeading,
+  SuccessHeader,
   TokenLifetimeNote,
 } from './parts';
+import { useApiKeyConnect } from './useApiKeyConnect';
 import {
   formatRemaining,
   identityOf,
   useOAuthConnectSession,
 } from './useOAuthConnectSession';
 
+/** `apikey`: inside the API-key flow, which owns its own sub-steps. */
 type StepId = 'kind' | 'signin' | 'paste' | 'finish' | 'apikey';
 type UpstreamKind = 'anthropic_oauth' | 'anthropic_api_key';
 
@@ -61,7 +65,8 @@ const PENDING_INPUT_CLASS =
 /** What the dialog is opened for; `null` keeps it closed. */
 export type UpstreamConnectTarget =
   | { mode: 'create' }
-  | { mode: 'reconnect'; upstream: Upstream };
+  | { mode: 'reconnect'; upstream: Upstream }
+  | { mode: 'replace'; upstream: Upstream };
 
 export function UpstreamConnectDialog({
   target,
@@ -76,6 +81,15 @@ export function UpstreamConnectDialog({
   // `null` is the closed state: nothing mounts, so each opening starts from a
   // clean slate (and a fresh sign-in session) in the keyed child.
   if (!target) return null;
+  if (target.mode === 'replace') {
+    return (
+      <ReplaceKeyDialogBody
+        key={target.upstream.id}
+        upstream={target.upstream}
+        onClose={onClose}
+      />
+    );
+  }
   return (
     <ConnectDialogBody
       key={target.mode === 'create' ? 'create' : target.upstream.id}
@@ -86,12 +100,62 @@ export function UpstreamConnectDialog({
   );
 }
 
+/** Replace key: the API-key flow alone, saving onto the existing upstream. */
+function ReplaceKeyDialogBody({
+  upstream,
+  onClose,
+}: {
+  upstream: Upstream;
+  onClose: () => void;
+}) {
+  const apiKey = useApiKeyConnect({
+    replace: upstream,
+    onCancel: onClose,
+    onDone: onClose,
+  });
+  return (
+    <Modal
+      open
+      onOpenChange={(next) => {
+        if (!next && !apiKey.busy) onClose();
+      }}
+      title={`Replace key for ${upstream.name}`}
+      description={
+        apiKeyUsable(upstream.api_key_access ?? null)
+          ? 'The current key keeps working until you save.'
+          : 'Requests use the new key once you save.'
+      }
+      size="lg"
+      preventDismiss={apiKey.busy}
+      footer={apiKey.footer}
+    >
+      <div className="flex gap-5 min-h-[20rem]">
+        <StepRail steps={apiKey.rail} activeIndex={apiKey.activeIndex} />
+        <div className="min-w-0 flex-1">
+          <MobileStepLine
+            steps={apiKey.rail}
+            activeIndex={apiKey.activeIndex}
+          />
+          {/* Keyed: remounts per step so the settle plays where the eye is
+              and the step's autoFocus lands again. */}
+          <div
+            key={apiKey.rail[apiKey.activeIndex]?.title ?? apiKey.activeIndex}
+            className="flash-text-active min-w-0"
+          >
+            {apiKey.body}
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function ConnectDialogBody({
   target,
   onClose,
   onCreated,
 }: {
-  target: UpstreamConnectTarget;
+  target: Exclude<UpstreamConnectTarget, { mode: 'replace' }>;
   onClose: () => void;
   onCreated: (upstream: Upstream) => void;
 }) {
@@ -122,21 +186,33 @@ function ConnectDialogBody({
     { previousAccount, enabled: sessionWanted },
   );
   const createFromDraft = useCreateFromOauthDraft();
-  const createUpstream = useCreateUpstream();
 
   const [oauthName, setOauthName] = useState('');
+  // Base URL is a rare need: hidden behind "Use a custom endpoint", as in the
+  // API-key flow. Anthropic itself (or an empty field) is the default.
+  const [oauthEndpointOpen, setOauthEndpointOpen] = useState(false);
+  const [oauthBaseUrl, setOauthBaseUrl] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
 
-  // API key form
-  const [keyName, setKeyName] = useState('');
-  const [baseUrl, setBaseUrl] = useState(DEFAULT_ANTHROPIC_BASE_URL);
-  const [useEnvVar, setUseEnvVar] = useState(false);
-  const [apiKeyValue, setApiKeyValue] = useState('');
-  const [apiKeyEnv, setApiKeyEnv] = useState('ANTHROPIC_API_KEY');
+  const apiKey = useApiKeyConnect({
+    replace: null,
+    onCancel: () => requestClose(),
+    onBackToKind: () => setStep('kind'),
+    onSignInInstead: () => {
+      setKind('anthropic_oauth');
+      setSessionWanted(true);
+      setStep('signin');
+    },
+    onDone: (created) => {
+      onCreated(created);
+      onClose();
+    },
+  });
+  const inApiKeyFlow = isCreate && kind === 'anthropic_api_key';
 
   const outcome = session.outcome;
-  const saving = createFromDraft.isPending || createUpstream.isPending;
-  const busy = session.completing || saving;
+  const saving = createFromDraft.isPending;
+  const busy = session.completing || saving || apiKey.busy;
   // The exchanged draft lives only as long as its 15-minute sign-in window;
   // once that lapses "Add upstream" can never succeed, so offer a new sign-in.
   const draftExpired =
@@ -147,12 +223,19 @@ function ConnectDialogBody({
   const needsDiscardConfirm =
     isCreate && step === 'finish' && outcome !== null && !draftExpired;
 
-  const steps: StepId[] = !isCreate
-    ? ['signin', 'paste', 'finish']
-    : kind === 'anthropic_oauth'
-      ? ['kind', 'signin', 'paste', 'finish']
-      : ['kind', 'apikey'];
-  const stepIndex = Math.max(0, steps.indexOf(step));
+  const steps: Exclude<StepId, 'apikey'>[] = isCreate
+    ? ['kind', 'signin', 'paste', 'finish']
+    : ['signin', 'paste', 'finish'];
+  const rail = inApiKeyFlow
+    ? [stepMeta('kind', true), ...apiKey.rail]
+    : steps.map((id) => stepMeta(id, isCreate));
+  const stepIndex = inApiKeyFlow
+    ? step === 'kind'
+      ? 0
+      : 1 + apiKey.activeIndex
+    : step === 'apikey'
+      ? 0
+      : Math.max(0, steps.indexOf(step));
 
   const requestClose = () => {
     if (busy) return;
@@ -183,32 +266,15 @@ function ConnectDialogBody({
     const draft = outcome?.draft;
     if (!draft) return;
     try {
+      const customBase =
+        oauthEndpointOpen && !isAnthropicBaseUrl(oauthBaseUrl)
+          ? oauthBaseUrl.trim()
+          : null;
       const created = await createFromDraft.mutateAsync({
         state_token: draft.state_token,
         name: oauthName.trim() || draft.suggested_name,
-      });
-      toast.success(`${created.name} added`);
-      onCreated(created);
-      onClose();
-    } catch {
-      // The shared MutationCache owns the error toast; stay on the step.
-    }
-  };
-
-  const apiKeyReady =
-    keyName.trim() !== '' &&
-    (useEnvVar ? apiKeyEnv.trim() !== '' : apiKeyValue.trim() !== '');
-
-  const saveApiKey = async () => {
-    if (!apiKeyReady) return;
-    const trimmedBase = baseUrl.trim();
-    try {
-      const created = await createUpstream.mutateAsync({
-        name: keyName.trim(),
-        kind: 'anthropic_api_key',
-        base_url: trimmedBase === '' ? null : trimmedBase,
-        api_key_value: useEnvVar ? null : apiKeyValue.trim(),
-        api_key_env: useEnvVar ? apiKeyEnv.trim() : null,
+        // Anthropic itself is the default, never stored as a custom value.
+        ...(customBase ? { base_url: customBase } : {}),
       });
       toast.success(`${created.name} added`);
       onCreated(created);
@@ -225,7 +291,7 @@ function ConnectDialogBody({
     step === 'kind'
       ? 'Choose how cc-lb reaches Anthropic.'
       : step === 'apikey'
-        ? 'The upstream is created when you click Create.'
+        ? 'Nothing is saved until you add the upstream.'
         : isCreate
           ? 'Nothing is saved until you confirm the account.'
           : firstConnect
@@ -269,20 +335,7 @@ function ConnectDialogBody({
       </>
     );
   } else if (step === 'apikey') {
-    footer = (
-      <>
-        {backButton('kind')}
-        {cancelButton}
-        <Button
-          variant="primary"
-          loading={createUpstream.isPending}
-          disabled={!apiKeyReady}
-          onClick={() => void saveApiKey()}
-        >
-          {createUpstream.isPending ? 'Creating…' : 'Create'}
-        </Button>
-      </>
-    );
+    footer = apiKey.footer;
   } else if (isCreate) {
     footer = draftExpired ? (
       <Button
@@ -297,6 +350,7 @@ function ConnectDialogBody({
     ) : (
       <Button
         variant="primary"
+        data-testid="upstream-connect-submit"
         loading={createFromDraft.isPending}
         disabled={!oauthName.trim()}
         onClick={() => void saveOauth()}
@@ -326,240 +380,175 @@ function ConnectDialogBody({
         footer={footer}
       >
         <div className="flex gap-5 min-h-[20rem]">
-          <StepRail
-            steps={steps.map((id) => stepMeta(id, isCreate))}
-            activeIndex={stepIndex}
-          />
+          <StepRail steps={rail} activeIndex={stepIndex} />
           <div className="min-w-0 flex-1">
-            <div className="sm:hidden text-caption text-text-faint mb-3">
-              Step {stepIndex + 1} of {steps.length}
-            </div>
-
-            {step === 'kind' ? (
-              <KindStep
-                kind={kind}
-                onKindChange={setKind}
-                onContinue={continueFromKind}
-              />
-            ) : null}
-
-            {step === 'apikey' ? (
-              <div className="flex flex-col gap-3">
-                <StepHeading
-                  title="API key details"
-                  subtitle="Requests through this upstream are billed per token to the key's workspace."
+            <MobileStepLine steps={rail} activeIndex={stepIndex} />
+            <div
+              key={rail[stepIndex]?.title ?? stepIndex}
+              className="flash-text-active min-w-0"
+            >
+              {step === 'kind' ? (
+                <KindStep
+                  kind={kind}
+                  onKindChange={setKind}
+                  onContinue={continueFromKind}
                 />
-                <Field
-                  label="Name"
-                  required
-                  hint="Only used inside cc-lb — e.g. anthropic-prod"
-                >
-                  <input
-                    className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                    value={keyName}
-                    autoFocus
-                    placeholder="anthropic-prod"
-                    disabled={saving}
-                    onChange={(e) => setKeyName(e.target.value)}
-                  />
-                </Field>
-                {useEnvVar ? (
-                  <Field
-                    label="API key environment variable"
-                    hint="Name of an env var on the cc-lb server that holds the key"
-                    required
-                  >
-                    <input
-                      className={cx(
-                        INPUT_CLASS,
-                        PENDING_INPUT_CLASS,
-                        'font-mono',
-                      )}
-                      value={apiKeyEnv}
-                      placeholder="ANTHROPIC_API_KEY"
-                      disabled={saving}
-                      onChange={(e) => setApiKeyEnv(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void saveApiKey();
-                      }}
-                    />
-                  </Field>
-                ) : (
-                  <Field label="API key" hint="Starts with sk-ant-" required>
-                    <input
-                      type="password"
-                      className={cx(
-                        INPUT_CLASS,
-                        PENDING_INPUT_CLASS,
-                        'font-mono',
-                      )}
-                      value={apiKeyValue}
-                      placeholder="sk-ant-…"
-                      disabled={saving}
-                      onChange={(e) => setApiKeyValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void saveApiKey();
-                      }}
-                    />
-                  </Field>
-                )}
-                <button
-                  type="button"
-                  className="-mt-1 w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:control-disabled"
-                  disabled={saving}
-                  onClick={() => setUseEnvVar((v) => !v)}
-                >
-                  {useEnvVar
-                    ? 'Paste the key instead'
-                    : 'Read the key from a server environment variable instead'}
-                </button>
-                <Field
-                  label="Base URL"
-                  hint="Leave as is unless you use a proxy"
-                >
-                  <input
-                    className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                    value={baseUrl}
-                    disabled={saving}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                  />
-                </Field>
-              </div>
-            ) : null}
+              ) : null}
 
-            {step === 'signin' ? (
-              <div className="flex flex-col gap-4">
-                <StepHeading title="Sign in with Claude" />
-                {upstream && !firstConnect && previousAccount ? (
-                  <div className="flex flex-col gap-1.5">
-                    <AccountCard account={previousAccount} label="Sign in as" />
-                    <p className="text-body-sm text-text-muted">
-                      If Claude shows a different account, switch accounts there
-                      first.
-                    </p>
-                  </div>
-                ) : null}
-                <p className="text-body-sm text-text-muted">
-                  A new Claude tab opens and asks you to approve access. When it
-                  finishes it shows a code — that code is how cc-lb proves the
-                  sign-in.
-                </p>
-                <div className="flex flex-col items-start gap-2.5">
-                  <SignInLink
-                    session={session}
-                    size="lg"
-                    className="w-full sm:w-auto"
-                    onOpened={() => setStep('paste')}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setStep('paste')}
-                    className="text-caption text-text-faint underline underline-offset-2 hover:text-text max-md:min-h-10"
-                  >
-                    I already have a code
-                  </button>
-                </div>
-                <WhatYouWillSee />
-              </div>
-            ) : null}
+              {step === 'apikey' ? apiKey.body : null}
 
-            {step === 'paste' ? (
-              <div className="flex flex-col gap-4">
-                <StepHeading
-                  title="Paste the code"
-                  subtitle="Paste what you copied — the code, or the whole page address both work."
-                />
-                <CodePasteField
-                  session={session}
-                  autoFocus
-                  onSubmit={(code) => void submitCode(code)}
-                />
-                {session.authorizeUrl ? (
-                  <a
-                    href={session.authorizeUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex w-fit items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
-                  >
-                    <ExternalLink className="w-3 h-3" strokeWidth={1.75} />
-                    Open the sign-in page again
-                  </a>
-                ) : null}
-              </div>
-            ) : null}
-
-            {step === 'finish' && outcome ? (
-              isCreate ? (
+              {step === 'signin' ? (
                 <div className="flex flex-col gap-4">
-                  <SuccessHeader
-                    title="Signed in"
-                    subtitle="Check that this is the right account, then name the upstream."
-                  />
-                  <AccountCard
-                    account={outcome.account}
-                    tone="ok"
-                    label="Connected account"
-                  />
-                  <TokenLifetimeNote outcome={outcome} />
-                  <Field
-                    label="Upstream name"
-                    hint="Only used inside cc-lb — pick something recognizable."
-                  >
-                    <input
-                      className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
-                      value={oauthName}
-                      autoFocus
-                      disabled={saving}
-                      onChange={(e) => setOauthName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && oauthName.trim())
-                          void saveOauth();
-                      }}
+                  <StepHeading title="Sign in with Claude" />
+                  {upstream && !firstConnect && previousAccount ? (
+                    <div className="flex flex-col gap-1.5">
+                      <AccountCard
+                        account={previousAccount}
+                        label="Sign in as"
+                      />
+                      <p className="text-body-sm text-text-muted">
+                        If Claude shows a different account, switch accounts
+                        there first.
+                      </p>
+                    </div>
+                  ) : null}
+                  <p className="text-body-sm text-text-muted">
+                    A new Claude tab opens and asks you to approve access. When
+                    it finishes it shows a code — that code is how cc-lb proves
+                    the sign-in.
+                  </p>
+                  <div className="flex flex-col items-start gap-2.5">
+                    <SignInLink
+                      session={session}
+                      size="lg"
+                      className="w-full sm:w-auto"
+                      onOpened={() => setStep('paste')}
                     />
-                  </Field>
-                  {draftExpired ? (
-                    <Notice tone="warning" role="alert">
-                      This sign-in expired before the upstream was added. Sign
-                      in again to continue — it only takes a moment.
-                    </Notice>
-                  ) : session.remainingMs < 300_000 ? (
-                    <p className="text-body-sm text-warn-text tabular-nums">
-                      Add the upstream within{' '}
-                      {formatRemaining(session.remainingMs)} — the sign-in
-                      expires after that.
-                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setStep('paste')}
+                      className="text-caption text-text-faint underline underline-offset-2 hover:text-text max-md:min-h-10"
+                    >
+                      I already have a code
+                    </button>
+                  </div>
+                  <WhatYouWillSee />
+                </div>
+              ) : null}
+
+              {step === 'paste' ? (
+                <div className="flex flex-col gap-4">
+                  <StepHeading
+                    title="Paste the code"
+                    subtitle="Paste what you copied — the code, or the whole page address both work."
+                  />
+                  <CodePasteField
+                    session={session}
+                    autoFocus
+                    onSubmit={(code) => void submitCode(code)}
+                  />
+                  {session.authorizeUrl ? (
+                    <a
+                      href={session.authorizeUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex w-fit items-center gap-1 text-caption text-text-faint underline underline-offset-2 hover:text-text"
+                    >
+                      <ExternalLink className="w-3 h-3" strokeWidth={1.75} />
+                      Open the sign-in page again
+                    </a>
                   ) : null}
                 </div>
-              ) : (
-                <div className="flex flex-col gap-4">
-                  <SuccessHeader
-                    title={firstConnect ? 'Connected' : 'Reconnected'}
-                    subtitle={`${upstream.name} is signed in with a fresh credential.`}
-                  />
-                  {outcome.verdict !== 'different' && outcome.account ? (
+              ) : null}
+
+              {step === 'finish' && outcome ? (
+                isCreate ? (
+                  <div className="flex flex-col gap-4">
+                    <SuccessHeader
+                      title="Signed in"
+                      subtitle="Check that this is the right account, then name the upstream."
+                    />
                     <AccountCard
                       account={outcome.account}
                       tone="ok"
-                      label="Now"
+                      label="Connected account"
                     />
-                  ) : null}
-                  <IdentityVerdictNotice outcome={outcome} />
-                  <TokenLifetimeNote outcome={outcome} />
-                </div>
-              )
-            ) : null}
+                    <TokenLifetimeNote outcome={outcome} />
+                    <Field
+                      label="Upstream name"
+                      hint="Only used inside cc-lb — pick something recognizable."
+                    >
+                      <input
+                        className={cx(INPUT_CLASS, PENDING_INPUT_CLASS)}
+                        value={oauthName}
+                        autoFocus
+                        disabled={saving}
+                        onChange={(e) => setOauthName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && oauthName.trim())
+                            void saveOauth();
+                        }}
+                      />
+                    </Field>
+                    <CustomEndpointDisclosure
+                      open={oauthEndpointOpen}
+                      value={oauthBaseUrl}
+                      busy={saving}
+                      hint="Requests go here instead of Anthropic."
+                      onOpen={() => {
+                        setOauthBaseUrl('');
+                        setOauthEndpointOpen(true);
+                      }}
+                      onChange={setOauthBaseUrl}
+                      onUseDefault={() => {
+                        setOauthBaseUrl('');
+                        setOauthEndpointOpen(false);
+                      }}
+                    />
+                    {draftExpired ? (
+                      <Notice tone="warning" role="alert">
+                        This sign-in expired before the upstream was added. Sign
+                        in again to continue — it only takes a moment.
+                      </Notice>
+                    ) : session.remainingMs < 300_000 ? (
+                      <p className="text-body-sm text-warn-text tabular-nums">
+                        Add the upstream within{' '}
+                        {formatRemaining(session.remainingMs)} — the sign-in
+                        expires after that.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    <SuccessHeader
+                      title={firstConnect ? 'Connected' : 'Reconnected'}
+                      subtitle={`${upstream.name} is signed in with a fresh credential.`}
+                    />
+                    {outcome.verdict !== 'different' && outcome.account ? (
+                      <AccountCard
+                        account={outcome.account}
+                        tone="ok"
+                        label="Now"
+                      />
+                    ) : null}
+                    <IdentityVerdictNotice outcome={outcome} />
+                    <TokenLifetimeNote outcome={outcome} />
+                  </div>
+                )
+              ) : null}
 
-            {step === 'signin' || step === 'paste' ? (
-              <div className="mt-4 flex flex-col gap-2">
-                <div className="flex items-center gap-4">
-                  <SessionTimer session={session} />
-                  {step === 'signin' ? (
-                    <CopyLinkButton authorizeUrl={session.authorizeUrl} />
-                  ) : null}
+              {step === 'signin' || step === 'paste' ? (
+                <div className="mt-4 flex flex-col gap-2">
+                  <div className="flex items-center gap-4">
+                    <SessionTimer session={session} />
+                    {step === 'signin' ? (
+                      <CopyLinkButton authorizeUrl={session.authorizeUrl} />
+                    ) : null}
+                  </div>
+                  <SessionStartError session={session} />
                 </div>
-                <SessionStartError session={session} />
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         </div>
       </Modal>
@@ -578,7 +567,7 @@ function ConnectDialogBody({
 }
 
 function stepMeta(
-  id: StepId,
+  id: Exclude<StepId, 'apikey'>,
   isCreate: boolean,
 ): { title: string; hint: string } {
   switch (id) {
@@ -588,8 +577,6 @@ function stepMeta(
       return { title: 'Sign in', hint: 'Approve access in a Claude tab' };
     case 'paste':
       return { title: 'Paste code', hint: 'Bring the code back here' };
-    case 'apikey':
-      return { title: 'Details', hint: 'Name and key' };
     case 'finish':
       return isCreate
         ? { title: 'Name & save', hint: 'Confirm the account' }
@@ -629,83 +616,10 @@ function KindStep({
           selected={kind === 'anthropic_api_key'}
           icon={<KeyRound className="w-4 h-4" strokeWidth={1.75} />}
           title="Anthropic API key"
-          description="Use a workspace API key (sk-ant-…). Billed per token."
+          description="Paste a key from Anthropic Console (sk-ant-…). Billed per token."
           onActivate={onContinue}
         />
       </BaseRadioGroup>
-    </div>
-  );
-}
-
-function KindOption({
-  value,
-  selected,
-  icon,
-  title,
-  badge,
-  description,
-  onActivate,
-}: {
-  value: UpstreamKind;
-  selected: boolean;
-  icon: ReactNode;
-  title: string;
-  badge?: string;
-  description: string;
-  onActivate: () => void;
-}) {
-  return (
-    <label
-      onDoubleClick={onActivate}
-      className={cx(
-        'flex items-start gap-3 p-3 rounded-sm border cursor-pointer transition-colors',
-        selected
-          ? 'border-accent bg-overlay-2'
-          : 'border-subtle hover:bg-overlay-2',
-      )}
-    >
-      <span
-        className={cx(
-          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors',
-          selected
-            ? 'bg-accent-dim text-accent-text'
-            : 'bg-overlay-3 text-text-muted',
-        )}
-      >
-        {icon}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-body font-medium text-text">{title}</span>
-          {badge ? <Badge tone="accent">{badge}</Badge> : null}
-        </span>
-        <span className="mt-0.5 block text-body-sm text-text-muted">
-          {description}
-        </span>
-      </span>
-      <BaseRadio.Root
-        value={value}
-        className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle-strong bg-bg transition-colors data-[checked]:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-      >
-        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-accent" />
-      </BaseRadio.Root>
-    </label>
-  );
-}
-
-function StepHeading({
-  title,
-  subtitle,
-}: {
-  title: string;
-  subtitle?: string;
-}) {
-  return (
-    <div>
-      <h3 className="text-title-card text-text">{title}</h3>
-      {subtitle ? (
-        <p className="mt-1 text-body-sm text-text-muted">{subtitle}</p>
-      ) : null}
     </div>
   );
 }
@@ -718,54 +632,78 @@ function StepRail({
   activeIndex: number;
 }) {
   return (
-    <ol className="hidden sm:flex sm:flex-col sm:w-44 shrink-0 border-r border-subtle pr-4">
+    <ol
+      aria-label="Steps"
+      className="hidden sm:flex sm:flex-col sm:w-44 shrink-0 border-r border-subtle pr-4"
+    >
       {steps.map((s, index) => {
         const done = index < activeIndex;
         const active = index === activeIndex;
         return (
-          <li key={s.title} className="relative flex gap-3 pb-6 last:pb-0">
+          <li
+            key={s.title}
+            className="relative mt-4 first:mt-0"
+            aria-current={active ? 'step' : undefined}
+          >
             {index < steps.length - 1 ? (
               <span
                 aria-hidden="true"
                 className={cx(
-                  'absolute left-[9px] top-5 bottom-0 w-px',
+                  'absolute left-[9px] top-5 -bottom-4 w-px',
                   done ? 'bg-ok/50' : 'bg-overlay-4',
                 )}
               />
             ) : null}
-            <span
+            {/* Current place, like nav's aria-current fill: no hover response. */}
+            <div
               className={cx(
-                'relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-caption font-medium tabular-nums',
-                done
-                  ? 'border-ok/50 bg-ok/15 text-traffic-success-text'
-                  : active
-                    ? 'border-accent text-accent-text'
-                    : 'border-subtle-strong text-text-faint',
+                'relative flex items-start gap-3 -ml-1.5 rounded-sm px-1.5 py-1.5 transition-colors duration-150',
+                active && 'bg-selected',
               )}
             >
-              {done ? (
-                <Check className="w-3 h-3" strokeWidth={1.75} />
-              ) : (
-                index + 1
-              )}
-            </span>
-            <span className="min-w-0">
+              {active ? (
+                <span
+                  aria-hidden="true"
+                  className="flash-in pointer-events-none absolute inset-0 rounded-sm"
+                />
+              ) : null}
               <span
                 className={cx(
-                  'block text-label leading-5',
-                  active
-                    ? 'text-text'
-                    : done
-                      ? 'text-text-muted'
-                      : 'text-text-faint',
+                  'relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full border bg-bg text-caption font-medium tabular-nums',
+                  done
+                    ? 'border-ok/50 bg-ok/15 text-traffic-success-text'
+                    : active
+                      ? 'border-text bg-text text-bg'
+                      : 'border-subtle-strong text-text-faint',
                 )}
               >
-                {s.title}
+                {done ? (
+                  <Check className="w-3 h-3" strokeWidth={1.75} />
+                ) : (
+                  index + 1
+                )}
               </span>
-              <span className="block text-caption text-text-faint">
-                {s.hint}
+              <span className="relative min-w-0">
+                <span
+                  className={cx(
+                    'block text-label leading-5',
+                    active
+                      ? 'text-text'
+                      : done
+                        ? 'text-text-muted'
+                        : 'text-text-faint',
+                  )}
+                >
+                  {s.title}
+                  <span className="sr-only">
+                    {done ? ' (done)' : active ? ' (current)' : ' (upcoming)'}
+                  </span>
+                </span>
+                <span className="block text-caption text-text-faint">
+                  {s.hint}
+                </span>
               </span>
-            </span>
+            </div>
           </li>
         );
       })}
@@ -773,20 +711,30 @@ function StepRail({
   );
 }
 
-function SuccessHeader({
-  title,
-  subtitle,
+/** Narrow screens hide the rail: name the step, announced on change. */
+function MobileStepLine({
+  steps,
+  activeIndex,
 }: {
-  title: string;
-  subtitle: string;
+  steps: ReadonlyArray<{ title: string; hint: string }>;
+  activeIndex: number;
 }) {
   return (
-    <div className="flex items-center gap-2.5">
-      <CheckCircle2 className="w-5 h-5 shrink-0 text-ok" strokeWidth={1.75} />
-      <div>
-        <h3 className="text-title-card text-text">{title}</h3>
-        <p className="text-body-sm text-text-muted">{subtitle}</p>
-      </div>
+    <div
+      className="sm:hidden text-caption mb-3"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span className="text-text-muted">
+        Step {activeIndex + 1} of {steps.length}
+      </span>{' '}
+      ·{' '}
+      <span
+        key={steps[activeIndex]?.title ?? activeIndex}
+        className="flash-text-active text-text"
+      >
+        {steps[activeIndex]?.title}
+      </span>
     </div>
   );
 }

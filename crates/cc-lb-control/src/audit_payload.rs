@@ -19,13 +19,39 @@ pub enum AuditPayload {
     PrincipalDelete {
         principal_id: String,
     },
+    /// `key_hint`, `verdict`, and `remediation` are set for API-key upstreams;
+    /// `verdict` is `None` when the create skipped the preflight.
     UpstreamCreate {
         upstream_id: String,
         kind: String,
+        key_hint: Option<String>,
+        verdict: Option<String>,
+        remediation: Vec<&'static str>,
     },
+    /// `key_hint`, `verdict`, and `remediation` are set when the update
+    /// re-probed or replaced an API key; `old_host`/`new_host` when
+    /// `base_url` changed (`None` = the default Anthropic host).
     UpstreamUpdate {
         upstream_id: String,
         fields_changed: Vec<&'static str>,
+        key_hint: Option<String>,
+        verdict: Option<String>,
+        remediation: Vec<&'static str>,
+        old_host: Option<String>,
+        new_host: Option<String>,
+    },
+    /// Candidate-key preflight: nothing is persisted but this row.
+    UpstreamPreflight {
+        key_hint: Option<String>,
+        verdict: String,
+        remediation: Vec<&'static str>,
+    },
+    /// Stored-key Re-check.
+    UpstreamRecheck {
+        upstream_id: String,
+        key_hint: Option<String>,
+        verdict: String,
+        remediation: Vec<&'static str>,
     },
     UpstreamDelete {
         upstream_id: String,
@@ -106,18 +132,67 @@ impl fmt::Display for AuditPayload {
             AuditPayload::PrincipalDelete { principal_id } => {
                 write!(f, "principal_delete(id={})", principal_id)
             }
-            AuditPayload::UpstreamCreate { upstream_id, kind } => {
-                write!(f, "upstream_create(id={}, kind={})", upstream_id, kind)
+            AuditPayload::UpstreamCreate {
+                upstream_id,
+                kind,
+                key_hint,
+                verdict,
+                remediation,
+            } => {
+                write!(f, "upstream_create(id={}, kind={}", upstream_id, kind)?;
+                write_key_check(f, key_hint.as_deref(), verdict.as_deref(), remediation)?;
+                f.write_str(")")
             }
             AuditPayload::UpstreamUpdate {
                 upstream_id,
                 fields_changed,
-            } => write!(
-                f,
-                "upstream_update(id={}, fields={})",
+                key_hint,
+                verdict,
+                remediation,
+                old_host,
+                new_host,
+            } => {
+                write!(
+                    f,
+                    "upstream_update(id={}, fields={}",
+                    upstream_id,
+                    fields_changed.join(",")
+                )?;
+                write_key_check(f, key_hint.as_deref(), verdict.as_deref(), remediation)?;
+                if fields_changed.contains(&"base_url") {
+                    write!(
+                        f,
+                        ", old_host={}, new_host={}",
+                        old_host.as_deref().unwrap_or("default"),
+                        new_host.as_deref().unwrap_or("default")
+                    )?;
+                }
+                f.write_str(")")
+            }
+            AuditPayload::UpstreamPreflight {
+                key_hint,
+                verdict,
+                remediation,
+            } => {
+                f.write_str("upstream_preflight(")?;
+                write!(f, "key_hint={}", key_hint.as_deref().unwrap_or("none"))?;
+                write!(
+                    f,
+                    ", verdict={}, remediation={})",
+                    verdict,
+                    remediation.join(",")
+                )
+            }
+            AuditPayload::UpstreamRecheck {
                 upstream_id,
-                fields_changed.join(",")
-            ),
+                key_hint,
+                verdict,
+                remediation,
+            } => {
+                write!(f, "upstream_recheck(id={}", upstream_id)?;
+                write_key_check(f, key_hint.as_deref(), Some(verdict), remediation)?;
+                f.write_str(")")
+            }
             AuditPayload::UpstreamDelete { upstream_id } => {
                 write!(f, "upstream_delete(id={})", upstream_id)
             }
@@ -202,6 +277,25 @@ impl fmt::Display for AuditPayload {
             }
         }
     }
+}
+
+/// Appends the API-key check facts. Never prints anything but the hint.
+fn write_key_check(
+    f: &mut fmt::Formatter<'_>,
+    key_hint: Option<&str>,
+    verdict: Option<&str>,
+    remediation: &[&'static str],
+) -> fmt::Result {
+    if let Some(key_hint) = key_hint {
+        write!(f, ", key_hint={key_hint}")?;
+    }
+    if let Some(verdict) = verdict {
+        write!(f, ", verdict={verdict}")?;
+    }
+    if !remediation.is_empty() {
+        write!(f, ", remediation={}", remediation.join(","))?;
+    }
+    Ok(())
 }
 
 impl From<AuditPayload> for AuditEntry {
@@ -319,5 +413,54 @@ mod tests {
 
         let gc = AuditPayload::PluginWasmGc { removed_count: 0 };
         assert_eq!(gc.to_string(), "plugin_wasm_gc(removed=0)");
+    }
+
+    /// AUTH-07/SEC-03 (T0): API-key audit text names the hint, verdict,
+    /// codes, fields, and hosts.
+    #[test]
+    fn api_key_audit_payloads_render_check_facts() {
+        let create = AuditPayload::UpstreamCreate {
+            upstream_id: "u1".to_owned(),
+            kind: "anthropic_api_key".to_owned(),
+            key_hint: Some("sk-ant-api03-...AAAA".to_owned()),
+            verdict: Some("ok".to_owned()),
+            remediation: vec!["non_anthropic_base_url"],
+        };
+        assert_eq!(
+            create.to_string(),
+            "upstream_create(id=u1, kind=anthropic_api_key, key_hint=sk-ant-api03-...AAAA, verdict=ok, remediation=non_anthropic_base_url)"
+        );
+        let update = AuditPayload::UpstreamUpdate {
+            upstream_id: "u1".to_owned(),
+            fields_changed: vec!["base_url"],
+            key_hint: None,
+            verdict: None,
+            remediation: Vec::new(),
+            old_host: None,
+            new_host: Some("https://proxy.example.com".to_owned()),
+        };
+        assert_eq!(
+            update.to_string(),
+            "upstream_update(id=u1, fields=base_url, old_host=default, new_host=https://proxy.example.com)"
+        );
+        let preflight = AuditPayload::UpstreamPreflight {
+            key_hint: None,
+            verdict: "rejected".to_owned(),
+            remediation: vec!["key_admin"],
+        };
+        assert_eq!(
+            preflight.to_string(),
+            "upstream_preflight(key_hint=none, verdict=rejected, remediation=key_admin)"
+        );
+        let recheck = AuditPayload::UpstreamRecheck {
+            upstream_id: "u1".to_owned(),
+            key_hint: Some("sk-ant-api03-...AAAA".to_owned()),
+            verdict: "ok".to_owned(),
+            remediation: Vec::new(),
+        };
+        assert_eq!(
+            recheck.to_string(),
+            "upstream_recheck(id=u1, key_hint=sk-ant-api03-...AAAA, verdict=ok)"
+        );
     }
 }

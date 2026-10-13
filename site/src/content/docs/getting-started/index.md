@@ -38,7 +38,6 @@ Create the local secrets and storage directory:
 ```bash
 export CC_LB_MASTER_KEY="$(openssl rand -hex 32)"
 export CC_LB_ADMIN_TOKEN="$(openssl rand -hex 24)"
-export ANTHROPIC_API_KEY="replace-with-your-upstream-secret"
 mkdir -p ./data
 ```
 
@@ -84,7 +83,6 @@ The published image is the immutable server release image. Prepare a config file
 ```dotenv
 CC_LB_MASTER_KEY=replace-with-a-64-character-hex-key
 CC_LB_ADMIN_TOKEN=replace-with-a-long-random-admin-token
-ANTHROPIC_API_KEY=replace-with-your-upstream-secret
 ```
 
 `cc-lb.container.toml`:

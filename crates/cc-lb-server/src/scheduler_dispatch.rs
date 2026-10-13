@@ -1,3 +1,4 @@
+mod api_key_usage;
 mod cache_keepalive;
 mod cron;
 mod http;
@@ -16,6 +17,7 @@ use cc_lb_clock::ClockHandle;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_control::DynamicViewHolder;
 use cc_lb_control::RequestEventBus;
+use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
 use cc_lb_control::api_keys::key_store::KeyStore;
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
 use cc_lb_engine::cache_keepalive::KeepaliveDispatcher;
@@ -59,6 +61,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     pub event_bus: Arc<dyn RequestEventBus>,
     pub clock: ClockHandle,
+    pub anthropic_org_api: AnthropicOrgApi,
 }
 
 #[derive(Clone)]
@@ -85,6 +88,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) keepalive_dispatcher: Arc<dyn KeepaliveDispatcher>,
     pub(super) event_bus: Arc<dyn RequestEventBus>,
     pub(super) clock: ClockHandle,
+    pub(super) anthropic_org_api: AnthropicOrgApi,
 }
 
 pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
@@ -122,6 +126,7 @@ impl SchedulerDispatch {
             keepalive_dispatcher: deps.keepalive_dispatcher,
             event_bus: deps.event_bus,
             clock: deps.clock,
+            anthropic_org_api: deps.anthropic_org_api,
         }
     }
 

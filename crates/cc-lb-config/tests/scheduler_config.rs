@@ -130,6 +130,103 @@ enabled = true
     assert!(error.to_string().contains("unknown field `enabled`"));
 }
 
+/// POL-09: the API-key usage poll defaults to 300 s with 15 s jitter.
+#[test]
+fn pol09_api_key_usage_poll_defaults() {
+    let job = &SchedulerConfig::default().recurring_jobs["api_key_usage_poll"];
+
+    assert!(job.enabled);
+    assert_eq!(job.interval_secs, 300);
+    assert_eq!(job.jitter_secs, 15);
+}
+
+/// POL-09: 60 s is the smallest accepted interval.
+#[test]
+fn pol09_api_key_usage_poll_accepts_sixty_seconds() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[scheduler.recurring_jobs.api_key_usage_poll]
+interval_secs = 60
+jitter_secs = 59
+"#,
+    );
+
+    let config = Config::load(&path).expect("60 s interval is accepted");
+
+    assert_eq!(
+        config.scheduler.recurring_jobs["api_key_usage_poll"].interval_secs,
+        60
+    );
+}
+
+/// POL-09: 604800 s (7 days) is the largest accepted interval.
+#[test]
+fn pol09_api_key_usage_poll_accepts_seven_days() {
+    let (_dir, path) = crate::common::temp_config(
+        r#"
+[scheduler.recurring_jobs.api_key_usage_poll]
+interval_secs = 604800
+jitter_secs = 604799
+"#,
+    );
+
+    let config = Config::load(&path).expect("7-day interval is accepted");
+
+    assert_eq!(
+        config.scheduler.recurring_jobs["api_key_usage_poll"].interval_secs,
+        604_800
+    );
+}
+
+/// POL-09: an interval below 60 s or above 7 days and a jitter not below the
+/// interval fail validation naming the field, for file and stored configs
+/// alike.
+#[test]
+fn pol09_api_key_usage_poll_bounds_name_the_field() {
+    for (toml, field) in [
+        (
+            "[scheduler.recurring_jobs.api_key_usage_poll]\ninterval_secs = 59\njitter_secs = 0\n",
+            "scheduler.recurring_jobs.api_key_usage_poll.interval_secs",
+        ),
+        (
+            "[scheduler.recurring_jobs.api_key_usage_poll]\ninterval_secs = 604801\njitter_secs = 0\n",
+            "scheduler.recurring_jobs.api_key_usage_poll.interval_secs",
+        ),
+        (
+            "[scheduler.recurring_jobs.api_key_usage_poll]\ninterval_secs = 9223372036854775807\njitter_secs = 0\n",
+            "scheduler.recurring_jobs.api_key_usage_poll.interval_secs",
+        ),
+        (
+            "[scheduler.recurring_jobs.api_key_usage_poll]\ninterval_secs = 300\njitter_secs = 300\n",
+            "scheduler.recurring_jobs.api_key_usage_poll.jitter_secs",
+        ),
+    ] {
+        let (_dir, path) = crate::common::temp_config(toml);
+        let file_error = Config::load(&path).expect_err("out-of-bounds poll config fails");
+        assert!(file_error.to_string().contains(field), "{file_error}");
+
+        let stored = Config::from_stored_toml(toml).expect("stored toml parses");
+        let stored_error = stored
+            .validate_without_filesystem()
+            .expect_err("stored out-of-bounds poll config fails");
+        assert!(stored_error.to_string().contains(field), "{stored_error}");
+    }
+}
+
+/// POL-09: unknown fields in the job block, including a removed
+/// `api_key_env`, are rejected.
+#[test]
+fn pol09_api_key_usage_poll_rejects_unknown_fields() {
+    for toml in [
+        "[scheduler.recurring_jobs.api_key_usage_poll]\napi_key_env = \"ANTHROPIC_API_KEY\"\n",
+        "[scheduler.recurring_jobs.api_key_usage_poll]\npage_size = 10\n",
+    ] {
+        let (_dir, path) = crate::common::temp_config(toml);
+        let error = Config::load(&path).expect_err("unknown poll field fails");
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+}
+
 #[test]
 fn default_scheduler_config_matches_snapshot() {
     insta::assert_json_snapshot!(SchedulerConfig::default());

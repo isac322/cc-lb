@@ -1,0 +1,18 @@
+[
+  "key_admin",
+  "key_enterprise_scoped",
+  "key_oat",
+  "key_invalid",
+  "key_forbidden",
+  "workspace_required",
+  "workspace_not_found",
+  "workspace_id_malformed",
+  "workspace_list_denied",
+  "key_workspace_scoped_usage_unavailable",
+  "role_insufficient",
+  "key_id_unresolved",
+  "usage_never_checked",
+  "non_anthropic_base_url",
+  "probe_unreachable",
+  "usage_poll_failed"
+]

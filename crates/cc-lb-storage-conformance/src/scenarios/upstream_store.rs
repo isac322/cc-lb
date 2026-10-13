@@ -69,7 +69,7 @@ where
     api_key_credential_replacement_can_clear_apply_error(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
-    secret_and_token_updates_do_not_bump_spec_revision(Arc::clone(&backend)).await?;
+    secret_update_bumps_spec_revision_token_update_does_not(Arc::clone(&backend)).await?;
     soft_delete_sets_deleted_at(Arc::clone(&backend)).await?;
     update_spec_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     set_status_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
@@ -113,6 +113,8 @@ scenario!(create_with_api_key_secret, |store| async move {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await?;
     ensure!(created.id == id, "create must honor the caller-assigned id");
@@ -162,6 +164,8 @@ scenario!(create_with_oauth_tokens, |store| async move {
             }),
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await?;
     ensure!(created.id == id, "create must honor the caller-assigned id");
@@ -214,6 +218,8 @@ scenario!(create_upstream_duplicate_id_conflicts, |store| async move {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await?;
     let aead = AeadService::from_master_key([47; 32]);
@@ -235,6 +241,8 @@ scenario!(create_upstream_duplicate_id_conflicts, |store| async move {
             }),
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await
         .err()
@@ -660,6 +668,8 @@ scenario!(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await?;
         store
@@ -751,15 +761,17 @@ scenario!(
 );
 
 scenario!(
-    secret_and_token_updates_do_not_bump_spec_revision,
+    secret_update_bumps_spec_revision_token_update_does_not,
     |store| async move {
         let record = create_named(store.as_ref(), "upstream-secret-token-stable").await?;
+        // A credential replace is a spec update: the new key must reach
+        // replicas and invalidate expected-revision guards in flight.
         let secret_updated = store
             .update_api_key_secret(record.id, Some(vec![9, 8, 7]))
             .await?;
         ensure!(
-            secret_updated.revision == record.revision,
-            "secret update should not bump spec revision"
+            secret_updated.revision == record.revision + 1,
+            "secret update should bump spec revision"
         );
         let aead = AeadService::from_master_key([45; 32]);
         let encrypted = EncryptedOAuthTokens::encrypt(
@@ -769,13 +781,13 @@ scenario!(
         )?;
         let token_updated = store.update_oauth_token(record.id, encrypted).await?;
         ensure!(
-            token_updated.revision == record.revision,
+            token_updated.revision == secret_updated.revision,
             "token update should not bump spec revision"
         );
         let spec_updated = store
             .update_spec(
                 record.id,
-                record.revision,
+                secret_updated.revision,
                 UpstreamUpdate {
                     base_url: Some(Some(url("https://secret-token-stable.example.com")?)),
                     ..UpstreamUpdate::default()
@@ -783,8 +795,8 @@ scenario!(
             )
             .await?;
         ensure!(
-            spec_updated.revision == record.revision + 1,
-            "spec update should still use original revision after secret/token updates"
+            spec_updated.revision == secret_updated.revision + 1,
+            "spec update should use the post-secret-write revision"
         );
         ensure!(
             spec_updated.api_key_ciphertext == Some(vec![9, 8, 7]),
@@ -1040,6 +1052,8 @@ scenario!(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect_err("creating a duplicate of a live upstream name must fail");
@@ -1109,6 +1123,8 @@ scenario!(validate_identifier_rejects_bad_name, |store| async move {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await
         .expect_err("reserved prefix should fail");
@@ -1143,6 +1159,8 @@ async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamR
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await?)
 }

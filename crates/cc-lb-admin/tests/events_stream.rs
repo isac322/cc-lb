@@ -165,6 +165,45 @@ async fn events_stream_resets_after_one_backfill_page_when_over_cap() {
     assert_eq!(text.matches("event: reset").count(), 1);
     assert!(text.contains(r#"reason":"backfill_cap"#));
 }
+/// A request can finalize between the subscription and the stream's first
+/// poll: its partials and its final then sit queued on the bus while the
+/// stream bookmarks the current cursor, which already includes the row. The
+/// queued partial must not count as the final having been emitted.
+#[tokio::test]
+async fn events_stream_emits_final_queued_behind_its_partial_before_first_poll() {
+    let (_dir, storage) = temp_storage().await;
+    let bus = Arc::new(InMemoryBus::with_capacity(8));
+    let mut state = test_state(Config::default(), Some(storage.clone()));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response = stream_response(state, None).await;
+    let event = request_event(1);
+    bus.publish(RequestEventUpdate::Partial(RequestEventPartial {
+        event_id: event.event_id.clone().expect("event id"),
+        request_id: event.request_id.clone(),
+        ..Default::default()
+    }));
+    let cursor = storage
+        .append_request_event(&event)
+        .await
+        .expect("append event");
+    bus.publish(RequestEventUpdate::final_(event, cursor));
+
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains(r#""phase":"final""#) {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("final frame timeout")
+            .expect("stream ended before final")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    assert_eq!(message_request_ids(&text), ["req-1", "req-1"]);
+}
+
 #[tokio::test]
 async fn events_stream_applies_combined_filters_to_partial_updates() {
     let (_dir, storage) = temp_storage().await;

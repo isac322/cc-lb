@@ -132,6 +132,8 @@ pub fn test_state_with_clock(
         event_bus,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     }
 }
 

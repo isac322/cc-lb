@@ -32,6 +32,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_event_bus(config)?;
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
+    validate_api_key_usage_poll(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -43,6 +44,7 @@ pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigE
     validate_event_bus(config)?;
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
+    validate_api_key_usage_poll(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -132,6 +134,38 @@ fn validate_upstream_affinity(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::new(
             "upstream_affinity.ttl_days",
             "upstream affinity TTL must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
+/// Smallest `api_key_usage_poll` interval: each tick sends up to two org
+/// usage-report requests per upstream.
+const API_KEY_USAGE_POLL_MIN_INTERVAL_SECS: u64 = 60;
+/// Largest `api_key_usage_poll` interval (7 days): the hourly usage window
+/// spans the last 7 days, so a longer interval leaves gaps. The bound also
+/// keeps the scheduler's first tick (`interval + jitter`, jitter below the
+/// interval) far inside the `DateTime` range.
+const API_KEY_USAGE_POLL_MAX_INTERVAL_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn validate_api_key_usage_poll(config: &Config) -> Result<(), ValidationError> {
+    let Some(job) = config.scheduler.recurring_jobs.get("api_key_usage_poll") else {
+        return Ok(());
+    };
+    if !(API_KEY_USAGE_POLL_MIN_INTERVAL_SECS..=API_KEY_USAGE_POLL_MAX_INTERVAL_SECS)
+        .contains(&job.interval_secs)
+    {
+        return Err(ValidationError::new(
+            "scheduler.recurring_jobs.api_key_usage_poll.interval_secs",
+            format!(
+                "API-key usage poll interval must be between {API_KEY_USAGE_POLL_MIN_INTERVAL_SECS} and {API_KEY_USAGE_POLL_MAX_INTERVAL_SECS} seconds"
+            ),
+        ));
+    }
+    if job.jitter_secs >= job.interval_secs {
+        return Err(ValidationError::new(
+            "scheduler.recurring_jobs.api_key_usage_poll.jitter_secs",
+            "API-key usage poll jitter must be less than its interval",
         ));
     }
     Ok(())

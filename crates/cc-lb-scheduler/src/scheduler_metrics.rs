@@ -15,6 +15,24 @@ pub const PRICE_CATALOG_STATUS_TOTAL: &str = "cclb_scheduler_price_catalog_statu
 pub const PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL: &str =
     "cclb_scheduler_prompt_cache_purge_rows_removed_total";
 pub const METADATA_REFRESH_STATUS_TOTAL: &str = "cclb_scheduler_metadata_refresh_status_total";
+pub const API_KEY_USAGE_POLL_TOTAL: &str = "cclb_scheduler_api_key_usage_poll_total";
+
+/// Bounded `outcome` label values of [`API_KEY_USAGE_POLL_TOTAL`], one per
+/// polled upstream per tick.
+pub const API_KEY_USAGE_POLL_OUTCOMES: &[&str] = &[
+    "success",
+    "probed",
+    "denied",
+    "rate_limited",
+    "failed",
+    "decrypt_failed",
+    "not_applicable",
+    "no_subject",
+    "conflict",
+    "claim_lost",
+    "lease_spent",
+    "storage_error",
+];
 
 const JOB_TYPES: &[&str] = &[
     "upstream_warmup",
@@ -30,6 +48,7 @@ const JOB_TYPES: &[&str] = &[
     "cron:warmup_watchdog",
     "cron:oauth_refresh_watchdog",
     "cron:oauth_usage_poll",
+    "cron:api_key_usage_poll",
     "cron:anthropic_compat_refresh",
 ];
 
@@ -85,6 +104,11 @@ pub fn describe_scheduler_metrics() {
             Unit::Count,
             "Scheduler metadata refresh outcomes by status."
         );
+        ::metrics::describe_counter!(
+            API_KEY_USAGE_POLL_TOTAL,
+            Unit::Count,
+            "Anthropic API-key usage poll outcomes by bounded outcome, one per polled upstream."
+        );
     });
 }
 
@@ -109,6 +133,10 @@ pub fn touch_scheduler_metric_handles() {
     ::metrics::counter!(PRICE_CATALOG_STATUS_TOTAL, "status" => "noop").increment(0);
     ::metrics::counter!(PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL).increment(0);
     ::metrics::counter!(METADATA_REFRESH_STATUS_TOTAL, "status" => "unknown").increment(0);
+    ::metrics::counter!(PRUNE_ROWS_REMOVED_TOTAL, "table" => "upstream_api_usage").increment(0);
+    for outcome in API_KEY_USAGE_POLL_OUTCOMES {
+        ::metrics::counter!(API_KEY_USAGE_POLL_TOTAL, "outcome" => *outcome).increment(0);
+    }
 }
 
 pub fn record_scheduler_job_status(job_type: &'static str, status: &'static str) {
@@ -130,4 +158,11 @@ pub fn record_scheduler_failure(job_type: &str, count: u64) {
 pub fn set_scheduler_init_failure(failed: bool) {
     describe_scheduler_metrics();
     ::metrics::gauge!(INIT_FAILURE).set(if failed { 1.0 } else { 0.0 });
+}
+
+/// Counts polled upstreams for one outcome; `outcome` must be one of
+/// [`API_KEY_USAGE_POLL_OUTCOMES`].
+pub fn record_api_key_usage_poll_outcome(outcome: &'static str, count: u64) {
+    describe_scheduler_metrics();
+    ::metrics::counter!(API_KEY_USAGE_POLL_TOTAL, "outcome" => outcome).increment(count);
 }

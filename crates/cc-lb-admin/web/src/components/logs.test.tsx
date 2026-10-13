@@ -642,7 +642,10 @@ describe('LogsPage', () => {
   });
 
   it('moves an arriving live row onto the first page and the displaced historical tail onto the next page', async () => {
-    const { publishLiveEvent } = await renderLogs();
+    const { publishLiveEvent } = await renderLogs(
+      {},
+      { wrapper: RowOnlyRequestEventsTable },
+    );
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),
@@ -673,7 +676,7 @@ describe('LogsPage', () => {
   });
 
   it('exports all retained rows, not just the current page', async () => {
-    await renderLogs();
+    await renderLogs({}, { wrapper: RowOnlyRequestEventsTable });
     const table = screen.getByRole('table');
     await waitFor(() =>
       expect(rowIds(table)).toEqual(expectedRows(mockEvents.slice(0, 50))),

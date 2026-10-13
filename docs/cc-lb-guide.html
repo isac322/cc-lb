@@ -361,11 +361,10 @@ semaphore_per_upstream  = 100
       </li>
 
       <li>
-        <h3>환경변수 (마스터키 + admin provider 토큰 + upstream credential)</h3>
+        <h3>환경변수 (마스터키 + admin provider 토큰)</h3>
         <p><code>[aead]</code>의 <code>key_env</code>와 <code>[[admin.auth.providers]]</code>의 <code>token_env</code>가 가리키는 secret을 설정합니다. Quick start는 <code>./data/cc-lb.sqlite</code>를 사용하고, upstream/principal/API key는 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export CC_LB_MASTER_KEY=$(openssl rand -hex 32)   # 64자 hex 필수
-export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)
-export ANTHROPIC_UPSTREAM_API_KEY=sk-ant-api03-...</code></pre><button class="copy">복사</button></div>
+export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy">복사</button></div>
       </li>
 
       <li>
@@ -388,7 +387,7 @@ export ANTHROPIC_UPSTREAM_API_KEY=sk-ant-api03-...</code></pre><button class="co
 curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
-  -d &#39;{&quot;name&quot;:&quot;anthropic&quot;,&quot;kind&quot;:&quot;anthropic_api_key&quot;,&quot;base_url&quot;:&quot;https://api.anthropic.com&quot;,&quot;api_key_env&quot;:&quot;ANTHROPIC_UPSTREAM_API_KEY&quot;}&#39;
+  -d &#39;{&quot;name&quot;:&quot;anthropic&quot;,&quot;kind&quot;:&quot;anthropic_api_key&quot;,&quot;base_url&quot;:&quot;https://api.anthropic.com&quot;,&quot;api_key_value&quot;:&quot;sk-ant-api03-...&quot;}&#39;
 
 # principal creation: POST /admin/v1/principals
 principal_id=$(curl -s -X POST http://127.0.0.1:9090/admin/v1/principals \
@@ -401,7 +400,11 @@ CC_LB_PROXY_KEY=$(curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principal
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{&quot;label&quot;:&quot;quickstart&quot;}&#39; | jq -r .plaintext_key)</code></pre><button class="copy">복사</button></div>
-        <p><code>api_key_env</code>는 생성/수정 시점에만 읽는 환경변수 이름입니다 — 값은 즉시 암호화되어 저장되고 변수명 자체는 저장·반환되지 않으므로 secret을 나중에 복원할 방법은 없습니다. 키 <code>label</code>은 생략하거나 빈 문자열로 둘 수 있고, 유효하지 않은 비어있지 않은 label(NUL 바이트, <code>system.</code> 접두사)은 400 <code>invalid_input</code>을 반환합니다. label 없는 키는 v1 목록에서 <code>null</code>로 표시됩니다.</p>
+        <p><code>api_key_value</code>는 upstream의 실제 API key 값입니다 — 즉시 암호화되어 저장되고, 키 자체는 다시 반환되지 않습니다(응답에는 <code>sk-ant-api03-...wxyz</code> 같은 마스킹된 <code>key_hint</code>만 포함). 따라서 secret을 나중에 복원할 방법은 없습니다. literal credential은 저장된 명령, 셸 히스토리, 소스 컨트롤에서 제외하세요. 키 <code>label</code>은 생략하거나 빈 문자열로 둘 수 있고, 유효하지 않은 비어있지 않은 label(NUL 바이트, <code>system.</code> 접두사)은 400 <code>invalid_input</code>을 반환합니다. label 없는 키는 v1 목록에서 <code>null</code>로 표시됩니다.</p>
+        <p><b>지원 키 종류.</b> 표준 Console API key만 사용할 수 있습니다: 워크스페이스 키(<code>sk-ant-api03-…</code>)와 계정에 연결된 개인·서비스 계정 키(<code>sk-ant-usr-…</code>). <code>sk-ant-usr-…</code> 키는 여러 워크스페이스에서 동작하므로 <code>workspace_id</code>를 함께 보내야 합니다. Admin key(<code>sk-ant-admin…</code>, <code>key_admin</code>), Enterprise 관리 키(<code>sk-ant-api01…</code>, <code>key_enterprise_scoped</code>), OAuth 토큰(<code>sk-ant-oat01…</code>, <code>key_oat</code> — 대신 <code>anthropic_oauth</code> upstream 사용)은 모델을 호출할 수 없으므로 저장 전에 거부됩니다. 생성 시 <code>base_url</code>로 키를 먼저 확인(preflight)하고, 거부되면 <code>{"error":{"code","message"}}</code>와 함께 아무것도 저장하지 않습니다. 확인할 수 없는 키는 <code>"skip_preflight": true</code>로 미검증 상태로 저장할 수 있습니다.</p>
+        <p><b>워크스페이스.</b> <b>All workspaces</b>로 만든 org-scoped 키는 <code>workspace_required</code>로 실패하므로 <code>"workspace_id":"wrkspc_…"</code>를 함께 보내야 합니다. cc-lb는 이 값을 모든 proxy 요청에 <code>anthropic-workspace-id</code>로 보내고, 클라이언트가 보낸 같은 헤더는 항상 제거합니다. 한 워크스페이스에 묶인 키에는 <code>workspace_id</code>를 보낼 수 없습니다.</p>
+        <p><b>사용량.</b> Anthropic이 보고한 사용량(<code>real</code>)은 org-scoped 키 + 사용량 보고서를 읽을 수 있는 org role + <code>base_url</code>이 정확히 <code>https://api.anthropic.com</code>일 때만 받을 수 있고, 그 외에는 cc-lb 요청 로그 기반 추정치(<code>estimated</code>)입니다. 비용은 항상 list price 추정치이며, 크레딧 잔액(Balance)은 Anthropic API로 제공되지 않으므로 표시하지 않습니다 — Console Billing 페이지에서 확인하세요. <code>anthropic_api_key</code> upstream의 warm-up 기본값은 그대로 비활성(Disabled)입니다.</p>
+        <p><b>보안 참고.</b> <code>base_url</code>은 <code>http</code>/<code>https</code>만 허용되고 자격증명(userinfo)을 포함할 수 없습니다. <code>base_url</code>을 바꿀 때 키를 다시 입력할 필요가 없으므로, upstream을 편집할 수 있는 admin은 저장된 키를 임의의 host로 보낼 수 있습니다. 변경은 이전·새 host와 함께 감사 로그에 남고(키는 남기지 않음), 새 host에서 키를 다시 확인합니다.</p>
       </li>
 
       <li>
@@ -835,7 +838,11 @@ curl -s http://127.0.0.1:8080/v1/messages \
       <tr><td><code>GET /admin/v1/principals/{id}/limits</code></td><td>principal의 DB 저장 기본 한도</td></tr>
       <tr><td><code>GET /admin/v1/audit?since=&amp;until=&amp;limit=&amp;principal_id=&amp;admin_only=</code></td><td>감사 로그 — 최신 항목부터(ts·id/seq 내림차순) limit개 반환. 기본값은 전체 기록이며, <code>admin_only=true</code>는 관리자 작업 기록을 LIMIT 전에 필터링(Audit UI에서 사용). <code>after</code>는 배타적 시간 하한(after+1초부터)이며 전진 커서가 아님. storage의 기존 오름차순 조회 계약은 유지</td></tr>
       <tr><td><code>GET /admin/v1/upstreams</code></td><td>DB upstream 목록과 상태 — <code>base_url</code> 포함(미설정 시 <code>null</code>)</td></tr>
-      <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략·<code>null</code>은 기존 override 유지, URL 문자열은 설정. <code>clear_base_url: true</code>만 override를 제거하고 기본 endpoint를 사용하며, URL 설정과 초기화의 동시 요청은 거절. 구버전 폼의 무편집 저장이 override를 지우지 않도록 초기화 의도를 구분한다. <code>If-Match</code> revision 보호와 API 키·OAuth 토큰의 null 처리는 유지</td></tr>
+      <tr><td><code>PUT/PATCH /admin/v1/upstreams/{id}</code></td><td><code>base_url</code> 생략·<code>null</code>은 기존 override 유지, URL 문자열은 설정. <code>clear_base_url: true</code>만 override를 제거하고 기본 endpoint를 사용하며, URL 설정과 초기화의 동시 요청은 거절. 구버전 폼의 무편집 저장이 override를 지우지 않도록 초기화 의도를 구분한다. <code>workspace_id</code>/<code>clear_workspace_id</code>도 같은 규칙. API-key upstream의 키·워크스페이스·<code>base_url</code> 변경은 저장 전에 preflight를 다시 실행. <code>If-Match</code> revision 보호와 API 키·OAuth 토큰의 null 처리는 유지</td></tr>
+      <tr><td><code>POST /admin/v1/upstreams/preflight</code></td><td>API key 후보 확인(저장 안 함). 항상 200 + <code>verdict</code>(<code>ok</code>/<code>needs_workspace</code>/<code>rejected</code>/<code>unreachable</code>), <code>key_hint</code>, <code>remediation[]</code></td></tr>
+      <tr><td><code>POST /admin/v1/upstreams/{id}/preflight</code></td><td>저장된 키 재확인(Re-check) 후 <code>api_key_access</code> 갱신</td></tr>
+      <tr><td><code>GET /admin/v1/upstreams/{id}/workspaces</code></td><td>org-scoped 키가 볼 수 있는 워크스페이스 목록. <code>api.anthropic.com</code>이 아니면 403 <code>non_anthropic_base_url</code>, role 부족 시 403 <code>workspace_list_denied</code></td></tr>
+      <tr><td><code>GET /admin/v1/upstreams/{id}/usage?range=&amp;step=</code></td><td>API key 사용량(<code>source</code>: <code>real</code>/<code>estimated</code>, 이번 달 요약과 billing stop). storage만 읽고 외부 호출 없음</td></tr>
       <tr><td><code>POST /admin/v1/upstreams/{id}/disable</code></td><td>upstream 비활성화</td></tr>
       <tr><td><code>GET /admin/v1/config/editor</code></td><td>Config editor 메타데이터와 현재 파일 상태</td></tr>
       <tr><td><code>GET /admin/v1/config/draft</code> · <code>PUT /admin/v1/config/draft</code></td><td>버전이 지정된 편집 초안 조회·저장</td></tr>
@@ -887,7 +894,7 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
 
     <details>
       <summary><code>/readyz</code>가 503 반환</summary>
-      <p>모든 upstream의 circuit breaker가 Open 상태이거나 drain 시작됨. 메트릭에서 <code>cc_lb_breaker_state{upstream}</code> 값 확인 (0=Closed, 1=HalfOpen, 2=Open). 한 upstream만 Open이어도 그 upstream으로 갈 요청은 503.</p>
+      <p><code>reason</code> 필드를 확인하세요. <code>startup_not_ready</code>(기동 중), <code>draining</code>(종료 중), <code>no_ready_principal</code>(활성 principal 없음), <code>no_ready_upstream</code>(사용 가능한 upstream 없음 — 활성화·적용되어 있고, OAuth라면 복호화 가능하며 재연결이 필요 없어야 함) 중 하나입니다. 일부 OAuth upstream만 망가진 경우에는 routing이 그 upstream을 건너뛰고 <code>/readyz</code>는 200 + <code>reason: "oauth_credentials_not_decryptable"</code>을 반환합니다. API key preflight 결과, capability snapshot, 사용량 poll 실패는 readiness에 영향을 주지 않습니다.</p>
     </details>
 
     <details>
@@ -1132,7 +1139,6 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     cmd += '# 1) 환경변수\n';
     cmd += 'export CC_LB_MASTER_KEY=$(openssl rand -hex 32)\n';
     cmd += 'export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)\n';
-    cmd += 'export ANTHROPIC_UPSTREAM_API_KEY=sk-ant-api03-...\n';
     cmd += '\n# 2) 위 toml을 cc-lb.toml로 저장 후 validate\n';
     cmd += './target/debug/cc-lb config validate --config cc-lb.toml\n';
     cmd += '\n# 3) 실행\n';
@@ -1145,7 +1151,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     cmd += 'curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \\\n';
     cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
     cmd += '  -H "content-type: application/json" \\\n';
-    cmd += '  -d \'{"name":"' + upstreamName + '","kind":"anthropic_api_key","base_url":"' + upstreamBaseUrl + '","api_key_env":"ANTHROPIC_UPSTREAM_API_KEY"}\'\n';
+    cmd += '  -d \'{"name":"' + upstreamName + '","kind":"anthropic_api_key","base_url":"' + upstreamBaseUrl + '","api_key_value":"sk-ant-api03-..."}\'\n';
     cmd += 'CC_LB_PROXY_KEY=$(curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/keys" \\\n';
     cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
     cmd += '  -H "content-type: application/json" \\\n';

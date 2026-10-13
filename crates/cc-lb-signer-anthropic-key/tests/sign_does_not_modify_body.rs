@@ -50,7 +50,8 @@ async fn sign_does_not_modify_body() {
     )
     .expect("shape request");
 
-    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
+    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key", None)
+        .expect("factory")
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");

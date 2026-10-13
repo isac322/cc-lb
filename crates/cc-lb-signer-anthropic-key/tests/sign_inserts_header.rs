@@ -54,7 +54,8 @@ async fn sign_sets_api_key_and_drops_inherited_authorization() {
     )
     .expect("shape request");
 
-    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
+    let signer = AnthropicKeySignerFactory::new("sk-ant-test-key", None)
+        .expect("factory")
         .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");

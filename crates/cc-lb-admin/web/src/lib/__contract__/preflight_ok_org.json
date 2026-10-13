@@ -1,0 +1,35 @@
+{
+  "capabilities": {
+    "api_key_resolution": "resolved",
+    "inference": "ok_limited",
+    "usage_report": "ok",
+    "workspace_list": "ok"
+  },
+  "checked_at": 1760000000,
+  "classification": {
+    "key_class": "org_scoped",
+    "key_type": "service_account",
+    "needs_workspace": true,
+    "workspace": {
+      "id": "wrkspc_01Prod",
+      "mode": "selected",
+      "name": "Production"
+    }
+  },
+  "key_hint": "sk-ant-api03-...AbCd",
+  "remediation": [],
+  "verdict": "ok",
+  "workspaces": {
+    "items": [
+      {
+        "id": "wrkspc_01Prod",
+        "name": "Production"
+      },
+      {
+        "id": "wrkspc_02Stage",
+        "name": "Staging"
+      }
+    ],
+    "state": "ok"
+  }
+}

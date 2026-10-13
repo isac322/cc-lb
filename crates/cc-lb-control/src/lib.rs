@@ -4,6 +4,7 @@
 //! stored configuration, API keys, audit records, and runtime status without
 //! depending on the data-plane engine crate.
 
+pub mod anthropic_api_key;
 pub mod anthropic_compat;
 pub mod anthropic_metadata;
 pub mod api_keys;

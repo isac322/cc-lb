@@ -705,6 +705,8 @@ async fn create_upstream_from_oauth_draft(
             }),
             warmup_enabled: true,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await

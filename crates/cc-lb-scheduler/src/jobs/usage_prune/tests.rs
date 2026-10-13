@@ -154,6 +154,7 @@ impl RecordingUsagePruneRunner {
         PruneResult {
             request_events_removed,
             audit_log_removed,
+            upstream_api_usage_removed: 0,
         }
     }
 }
@@ -221,6 +222,7 @@ fn done_result(
         result: PruneResult {
             request_events_removed,
             audit_log_removed,
+            upstream_api_usage_removed: 0,
         },
         api_key_usage_compaction: ApiKeyUsageCompactionRun {
             folded_rows,

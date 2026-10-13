@@ -23,6 +23,7 @@ mod storage_types_keys;
 pub mod traits;
 pub mod upstream;
 pub mod upstream_affinity;
+pub mod upstream_api_key;
 pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
@@ -62,6 +63,7 @@ pub use traits::{
 };
 pub use upstream::*;
 pub use upstream_affinity::*;
+pub use upstream_api_key::*;
 pub use upstream_rate_limit::*;
 pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;

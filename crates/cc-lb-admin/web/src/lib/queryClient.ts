@@ -44,8 +44,11 @@ export const queryClient = new QueryClient({
     mutations: { retry: 0 },
   },
   queryCache: new QueryCache({
-    onError: (error) => {
+    onError: (error, query) => {
       if (isSilencedError(error)) return;
+      // Queries that render their own error surface (a `role="alert"` next to
+      // the data) opt out, so a failure is announced exactly once.
+      if (query.meta?.inlineError === true) return;
       toast.error(messageOf(error));
     },
   }),

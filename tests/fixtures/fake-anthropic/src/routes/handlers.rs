@@ -17,6 +17,7 @@ use super::helpers::{
     auth_failure, content_length_too_large, error_response, file_json, json_response,
     mode_response, model_json, wants_stream,
 };
+use super::key_policy::{policy_for, serve, with_resolved_workspace, workspace_gate};
 use super::state::AppState;
 
 pub(crate) async fn last_request(State(state): State<Arc<AppState>>) -> Response {
@@ -50,14 +51,25 @@ pub(crate) async fn messages(
     if let Some(response) = auth_failure(&state, &headers) {
         return response;
     }
+    let Some(policy) = policy_for(&state, &headers) else {
+        return messages_default(&state, &headers, &body).await;
+    };
+    if let Some(response) = workspace_gate(&policy, &headers) {
+        return response;
+    }
+    let response = messages_default(&state, &headers, &body).await;
+    with_resolved_workspace(response, &policy, &headers)
+}
+
+async fn messages_default(state: &AppState, headers: &HeaderMap, body: &Bytes) -> Response {
     if let Some(script) = state.config.message_script.as_ref() {
-        script.record(&headers, &body);
+        script.record(headers, body);
         if let Some(response) = script.pop_response() {
             return response.into_response().await;
         }
     }
 
-    let weather = state.config.weather.for_headers(&headers);
+    let weather = state.config.weather.for_headers(headers);
     if weather.timeout() > Duration::ZERO {
         sleep(weather.timeout()).await;
         return error_response(
@@ -66,27 +78,27 @@ pub(crate) async fn messages(
             "forced fake weather timeout response",
         );
     }
-    let mode = FakeMode::from_headers(&headers);
+    let mode = FakeMode::from_headers(headers);
     if let Some(response) = mode_response(mode, weather.retry_after()).await {
         return response;
     }
 
-    let body_json = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let body_json = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
     let model = body_json
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or("claude-3-5-sonnet-20241022")
         .to_owned();
-    if mode == FakeMode::OpenCodeTools && wants_stream(&headers, &body_json) {
+    if mode == FakeMode::OpenCodeTools && wants_stream(headers, &body_json) {
         return crate::sse::opencode_tools_response(model, &body_json);
     }
-    if mode == FakeMode::SenpiTools && wants_stream(&headers, &body_json) {
+    if mode == FakeMode::SenpiTools && wants_stream(headers, &body_json) {
         let image_path = headers
             .get("x-senpi-image-path")
             .and_then(|value| value.to_str().ok());
         return crate::sse::senpi_tools_response(model, &body_json, image_path);
     }
-    if wants_stream(&headers, &body_json) {
+    if wants_stream(headers, &body_json) {
         return streaming_response(model, mode, state.config.slow_mode_bps, weather);
     }
     if let Some((stop_reason, stop_details)) = crate::sse::abnormal_stop(mode) {
@@ -117,7 +129,7 @@ pub(crate) async fn messages(
         "usage": {"input_tokens": 100, "output_tokens": 50}
     });
     #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
-    let response_body = response_body_with_injected_usage(&state, &body_json, response_body);
+    let response_body = response_body_with_injected_usage(state, &body_json, response_body);
     json_response(StatusCode::OK, response_body)
 }
 
@@ -130,7 +142,15 @@ pub(crate) async fn count_tokens(
         return response;
     }
     let _body_len = body.len();
-    json_response(StatusCode::OK, json!({"input_tokens": 100}))
+    let default = || json_response(StatusCode::OK, json!({"input_tokens": 100}));
+    let Some(policy) = policy_for(&state, &headers) else {
+        return default();
+    };
+    if let Some(response) = workspace_gate(&policy, &headers) {
+        return response;
+    }
+    let response = serve(&policy.count_tokens, default).await;
+    with_resolved_workspace(response, &policy, &headers)
 }
 
 pub(crate) async fn list_models(
@@ -140,6 +160,17 @@ pub(crate) async fn list_models(
     if let Some(response) = auth_failure(&state, &headers) {
         return response;
     }
+    let Some(policy) = policy_for(&state, &headers) else {
+        return models_page();
+    };
+    if let Some(response) = workspace_gate(&policy, &headers) {
+        return response;
+    }
+    let response = serve(&policy.models, models_page).await;
+    with_resolved_workspace(response, &policy, &headers)
+}
+
+fn models_page() -> Response {
     json_response(
         StatusCode::OK,
         json!({

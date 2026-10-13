@@ -138,7 +138,7 @@ sum(rate(cc_lb_cache_observation_write_failed_total[1m])) > 0
 
 ### Interpretation
 
-This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the cost-first within-tier selection actually placed candidates in, and which upstream captured the pick.
+This metric counts routing decisions won by each upstream in each subscription-preference tier, per principal. It surfaces which tier the cost-first within-tier selection actually placed candidates in, and which upstream captured the pick. A request that fails over to another upstream counts one decision per routed upstream.
 
 - `tier` ∈ `{known_base, partial_base, overage, unknown_probe}` from the `SubscriptionTier` enum.
 - `upstream` matches the upstream name (same convention as `cc_lb_cache_hit_total`, `cc_lb_requests_completed_total`, and `cc_lb_stream_terminations_total`), NOT the UUID.
@@ -182,6 +182,24 @@ When `RoutingUpstreamFunneling` fires:
 5. Common causes: (a) a single upstream is the only one with fresh quota snapshots and everyone else is stale, (b) a plan-capacity change made one upstream saturate the cap while others fell below, (c) the collector stopped ingesting subscription-quota headers from N-1 of the N upstreams.
 
 False positives: sustained low traffic that clears the `> 2 req/s` floor after the alert has already latched. If confirmed low-volume, no action; alert will self-clear.
+
+## Metric: cc_lb_upstream_failover_total
+
+- **Type**: Counter
+- **Labels**: `reason`, `from_kind`, `to_kind`
+- **Label Cardinality Bounds**: 4 reasons × 2 kinds × 2 kinds = 16 series.
+
+### Interpretation
+
+Counts requests that moved from one upstream to another before any response reached the client. `reason` is `signer_build_failed`, `sign_failed`, `upstream_401`, or `upstream_429`; `from_kind` and `to_kind` are `anthropic_oauth` or `anthropic_key`. A request tries at most three upstreams, so one request adds at most two increments. Each failover also logs a warning with the source and target upstream names.
+
+### Typical PromQL Query
+
+```promql
+sum by (reason, from_kind, to_kind) (rate(cc_lb_upstream_failover_total[15m]))
+```
+
+A sustained `upstream_429` rate from `anthropic_oauth` means subscription accounts are rejecting requests that routing still selects; check `/admin/v1/subscription-quotas/latest` for those accounts. A sustained `upstream_401` or `sign_failed` rate points to credentials that need a reconnect.
 
 ## Metric: cc_lb_response_body_chunks_total
 

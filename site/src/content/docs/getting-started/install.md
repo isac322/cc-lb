@@ -10,7 +10,7 @@ The examples below use `http://127.0.0.1:9090` for the admin API and `http://127
 
 ## Create an API-key upstream
 
-The API-key upstream reads the value of `ANTHROPIC_API_KEY` from the server process environment and encrypts the credential for database storage:
+The API-key upstream stores the literal Anthropic API key sent as `api_key_value` and encrypts the credential for database storage:
 
 ```bash
 curl -X POST http://127.0.0.1:9090/admin/v1/upstreams \
@@ -20,11 +20,13 @@ curl -X POST http://127.0.0.1:9090/admin/v1/upstreams \
     "name": "primary-api-key",
     "kind": "anthropic_api_key",
     "base_url": "https://api.anthropic.com",
-    "api_key_env": "ANTHROPIC_API_KEY"
+    "api_key_value": "replace-with-your-upstream-secret"
   }'
 ```
 
-`api_key_env` names an environment variable in the server process. You can alternatively send `api_key_value`, but supply only one of the two fields and do not place literal credentials in saved command examples.
+Substitute your real Anthropic API key for the placeholder. Use a standard Console API key (a workspace key `sk-ant-api03-…` or a personal or service-account key `sk-ant-usr-…`); Admin keys, Enterprise management keys, and OAuth tokens are rejected before anything is stored. cc-lb checks the key against `base_url` first and answers `201` with a masked `key_hint`; it never returns the key itself. Keep literal credentials out of saved commands, shell history, and source control.
+
+If the key was created for **All workspaces**, the create fails with `workspace_required`. Add `"workspace_id": "wrkspc_…"` with the workspace the key should bill. Anthropic reports usage for such a key when its account's org role allows it; other keys and custom endpoints show cc-lb's estimates. The credit balance is not available through Anthropic's API, so cc-lb does not show it. The [upstreams concept page](/docs/concepts/upstreams/) covers key types, workspaces, usage, and credits.
 
 For an OAuth upstream, use `"kind": "anthropic_oauth"` and complete the OAuth flow from the admin surface.
 

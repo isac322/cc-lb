@@ -96,6 +96,7 @@ impl SchedulerDispatch {
             CronJob::OAuthUsagePoll(job) => self.handle_oauth_usage_poll(job).await,
             CronJob::AnthropicCompatRefresh(_) => self.dispatch_anthropic_compat().await,
             CronJob::PoolQuotaSnapshot(job) => self.handle_pool_quota_snapshot(job).await,
+            CronJob::ApiKeyUsagePoll(job) => self.handle_api_key_usage_poll(job).await,
         }
     }
 

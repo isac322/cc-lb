@@ -89,6 +89,14 @@ jobs:
           bun run --shell=bun build
           git diff --exit-code -- src/routeTree.gen.ts
 
+          # PRE-01: the production bundle carries no preview transport or
+          # scenario fixtures (src/preview/ was removed; nothing may return).
+          # `if` rather than `! rg`: `set -e` ignores an inverted status.
+          if rg -n 'preview-scenario-key|apiKeyScenarios|registerPreviewTransport|wrkspc_01Preview' dist/; then
+            echo '::error::preview code found in dist/ (PRE-01)'
+            exit 1
+          fi
+
           bun run --shell=bun lint
           bun run --shell=bun typecheck
           bunx --bun vitest run --passWithNoTests --maxWorkers=1 --no-file-parallelism

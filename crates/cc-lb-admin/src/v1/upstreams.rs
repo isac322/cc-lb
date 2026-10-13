@@ -15,6 +15,7 @@ use bytes::Bytes;
 use cc_lb_aead::OAuthTokenBundle;
 use cc_lb_clock::Clock;
 use cc_lb_control::AuditPayload;
+use cc_lb_control::anthropic_api_key::{RemediationErrorBody, RemediationErrorInner, WARMUP_MODEL};
 use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
@@ -30,10 +31,11 @@ use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaSample,
-    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
-    WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
+    OrganizationMetadataRecord, RemediationCode, Storage, StorageError, SubscriptionQuotaSample,
+    SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore, UpstreamCreate,
+    UpstreamRecord, UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind, WarmupPermanentFailureReason,
+    WarmupSkipReason, WarmupTransientFailureReason,
 };
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -46,6 +48,12 @@ use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::api_key::access::{ApiKeyAccessResponse, api_key_access_response};
+use super::api_key::poll_enqueue::enqueue_usage_poll;
+use super::api_key::preflight::{
+    ApiKeyUpdateRequest, KeyCheck, PREFLIGHT_ROUTE, no_store, prepare_api_key_create,
+    prepare_api_key_update, validate_base_url_input,
+};
 use super::post_commit::{PostCommitAborted, complete_after_commit, rebuild_after_audit_failure};
 use crate::ports::{WarmupAttemptInput, WarmupAttemptResult};
 use crate::{
@@ -61,7 +69,6 @@ const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
-const WARMUP_MODEL: &str = "claude-haiku-4-5-20251001";
 const WARMUP_MAX_TOKENS: u32 = 1;
 const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 
@@ -86,6 +93,10 @@ pub fn router() -> Router<AdminState> {
         .route(
             "/admin/v1/upstreams",
             post(create_upstream).get(list_upstreams),
+        )
+        .route(
+            PREFLIGHT_ROUTE,
+            post(super::api_key::preflight::preflight_candidate),
         )
         .route(
             "/admin/v1/upstreams/{id}",
@@ -128,25 +139,42 @@ pub fn router() -> Router<AdminState> {
         )
         .route("/admin/v1/upstreams/{id}/enable", post(enable_upstream))
         .route("/admin/v1/upstreams/{id}/disable", post(disable_upstream))
+        .route(
+            "/admin/v1/upstreams/{id}/preflight",
+            post(super::api_key::recheck::recheck_upstream_api_key),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/workspaces",
+            get(super::api_key::workspaces::list_upstream_workspaces),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/usage",
+            get(super::api_key::usage::get_upstream_usage),
+        )
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct UpstreamCreateBody {
     name: String,
     kind: UpstreamKind,
     #[serde(default)]
     base_url: Option<Url>,
     #[serde(default)]
-    api_key_env: Option<String>,
-    #[serde(default)]
     api_key_value: Option<String>,
     #[serde(default)]
     warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    /// Anthropic workspace for an org-scoped API key.
+    #[serde(default)]
+    workspace_id: Option<String>,
+    /// Store the API key unverified without probing it. The local prefix
+    /// gate still applies.
+    #[serde(default)]
+    skip_preflight: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct UpstreamUpdateBody {
     #[serde(default)]
     name: Option<String>,
@@ -159,8 +187,6 @@ struct UpstreamUpdateBody {
     #[serde(default)]
     clear_base_url: bool,
     #[serde(default)]
-    api_key_env: Option<String>,
-    #[serde(default)]
     api_key_value: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
@@ -168,6 +194,74 @@ struct UpstreamUpdateBody {
     warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    /// Missing or `null` preserves the workspace; a non-null value sets it.
+    /// Clearing requires `clear_workspace_id`.
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    clear_workspace_id: bool,
+    /// Store a new key, workspace, or host unverified without probing.
+    #[serde(default)]
+    skip_preflight: bool,
+}
+
+/// `Some("[REDACTED]")` for a present secret, so `Debug` shows presence only.
+fn redacted_presence(value: &Option<String>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[REDACTED]")
+}
+
+impl std::fmt::Debug for UpstreamCreateBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            kind,
+            base_url,
+            api_key_value,
+            warmup_enabled,
+            warmup_dialect_plugin,
+            workspace_id,
+            skip_preflight,
+        } = self;
+        f.debug_struct("UpstreamCreateBody")
+            .field("name", name)
+            .field("kind", kind)
+            .field("base_url", base_url)
+            .field("api_key_value", &redacted_presence(api_key_value))
+            .field("warmup_enabled", warmup_enabled)
+            .field("warmup_dialect_plugin", warmup_dialect_plugin)
+            .field("workspace_id", workspace_id)
+            .field("skip_preflight", skip_preflight)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UpstreamUpdateBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            base_url,
+            clear_base_url,
+            api_key_value,
+            enabled,
+            warmup_enabled,
+            warmup_dialect_plugin,
+            workspace_id,
+            clear_workspace_id,
+            skip_preflight,
+        } = self;
+        f.debug_struct("UpstreamUpdateBody")
+            .field("name", name)
+            .field("base_url", base_url)
+            .field("clear_base_url", clear_base_url)
+            .field("api_key_value", &redacted_presence(api_key_value))
+            .field("enabled", enabled)
+            .field("warmup_enabled", warmup_enabled)
+            .field("warmup_dialect_plugin", warmup_dialect_plugin)
+            .field("workspace_id", workspace_id)
+            .field("clear_workspace_id", clear_workspace_id)
+            .field("skip_preflight", skip_preflight)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +281,12 @@ struct UpstreamResponse {
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
     spec_revision: u64,
     status: UpstreamStatusResponse,
+    /// API-key upstreams with a details row only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_access: Option<ApiKeyAccessResponse>,
+    /// Recognizable fragment of the stored key; never the key itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_hint: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +342,16 @@ pub(crate) enum UpstreamError {
     },
     NotOauthUpstream,
     CredentialDecrypt,
+    /// Failure carrying a remediation code; renders the nested
+    /// `{"error":{"code","message"}}` body.
+    Remediation {
+        status: StatusCode,
+        code: RemediationCode,
+        message: String,
+    },
+    NotApiKeyUpstream,
+    /// The stored API-key credential could not be decrypted.
+    ApiKeyCredentialDecrypt,
     RefreshUnavailable,
     RefreshFailed {
         detail: String,
@@ -290,7 +400,11 @@ impl UpstreamError {
             | Self::Conflict { .. }
             | Self::StaleIdentity => StatusCode::CONFLICT,
             Self::NotOauthUpstream => StatusCode::BAD_REQUEST,
-            Self::CredentialDecrypt => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::CredentialDecrypt | Self::ApiKeyCredentialDecrypt => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            Self::Remediation { status, .. } => *status,
+            Self::NotApiKeyUpstream => StatusCode::BAD_REQUEST,
             Self::RefreshUnavailable | Self::WarmupUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::RefreshFailed { .. }
             | Self::ProviderError { .. }
@@ -322,6 +436,9 @@ impl UpstreamError {
             Self::Conflict { .. } => "conflict",
             Self::NotOauthUpstream => "not_oauth_upstream",
             Self::CredentialDecrypt => "oauth_credential_decrypt_failed",
+            Self::Remediation { code, .. } => code.as_str(),
+            Self::NotApiKeyUpstream => "not_api_key_upstream",
+            Self::ApiKeyCredentialDecrypt => "api_key_credential_decrypt_failed",
             Self::RefreshUnavailable => "oauth_refresh_unavailable",
             Self::RefreshFailed { .. } => "oauth_refresh_failed",
             Self::MetadataRefreshTimeout => "metadata_refresh_timeout",
@@ -396,6 +513,27 @@ impl IntoResponse for UpstreamError {
             Self::CredentialDecrypt => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "oauth_credential_decrypt_failed" })),
+            )
+                .into_response(),
+            Self::Remediation {
+                status,
+                code,
+                message,
+            } => (
+                status,
+                Json(RemediationErrorBody {
+                    error: RemediationErrorInner { code, message },
+                }),
+            )
+                .into_response(),
+            Self::NotApiKeyUpstream => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "not_api_key_upstream" })),
+            )
+                .into_response(),
+            Self::ApiKeyCredentialDecrypt => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "api_key_credential_decrypt_failed" })),
             )
                 .into_response(),
             Self::RefreshUnavailable => (
@@ -509,20 +647,57 @@ async fn create_upstream(
     Json(body): Json<UpstreamCreateBody>,
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
-    let api_key_plaintext = api_key_plaintext_for_create(&body)?;
+    if let Some(base_url) = body.base_url.as_ref() {
+        validate_base_url_input(base_url)?;
+    }
+    // The id is allocated up front so the credential — sealed with AAD = id —
+    // and the spec row can be committed in one storage transaction (#852).
     let id = Uuid::new_v4();
-    let api_key_ciphertext = api_key_plaintext
-        .as_deref()
-        .map(|plaintext| encrypt_plaintext_value(&state, plaintext, id.as_bytes()))
-        .transpose()?;
     let name = body.name.clone();
     let kind = body.kind;
+    let api_key = match kind {
+        UpstreamKind::AnthropicApiKey => {
+            // A taken name is refused before the key is probed.
+            if let Some(existing) = UpstreamStore::get_by_name(storage, &name).await? {
+                return Err(UpstreamError::NameConflict {
+                    name,
+                    existing_id: existing.id,
+                });
+            }
+            Some(
+                prepare_api_key_create(
+                    &state,
+                    body.api_key_value.as_deref(),
+                    body.base_url.as_ref(),
+                    body.workspace_id.as_deref(),
+                    body.skip_preflight,
+                )
+                .await?,
+            )
+        }
+        UpstreamKind::AnthropicOauth => {
+            if body.api_key_value.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_api_key",
+                    detail: "anthropic_oauth upstreams do not accept api_key_value".to_owned(),
+                });
+            }
+            if body.workspace_id.is_some() {
+                return Err(UpstreamError::NotApiKeyUpstream);
+            }
+            None
+        }
+    };
     let warmup_enabled = body
         .warmup_enabled
         .unwrap_or(kind == UpstreamKind::AnthropicOauth);
     // The api key is sealed under the preallocated id so the spec row and its
     // credential land in one storage transaction; no reader ever observes an
     // api-key upstream without its key.
+    let api_key_ciphertext = api_key
+        .as_ref()
+        .map(|prepared| encrypt_plaintext_value(&state, prepared.key.as_str(), id.as_bytes()))
+        .transpose()?;
     let record = match UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -534,6 +709,12 @@ async fn create_upstream(
             oauth_tokens: None,
             warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
+            workspace_id: api_key
+                .as_ref()
+                .and_then(|prepared| prepared.check.workspace_id.clone()),
+            api_key_access: api_key
+                .as_ref()
+                .map(|prepared| prepared.check.access.clone()),
         },
     )
     .await
@@ -552,32 +733,36 @@ async fn create_upstream(
         }
         Err(error) => return Err(error.into()),
     };
+    let check = api_key.map(|prepared| prepared.check);
+    let storage = storage_arc(&state)?;
     complete_after_commit(async move {
         let payload = AuditPayload::UpstreamCreate {
             upstream_id: record.id.to_string(),
             kind: record.kind.as_str().to_owned(),
+            key_hint: check.as_ref().and_then(KeyCheck::key_hint),
+            verdict: check.as_ref().and_then(KeyCheck::verdict_label),
+            remediation: check
+                .as_ref()
+                .map(KeyCheck::remediation_labels)
+                .unwrap_or_default(),
         };
-        let action = payload.to_string();
-        if let Err(error) = record_admin_audit(
+        if let Err(error) = audit_upstream_action(
             &state,
-            AdminAuditEvent {
-                identity: Some(&identity),
-                system_component: None,
-                action: &action,
-                route: "/admin/v1/upstreams",
-                target_principal_id: None,
-                target_upstream: Some(&record.name),
-                api_key_id: None,
-                status: StatusCode::CREATED.as_u16(),
-                payload: None,
-            },
+            &identity,
+            &payload,
+            "/admin/v1/upstreams",
+            Some(&record.name),
+            StatusCode::CREATED,
         )
         .await
         {
-            tracing::error!(error = %error, action = %action, "admin audit write failed");
             rebuild_after_audit_failure(&state).await;
-            return Err(UpstreamError::AuditWriteFailed);
+            return Err(error);
         }
+        if let Some(checked_at) = check.as_ref().and_then(KeyCheck::usage_reported_at) {
+            enqueue_usage_poll(&state, record.id, record.revision, checked_at).await;
+        }
+        let details = api_key_details_after_commit(storage.as_ref(), &record).await;
         let location = match HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", record.id)) {
             Ok(location) => location,
             Err(error) => {
@@ -587,12 +772,16 @@ async fn create_upstream(
                 });
             }
         };
-        let mut response = (StatusCode::CREATED, Json(upstream_response(&record))).into_response();
+        let mut response = (
+            StatusCode::CREATED,
+            Json(upstream_response(&record, details.as_ref())),
+        )
+            .into_response();
         response
             .headers_mut()
             .insert(axum::http::header::LOCATION, location);
         add_dynamic_rebind_headers(&mut response, &state).await;
-        Ok(response)
+        Ok(key_handling_response(&record, response))
     })
     .await?
 }
@@ -613,7 +802,25 @@ async fn list_upstreams(
                 .is_none_or(|after| record.id.to_string() > *after)
         })
         .take(limit)
-        .map(|record| upstream_response(&record))
+        .collect::<Vec<_>>();
+    let api_key_ids = page
+        .iter()
+        .filter(|record| record.kind == UpstreamKind::AnthropicApiKey)
+        .map(|record| record.id)
+        .collect::<Vec<_>>();
+    let details = if api_key_ids.is_empty() {
+        Vec::new()
+    } else {
+        UpstreamApiKeyStore::list_api_key_details(storage(&state)?, &api_key_ids).await?
+    };
+    let page = page
+        .iter()
+        .map(|record| {
+            let details = details
+                .iter()
+                .find(|details| details.upstream_id == record.id);
+            upstream_response(record, details)
+        })
         .collect::<Vec<_>>();
 
     let mut response = Json(json!({ "upstreams": page })).into_response();
@@ -634,7 +841,8 @@ async fn get_upstream(
     let record = find_upstream(&state, &id)
         .await?
         .ok_or(UpstreamError::NotFound)?;
-    let mut response = Json(upstream_response(&record)).into_response();
+    let details = api_key_details(storage(&state)?, &record).await?;
+    let mut response = Json(upstream_response(&record, details.as_ref())).into_response();
     response
         .headers_mut()
         .insert(axum::http::header::ETAG, etag_value(record.revision)?);
@@ -1383,8 +1591,13 @@ async fn record_warmup_attempt(
 }
 
 pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
-    match upstream.base_url.clone() {
-        Some(base_url) => Ok(base_url),
+    effective_base_url(upstream.base_url.as_ref())
+}
+
+/// The configured `base_url` override, or the default Anthropic API host.
+pub(super) fn effective_base_url(base_url: Option<&Url>) -> Result<Url, UpstreamError> {
+    match base_url {
+        Some(base_url) => Ok(base_url.clone()),
         None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL)
             .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}"))),
     }
@@ -1428,10 +1641,15 @@ async fn update_upstream(
             detail: "provide either base_url or clear_base_url, not both".to_owned(),
         });
     }
-
-    let fields_changed = changed_fields(&body);
-    let api_key_ciphertext = api_key_ciphertext_for_update(&state, &current, &body)?;
-    let storage = storage(&state)?;
+    if body.clear_workspace_id && body.workspace_id.is_some() {
+        return Err(UpstreamError::InvalidInput {
+            field: "workspace_id".to_owned(),
+            reason: "provide either workspace_id or clear_workspace_id, not both".to_owned(),
+        });
+    }
+    if let Some(base_url) = body.base_url.as_ref() {
+        validate_base_url_input(base_url)?;
+    }
     if body.warmup_enabled == Some(true)
         && current.kind == UpstreamKind::AnthropicOauth
         && current.oauth_credentials.is_none()
@@ -1441,6 +1659,63 @@ async fn update_upstream(
             detail: "complete OAuth before enabling warmup".to_owned(),
         });
     }
+    let storage = storage(&state)?;
+    let target_base_url = if body.clear_base_url {
+        None
+    } else {
+        body.base_url.clone().or_else(|| current.base_url.clone())
+    };
+    let api_key = match current.kind {
+        UpstreamKind::AnthropicApiKey => {
+            prepare_api_key_update(
+                &state,
+                &current,
+                ApiKeyUpdateRequest {
+                    api_key_value: body.api_key_value.as_deref(),
+                    workspace_id: body.workspace_id.as_deref(),
+                    clear_workspace_id: body.clear_workspace_id,
+                    base_url: target_base_url.as_ref(),
+                    skip_preflight: body.skip_preflight,
+                },
+            )
+            .await?
+        }
+        UpstreamKind::AnthropicOauth => {
+            if body.api_key_value.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_api_key",
+                    detail: format!(
+                        "{} upstreams do not accept api_key_value",
+                        current.kind.as_str()
+                    ),
+                });
+            }
+            if body.workspace_id.is_some() || body.clear_workspace_id {
+                return Err(UpstreamError::NotApiKeyUpstream);
+            }
+            Default::default()
+        }
+    };
+
+    let mut fields_changed = changed_fields(&body);
+    if api_key.workspace_id.is_some() && !fields_changed.contains(&"workspace_id") {
+        fields_changed.push("workspace_id");
+    }
+    let api_key_ciphertext = api_key
+        .new_key
+        .as_ref()
+        .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
+        .transpose()?;
+    let base_url_written = body.base_url.is_some() || body.clear_base_url;
+    let (old_host, new_host) = if base_url_written {
+        (
+            current.base_url.as_ref().map(audit_host),
+            target_base_url.as_ref().map(audit_host),
+        )
+    } else {
+        (None, None)
+    };
+    let check = api_key.check;
     let result = UpstreamStore::update(
         storage,
         current.id,
@@ -1457,11 +1732,15 @@ async fn update_upstream(
             enabled: body.enabled,
             warmup_enabled: body.warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
+            workspace_id: api_key.workspace_id,
+            api_key_access: check.as_ref().map(|check| check.access.clone()),
+            reset_api_key_poll_state: api_key.reset_poll_state,
         },
     )
     .await;
     match result {
         Ok(updated) => {
+            let storage = storage_arc(&state)?;
             complete_after_commit(async move {
                 if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
                     // The update is committed even though seeding failed;
@@ -1479,32 +1758,36 @@ async fn update_upstream(
                 let payload = AuditPayload::UpstreamUpdate {
                     upstream_id: updated.id.to_string(),
                     fields_changed,
+                    key_hint: check.as_ref().and_then(KeyCheck::key_hint),
+                    verdict: check.as_ref().and_then(KeyCheck::verdict_label),
+                    remediation: check
+                        .as_ref()
+                        .map(KeyCheck::remediation_labels)
+                        .unwrap_or_default(),
+                    old_host,
+                    new_host,
                 };
-                let action = payload.to_string();
                 let route = format!("/admin/v1/upstreams/{}", updated.id);
-                if let Err(error) = record_admin_audit(
+                if let Err(error) = audit_upstream_action(
                     &state,
-                    AdminAuditEvent {
-                        identity: Some(&identity),
-                        system_component: None,
-                        action: &action,
-                        route: &route,
-                        target_principal_id: None,
-                        target_upstream: Some(&updated.name),
-                        api_key_id: None,
-                        status: StatusCode::OK.as_u16(),
-                        payload: None,
-                    },
+                    &identity,
+                    &payload,
+                    &route,
+                    Some(&updated.name),
+                    StatusCode::OK,
                 )
                 .await
                 {
-                    tracing::error!(error = %error, action = %action, "admin audit write failed");
                     rebuild_after_audit_failure(&state).await;
-                    return Err(UpstreamError::AuditWriteFailed);
+                    return Err(error);
                 }
-                let mut response = respond_with_etag(&updated);
+                if let Some(checked_at) = check.as_ref().and_then(KeyCheck::usage_reported_at) {
+                    enqueue_usage_poll(&state, updated.id, updated.revision, checked_at).await;
+                }
+                let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
+                let mut response = respond_with_etag(&updated, details.as_ref());
                 add_dynamic_rebind_headers(&mut response, &state).await;
-                Ok(response)
+                Ok(key_handling_response(&updated, response))
             })
             .await?
         }
@@ -1512,6 +1795,25 @@ async fn update_upstream(
             stale_or_conflict(&state, &id, expected_revision, message).await
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Create and update answers for an API-key upstream follow a key check, so
+/// they are never cacheable, like the preflight and re-check answers.
+fn key_handling_response(record: &UpstreamRecord, response: Response) -> Response {
+    if record.kind == UpstreamKind::AnthropicApiKey {
+        no_store(response)
+    } else {
+        response
+    }
+}
+
+/// Host part of a `base_url` for audit rows; never the path or userinfo.
+fn audit_host(base_url: &Url) -> String {
+    match (base_url.host_str(), base_url.port()) {
+        (Some(host), Some(port)) => format!("{}://{host}:{port}", base_url.scheme()),
+        (Some(host), None) => format!("{}://{host}", base_url.scheme()),
+        (None, _) => base_url.scheme().to_owned(),
     }
 }
 
@@ -1649,10 +1951,16 @@ async fn delete_upstream_warmup_dialect_plugin(
         .await?;
     match cleared {
         Some(updated) => {
+            let storage = storage_arc(&state)?;
             complete_after_commit(async move {
                 let payload = AuditPayload::UpstreamUpdate {
                     upstream_id: updated.id.to_string(),
                     fields_changed: vec!["warmup_dialect_plugin"],
+                    key_hint: None,
+                    verdict: None,
+                    remediation: Vec::new(),
+                    old_host: None,
+                    new_host: None,
                 };
                 let action = payload.to_string();
                 let route = format!("/admin/v1/upstreams/{}/warmup-dialect-plugin", updated.id);
@@ -1676,7 +1984,8 @@ async fn delete_upstream_warmup_dialect_plugin(
                     rebuild_after_audit_failure(&state).await;
                     return Err(UpstreamError::AuditWriteFailed);
                 }
-                let mut response = respond_with_etag(&updated);
+                let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
+                let mut response = respond_with_etag(&updated, details.as_ref());
                 add_dynamic_rebind_headers(&mut response, &state).await;
                 Ok(response)
             })
@@ -1733,6 +2042,7 @@ async fn set_enabled(
     } else {
         format!("/admin/v1/upstreams/{}/disable", updated.id)
     };
+    let storage = storage_arc(&state)?;
     complete_after_commit(async move {
         if let Err(error) = record_admin_audit(
             &state,
@@ -1755,7 +2065,8 @@ async fn set_enabled(
             return Err(UpstreamError::AuditWriteFailed);
         }
 
-        let mut response = respond_with_etag(&updated);
+        let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
+        let mut response = respond_with_etag(&updated, details.as_ref());
         crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
         Ok(response)
     })
@@ -1780,19 +2091,88 @@ async fn stale_or_conflict(
     }
 }
 
-fn respond_with_etag(record: &UpstreamRecord) -> Response {
-    let mut response = Json(upstream_response(record)).into_response();
+fn respond_with_etag(
+    record: &UpstreamRecord,
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+) -> Response {
+    let mut response = Json(upstream_response(record, details)).into_response();
     if let Ok(etag) = etag_value(record.revision) {
         response.headers_mut().insert(ETAG, etag);
     }
     response
 }
 
-fn storage(state: &AdminState) -> Result<&dyn Storage, UpstreamError> {
+pub(super) fn storage(state: &AdminState) -> Result<&dyn Storage, UpstreamError> {
     state
         .storage
         .as_deref()
         .ok_or(UpstreamError::StorageUnavailable)
+}
+
+/// The details row of an API-key upstream; `None` for OAuth upstreams.
+async fn api_key_details(
+    storage: &dyn Storage,
+    record: &UpstreamRecord,
+) -> Result<Option<UpstreamApiKeyDetailsRecord>, UpstreamError> {
+    if record.kind != UpstreamKind::AnthropicApiKey {
+        return Ok(None);
+    }
+    Ok(UpstreamApiKeyStore::get_api_key_details(storage, record.id).await?)
+}
+
+/// Post-commit read of the details row. The mutation and its audit row are
+/// already durable, so a transient read failure drops only the display-only
+/// `api_key_access`/`key_hint` fields of this response; the response is still
+/// built and the serving-view rebuild still runs.
+async fn api_key_details_after_commit(
+    storage: &dyn Storage,
+    record: &UpstreamRecord,
+) -> Option<UpstreamApiKeyDetailsRecord> {
+    match api_key_details(storage, record).await {
+        Ok(details) => details,
+        Err(error) => {
+            tracing::warn!(
+                upstream_id = %record.id,
+                ?error,
+                "admin upstream response omits api-key details after a failed read"
+            );
+            None
+        }
+    }
+}
+
+/// Writes the audit row of an admin upstream action. `payload` is stored
+/// both as the action text and as JSON; neither carries key material.
+pub(super) async fn audit_upstream_action(
+    state: &AdminState,
+    identity: &AdminIdentity,
+    payload: &AuditPayload,
+    route: &str,
+    target_upstream: Option<&str>,
+    status: StatusCode,
+) -> Result<(), UpstreamError> {
+    let action = payload.to_string();
+    let payload_json = serde_json::to_value(payload).ok();
+    if let Err(error) = record_admin_audit(
+        state,
+        AdminAuditEvent {
+            identity: Some(identity),
+            system_component: None,
+            action: &action,
+            route,
+            target_principal_id: None,
+            target_upstream,
+            api_key_id: None,
+            status: status.as_u16(),
+            payload: payload_json,
+        },
+    )
+    .await
+    {
+        tracing::error!(error = %error, action = %action, "admin audit write failed");
+        return Err(UpstreamError::AuditWriteFailed);
+    }
+    Ok(())
 }
 
 pub(super) fn storage_arc(state: &AdminState) -> Result<Arc<dyn Storage>, UpstreamError> {
@@ -1884,7 +2264,16 @@ pub(super) async fn metadata_user_agent(storage: &dyn Storage) -> Result<String,
     Ok(claude_code_user_agent(&version))
 }
 
-fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
+fn upstream_response(
+    record: &UpstreamRecord,
+    details: Option<&UpstreamApiKeyDetailsRecord>,
+) -> UpstreamResponse {
+    let api_key_access = api_key_access_response(record, details);
+    let key_hint = api_key_access
+        .as_ref()
+        .and(details)
+        .map(|details| details.key_hint.clone())
+        .filter(|hint| !hint.is_empty());
     UpstreamResponse {
         id: record.id.to_string(),
         name: record.name.clone(),
@@ -1899,6 +2288,8 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
             last_apply_at_unix_secs: record.last_apply_at_unix_secs,
             last_warmup_at_unix_secs: record.last_warmup_at_unix_secs,
         },
+        api_key_access,
+        key_hint,
     }
 }
 
@@ -1933,108 +2324,6 @@ fn etag_value(revision: u64) -> Result<HeaderValue, UpstreamError> {
     })
 }
 
-fn api_key_plaintext_for_create(
-    body: &UpstreamCreateBody,
-) -> Result<Option<String>, UpstreamError> {
-    let plaintext = body
-        .api_key_value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let env_name = body
-        .api_key_env
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    match body.kind {
-        UpstreamKind::AnthropicApiKey => match (plaintext, env_name) {
-            (Some(_), Some(_)) => Err(UpstreamError::BadRequest {
-                error: "conflicting_api_key",
-                detail: "provide either api_key_value or api_key_env, not both".to_owned(),
-            }),
-            (Some(value), None) => Ok(Some(value.to_owned())),
-            (None, Some(env)) => {
-                let value = std::env::var(env).map_err(|error| UpstreamError::BadRequest {
-                    error: "missing_api_key_env_value",
-                    detail: format!("{env}: {error}"),
-                })?;
-                Ok(Some(value))
-            }
-            (None, None) => Err(UpstreamError::BadRequest {
-                error: "missing_api_key",
-                detail: "anthropic_api_key upstreams require api_key_value or api_key_env"
-                    .to_owned(),
-            }),
-        },
-        UpstreamKind::AnthropicOauth => {
-            if plaintext.is_some() || env_name.is_some() {
-                return Err(UpstreamError::BadRequest {
-                    error: "unexpected_api_key",
-                    detail: "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
-                        .to_owned(),
-                });
-            }
-            Ok(None)
-        }
-    }
-}
-
-fn api_key_ciphertext_for_update(
-    state: &AdminState,
-    current: &UpstreamRecord,
-    body: &UpstreamUpdateBody,
-) -> Result<Option<Vec<u8>>, UpstreamError> {
-    let plaintext = body
-        .api_key_value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let env_name = body
-        .api_key_env
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    match (plaintext, env_name) {
-        (Some(_), Some(_)) => Err(UpstreamError::BadRequest {
-            error: "conflicting_api_key",
-            detail: "provide either api_key_value or api_key_env, not both".to_owned(),
-        }),
-        (None, None) => Ok(None),
-        (value_opt, env_opt) => {
-            if !matches!(current.kind, UpstreamKind::AnthropicApiKey) {
-                return Err(UpstreamError::BadRequest {
-                    error: "unexpected_api_key",
-                    detail: format!(
-                        "{} upstreams do not accept api_key_value or api_key_env",
-                        current.kind.as_str()
-                    ),
-                });
-            }
-            if let Some(value) = value_opt {
-                encrypt_plaintext_value(state, value, current.id.as_bytes()).map(Some)
-            } else if let Some(env) = env_opt {
-                encrypt_env_value(state, env, current.id.as_bytes()).map(Some)
-            } else {
-                Ok(None)
-            }
-        }
-    }
-}
-
-fn encrypt_env_value(
-    state: &AdminState,
-    env_name: &str,
-    aad: &[u8],
-) -> Result<Vec<u8>, UpstreamError> {
-    let value = std::env::var(env_name).map_err(|error| UpstreamError::BadRequest {
-        error: "missing_api_key_env_value",
-        detail: format!("{env_name}: {error}"),
-    })?;
-    encrypt_plaintext_value(state, &value, aad)
-}
-
 fn encrypt_plaintext_value(
     state: &AdminState,
     plaintext: &str,
@@ -2057,7 +2346,7 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     if body.base_url.is_some() || body.clear_base_url {
         fields.push("base_url");
     }
-    if body.api_key_env.is_some() || body.api_key_value.is_some() {
+    if body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
     }
     if body.enabled.is_some() {
@@ -2169,6 +2458,77 @@ mod tests {
             request.headers().get("anthropic-beta"),
             Some(&HeaderValue::from_static(WARMUP_ANTHROPIC_BETA))
         );
+    }
+
+    async fn error_response_json(error: super::UpstreamError) -> (StatusCode, Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body collects");
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("error body is JSON"),
+        )
+    }
+
+    #[tokio::test]
+    async fn remediation_error_renders_nested_body_with_its_status() {
+        let error = super::UpstreamError::Remediation {
+            status: StatusCode::BAD_REQUEST,
+            code: RemediationCode::WorkspaceRequired,
+            message: "choose a workspace".to_owned(),
+        };
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.error_code(), "workspace_required");
+        assert_eq!(
+            error_response_json(error).await,
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": { "code": "workspace_required", "message": "choose a workspace" } })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn api_key_upstream_errors_render_flat_bodies() {
+        let not_api_key = super::UpstreamError::NotApiKeyUpstream;
+        assert_eq!(not_api_key.error_code(), "not_api_key_upstream");
+        assert_eq!(
+            error_response_json(not_api_key).await,
+            (
+                StatusCode::BAD_REQUEST,
+                json!({ "error": "not_api_key_upstream" })
+            )
+        );
+        let decrypt = super::UpstreamError::ApiKeyCredentialDecrypt;
+        assert_eq!(decrypt.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(decrypt.error_code(), "api_key_credential_decrypt_failed");
+        assert_eq!(
+            error_response_json(decrypt).await,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "api_key_credential_decrypt_failed" })
+            )
+        );
+    }
+
+    /// SEC-09: Debug of the create/update bodies never prints the key.
+    #[test]
+    fn sec_09_debug_redacts_upstream_bodies() {
+        let update: UpstreamUpdateBody =
+            serde_json::from_value(json!({ "api_key_value": "sk-ant-api03-SECRETVALUE1234" }))
+                .expect("update body parses");
+        let create: UpstreamCreateBody = serde_json::from_value(json!({
+            "name": "primary",
+            "kind": "anthropic_api_key",
+            "api_key_value": "sk-ant-api03-SECRETVALUE1234",
+        }))
+        .expect("create body parses");
+        for rendered in [format!("{update:?}"), format!("{create:?}")] {
+            assert!(!rendered.contains("SECRETVALUE"), "{rendered}");
+            assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        }
     }
 
     #[tokio::test]
@@ -2436,6 +2796,8 @@ mod tests {
             event_bus: None,
             storage_tail: crate::events::storage_tail_channel(),
             clock: Arc::new(cc_lb_clock::SystemClock),
+            anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+                .expect("production Anthropic origin parses"),
         };
         TestContext {
             _dir: dir,
@@ -2468,6 +2830,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream create succeeds")
@@ -2513,6 +2877,8 @@ mod tests {
                 }),
                 warmup_enabled,
                 warmup_dialect_plugin,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream create succeeds")
@@ -2630,6 +2996,7 @@ mod tests {
             "name": "api-key-warmup-default",
             "kind": "anthropic_api_key",
             "api_key_value": "test-api-key",
+            "skip_preflight": true,
         });
         let response = router()
             .with_state(context.state)
@@ -2660,6 +3027,7 @@ mod tests {
             "name": "api-key-aad-bound",
             "kind": "anthropic_api_key",
             "api_key_value": "sk-ant-UPSTREAM-SECRET",
+            "skip_preflight": true,
         });
         let response = router()
             .with_state(context.state)
@@ -2717,6 +3085,7 @@ mod tests {
             "name": "api-key-clean-status",
             "kind": "anthropic_api_key",
             "api_key_value": "sk-ant-CLEAN-STATUS",
+            "skip_preflight": true,
         });
         let response = router()
             .with_state(context.state)
@@ -2742,6 +3111,7 @@ mod tests {
     }
 
     #[tokio::test]
+
     async fn create_api_key_upstream_missing_secret_writes_no_row() {
         let context = test_context().await;
         let body = serde_json::json!({
@@ -2776,6 +3146,49 @@ mod tests {
                 .expect("lookup succeeds")
                 .is_none(),
             "invalid create must not leave an upstream row"
+        );
+    }
+
+    /// The removed `api_key_env` field is not part of the request contract:
+    /// upstream bodies ignore unknown fields like every other admin v1 DTO,
+    /// so an env-only create is simply a create without `api_key_value` and
+    /// never reads the server environment.
+    #[tokio::test]
+    async fn create_api_key_upstream_ignores_removed_api_key_env_field() {
+        let context = test_context().await;
+        let body = serde_json::json!({
+            "name": "api-key-removed-env-field",
+            "kind": "anthropic_api_key",
+            "api_key_env": "ANTHROPIC_API_KEY",
+        });
+        let response = router()
+            .with_state(context.state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/admin/v1/upstreams")
+                    .header("content-type", "application/json")
+                    .extension(test_admin_identity())
+                    .body(AxumBody::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body: Value = serde_json::from_slice(&bytes).expect("response is json");
+        assert_eq!(body["error"], "missing_api_key");
+        assert!(
+            context
+                .storage
+                .get_by_name("api-key-removed-env-field")
+                .await
+                .expect("lookup succeeds")
+                .is_none(),
+            "create carrying only the removed field must not leave an upstream row"
         );
     }
 
@@ -2845,6 +3258,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("create succeeds");
@@ -2894,6 +3309,8 @@ mod tests {
                 oauth_tokens: None,
                 warmup_enabled: true,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("create succeeds");

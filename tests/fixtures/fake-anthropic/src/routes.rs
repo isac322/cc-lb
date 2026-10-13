@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 
 use crate::oauth::{authorize, refresh_history, token};
@@ -11,9 +12,16 @@ mod config;
 mod debug;
 mod handlers;
 mod helpers;
+mod key_policy;
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+mod org;
 mod state;
 
 pub use config::{AppConfig, MessageScript, RecordedMessageRequest, ScriptedMessageResponse};
+pub use key_policy::{
+    FakeApiKey, FakeWorkspace, IDENTITY_LINKED_MESSAGE, KeyPolicies, KeyPolicy, RecordedRequest,
+    RequestRecorder, Script, ScriptSteps,
+};
 pub(crate) use state::AppState;
 pub use state::with_fixture_headers;
 
@@ -36,7 +44,16 @@ pub fn app(config: AppConfig) -> Router {
         .route(
             "/__set_default_cache_stats",
             post(debug::set_default_cache_stats),
-        );
+        )
+        .route(
+            "/__key_policies",
+            post(debug::set_key_policy).delete(debug::clear_key_policies),
+        )
+        .route("/__requests", get(debug::recorded_requests))
+        .route("/__requests/clear", post(debug::clear_recorded_requests))
+        .route("/v1/organizations/workspaces", get(org::list_workspaces))
+        .route("/v1/organizations/api_keys", get(org::list_api_keys))
+        .route(org::USAGE_REPORT_PATH, get(org::usage_report));
 
     router
         .route("/v1/models", get(handlers::list_models))
@@ -50,6 +67,10 @@ pub fn app(config: AppConfig) -> Router {
             get(handlers::get_file).delete(handlers::delete_file),
         )
         .fallback(handlers::not_found)
+        .layer(from_fn_with_state(
+            Arc::clone(&state),
+            key_policy::record_request,
+        ))
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body))
 }

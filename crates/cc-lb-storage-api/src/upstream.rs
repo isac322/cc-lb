@@ -63,6 +63,11 @@ pub struct UpstreamRecord {
     /// completed. Used by the admin UI to render "Last cycle ran <X> ago".
     #[serde(default)]
     pub last_warmup_at_unix_secs: Option<u64>,
+    /// Anthropic workspace this API-key upstream sends as
+    /// `anthropic-workspace-id`. `None` for OAuth upstreams, bound keys, and
+    /// org keys used without a workspace.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 impl UpstreamRecord {
@@ -110,6 +115,10 @@ pub struct UpstreamCreate {
     pub oauth_tokens: Option<OAuthTokensCreate>,
     pub warmup_enabled: bool,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    pub workspace_id: Option<String>,
+    /// Capability/access snapshot written in the same transaction as the spec
+    /// row. `None` creates no details row (reads as "not checked").
+    pub api_key_access: Option<crate::upstream_api_key::ApiKeyAccessWrite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -123,6 +132,15 @@ pub struct UpstreamUpdate {
     pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: Option<bool>,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    /// `None` preserves the workspace; `Some(None)` clears it;
+    /// `Some(Some(id))` sets it.
+    pub workspace_id: Option<Option<String>>,
+    /// Capability/access snapshot written in the same transaction as the spec
+    /// update. `None` leaves the details row untouched.
+    pub api_key_access: Option<crate::upstream_api_key::ApiKeyAccessWrite>,
+    /// Zeroes usage-poll failures and clears the usage-poll schedule and
+    /// success/attempt timestamps. Usage rows are kept.
+    pub reset_api_key_poll_state: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

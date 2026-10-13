@@ -20,7 +20,7 @@ use cc_lb_storage_conformance::{
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
         request_event_list, request_event_principal_costs, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        storage_roundtrips_upstream_diagnostics, upstream_rate_limit_store,
+        storage_roundtrips_upstream_diagnostics, upstream_api_key_store, upstream_rate_limit_store,
         upstream_subscription_metadata_store, upstream_subscription_quota_store,
         warmup_attempts_store,
     },
@@ -591,6 +591,96 @@ fn price_catalog_corrupted_payload_hash_is_rejected_sqlite() {
         price_catalog::corrupted_payload_hash_is_rejected,
     );
 }
+
+macro_rules! upstream_api_key_store_sqlite_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_sqlite_scenario(stringify!($scenario), upstream_api_key_store::$scenario);
+        }
+    };
+}
+
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_sto05_upd08_workspace_id_tri_state_sqlite,
+    sto05_upd08_workspace_id_tri_state_bumps_revision
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_sto04_details_crud_sqlite,
+    sto04_details_create_get_list_update_conflict
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_acc08_capabilities_json_roundtrip_sqlite,
+    acc08_capabilities_json_roundtrip_all_values
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc07_column_scoped_writes_sqlite,
+    conc07_access_and_poll_writes_are_column_scoped
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc07_concurrent_writes_survive_sqlite,
+    conc07_concurrent_access_and_poll_writes_both_survive
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc07_same_second_recheck_sqlite,
+    conc07_same_second_recheck_rejects_stale_demotion
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_pol07_failure_counter_sqlite,
+    pol07_failure_counter_and_schedule_persist
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_pol05_bucket_upsert_sqlite,
+    pol05_bucket_upsert_is_idempotent_and_latest_wins
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_sto04_poll_candidates_sqlite,
+    sto04_poll_candidate_query_filters
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_sto04_poll_candidates_rotate_sqlite,
+    sto04_poll_candidates_rotate_past_the_limit
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_acc06_delete_semantics_sqlite,
+    acc06_soft_and_hard_delete_semantics
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_sto06_time_roundtrip_sqlite,
+    sto06_unix_seconds_roundtrip_exactly
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_prune_bounded_sqlite,
+    prune_upstream_api_usage_is_bounded
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_reset_poll_state_sqlite,
+    reset_poll_state_keeps_usage_rows
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc_poll_claim_two_claimers_sqlite,
+    conc_poll_claim_two_claimers_one_wins
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc_poll_claim_stale_completion_sqlite,
+    conc_poll_claim_stale_completion_rejected
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc_poll_claim_disabled_sqlite,
+    conc_poll_claim_and_completion_reject_disabled_upstream
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc_poll_claim_lease_expiry_sqlite,
+    conc_poll_claim_lease_expiry_is_reclaimable
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_pol_completion_never_shortens_retry_after_sqlite,
+    pol_completion_never_shortens_retry_after
+);
+upstream_api_key_store_sqlite_test!(
+    upstream_api_key_conc_access_write_releases_poll_claim_sqlite,
+    conc_access_write_releases_poll_claim
+);
 
 fn run_sqlite_scenario<F, Fut>(name: &str, scenario: F)
 where

@@ -9,10 +9,14 @@ import {
 } from '@testing-library/react';
 import type React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import {
+  UpstreamConnectDialog,
+  type UpstreamConnectTarget,
+} from '../components/upstreams/connect/UpstreamConnectDialog';
 import * as api from '../lib/api';
-import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import type { Upstream } from '../lib/queries';
 import * as queries from '../lib/queries';
+import { pendingQuery } from '../lib/test-utils/hook-results';
 import * as requestEventsFeed from '../lib/useRequestEventsFeed';
 import { Route } from './upstreams';
 
@@ -52,6 +56,7 @@ vi.mock('../lib/queries', async () => {
     useUpdateUpstreamWarmupSettings: vi.fn(),
     useUpstreamOAuthStatus: vi.fn(),
     useUpstreamSubscriptionMetadata: vi.fn(),
+    useUpstreamKeyUsage: vi.fn(),
     useUpstreams: vi.fn(),
     useUsage: vi.fn(),
   };
@@ -59,11 +64,12 @@ vi.mock('../lib/queries', async () => {
 
 // The connect dialog's reconnect path calls the metadata-refresh endpoint
 // through this raw API function (not a hook) to learn which Claude account
-// came back.
+// came back. The API-key path classifies keys through `preflightApiKey`.
 vi.mock('../lib/api', async () => {
   const actual = (await vi.importActual('../lib/api')) as typeof api;
   return {
     ...actual,
+    preflightApiKey: vi.fn(),
     triggerSubscriptionMetadataRefresh: vi.fn(),
   };
 });
@@ -102,7 +108,6 @@ const upstream: Upstream = {
   enabled: true,
   spec_revision: 1,
   base_url: null,
-  api_key_env: null,
   warmup_enabled: true,
   warmup_dialect_plugin: null,
   status: {
@@ -118,6 +123,18 @@ const apiKeyUpstream: Upstream = {
   name: 'API Key Backup',
   kind: 'anthropic_api_key',
   warmup_enabled: false,
+  // Checked and working, so the row is not flagged "Key not verified".
+  api_key_access: {
+    verified: true,
+    checked_at_unix_secs: 1_700_000_000,
+    key_class: 'workspace_bound',
+    inference: 'ok',
+    workspace: { mode: 'bound' },
+    workspace_list: 'not_applicable',
+    usage_report: 'not_applicable',
+    key_type: 'workspace',
+    last_error: null,
+  },
 };
 
 const secondOauthUpstream: Upstream = {
@@ -438,11 +455,31 @@ function subscriptionMetadataResponse(
 // link, then waits for the pasted code on the next step.
 async function openCreateToSignIn() {
   fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
+  return continueToSignIn();
+}
+
+/** From the open "New upstream" dialog's kind step to the sign-in step. */
+async function continueToSignIn() {
   const dialog = screen.getByRole('dialog', { name: 'New upstream' });
   fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
   // The 'Link valid for' timer only renders once the draft session is ready.
   await within(dialog).findByText(/Link valid for/);
   return dialog;
+}
+
+// The connect dialog alone, for behavior the dialog owns end to end. The
+// /upstreams route behind it adds a full page render and page-wide queries per
+// opening without changing what the dialog shows.
+function renderConnectDialog(target: UpstreamConnectTarget) {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <UpstreamConnectDialog
+        target={target}
+        onClose={vi.fn()}
+        onCreated={vi.fn()}
+      />
+    </QueryClientProvider>,
+  );
 }
 
 function pasteStep(dialog: HTMLElement) {
@@ -491,6 +528,7 @@ beforeEach(() => {
     isPending: true,
     isPlaceholderData: false,
   } as never);
+  vi.mocked(queries.useUpstreamKeyUsage).mockReturnValue(pendingQuery());
   vi.mocked(queries.useStatus).mockReturnValue({
     data: undefined,
     isLoading: true,
@@ -988,6 +1026,35 @@ describe('/upstreams refresh retention', () => {
             );
       return queryResult(data, { isPlaceholderData });
     });
+    // The API usage card reads the key's own usage endpoint.
+    vi.mocked(queries.useUpstreamKeyUsage).mockImplementation(() => {
+      const old = phase === 'old';
+      return queryResult(
+        {
+          ...usageData(
+            old ? 'old-usage-model' : 'new-usage-model',
+            old ? 100 : 200,
+            old ? 1_500_000 : 2_500_000,
+          ),
+          source: 'estimated',
+          attribution: 'api_key',
+          stale: false,
+          totals: {
+            cost_usd_micros: old ? 1_500_000 : 2_500_000,
+            cost_is_estimate: true,
+          },
+          fix: { code: 'key_workspace_scoped_usage_unavailable' },
+          month: {
+            start_unix_secs: 1_759_276_800,
+            end_unix_secs: 1_761_955_200,
+            tokens: old ? 100 : 200,
+            cost_usd_micros: old ? 1_500_000 : 2_500_000,
+            billing_stop: null,
+          },
+        },
+        { isPlaceholderData },
+      );
+    });
     vi.mocked(requestEventsFeed.useRequestEventsFeed).mockImplementation(() =>
       feedState({
         pageRows: recentRows(
@@ -1137,7 +1204,7 @@ describe('/upstreams refresh retention', () => {
 });
 
 describe('/upstreams mutation pending UX', () => {
-  test('create pending locks resubmission and modal dismissal while showing progress', () => {
+  test('create pending locks resubmission and modal dismissal while showing progress', async () => {
     const create = vi.fn().mockReturnValue(inFlight());
     vi.mocked(queries.useCreateUpstream).mockReturnValue({
       mutate: vi.fn(),
@@ -1145,6 +1212,17 @@ describe('/upstreams mutation pending UX', () => {
       isPending: false,
       reset: vi.fn(),
     } as never);
+    // A workspace-bound key: the check goes straight to Finish.
+    vi.mocked(api.preflightApiKey).mockResolvedValue({
+      verdict: 'ok',
+      key_class: 'workspace_bound',
+      inference: 'ok',
+      workspace: { mode: 'bound', id: 'wrkspc_01TestBound4f2a' },
+      workspace_list: 'not_applicable',
+      usage_report: 'not_applicable',
+      key_type: 'workspace',
+      remediation: [{ code: 'key_workspace_scoped_usage_unavailable' }],
+    });
 
     const view = renderRoute();
     fireEvent.click(screen.getByRole('button', { name: 'Add upstream' }));
@@ -1154,20 +1232,48 @@ describe('/upstreams mutation pending UX', () => {
       within(dialog).getByRole('radio', { name: /Anthropic API key/ }),
     );
     fireEvent.click(within(dialog).getByRole('button', { name: 'Continue' }));
-    fireEvent.change(within(dialog).getByPlaceholderText('anthropic-prod'), {
-      target: { value: 'api-key-primary' },
-    });
     fireEvent.change(within(dialog).getByPlaceholderText(/sk-ant-/), {
-      target: { value: 'sk-ant-test' },
+      target: { value: 'sk-ant-api03-test' },
     });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+    // The endpoint is a named reveal link; Base URL is never shown by default.
+    expect(
+      within(dialog).queryByRole('textbox', { name: /Base URL/ }),
+    ).toBeNull();
+    expect(
+      within(dialog)
+        .getByRole('button', { name: 'Use a custom endpoint' })
+        .getAttribute('aria-expanded'),
+    ).toBe('false');
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole('button', { name: 'Check key' }),
+      );
+    });
+    expect(api.preflightApiKey).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.preflightApiKey).mock.calls[0]?.[0]).toEqual({
+      api_key_value: 'sk-ant-api03-test',
+    });
+
+    // Finish: the name is prefilled; Add upstream submits once.
+    expect(
+      within(dialog).getByRole('heading', { name: 'Key verified' }),
+    ).toBeDefined();
+    // Finish speaks Access's vocabulary for the same key state.
+    expect(within(dialog).getByText('Key accepted')).toBeDefined();
+    expect(within(dialog).queryByText('Working')).toBeNull();
+    const nameInput = within(dialog).getByRole('textbox', {
+      name: /Upstream name/,
+    }) as HTMLInputElement;
+    expect(nameInput.value).toBe('Anthropic API key');
+    fireEvent.change(nameInput, { target: { value: 'api-key-primary' } });
+    fireEvent.click(within(dialog).getByTestId('upstream-connect-submit'));
     expect(create).toHaveBeenCalledTimes(1);
     expect(create).toHaveBeenCalledWith({
       name: 'api-key-primary',
       kind: 'anthropic_api_key',
-      base_url: DEFAULT_ANTHROPIC_BASE_URL,
-      api_key_value: 'sk-ant-test',
-      api_key_env: null,
+      base_url: null,
+      api_key_value: 'sk-ant-api03-test',
+      workspace_id: null,
     });
 
     vi.mocked(queries.useCreateUpstream).mockReturnValue({
@@ -1179,12 +1285,11 @@ describe('/upstreams mutation pending UX', () => {
     view.rerender(routeElement());
 
     dialog = screen.getByRole('dialog', { name: 'New upstream' });
-    const creating = within(dialog).getByRole('button', {
-      name: 'Creating…',
-    });
-    expect(creating.hasAttribute('disabled')).toBe(true);
-    expect(creating.getAttribute('aria-busy')).toBe('true');
-    expect(creating.querySelector('svg.animate-spin')).not.toBeNull();
+    const adding = within(dialog).getByTestId('upstream-connect-submit');
+    expect(adding.textContent).toContain('Adding…');
+    expect(adding.hasAttribute('disabled')).toBe(true);
+    expect(adding.getAttribute('aria-busy')).toBe('true');
+    expect(adding.querySelector('svg.animate-spin')).not.toBeNull();
     expect(
       within(dialog)
         .getByRole('button', { name: 'Back' })
@@ -1200,17 +1305,11 @@ describe('/upstreams mutation pending UX', () => {
         .getByRole('button', { name: 'Close dialog' })
         .hasAttribute('disabled'),
     ).toBe(true);
-    for (const control of [
-      ...within(dialog).getAllByRole('textbox'),
-      within(dialog).getByPlaceholderText(/sk-ant-/),
-      within(dialog).getByRole('button', {
-        name: 'Read the key from a server environment variable instead',
-      }),
-    ]) {
+    for (const control of within(dialog).getAllByRole('textbox')) {
       expect(control.hasAttribute('disabled')).toBe(true);
     }
 
-    fireEvent.click(creating);
+    fireEvent.click(adding);
     fireEvent.keyDown(dialog, { key: 'Escape', code: 'Escape' });
     expect(create).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('dialog', { name: 'New upstream' })).toBeDefined();
@@ -1941,15 +2040,17 @@ describe('/upstreams long-lived OAuth credential', () => {
       reset: vi.fn(),
     } as never);
 
+    // Each case opens a fresh "New upstream" dialog; the notice is the
+    // dialog's own success step, so the page behind it is not rendered.
     const completeHandshake = async () => {
-      const dialog = await openCreateToSignIn();
+      renderConnectDialog({ mode: 'create' });
+      const dialog = await continueToSignIn();
       pasteStep(dialog);
       await within(dialog).findByText('Signed in');
       return dialog;
     };
 
     // A real year-long grant gets no fallback styling.
-    renderRoute();
     let dialog = await completeHandshake();
     expect(
       within(dialog).queryByTestId('oauth-long-lived-fallback-notice'),
@@ -1958,7 +2059,6 @@ describe('/upstreams long-lived OAuth credential', () => {
 
     cleanup();
     fallbackReason = 'rejected';
-    renderRoute();
     dialog = await completeHandshake();
     let notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
     expect(notice.getAttribute('data-reason')).toBe('rejected');
@@ -1966,14 +2066,12 @@ describe('/upstreams long-lived OAuth credential', () => {
 
     cleanup();
     fallbackReason = 'clamped';
-    renderRoute();
     dialog = await completeHandshake();
     notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
     expect(notice.getAttribute('data-reason')).toBe('clamped');
 
     cleanup();
     fallbackReason = 'scope_rejected';
-    renderRoute();
     dialog = await completeHandshake();
     notice = within(dialog).getByTestId('oauth-long-lived-fallback-notice');
     expect(notice.getAttribute('data-reason')).toBe('scope_rejected');
@@ -2025,15 +2123,9 @@ describe('/upstreams long-lived OAuth credential', () => {
       reset: vi.fn(),
     } as never);
 
-    renderRoute();
-
-    // The reconnect notice is the prominent entry point, same as the
-    // pending-UX test above.
-    const reconnectNotice = statusNoticeNamed('OAuth not connected');
-    fireEvent.click(
-      within(reconnectNotice).getByRole('button', { name: 'Connect' }),
-    );
-
+    // The dialog as the route opens it for the reconnect notice's Connect
+    // button; the pending-UX test above covers that entry point itself.
+    renderConnectDialog({ mode: 'reconnect', upstream });
     const dialog = screen.getByRole('dialog', {
       name: 'Connect OAuth Primary',
     });

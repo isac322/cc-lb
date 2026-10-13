@@ -6,15 +6,17 @@ use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::DynamicViewHolder;
 use cc_lb_runtime_wasmtime::WasmtimeRuntime;
-use cc_lb_storage_api::{PluginSlotKind, StorageResult};
+use cc_lb_storage_api::{PluginSlotKind, StorageResult, UpstreamRecord, upstream::UpstreamKind};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
-use crate::dynamic_view_builder::{Stores, build_dynamic_view};
+use crate::dynamic_view_builder::{Stores, build_dynamic_view, list_upstreams};
 use crate::revision_hash::compute_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use cc_lb_control::PromptCacheObservationSinkLike;
+
+const RECONNECT_REQUIRED_SEED: u64 = 0x7265_636f_6e6e_6563;
 
 pub struct Reconciler {
     pub stores: Arc<Stores>,
@@ -178,27 +180,20 @@ impl Reconciler {
     }
 }
 
+/// Hashes the current storage state; `reconcile_once` compares this with the
+/// resident view's hash, and `build_dynamic_view` samples it before reading
+/// any contents. Reconnect-required status writes bump no revision and emit no
+/// NOTIFY, so the upstream material folds that status in: a write that lands
+/// after a build's early sample leaves the resident hash stale and the next
+/// reconcile rebuilds. The material also folds the monotonic OAuth token
+/// generation, so a reconnect that clears the marker again cannot return the
+/// hash to a sample taken before the captured failure.
 pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64> {
-    let mut upstreams = Vec::new();
-    let mut after_upstream = None;
-    loop {
-        let page = stores.upstreams.list(after_upstream, 100).await?;
-        if page.is_empty() {
-            break;
-        }
-        after_upstream = page.last().map(|record| record.id);
-        upstreams.extend(page.into_iter().map(|record| {
-            // Rotating the api-key credential does not bump
-            // `record.revision`; fold the ciphertext (fresh nonce per
-            // encryption) into the hash so a secret-only rotation still
-            // converges on peers that missed the NOTIFY.
-            let material = xxh3_64_with_seed(
-                record.api_key_ciphertext.as_deref().unwrap_or_default(),
-                record.revision,
-            );
-            (record.id, material)
-        }));
-    }
+    let upstreams = list_upstreams(stores)
+        .await?
+        .iter()
+        .map(upstream_revision_material)
+        .collect::<Vec<_>>();
 
     let mut registry_entries = Vec::new();
     let mut after_registry = None;
@@ -254,6 +249,33 @@ async fn chain_revisions(
         .into_iter()
         .map(|entry| (entry.id, entry.revision))
         .collect())
+}
+
+fn upstream_revision_material(record: &UpstreamRecord) -> (Uuid, u64) {
+    // Rotating the api-key credential does not bump `record.revision`; fold
+    // the ciphertext (fresh nonce per encryption) into the hash so a
+    // secret-only rotation still converges on peers that missed the NOTIFY.
+    let material = xxh3_64_with_seed(
+        record.api_key_ciphertext.as_deref().unwrap_or_default(),
+        record.revision,
+    );
+    // OAuth reconnects and refreshes bump no spec revision but always advance
+    // this monotonic generation. Folding it in keeps a reconnect that clears
+    // the reconnect-required marker distinguishable from the pre-failure
+    // state, so a view built from contents captured between those writes
+    // never matches the post-reconnect hash.
+    let material = xxh3_64_with_seed(&record.oauth_token_generation.to_le_bytes(), material);
+    // A runtime refresh failure that requires an operator reconnect is a
+    // status write without NOTIFY; fold it in so the periodic reconcile
+    // rebuilds the view and routing stops picking the dead OAuth account.
+    let reconnect_required = record.kind == UpstreamKind::AnthropicOauth
+        && cc_lb_oauth_protocol::refresh_requires_reconnect(record.last_apply_error.as_deref());
+    let material = if reconnect_required {
+        xxh3_64_with_seed(&material.to_le_bytes(), RECONNECT_REQUIRED_SEED)
+    } else {
+        material
+    };
+    (record.id, material)
 }
 
 fn jitter_millis() -> u64 {

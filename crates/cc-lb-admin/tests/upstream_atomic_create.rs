@@ -215,6 +215,8 @@ async fn admin_app(storage: Arc<dyn DynStorage>) -> axum::Router {
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     })
 }
 
@@ -318,6 +320,9 @@ impl Kind {
                     "name": name,
                     "kind": "anthropic_api_key",
                     "api_key_value": API_KEY_PLAINTEXT,
+                    // The create contract now probes the key unless asked not
+                    // to; these tests exercise storage atomicity, not probing.
+                    "skip_preflight": true,
                 }),
             ),
             Self::OAuth => (

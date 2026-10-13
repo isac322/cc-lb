@@ -36,6 +36,7 @@ bytes.workspace = true
 bincode.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-lifecycle = { workspace = true }
+cc-lb-oauth-protocol = { path = "../cc-lb-oauth-protocol" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
@@ -79,6 +80,7 @@ tower.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 insta.workspace = true

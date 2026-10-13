@@ -110,6 +110,18 @@ export function formatUsdAmount(usd: number | null | undefined): string {
   return formatUsdValue(usd, usd >= 1_000 ? 0 : 2);
 }
 
+/**
+ * Micros as dollars to the cent (`$412.30`, whole dollars from $1,000), the
+ * way `formatUsdAmount` shows money elsewhere. A non-zero amount below one
+ * cent reads `<$0.01`, never `$0.00`.
+ */
+export function fmtUsdCents(micros: number | null | undefined): string {
+  if (micros == null || !Number.isFinite(micros) || micros < 0) return DASH;
+  if (micros > Number.MAX_SAFE_INTEGER) return DASH;
+  if (micros > 0 && micros < 10_000) return '<$0.01';
+  return formatUsdAmount(micros / 1_000_000);
+}
+
 export function formatBigInteger(
   n: number | null | undefined,
   _maxSafeDigits = 15,

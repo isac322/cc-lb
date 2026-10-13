@@ -96,6 +96,8 @@ where
         .increment(result.request_events_removed);
     ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "audit_log")
         .increment(result.audit_log_removed);
+    ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "upstream_api_usage")
+        .increment(result.upstream_api_usage_removed);
     let api_key_usage_compaction = runner
         .compact_api_key_usage_buckets(
             api_key_usage_writer_inactive_after_secs,
@@ -110,6 +112,7 @@ where
     tracing::info!(
         request_events_removed = result.request_events_removed,
         audit_log_removed = result.audit_log_removed,
+        upstream_api_usage_removed = result.upstream_api_usage_removed,
         api_key_usage_buckets_folded = api_key_usage_compaction.folded_rows,
         api_key_usage_buckets_pruned = api_key_usage_compaction.pruned_rows,
         "usage prune job complete",

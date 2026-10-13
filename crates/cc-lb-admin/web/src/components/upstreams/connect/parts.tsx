@@ -1,6 +1,8 @@
-// Presentational building blocks shared by every OAuth connect variant, so the
-// variants differ in choreography, not in how a single concept is rendered.
+// Presentational building blocks shared by every connect path (Claude sign-in
+// and API key), so the paths differ in choreography, not in how a single
+// concept is rendered.
 
+import { Radio as BaseRadio } from '@base-ui/react/radio';
 import {
   Check,
   CheckCircle2,
@@ -21,14 +23,18 @@ import {
   useState,
 } from 'react';
 import { toast } from 'sonner';
+import type { ApiKeyOrgCapability } from '../../../lib/api';
 import {
+  Badge,
   Button,
   buttonClassName,
   cx,
+  Field,
   INPUT_CLASS,
   INPUT_SM_CLASS,
   Notice,
 } from '../../ui/primitives';
+import { CONSOLE_WORKSPACES_URL } from './apiKeyCopy';
 import {
   matchPasteToSession,
   type ParsedOAuthPaste,
@@ -496,6 +502,247 @@ export function TokenLifetimeNote({ outcome }: { outcome: ConnectOutcome }) {
         renewal ends, cc-lb reminds you beforehand; otherwise a reconnect notice
         appears if renewal stops working.
       </Notice>
+    </div>
+  );
+}
+
+/** Quiet text action: "Don't have a key?", "Use a custom endpoint". */
+export const QUIET_LINK_CLASS =
+  'w-fit text-caption text-text-faint underline underline-offset-2 hover:text-text disabled:control-disabled max-md:min-h-10';
+/** Inline action inside notice or caption copy (link or button). */
+export const ANCHOR_CLASS =
+  'inline-flex w-fit items-center gap-1 text-accent-text underline underline-offset-2 hover:text-text';
+
+/** An Anthropic Console page, opened beside cc-lb. */
+export function ConsoleLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={ANCHOR_CLASS}
+    >
+      {children}
+      <ExternalLink className="size-3 shrink-0" strokeWidth={1.75} />
+    </a>
+  );
+}
+
+const WORKSPACE_LIST_WHY: Partial<Record<ApiKeyOrgCapability, string>> = {
+  denied: "This key's account lacks the role to list workspaces.",
+  error: "Anthropic didn't return the list — Re-check, or paste the ID.",
+  not_applicable: 'Workspace lists need api.anthropic.com — paste the ID.',
+};
+
+/**
+ * Manual workspace-ID help, shared by the connect dialog and the pane's
+ * Access → Workspace: why there is no list, then where the ID lives. A
+ * steady-state limit, so two quiet caption lines rather than a notice.
+ */
+export function WorkspaceIdHelp({ list }: { list: ApiKeyOrgCapability }) {
+  const why = WORKSPACE_LIST_WHY[list];
+  return (
+    <div className="flex flex-col gap-0.5 text-caption text-text-faint">
+      {why ? <span>{why}</span> : null}
+      <span>
+        <ConsoleLink href={CONSOLE_WORKSPACES_URL}>
+          Open Workspaces in Console
+        </ConsoleLink>{' '}
+        → copy the <span className="font-mono text-data">wrkspc_…</span> in the
+        URL.
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The last row of a create step: a custom Base URL is a rare need, so the
+ * field stays behind a quiet "Use a custom endpoint" link. It opens empty —
+ * the Anthropic URL is never shown as a value — and "Use the default
+ * endpoint" folds it away again. Focus follows the toggle.
+ */
+export function CustomEndpointDisclosure({
+  open,
+  value,
+  busy,
+  hint = 'Requests and key checks go here instead of Anthropic.',
+  onOpen,
+  onChange,
+  onUseDefault,
+}: {
+  open: boolean;
+  value: string;
+  busy: boolean;
+  hint?: string;
+  /** Opening starts from an empty value. */
+  onOpen: () => void;
+  onChange: (value: string) => void;
+  /** Back to Anthropic; the caller resets its value and closes. */
+  onUseDefault: () => void;
+}) {
+  const fieldId = useId();
+  /** Where focus goes after the toggle; consumed on mount. */
+  const focusNext = useRef<'field' | 'trigger' | null>(null);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        ref={(el) => {
+          if (el && focusNext.current === 'trigger') {
+            focusNext.current = null;
+            el.focus();
+          }
+        }}
+        className={cx(QUIET_LINK_CLASS, 'mt-1')}
+        aria-expanded={false}
+        aria-controls={fieldId}
+        disabled={busy}
+        onClick={() => {
+          focusNext.current = 'field';
+          onOpen();
+        }}
+      >
+        Use a custom endpoint
+      </button>
+    );
+  }
+  return (
+    <div className="mt-1 flex flex-col gap-1.5">
+      <Field label="Base URL" hint={hint}>
+        <input
+          id={fieldId}
+          ref={(el) => {
+            if (el && focusNext.current === 'field') {
+              focusNext.current = null;
+              el.focus();
+            }
+          }}
+          className={cx(
+            INPUT_CLASS,
+            'disabled:cursor-not-allowed disabled:border-subtle disabled:text-text-faint',
+          )}
+          value={value}
+          placeholder="https://proxy.example.com"
+          spellCheck={false}
+          disabled={busy}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </Field>
+      <button
+        type="button"
+        className={QUIET_LINK_CLASS}
+        // The fold side of the same disclosure: it controls the open field.
+        aria-expanded={true}
+        aria-controls={fieldId}
+        disabled={busy}
+        onClick={() => {
+          focusNext.current = 'trigger';
+          onUseDefault();
+        }}
+      >
+        Use the default endpoint
+      </button>
+    </div>
+  );
+}
+
+// ─── Step chrome ─────────────────────────────────────────────────────────────
+// Radio cards, step headings and the success header every connect path uses.
+export function SuccessHeader({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <CheckCircle2 className="w-5 h-5 shrink-0 text-ok" strokeWidth={1.75} />
+      <div>
+        <h3 className="text-title-card text-text">{title}</h3>
+        <p className="text-body-sm text-text-muted">{subtitle}</p>
+      </div>
+    </div>
+  );
+}
+
+/** Radio card; render inside a Base UI `RadioGroup`. */
+export function KindOption({
+  value,
+  selected,
+  icon,
+  title,
+  badge,
+  description,
+  onActivate,
+}: {
+  value: string;
+  selected: boolean;
+  icon: ReactNode;
+  title: string;
+  badge?: string;
+  description: string;
+  onActivate: () => void;
+}) {
+  return (
+    <label
+      onDoubleClick={onActivate}
+      className={cx(
+        'flex items-start gap-3 p-3 rounded-sm border cursor-pointer transition-colors',
+        selected
+          ? 'border-accent bg-overlay-2'
+          : 'border-subtle hover:bg-overlay-2',
+      )}
+    >
+      <span
+        className={cx(
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors',
+          selected
+            ? 'bg-accent-dim text-accent-text'
+            : 'bg-overlay-3 text-text-muted',
+        )}
+      >
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-body font-medium text-text">{title}</span>
+          {badge ? <Badge tone="accent">{badge}</Badge> : null}
+        </span>
+        <span className="mt-0.5 block text-body-sm text-text-muted">
+          {description}
+        </span>
+      </span>
+      <BaseRadio.Root
+        value={value}
+        className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle-strong bg-bg transition-colors data-[checked]:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      >
+        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-accent" />
+      </BaseRadio.Root>
+    </label>
+  );
+}
+
+export function StepHeading({
+  title,
+  subtitle,
+}: {
+  title: string;
+  subtitle?: string;
+}) {
+  return (
+    <div>
+      <h3 className="text-title-card text-text">{title}</h3>
+      {subtitle ? (
+        <p className="mt-1 text-body-sm text-text-muted">{subtitle}</p>
+      ) : null}
     </div>
   );
 }

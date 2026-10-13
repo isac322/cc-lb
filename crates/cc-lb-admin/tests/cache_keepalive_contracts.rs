@@ -93,6 +93,8 @@ async fn cache_keepalive_list_preserves_soft_deleted_upstream_names() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         })
         .await
         .expect("create upstream");

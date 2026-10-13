@@ -417,6 +417,8 @@ async fn seed_storage(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await

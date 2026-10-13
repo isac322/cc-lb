@@ -58,6 +58,8 @@ pub async fn new_fixture() -> Fixture {
             oauth_tokens: None,
             warmup_enabled: true,
             warmup_dialect_plugin: Some(dialect_plugin.clone()),
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -108,6 +110,8 @@ fn test_state(
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     }
 }
 

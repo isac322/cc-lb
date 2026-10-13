@@ -191,6 +191,8 @@ impl Fixture {
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             })
             .await
             .expect("upstream created");
@@ -433,6 +435,134 @@ async fn long_lived_expired_oauth_upstream_never_triggers_lazy_refresh() {
         Some(initial_generation),
         "long-lived credential generation must not advance"
     );
+}
+
+async fn routable_upstream_ids(fixture: &Fixture, principal: &str) -> Vec<Uuid> {
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let view = build_dynamic_view(
+        fixture.stores.as_ref(),
+        fixture.aead.clone(),
+        None,
+        0,
+        &runtime,
+        fixture._dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        30,
+        Arc::new(cc_lb_control::NoopPromptCacheObservationSink),
+        1800,
+        fixture.clock.clone(),
+    )
+    .await
+    .expect("dynamic view builds");
+    cc_lb_engine::build_candidates(
+        &view,
+        principal,
+        cc_lb_engine::RequestKind::AnthropicMessages,
+        &[],
+        &std::collections::HashMap::new(),
+        fixture.clock.as_ref(),
+    )
+    .into_iter()
+    .map(|candidate| candidate.upstream_id)
+    .collect()
+}
+
+#[tokio::test]
+async fn long_lived_oauth_401_persists_reconnect_required_until_reconnect() {
+    let fixture = Fixture::new_without_scheduler(AppConfig::default()).await;
+    fixture.create_principal("long-lived-principal").await;
+    let expires_at = now_secs(fixture.clock.as_ref()) + 86_400;
+    let tokens = initial_tokens(&fixture.fake_base).await;
+    let upstream_id = fixture
+        .create_oauth_upstream_with_tokens("long-lived-401", expires_at, tokens, None, true)
+        .await;
+    let factory = AnthropicOAuthSignerFactory::for_upstream_name(
+        fixture.storage.clone(),
+        fixture.aead.clone(),
+        "long-lived-401",
+        fixture.clock.clone(),
+    );
+    let upstream = Upstream::AnthropicDirect { base_url: None };
+    assert_eq!(
+        routable_upstream_ids(&fixture, "long-lived-principal").await,
+        vec![upstream_id]
+    );
+
+    // Given a long-lived credential the provider rejects with 401.
+    let signer = cc_lb_upstream::SignerFactory::build(&factory, &upstream)
+        .await
+        .expect("signer");
+    let decision = signer
+        .on_unauthorized(&cc_lb_upstream::UpstreamError::Unauthorized {
+            status: StatusCode::UNAUTHORIZED,
+            body: None,
+        })
+        .await;
+
+    // Then the rejection is terminal and persisted as reconnect-required.
+    assert!(matches!(decision, cc_lb_upstream::RetryDecision::Fail));
+    let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("upstream read")
+        .expect("upstream exists");
+    assert_eq!(record.last_apply_error.as_deref(), Some("status_401"));
+    assert_eq!(
+        refresh_history_len(&fixture.fake_base).await,
+        0,
+        "a long-lived credential is never rotated"
+    );
+
+    // And the next request neither routes to it nor signs with it.
+    assert!(
+        routable_upstream_ids(&fixture, "long-lived-principal")
+            .await
+            .is_empty()
+    );
+    match cc_lb_upstream::SignerFactory::build(&factory, &upstream).await {
+        Err(SignerError::ExpiredToken { .. }) => {}
+        Ok(_) => panic!("a reconnect-required long-lived credential must not sign"),
+        Err(other) => panic!("expected ExpiredToken, got: {other:?}"),
+    }
+
+    // When the operator reconnects, the state clears and routing resumes.
+    let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("upstream read")
+        .expect("upstream exists");
+    let reconnected = initial_tokens(&fixture.fake_base).await;
+    let replacement = encrypted(
+        &fixture.aead,
+        upstream_id,
+        &OAuthTokenBundle {
+            access_token: reconnected.access_token,
+            refresh_token: reconnected.refresh_token,
+            expires_at_unix_secs: expires_at,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: vec!["messages".to_owned()],
+            never_refresh: true,
+        },
+    );
+    UpstreamStore::store_oauth_tokens(
+        fixture.storage.as_ref(),
+        upstream_id,
+        current.revision,
+        replacement,
+        true,
+    )
+    .await
+    .expect("reconnected credential stored");
+    let record = UpstreamStore::get_by_id(fixture.storage.as_ref(), upstream_id)
+        .await
+        .expect("upstream read")
+        .expect("upstream exists");
+    assert_eq!(record.last_apply_error, None);
+    assert_eq!(
+        routable_upstream_ids(&fixture, "long-lived-principal").await,
+        vec![upstream_id]
+    );
+    cc_lb_upstream::SignerFactory::build(&factory, &upstream)
+        .await
+        .expect("reconnected credential signs");
 }
 
 #[tokio::test]

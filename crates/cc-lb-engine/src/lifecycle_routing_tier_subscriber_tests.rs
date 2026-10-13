@@ -116,7 +116,7 @@ async fn send_events(events: Vec<LifecycleEvent>) {
     handle.shutdown().await;
 }
 
-fn route_drains_map(tier: SubscriptionTier) {
+fn route_then_terminate_drains_map(tier: SubscriptionTier) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
     handle_event(
         &NoopMetricsHook,
@@ -131,6 +131,68 @@ fn route_drains_map(tier: SubscriptionTier) {
         16,
         route_completed("route-a", Some(tier)),
     );
+    assert_eq!(partials_len(&partials), 1);
+    handle_event(&NoopMetricsHook, &mut partials, 16, terminated("route-a"));
+    assert_eq!(partials_len(&partials), 0);
+}
+
+#[derive(Default)]
+struct RecordingMetricsHook {
+    selections: parking_lot::Mutex<Vec<(String, String, String)>>,
+}
+
+impl cc_lb_observability::EngineMetricsHook for RecordingMetricsHook {
+    fn record_cache_hit(&self, _upstream: &str, _model: &str) {}
+
+    fn record_cache_miss(&self, _upstream: &str, _model: &str) {}
+
+    fn record_cache_observation_dropped(&self, _reason: &str) {}
+
+    fn record_dropped_events_by(&self, _reason: &str, _count: u64) {}
+
+    fn record_routing_tier_selection(&self, tier: &str, upstream: &str, principal_id: &str) {
+        self.selections.lock().push((
+            tier.to_owned(),
+            upstream.to_owned(),
+            principal_id.to_owned(),
+        ));
+    }
+}
+
+#[test]
+fn routing_tier_metric_counted_with_principal_on_failover() {
+    let metrics = RecordingMetricsHook::default();
+    let mut partials: HashMap<EventId, Partial> = HashMap::new();
+    handle_event(&metrics, &mut partials, 16, authenticated("failover"));
+    handle_event(
+        &metrics,
+        &mut partials,
+        16,
+        route_completed("failover", Some(SubscriptionTier::KnownBase)),
+    );
+    handle_event(
+        &metrics,
+        &mut partials,
+        16,
+        route_completed("failover", Some(SubscriptionTier::UnknownProbe)),
+    );
+    assert_eq!(
+        *metrics.selections.lock(),
+        vec![
+            (
+                "known_base".to_owned(),
+                "upstream-a".to_owned(),
+                "principal-a".to_owned(),
+            ),
+            (
+                "unknown_probe".to_owned(),
+                "upstream-a".to_owned(),
+                "principal-a".to_owned(),
+            ),
+        ]
+    );
+    assert_eq!(partials_len(&partials), 1);
+    handle_event(&metrics, &mut partials, 16, terminated("failover"));
     assert_eq!(partials_len(&partials), 0);
 }
 
@@ -141,7 +203,7 @@ async fn authentication_then_route_with_known_base_stage_drains_map() {
         route_completed("known-base", Some(SubscriptionTier::KnownBase)),
     ])
     .await;
-    route_drains_map(SubscriptionTier::KnownBase);
+    route_then_terminate_drains_map(SubscriptionTier::KnownBase);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -151,7 +213,7 @@ async fn authentication_then_route_with_partial_base_stage_drains_map() {
         route_completed("partial-base", Some(SubscriptionTier::PartialBase)),
     ])
     .await;
-    route_drains_map(SubscriptionTier::PartialBase);
+    route_then_terminate_drains_map(SubscriptionTier::PartialBase);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -161,7 +223,7 @@ async fn authentication_then_route_with_overage_stage_drains_map() {
         route_completed("overage", Some(SubscriptionTier::Overage)),
     ])
     .await;
-    route_drains_map(SubscriptionTier::Overage);
+    route_then_terminate_drains_map(SubscriptionTier::Overage);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -171,7 +233,7 @@ async fn authentication_then_route_with_unknown_probe_stage_drains_map() {
         route_completed("unknown-probe", Some(SubscriptionTier::UnknownProbe)),
     ])
     .await;
-    route_drains_map(SubscriptionTier::UnknownProbe);
+    route_then_terminate_drains_map(SubscriptionTier::UnknownProbe);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -210,6 +272,12 @@ async fn route_without_subscription_preference_stage_does_nothing() {
         &mut partials,
         16,
         route_completed("no-preference", None),
+    );
+    handle_event(
+        &NoopMetricsHook,
+        &mut partials,
+        16,
+        terminated("no-preference"),
     );
     assert_eq!(partials_len(&partials), 0);
 }

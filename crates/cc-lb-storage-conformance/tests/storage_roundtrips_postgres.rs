@@ -16,7 +16,8 @@ use std::{
 use async_trait::async_trait;
 use cc_lb_clock::{ClockHandle, SystemClock, TestClock};
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
+    BackendKind, ChangeChannel, MetaStore, PluginRegistryStore, UpstreamCreate, UpstreamKind,
+    UpstreamStore, UpstreamUpdate, WasmBlob, WasmRegistryEntryInput,
 };
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
@@ -26,7 +27,7 @@ use cc_lb_storage_conformance::{
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
         request_event_list, request_event_principal_costs, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
-        storage_roundtrips_upstream_diagnostics, upstream_rate_limit_store,
+        storage_roundtrips_upstream_diagnostics, upstream_api_key_store, upstream_rate_limit_store,
         upstream_subscription_metadata_store, upstream_subscription_quota_store,
         warmup_attempts_store,
     },
@@ -34,7 +35,7 @@ use cc_lb_storage_conformance::{
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, PgPool,
-    postgres::{PgConnectOptions, PgPoolOptions},
+    postgres::{PgConnectOptions, PgListener, PgPoolOptions},
 };
 use tokio::{runtime::Runtime, sync::Barrier};
 
@@ -619,6 +620,386 @@ fn price_catalog_corrupted_payload_hash_is_rejected_postgres() {
         "price_catalog_corrupted_payload_hash_is_rejected",
         price_catalog::corrupted_payload_hash_is_rejected,
     );
+}
+
+macro_rules! upstream_api_key_store_postgres_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_postgres_scenario(stringify!($scenario), upstream_api_key_store::$scenario);
+        }
+    };
+}
+
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_sto05_upd08_workspace_id_tri_state_postgres,
+    sto05_upd08_workspace_id_tri_state_bumps_revision
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_sto04_details_crud_postgres,
+    sto04_details_create_get_list_update_conflict
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_acc08_capabilities_json_roundtrip_postgres,
+    acc08_capabilities_json_roundtrip_all_values
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc07_column_scoped_writes_postgres,
+    conc07_access_and_poll_writes_are_column_scoped
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc07_concurrent_writes_survive_postgres,
+    conc07_concurrent_access_and_poll_writes_both_survive
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc07_same_second_recheck_postgres,
+    conc07_same_second_recheck_rejects_stale_demotion
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_pol07_failure_counter_postgres,
+    pol07_failure_counter_and_schedule_persist
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_pol05_bucket_upsert_postgres,
+    pol05_bucket_upsert_is_idempotent_and_latest_wins
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_sto04_poll_candidates_postgres,
+    sto04_poll_candidate_query_filters
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_sto04_poll_candidates_rotate_postgres,
+    sto04_poll_candidates_rotate_past_the_limit
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_acc06_delete_semantics_postgres,
+    acc06_soft_and_hard_delete_semantics
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_sto06_time_roundtrip_postgres,
+    sto06_unix_seconds_roundtrip_exactly
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_prune_bounded_postgres,
+    prune_upstream_api_usage_is_bounded
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_reset_poll_state_postgres,
+    reset_poll_state_keeps_usage_rows
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc_poll_claim_two_claimers_postgres,
+    conc_poll_claim_two_claimers_one_wins
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc_poll_claim_stale_completion_postgres,
+    conc_poll_claim_stale_completion_rejected
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc_poll_claim_disabled_postgres,
+    conc_poll_claim_and_completion_reject_disabled_upstream
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc_poll_claim_lease_expiry_postgres,
+    conc_poll_claim_lease_expiry_is_reclaimable
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_pol_completion_never_shortens_retry_after_postgres,
+    pol_completion_never_shortens_retry_after
+);
+upstream_api_key_store_postgres_test!(
+    upstream_api_key_conc_access_write_releases_poll_claim_postgres,
+    conc_access_write_releases_poll_claim
+);
+
+/// STO-05: a workspace-only update bumps `spec_revision` and publishes the
+/// upstream NOTIFY that drives Postgres rebinds.
+#[test]
+fn upstream_api_key_sto05_workspace_update_notifies_postgres() {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
+        return;
+    };
+    Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            let backend = PostgresConformanceBackend { url };
+            let fixture = backend.create_fixture().await?;
+            let result = workspace_update_notifies(&backend, &fixture).await;
+            let teardown = backend.teardown(fixture).await;
+            result?;
+            teardown
+        })
+        .unwrap_or_else(|error| panic!("sto05 workspace notify postgres: {error}"));
+}
+
+async fn workspace_update_notifies(
+    backend: &PostgresConformanceBackend,
+    fixture: &PostgresFixture,
+) -> anyhow::Result<()> {
+    let storage = backend.open(fixture).await?;
+    let created = UpstreamStore::create(
+        &storage,
+        UpstreamCreate {
+            id: uuid::Uuid::new_v4(),
+            name: "sto05-notify".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?;
+    let mut listener = PgListener::connect_with(&fixture.pool).await?;
+    listener
+        .listen(ChangeChannel::Upstream.postgres_channel())
+        .await?;
+    let updated = UpstreamStore::update(
+        &storage,
+        created.id,
+        created.revision,
+        UpstreamUpdate {
+            workspace_id: Some(Some("wrkspc_notify".to_owned())),
+            ..UpstreamUpdate::default()
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        updated.revision == created.revision + 1,
+        "workspace update bumps spec_revision"
+    );
+    // The channel is database-wide; sibling tests may notify other ids.
+    let expected = created.id.to_string();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let notification = listener.recv().await?;
+            if notification.payload() == expected {
+                return anyhow::Ok(());
+            }
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+/// One column, normalized across backends: SQLite `INTEGER` covers Postgres
+/// `bigint`/`integer`/`boolean`, and `TEXT` covers `text`/`uuid`.
+#[derive(Debug, PartialEq, Eq)]
+struct ColumnShape {
+    name: String,
+    family: String,
+    not_null: bool,
+    default: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TableShape {
+    columns: Vec<ColumnShape>,
+    primary_key: Vec<String>,
+    /// `(column, referenced table, referenced column, on delete)`.
+    foreign_keys: Vec<(String, String, String, String)>,
+    indexes: Vec<String>,
+}
+
+const API_KEY_TABLES: [&str; 2] = ["upstream_api_key_details_v1", "upstream_api_usage_v1"];
+
+/// STO-03: a fresh install gives both backends the same columns,
+/// nullability, defaults, primary keys, and cascading foreign keys.
+#[test]
+fn upstream_api_key_sto03_fresh_schema_parity_postgres() {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
+        return;
+    };
+    Runtime::new()
+        .expect("tokio runtime")
+        .block_on(async move {
+            let backend = PostgresConformanceBackend { url };
+            let fixture = backend.create_fixture().await?;
+            let result = fresh_schema_parity(&fixture.pool).await;
+            let teardown = backend.teardown(fixture).await;
+            result?;
+            teardown
+        })
+        .unwrap_or_else(|error| panic!("sto03 schema parity: {error}"));
+}
+
+async fn fresh_schema_parity(postgres: &PgPool) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let sqlite_url = format!("sqlite://{}", dir.path().join("fresh.sqlite").display());
+    let sqlite = cc_lb_storage_sqlite::open_sqlite(&sqlite_url, system_clock()).await?;
+    sqlite.initialize().await?;
+    let sqlite_pool = sqlite.pool();
+
+    for table in API_KEY_TABLES {
+        let sqlite_shape = sqlite_table_shape(sqlite_pool, table).await?;
+        let postgres_shape = postgres_table_shape(postgres, table).await?;
+        anyhow::ensure!(
+            sqlite_shape == postgres_shape,
+            "{table} differs:\nsqlite   {sqlite_shape:?}\npostgres {postgres_shape:?}"
+        );
+        anyhow::ensure!(
+            sqlite_shape.foreign_keys
+                == [(
+                    "upstream_id".to_owned(),
+                    "upstream_spec_v1".to_owned(),
+                    "id".to_owned(),
+                    "CASCADE".to_owned()
+                )],
+            "{table} cascades from upstream_spec_v1"
+        );
+    }
+    let sqlite_workspace = sqlite_table_shape(sqlite_pool, "upstream_spec_v1")
+        .await?
+        .columns
+        .into_iter()
+        .find(|column| column.name == "workspace_id");
+    let postgres_workspace = postgres_table_shape(postgres, "upstream_spec_v1")
+        .await?
+        .columns
+        .into_iter()
+        .find(|column| column.name == "workspace_id");
+    let expected = ColumnShape {
+        name: "workspace_id".to_owned(),
+        family: "text".to_owned(),
+        not_null: false,
+        default: None,
+    };
+    anyhow::ensure!(
+        sqlite_workspace.as_ref() == Some(&expected) && postgres_workspace == sqlite_workspace,
+        "workspace_id: sqlite {sqlite_workspace:?} postgres {postgres_workspace:?}"
+    );
+    Ok(())
+}
+
+async fn sqlite_table_shape(pool: &sqlx::SqlitePool, table: &str) -> anyhow::Result<TableShape> {
+    use sqlx::Row as _;
+
+    let rows = sqlx::query(
+        "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info(?) ORDER BY cid",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let mut columns = Vec::with_capacity(rows.len());
+    let mut primary_key = Vec::new();
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let declared: String = row.try_get("type")?;
+        let pk: i64 = row.try_get("pk")?;
+        if pk > 0 {
+            primary_key.push((pk, name.clone()));
+        }
+        columns.push(ColumnShape {
+            family: type_family(&declared),
+            // A single-column TEXT PRIMARY KEY is NOT NULL in meaning.
+            not_null: row.try_get::<i64, _>("notnull")? != 0 || pk > 0,
+            default: row
+                .try_get::<Option<String>, _>("dflt_value")?
+                .map(|value| normalize_default(&value)),
+            name,
+        });
+    }
+    primary_key.sort();
+    let foreign_keys = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT \"from\", \"table\", \"to\", on_delete FROM pragma_foreign_key_list(?) ORDER BY \"from\"",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let indexes = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(TableShape {
+        columns,
+        primary_key: primary_key.into_iter().map(|(_, name)| name).collect(),
+        foreign_keys,
+        indexes,
+    })
+}
+
+async fn postgres_table_shape(pool: &PgPool, table: &str) -> anyhow::Result<TableShape> {
+    let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT column_name::text, data_type::text, is_nullable::text, column_default::text \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND table_name = $1 \
+         ORDER BY ordinal_position",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let columns = rows
+        .into_iter()
+        .map(|(name, data_type, nullable, default)| {
+            Ok(ColumnShape {
+                family: type_family(&data_type),
+                not_null: nullable == "NO",
+                default: default.map(|value| normalize_default(&value)),
+                name,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let primary_key = sqlx::query_scalar::<_, String>(
+        "SELECT a.attname::text \
+         FROM pg_index i \
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) \
+         WHERE i.indrelid = (current_schema() || '.' || $1)::regclass AND i.indisprimary \
+         ORDER BY array_position(i.indkey::int2[], a.attnum)",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let foreign_keys = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT kcu.column_name::text, ccu.table_name::text, ccu.column_name::text, rc.delete_rule::text \
+         FROM information_schema.referential_constraints rc \
+         JOIN information_schema.key_column_usage kcu \
+           ON kcu.constraint_name = rc.constraint_name AND kcu.constraint_schema = rc.constraint_schema \
+         JOIN information_schema.constraint_column_usage ccu \
+           ON ccu.constraint_name = rc.unique_constraint_name AND ccu.constraint_schema = rc.unique_constraint_schema \
+         WHERE kcu.table_schema = current_schema() AND kcu.table_name = $1 \
+         ORDER BY kcu.column_name",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    let indexes = sqlx::query_scalar::<_, String>(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = current_schema() AND tablename = $1 \
+           AND indexname NOT IN ( \
+               SELECT conname FROM pg_constraint \
+               WHERE conrelid = (current_schema() || '.' || $1)::regclass AND contype = 'p') \
+         ORDER BY indexname",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await?;
+    Ok(TableShape {
+        columns,
+        primary_key,
+        foreign_keys,
+        indexes,
+    })
+}
+
+/// Unmapped types keep their declared spelling, so they only match the same
+/// spelling on the other backend.
+fn type_family(declared: &str) -> String {
+    match declared.to_ascii_lowercase().as_str() {
+        "integer" | "bigint" | "boolean" => "int".to_owned(),
+        "text" | "uuid" => "text".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn normalize_default(value: &str) -> String {
+    value.trim_end_matches("::text").to_owned()
 }
 
 fn run_postgres_price_scenario<F, Fut>(name: &str, scenario: F)

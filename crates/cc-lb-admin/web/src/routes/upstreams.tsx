@@ -33,6 +33,8 @@ import {
   DetailHeader,
   DetailHeaderSkeleton,
   DetailPane,
+  DetailRow,
+  DetailRows,
   DetailSection,
   DetailSectionGrid,
 } from '../components/ui/DetailPane';
@@ -60,15 +62,27 @@ import {
   RequestEventsFeed,
 } from '../components/ui/RequestEventsFeed';
 import { PaceLegend } from '../components/ui/UsageMeter';
+import { ApiKeyAccessSection } from '../components/upstreams/ApiKeyAccessSection';
+import {
+  ApiKeyNotice,
+  apiKeyNoticeOf,
+  apiKeyUsable,
+} from '../components/upstreams/ApiKeyNotice';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import {
   buildQuotaChartData,
   type ChartMarker,
 } from '../components/upstreams/buildQuotaChartData';
 import {
+  isAnthropicBaseUrl,
+  usageFixLine,
+} from '../components/upstreams/connect/apiKeyCopy';
+import {
   UpstreamConnectDialog,
   type UpstreamConnectTarget,
 } from '../components/upstreams/connect/UpstreamConnectDialog';
+import { errorMessage } from '../components/upstreams/connect/useOAuthConnectSession';
+import { EndpointRow } from '../components/upstreams/EndpointRow';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { LimitResetAction } from '../components/upstreams/LimitResetAction';
 import { OAuthReconnectNotice } from '../components/upstreams/OAuthReconnectNotice';
@@ -83,7 +97,6 @@ import {
   selectQuotaCardSnapshots,
   selectVisibleGraphWindows,
 } from '../components/upstreams/quotaWindowVisibility';
-import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { UpstreamPlanCaption } from '../components/upstreams/UpstreamPlanCaption';
 import {
   formatQuotaStamp,
@@ -99,6 +112,8 @@ import {
 import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import {
   ApiError,
+  apiKeyAccessOf,
+  keyUsageProvenance,
   type OrganizationMetadataInner,
   type SubscriptionMetadataResponse,
   type UpstreamOAuthStatusResponse,
@@ -118,15 +133,16 @@ import {
   type Upstream,
   useDeleteUpstream,
   usePrincipalNameMap,
+  useRecheckApiKey,
   useStatus,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
   useTriggerSubscriptionMetadataRefresh,
   useUpdateUpstreamWarmupSettings,
+  useUpstreamKeyUsage,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
   useUpstreams,
-  useUsage,
 } from '../lib/queries';
 import {
   formatQuotaPercent,
@@ -252,7 +268,10 @@ function rowQuotaSeverity(
   );
 }
 
-/** A status problem worth a phrase: reconnect nudges and danger health. */
+/**
+ * A status problem worth a phrase: reconnect nudges, danger health and API
+ * keys that were never verified.
+ */
 function rowProblem(
   row: UpstreamUsageRow,
 ): { tone: 'warn' | 'danger'; label: string } | null {
@@ -262,6 +281,9 @@ function rowProblem(
     (row.health.tone === 'danger' || row.health.tone === 'warn')
   )
     return { tone: row.health.tone, label: row.health.label };
+  // A row without a snapshot was saved before key checks: unverified too.
+  if (row.upstream.enabled && apiKeyAccessOf(row.upstream)?.verified === false)
+    return { tone: 'warn', label: 'Key not verified' };
   return null;
 }
 
@@ -889,7 +911,7 @@ function PaymentWarning({
   );
 }
 
-function DetailView({
+export function DetailView({
   upstream,
   onBack,
   onConnect,
@@ -1034,12 +1056,20 @@ function DetailView({
   const [apiUsageMetric, setApiUsageMetric] = useState<'tokens' | 'cost'>(
     'tokens',
   );
-  const apiUsageQ = useUsage(
+  const apiUsageQ = useUpstreamKeyUsage(
+    upstream.kind === 'anthropic_oauth' ? null : upstream.id,
     range,
     range === '7d' || range === '24h' ? 'hour' : 'minute',
-    'model',
-    upstream.kind === 'anthropic_oauth' ? undefined : upstream.id,
   );
+  // One inline editor at a time in the pane, so one primary Save.
+  const [activeEditor, setActiveEditor] = useState<
+    'workspace' | 'endpoint' | null
+  >(null);
+  /** Opening an editor closes the other; closing only clears its own. */
+  const editorToggle = (id: 'workspace' | 'endpoint') => (editing: boolean) =>
+    setActiveEditor((current) =>
+      editing ? id : current === id ? null : current,
+    );
 
   const chartData = useMemo(() => {
     return buildQuotaChartData(
@@ -1135,6 +1165,16 @@ function DetailView({
     upstreamRuntimeStatus?.status,
     reconnectNudge,
   );
+  const recheckKey = useRecheckApiKey();
+  const keyAccess = apiKeyAccessOf(upstream);
+  const keyNotice = apiKeyNoticeOf(keyAccess);
+  /** Replace key, from the key notice or Access: one dialog for the pane. */
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const keyUsage =
+    keyAccess && apiUsageQ.data
+      ? keyUsageProvenance(apiUsageQ.data, keyAccess)
+      : undefined;
+  const usageReportsStopped = keyUsage?.stopped === true;
 
   // The toggle PATCH is not optimistic, so `upstream.enabled` still holds the
   // pre-request value while it is in flight; the requested value lives in the
@@ -1152,7 +1192,7 @@ function DetailView({
     : 'API key';
   // The header carries plan, account and organization; the collapsed
   // metadata section keeps only what the header does not say. API-key
-  // endpoint and key source live in Settings, where they are edited.
+  // endpoint and key status live in Access, where they are edited.
   const headerMeta: React.ReactNode[] = !isOauth
     ? []
     : metadataPending
@@ -1650,7 +1690,11 @@ function DetailView({
         orgMeta.overage_credit_amount_minor_units > 0));
   const applyError = isOauth ? null : upstreamRuntimeStatus?.last_apply_error;
   const hasNotices =
-    reconnectNudge != null || !!applyError || !!hasBillingNotice;
+    reconnectNudge != null ||
+    keyNotice != null ||
+    !!applyError ||
+    !!hasBillingNotice ||
+    usageReportsStopped;
 
   return (
     <>
@@ -1669,10 +1713,12 @@ function DetailView({
                 <Badge>{planLabel}</Badge>
               )
             }
-            // One danger surface per problem: when the reconnect notice
-            // below owns the diagnosis, the header stays quiet.
+            // One danger surface per problem: when the reconnect or key
+            // notice below owns the diagnosis, the header stays quiet.
             status={
-              headerHealth.tone === 'danger' && !reconnectNudge ? (
+              headerHealth.tone === 'danger' &&
+              !reconnectNudge &&
+              !keyNotice ? (
                 <StatusBadge tone="danger" label={headerHealth.label} />
               ) : null
             }
@@ -1698,9 +1744,32 @@ function DetailView({
                   onReconnect={onConnect}
                 />
               ) : null}
+              {keyNotice ? (
+                <ApiKeyNotice
+                  kind={keyNotice}
+                  anthropicHost={isAnthropicBaseUrl(upstream.base_url ?? '')}
+                  lastError={keyAccess?.last_error ?? null}
+                  onReplace={() => setReplaceOpen(true)}
+                  onRecheck={() => recheckKey.mutate(upstream.id)}
+                  rechecking={recheckKey.isPending}
+                  recheckError={
+                    recheckKey.error ? errorMessage(recheckKey.error) : null
+                  }
+                />
+              ) : null}
               {applyError ? (
                 <Notice tone="danger" title="Last apply failed">
                   <span className="break-words">{applyError}</span>
+                </Notice>
+              ) : null}
+              {usageReportsStopped && keyUsage ? (
+                <Notice
+                  tone="warning"
+                  variant="banner"
+                  title="Usage reports stopped"
+                >
+                  {/* What the card shows meanwhile lives in its caption. */}
+                  {usageFixLine(keyUsage.key_class)}
                 </Notice>
               ) : null}
               {hasBillingNotice ? (
@@ -1728,6 +1797,13 @@ function DetailView({
               onRangeChange={setRange}
               metric={apiUsageMetric}
               onMetricChange={setApiUsageMetric}
+              provenance={keyUsage}
+              month={apiUsageQ.data?.month}
+              monthLoading={apiUsageQ.data === undefined && apiUsageQ.isPending}
+              monthError={
+                apiUsageQ.error ? errorMessage(apiUsageQ.error) : null
+              }
+              usageModeShown={apiKeyUsable(keyAccess)}
             />
           )}
 
@@ -1963,6 +2039,22 @@ function DetailView({
                       are available right now.
                     </p>
                   )}
+                  {/* The effective endpoint closes the Credential body in
+                      every state, as Access row 1 does for API keys. */}
+                  <DetailRows className="mt-3">
+                    {oauthStatusPending ? (
+                      <DetailRow label="Endpoint">
+                        <Skeleton className="h-4 w-36" />
+                      </DetailRow>
+                    ) : (
+                      <EndpointRow
+                        upstream={upstream}
+                        kind="oauth"
+                        editing={activeEditor === 'endpoint'}
+                        onEditingChange={editorToggle('endpoint')}
+                      />
+                    )}
+                  </DetailRows>
                 </div>
               </DetailSection>
               {/* Account metadata pairs beside Credential in the row above;
@@ -1975,10 +2067,27 @@ function DetailView({
               />
             </>
           ) : (
-            <SettingsCard upstream={upstream} />
+            <ApiKeyAccessSection
+              upstream={upstream}
+              workspaceEditing={activeEditor === 'workspace'}
+              onWorkspaceEditingChange={editorToggle('workspace')}
+              endpointEditing={activeEditor === 'endpoint'}
+              onEndpointEditingChange={editorToggle('endpoint')}
+              onReplace={() => setReplaceOpen(true)}
+              usageReportsStopped={usageReportsStopped}
+              usageAttribution={keyUsage?.attribution}
+            />
           )}
         </DetailSectionGrid>
       </DetailPane>
+
+      {isOauth ? null : (
+        <UpstreamConnectDialog
+          target={replaceOpen ? { mode: 'replace', upstream } : null}
+          onClose={() => setReplaceOpen(false)}
+          onCreated={() => setReplaceOpen(false)}
+        />
+      )}
 
       <ConfirmDialog
         open={confirmDeleteOpen}

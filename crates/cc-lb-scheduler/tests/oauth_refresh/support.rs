@@ -85,6 +85,7 @@ pub fn refreshable_record(upstream_id: Uuid, generation: u64) -> UpstreamRecord 
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
+        workspace_id: None,
     }
 }
 

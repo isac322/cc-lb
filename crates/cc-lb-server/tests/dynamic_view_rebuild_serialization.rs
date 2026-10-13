@@ -366,6 +366,8 @@ async fn create_upstream(storage: &Storage, name: &str, enabled: bool) -> Upstre
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
@@ -491,6 +493,8 @@ async fn fixture() -> Fixture {
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock,
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     };
     Fixture {
         _dir: dir,

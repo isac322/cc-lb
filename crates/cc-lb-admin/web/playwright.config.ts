@@ -1,7 +1,11 @@
 import { defineConfig } from '@playwright/test';
 
+// Mocked-network specs: every spec routes `/admin/**` itself, so no backend
+// runs. The real-server API-key suite has its own config
+// (playwright.api-key.config.ts) and is excluded here.
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: 'api-key/**',
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -12,8 +16,6 @@ export default defineConfig({
     trace: 'on',
     screenshot: 'on',
   },
-  globalSetup: './e2e/global-setup.ts',
-  globalTeardown: './e2e/global-teardown.ts',
   webServer: {
     command: 'bun run dev',
     port: 5173,

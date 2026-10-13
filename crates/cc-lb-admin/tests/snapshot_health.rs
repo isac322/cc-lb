@@ -33,6 +33,8 @@ fn test_state() -> AdminState {
         event_bus: None,
         storage_tail: cc_lb_admin::events::storage_tail_channel(),
         clock: Arc::new(cc_lb_clock::SystemClock),
+        anthropic_org_api: cc_lb_control::anthropic_api_key::AnthropicOrgApi::production()
+            .expect("production Anthropic origin parses"),
     }
 }
 

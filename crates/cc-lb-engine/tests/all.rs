@@ -79,6 +79,8 @@ mod lifecycle_router_drives_credentials;
 mod lifecycle_routing_failure;
 #[path = "lifecycle_terminal.rs"]
 mod lifecycle_terminal;
+#[path = "lifecycle_upstream_failover.rs"]
+mod lifecycle_upstream_failover;
 #[path = "limit_engine_smoke.rs"]
 mod limit_engine_smoke;
 #[path = "load_once_bind_dispatch.rs"]

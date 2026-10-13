@@ -51,7 +51,7 @@ use tracing::Instrument as _;
 use url::Url;
 use uuid::Uuid;
 
-use crate::attempt_rail::{AttemptIntent, ResponseAccountingGuard, Scoped};
+use crate::attempt_rail::{AttemptIntent, Reserved, ResponseAccountingGuard, Scoped};
 use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
@@ -90,9 +90,11 @@ use cc_lb_control::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, Bui
 use cc_lb_control::api_keys::limit_engine::{
     LimitEngine, RejectReason, Reservation as LimitReservation,
 };
-use cc_lb_control::api_keys::principal_view::PrincipalView;
+use cc_lb_control::api_keys::principal_view::{
+    PrincipalSpecCached, PrincipalView, RouterPipelineCache,
+};
 use cc_lb_control::api_keys::types::LimitKind;
-use cc_lb_control::dynamic_view::{ApplyStatus, DynamicView, DynamicViewHolder};
+use cc_lb_control::dynamic_view::{DynamicView, DynamicViewHolder};
 use cc_lb_control::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use cc_lb_control::{
     PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike, SubscriptionQuotaCacheLike,
@@ -348,13 +350,18 @@ fn semantic_body_bytes(body: &Bytes, plaintext: std::borrow::Cow<'_, [u8]>) -> B
 /// Cap on the retained non-200 upstream error body: an admin-visible diagnostic
 /// that can echo request text, so the byte cap bounds the blast radius.
 const REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES: usize = 8 * 1024;
+/// Bytes of an upstream error body considered for a stored sink. The margin
+/// over the store cap lets a secret that straddles the cap be masked whole
+/// before truncation, so no fragment of it survives the cut.
+const REQUEST_LOG_UPSTREAM_ERROR_BODY_COLLECT_BYTES: usize =
+    REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES + 512;
 const REQUEST_LOG_UPSTREAM_ERROR_BODY_TRUNCATION_MARKER: &str = "\n...[truncated]";
 
 fn append_bounded_upstream_error_body(buf: &mut Vec<u8>, chunk: &[u8], truncated: &mut bool) {
     if *truncated || chunk.is_empty() {
         return;
     }
-    let remaining = REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES.saturating_sub(buf.len());
+    let remaining = REQUEST_LOG_UPSTREAM_ERROR_BODY_COLLECT_BYTES.saturating_sub(buf.len());
     if chunk.len() <= remaining {
         buf.extend_from_slice(chunk);
     } else {
@@ -387,6 +394,19 @@ fn bounded_lossy_upstream_error_body(bytes: &[u8], truncated: bool) -> String {
         out.push_str(marker);
     }
     out
+}
+
+/// Render an upstream error body for a stored sink. Only the first
+/// `REQUEST_LOG_UPSTREAM_ERROR_BODY_COLLECT_BYTES` count; the signer masks its
+/// secret in them before the store cap and truncation marker are applied.
+fn scrubbed_upstream_error_body(signer: &dyn Signer, bytes: &[u8], truncated: bool) -> String {
+    let collected = bytes
+        .get(..REQUEST_LOG_UPSTREAM_ERROR_BODY_COLLECT_BYTES)
+        .unwrap_or(bytes);
+    let truncated = truncated || collected.len() < bytes.len();
+    let text = String::from_utf8_lossy(collected);
+    let scrubbed = signer.scrub_secrets(&text);
+    bounded_lossy_upstream_error_body(scrubbed.as_bytes(), truncated)
 }
 
 /// Render the request-log `upstream_error_message` for an abnormal upstream
@@ -624,14 +644,7 @@ pub(crate) fn build_candidates_with_matches(
             .filter(|upstream| {
                 allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id)
             })
-            // #851: an upstream whose last apply errored cannot sign; drop it
-            // so a healthy sibling is routed instead of a guaranteed failure.
-            .filter(|upstream| {
-                view.upstream_status_snapshot
-                    .entries
-                    .get(&upstream.name)
-                    .is_none_or(|entry| entry.status != ApplyStatus::Error)
-            })
+            .filter(|upstream| upstream_credentials_routable(view, upstream))
         {
             let has_rate_limit_snapshot = rate_limit_cache
                 .snapshots
@@ -684,6 +697,21 @@ pub(crate) fn build_candidates_with_matches(
     }
     candidates.sort_unstable_by_key(|c| c.upstream_id);
     (candidates, selected_matches)
+}
+
+/// Excludes upstreams whose credentials are known dead: OAuth accounts that
+/// need an operator reconnect and any upstream whose last apply failed.
+fn upstream_credentials_routable(view: &DynamicView, upstream: &UpstreamRecord) -> bool {
+    if upstream.kind == StorageUpstreamKind::AnthropicOauth
+        && cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+    {
+        return false;
+    }
+    !view
+        .upstream_status_snapshot
+        .entries
+        .get(&upstream.name)
+        .is_some_and(|entry| entry.status == cc_lb_control::ApplyStatus::Error)
 }
 
 #[cfg(test)]
@@ -3061,20 +3089,13 @@ impl Lifecycle {
             }
             return Ok(response);
         };
-        let router_chosen_upstream_name = resolved_record.name.clone();
-        handle_span.record("cc_lb.upstream.name", router_chosen_upstream_name.as_str());
+        handle_span.record("cc_lb.upstream.name", resolved_record.name.as_str());
         handle_span.record(
             "cc_lb.upstream.id",
             tracing::field::display(resolved_upstream_id),
         );
-        let raw_passthrough_base_url = resolved_record.base_url.clone();
-        let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
-            base_url: raw_passthrough_base_url
-                .clone()
-                .unwrap_or_else(default_anthropic_base_url),
-        });
-        let route_upstream = match upstream_for_record(resolved_record) {
-            Ok(upstream) => upstream,
+        let (route, raw_passthrough_base_url) = match route_for_record(resolved_record, cached) {
+            Ok(resolved) => resolved,
             Err(reason) => {
                 route_span.record("cc_lb.route.outcome", "error");
                 route_span.record("otel.status_code", "ERROR");
@@ -3103,12 +3124,6 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
-        let dialect = cached.resolved_dialect(&route_dialect).clone();
-        let route = RouteDecision {
-            upstream_id: resolved_upstream_id,
-            upstream: route_upstream,
-            dialect,
-        };
         drop(route_guard);
         let route_ms = duration_to_ms(route_start.elapsed());
         route_span.record("cc_lb.route.outcome", "success");
@@ -3116,87 +3131,16 @@ impl Lifecycle {
             "cc_lb.route.duration_ms",
             numeric_attribute(Some(route_ms)).as_value(),
         );
-        let routing_trace_value = pipeline_result.routing_trace(terminal_decision.clone());
-        let selected_quota_candidate =
-            resolved_candidate_urgency(&routing_trace_value, resolved_upstream_id);
-        let selected_cache_score = pipeline_result
-            .candidates
-            .iter()
-            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
-            .and_then(|candidate| candidate.cache_score.as_ref())
-            .cloned();
-        let predicted_cache_read_tokens = selected_cache_score
-            .as_ref()
-            .map_or(0, |score| score.predicted_cache_read_tokens);
-        let subscription_trace = subscription_preference_trace(&routing_trace_value);
-        if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-                event_id: o.event_id().to_owned(),
-                result: Ok(cc_lb_lifecycle::RouteInfo {
-                    upstream_id: resolved_upstream_id,
-                    upstream_name: router_chosen_upstream_name.clone(),
-                    model: body_view.model(),
-                    upstream_kind: Some(
-                        match resolved_record.kind {
-                            StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
-                            StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
-                        }
-                        .to_owned(),
-                    ),
-                    route_ms: Some(route_ms),
-                    routing_trace: Some(routing_trace_value.clone()),
-                    predicted_cache_read_tokens: Some(predicted_cache_read_tokens),
-                    matched_v3_cache_key: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.matched_v3_cache_key.clone()),
-                    breakpoint_content_block_index: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.breakpoint_content_block_index),
-                    matched_content_block_index: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.matched_content_block_index),
-                    lookback_distance: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.lookback_distance),
-                    predicted_cache_creation_tokens_5m: selected_cache_score
-                        .as_ref()
-                        .map(|score| score.predicted_cache_creation_tokens_5m),
-                    predicted_cache_creation_tokens_1h: selected_cache_score
-                        .as_ref()
-                        .map(|score| score.predicted_cache_creation_tokens_1h),
-                    token_estimate_source: selected_cache_score
-                        .as_ref()
-                        .and_then(|score| score.token_estimate_source.clone()),
-                    cache_value_micros: subscription_trace.and_then(|trace| {
-                        trace
-                            .candidates
-                            .iter()
-                            .find(|candidate| candidate.upstream_id == resolved_upstream_id)
-                            .and_then(|candidate| candidate.cache_value_micros)
-                    }),
-                    formula_winner_upstream_id: subscription_trace
-                        .and_then(|trace| trace.formula_winner_upstream_id),
-                    kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
-                    quota_urgency_5h: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_5h),
-                    quota_urgency_7d: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_7d),
-                    quota_urgency_combined: selected_quota_candidate
-                        .and_then(|candidate| candidate.quota_urgency_combined),
-                    quota_warning_multiplier: selected_quota_candidate
-                        .map(|candidate| candidate.warning_multiplier),
-                }),
-                routing_trace: Some(routing_trace_value.clone()),
-            });
-        }
-        let prompt_cache_observation_context = prompt_cache_observation_context(
-            &view,
-            resolved_upstream_id,
-            &ctx.canonical_model_id,
-            &ctx.cache_breakpoints,
-            &cache_metadata.cacheable_breakpoint_prefix_keys,
-            selected_cache_matches.get(&resolved_upstream_id).cloned(),
+        let mut routed = RoutedUpstream::new(
+            resolved_record,
+            route,
+            raw_passthrough_base_url,
+            &pipeline_result,
+            terminal_decision,
+            selected_cache_matches.remove(&resolved_upstream_id),
+            route_ms,
         );
+        emit_route_completed(observer.as_ref(), &routed, &body_view);
 
         let limit_reserve_start = Instant::now();
         let mut active_limit = match self
@@ -3204,7 +3148,7 @@ impl Lifecycle {
                 &principal_view,
                 &ctx,
                 &principal,
-                resolved_record,
+                routed.record,
                 success,
                 &body_view,
             )
@@ -3268,264 +3212,230 @@ impl Lifecycle {
             .and_then(|active_limit| active_limit.reservation.take())
             .map(|reservation| AttemptIntent::from_reservation(reservation).into_reserved());
 
-        let signer_factory = view
-            .signer_factory
-            .with_router_choice(router_chosen_upstream_name.clone());
-        let prepare_signer_started = Instant::now();
-        let signer_result = signer_factory
-            .build(&route.upstream)
-            .instrument(tracing::info_span!("proxy.prepare_signer"))
-            .await;
-        setup_timings.prepare_signer_ms =
-            Some(prepare_signer_started.elapsed().as_secs_f64() * 1_000.0);
-        store_setup_timings(observer.as_ref(), setup_timings);
-        let signer = match signer_result {
-            Ok(signer) => signer,
-            Err(source) => {
-                let mut response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "failed to prepare upstream credentials",
-                );
-                self.attach_limit_headers(&mut response, active_limit.as_ref());
-                if let Some(o) = observer.as_ref() {
-                    o.terminate_failure(InternalFailure {
-                        status: StatusCode::BAD_GATEWAY,
-                        error_code: error_codes::SIGNER_FAILED,
-                        error: InternalError {
-                            stage: InternalErrorStage::Signer,
-                            kind: signer_error_kind(&source),
-                            message: Some(source.to_string()),
-                        },
-                    });
-                }
-                return Ok(response);
-            }
+        // Bounded cross-upstream failover. Only failures that happen before
+        // the upstream processed the request (credential preparation, signing,
+        // 401, 429) move to another upstream; nothing has reached the client
+        // yet, and the reservation above covers every attempt.
+        let mut failover = FailoverRouter {
+            view: &view,
+            cached,
+            router_pipeline: &router_pipeline,
+            ctx: &ctx,
+            principal: &principal,
+            warm_entries: &warm_entries,
+            observer: observer.as_ref(),
+            handle_span: &handle_span,
+            enabled: request_affinity.is_none(),
+            excluded: Vec::new(),
+            upstream_attempts: 1,
         };
-
-        let dispatch_started = Instant::now();
-        let dispatch_unix_secs = unix_now_ms(&*self.clock) / 1000;
-        let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
+        let mut attempt_num: u32 = 0;
+        let mut first_dispatch: Option<(Instant, u64)> = None;
         let mut attempt_timings = AttemptTimings::default();
         let mut keepalive_shaped_body = None;
-        let mut keepalive_discard_shaped_body = None;
-        if let Some(o) = observer.as_ref() {
-            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
-                event_id: o.event_id().to_owned(),
-                attempt_num: 1,
-                upstream_id: resolved_upstream_id,
-            });
-        }
-        let first_attempt_scope = match reserved.as_ref() {
-            Some(reserved) => reserved.begin_attempt(),
-            None => Scoped::unreserved_for_lifecycle(),
-        };
-        let mut response = match self
-            .attempt(
-                self.dispatcher.as_ref(),
-                first_attempt_scope,
-                &ctx,
-                &principal,
-                &route,
-                raw_passthrough_base_url.as_ref(),
-                signer.clone(),
-                observer.as_ref(),
-                &mut attempt_timings,
-                if track_keepalive_response {
-                    &mut keepalive_shaped_body
-                } else {
-                    &mut keepalive_discard_shaped_body
-                },
-            )
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                if let Some(o) = observer.as_ref() {
-                    o.set_attempt_timings(
-                        attempt_timings.shape_ms,
-                        attempt_timings.sign_ms,
-                        attempt_timings.upstream_ttfb_ms,
-                    );
-                }
-                if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
-                        event_id: o.event_id().to_owned(),
-                        status: status.as_u16(),
-                        headers: header_snapshot_from(response.headers()),
-                        bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
-                        dns_ms: attempt_timings.dns_ms,
-                        connect_ms: attempt_timings.connect_ms,
-                        connection_reused: attempt_timings.connection_reused,
-                        shape_ms: attempt_timings.shape_ms,
-                        sign_ms: attempt_timings.sign_ms,
-                        upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
-                    });
-                }
-                response
+        let (mut response, dispatch_started, dispatch_unix_secs, signer) = loop {
+            // A failed-over upstream is announced before its signer is built,
+            // so a terminal failure here never reports the previous upstream's
+            // response status or timings under the new route.
+            let failover_entry = failover.upstream_attempts > 1;
+            if failover_entry {
+                announce_attempt(
+                    observer.as_ref(),
+                    &mut attempt_num,
+                    routed.route.upstream_id,
+                    &mut attempt_timings,
+                    first_dispatch.map(|(dispatch_started, _)| dispatch_started),
+                );
+                emit_route_completed(observer.as_ref(), &routed, &body_view);
             }
-            Err(failure) => {
-                let (mut response, failure) = failure.into_response_and_failure();
-                self.attach_limit_headers(&mut response, active_limit.as_ref());
-                if let Some(o) = observer.as_ref() {
-                    o.set_attempt_timings(
-                        attempt_timings.shape_ms,
-                        attempt_timings.sign_ms,
-                        attempt_timings.upstream_ttfb_ms,
-                    );
-                    o.set_attempt_connection_timings(
-                        attempt_timings.dns_ms,
-                        attempt_timings.connect_ms,
-                        attempt_timings.connection_reused,
-                    );
-                    o.terminate_failure(failure);
-                }
-                return Ok(response);
-            }
-        };
-
-        if response.status() == StatusCode::UNAUTHORIZED {
-            let unauthorized = collect_error_response(response)
-                .instrument(tracing::info_span!("proxy.collect_upstream_error_body"))
+            let signer_factory = view
+                .signer_factory
+                .with_router_choice(routed.record.name.clone());
+            let prepare_signer_started = Instant::now();
+            let signer_result = signer_factory
+                .build(&routed.route.upstream)
+                .instrument(tracing::info_span!("proxy.prepare_signer"))
                 .await;
-            let err = UpstreamError::Unauthorized {
-                status: StatusCode::UNAUTHORIZED,
-                body: Some(unauthorized.body.clone()),
+            setup_timings.prepare_signer_ms =
+                Some(prepare_signer_started.elapsed().as_secs_f64() * 1_000.0);
+            store_setup_timings(observer.as_ref(), setup_timings);
+            let mut signer = match signer_result {
+                Ok(signer) => signer,
+                Err(source) => {
+                    if let Some(next) = failover.next(self, &routed, FailoverReason::SignerBuild) {
+                        routed = next;
+                        continue;
+                    }
+                    let mut response = anthropic_error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "api_error",
+                        "failed to prepare upstream credentials",
+                    );
+                    self.attach_limit_headers(&mut response, active_limit.as_ref());
+                    if let Some(o) = observer.as_ref() {
+                        o.terminate_failure(InternalFailure {
+                            status: StatusCode::BAD_GATEWAY,
+                            error_code: error_codes::SIGNER_FAILED,
+                            error: InternalError {
+                                stage: InternalErrorStage::Signer,
+                                kind: signer_error_kind(&source),
+                                message: Some(source.to_string()),
+                            },
+                        });
+                    }
+                    return Ok(response);
+                }
             };
-            if let RetryDecision::Refresh { new_signer } = signer
-                .on_unauthorized(&err)
-                .instrument(tracing::info_span!("proxy.refresh_signer"))
+
+            let (dispatch_started, dispatch_unix_secs) = *first_dispatch
+                .get_or_insert_with(|| (Instant::now(), unix_now_ms(&*self.clock) / 1000));
+            if !failover_entry {
+                announce_attempt(
+                    observer.as_ref(),
+                    &mut attempt_num,
+                    routed.route.upstream_id,
+                    &mut attempt_timings,
+                    Some(dispatch_started),
+                );
+            }
+            let mut response = match self
+                .run_upstream_attempt(
+                    reserved.as_ref(),
+                    &ctx,
+                    &principal,
+                    &routed,
+                    signer.clone(),
+                    observer.as_ref(),
+                    &mut attempt_timings,
+                    &mut keepalive_shaped_body,
+                )
                 .await
             {
-                attempt_timings.reset_attempt_stages();
-                if let Some(o) = observer.as_ref() {
-                    o.reset_attempt_timings();
-                    o.set_io_timings(cc_lb_lifecycle::RequestIoTimings {
-                        retry_overhead_ms: Some(dispatch_started.elapsed().as_secs_f64() * 1_000.0),
-                        ..Default::default()
-                    });
+                Ok(response) => response,
+                Err(failure) => {
+                    if matches!(failure, AttemptFailure::Sign(_))
+                        && let Some(next) = failover.next(self, &routed, FailoverReason::Sign)
+                    {
+                        routed = next;
+                        continue;
+                    }
+                    return Ok(self.relay_attempt_failure(
+                        failure,
+                        active_limit.as_ref(),
+                        observer.as_ref(),
+                        &attempt_timings,
+                    ));
                 }
-                if let Some(o) = observer.as_ref() {
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
-                        event_id: o.event_id().to_owned(),
-                        attempt_num: 2,
-                        upstream_id: resolved_upstream_id,
-                    });
-                }
-                let retry_attempt_scope = match reserved.as_ref() {
-                    Some(reserved) => reserved.begin_attempt(),
-                    None => Scoped::unreserved_for_lifecycle(),
+            };
+
+            if response.status() == StatusCode::UNAUTHORIZED {
+                let unauthorized = collect_error_response(response)
+                    .instrument(tracing::info_span!("proxy.collect_upstream_error_body"))
+                    .await;
+                let err = UpstreamError::Unauthorized {
+                    status: StatusCode::UNAUTHORIZED,
+                    // Body-sensitive signers see the upstream body when it was
+                    // fully read inside the collection bound; a stalled or
+                    // oversized body surfaces as `None` instead of blocking
+                    // the refresh/failover decision.
+                    body: unauthorized.body.clone(),
                 };
+                let RetryDecision::Refresh { new_signer } = signer
+                    .on_unauthorized(&err)
+                    .instrument(tracing::info_span!("proxy.refresh_signer"))
+                    .await
+                else {
+                    if let Some(next) = failover.next(self, &routed, FailoverReason::Unauthorized) {
+                        routed = next;
+                        continue;
+                    }
+                    return Ok(self.relay_unauthorized(
+                        unauthorized,
+                        signer.as_ref(),
+                        active_limit.as_ref(),
+                        observer.as_ref(),
+                        &attempt_timings,
+                    ));
+                };
+                announce_attempt(
+                    observer.as_ref(),
+                    &mut attempt_num,
+                    routed.route.upstream_id,
+                    &mut attempt_timings,
+                    Some(dispatch_started),
+                );
                 response = match self
-                    .attempt(
-                        self.dispatcher.as_ref(),
-                        retry_attempt_scope,
+                    .run_upstream_attempt(
+                        reserved.as_ref(),
                         &ctx,
                         &principal,
-                        &route,
-                        raw_passthrough_base_url.as_ref(),
-                        new_signer,
+                        &routed,
+                        new_signer.clone(),
                         observer.as_ref(),
                         &mut attempt_timings,
-                        if track_keepalive_response {
-                            &mut keepalive_shaped_body
-                        } else {
-                            &mut keepalive_discard_shaped_body
-                        },
+                        &mut keepalive_shaped_body,
                     )
                     .await
                 {
-                    Ok(response) => {
-                        if let Some(o) = observer.as_ref() {
-                            o.set_attempt_timings(
-                                attempt_timings.shape_ms,
-                                attempt_timings.sign_ms,
-                                attempt_timings.upstream_ttfb_ms,
-                            );
-                        }
-                        if let Some(o) = observer.as_ref() {
-                            o.emit_lifecycle(
-                                cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
-                                    event_id: o.event_id().to_owned(),
-                                    status: response.status().as_u16(),
-                                    headers: header_snapshot_from(response.headers()),
-                                    bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
-                                    dns_ms: attempt_timings.dns_ms,
-                                    connect_ms: attempt_timings.connect_ms,
-                                    connection_reused: attempt_timings.connection_reused,
-                                    shape_ms: attempt_timings.shape_ms,
-                                    sign_ms: attempt_timings.sign_ms,
-                                    upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
-                                },
-                            );
-                        }
-                        response
-                    }
+                    Ok(response) => response,
                     Err(failure) => {
-                        let (mut response, failure) = failure.into_response_and_failure();
-                        self.attach_limit_headers(&mut response, active_limit.as_ref());
-                        if let Some(o) = observer.as_ref() {
-                            o.set_attempt_timings(
-                                attempt_timings.shape_ms,
-                                attempt_timings.sign_ms,
-                                attempt_timings.upstream_ttfb_ms,
-                            );
-                            o.set_attempt_connection_timings(
-                                attempt_timings.dns_ms,
-                                attempt_timings.connect_ms,
-                                attempt_timings.connection_reused,
-                            );
-                            o.terminate_failure(failure);
+                        if matches!(failure, AttemptFailure::Sign(_))
+                            && let Some(next) = failover.next(self, &routed, FailoverReason::Sign)
+                        {
+                            routed = next;
+                            continue;
                         }
-                        return Ok(response);
+                        return Ok(self.relay_attempt_failure(
+                            failure,
+                            active_limit.as_ref(),
+                            observer.as_ref(),
+                            &attempt_timings,
+                        ));
                     }
                 };
-            } else {
-                if let Some(o) = observer.as_ref()
-                    && let Ok(Some(error_body)) = decode_full_body(
-                        &unauthorized.headers,
-                        &unauthorized.body,
-                        decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
-                    )
-                    && !error_body.is_empty()
+                // Everything the refreshed attempt returns is scrubbed with
+                // the signer that produced it.
+                signer = new_signer;
+                if response.status() == StatusCode::UNAUTHORIZED
+                    && let Some(next) = failover.next(self, &routed, FailoverReason::Unauthorized)
                 {
-                    let (error_type, error_message) =
-                        usage_parser::observe_http_error_body(&error_body)
-                            .map(usage_parser::CanonicalUpstreamError::into_parts)
-                            .unwrap_or_default();
-                    o.emit_lifecycle(
-                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                            event_id: o.event_id().to_owned(),
-                            error_type: error_type.unwrap_or_default(),
-                            error_message: error_message.unwrap_or_else(|| {
-                                bounded_lossy_upstream_error_body(&error_body, false)
-                            }),
-                        },
-                    );
+                    // Never read a discarded body: its size and pace are
+                    // upstream-controlled. Dropping it closes the connection.
+                    drop(response);
+                    routed = next;
+                    continue;
                 }
-                let mut response = response_from_collected(unauthorized);
-                self.attach_limit_headers(&mut response, active_limit.as_ref());
-                let status = response.status();
-                if let Some(o) = observer.as_ref() {
-                    o.set_attempt_timings(
-                        attempt_timings.shape_ms,
-                        attempt_timings.sign_ms,
-                        attempt_timings.upstream_ttfb_ms,
-                    );
-                    let code = if status.is_client_error() {
-                        UpstreamErrorCode::Upstream4xx
-                    } else {
-                        UpstreamErrorCode::Upstream5xx
-                    };
-                    o.set_upstream_error(status, code);
-                    o.finish();
-                }
-                return Ok(response);
             }
-        }
 
+            if response.status() == StatusCode::TOO_MANY_REQUESTS
+                && let Some(next) = failover.next(self, &routed, FailoverReason::RateLimited)
+            {
+                // Never read a discarded body: its size and pace are
+                // upstream-controlled. Dropping it closes the connection.
+                drop(response);
+                routed = next;
+                continue;
+            }
+            break (response, dispatch_started, dispatch_unix_secs, signer);
+        };
+
+        let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
+        let resolved_upstream_id = routed.route.upstream_id;
+        let prompt_cache_observation_context = prompt_cache_observation_context(
+            &view,
+            resolved_upstream_id,
+            &ctx.canonical_model_id,
+            &ctx.cache_breakpoints,
+            &cache_metadata.cacheable_breakpoint_prefix_keys,
+            routed.selected_cache_match.take(),
+        );
         let status = response.status();
-        let keepalive_completion = keepalive_shaped_body.take().map(|shaped_body| {
+        let keepalive_shaped_body = if track_keepalive_response {
+            keepalive_shaped_body
+        } else {
+            None
+        };
+        let keepalive_completion = keepalive_shaped_body.map(|shaped_body| {
             crate::cache_keepalive::LifecycleKeepaliveContext {
                 principal: principal.clone(),
                 accounting_key_id: success.key_id.clone(),
@@ -3550,6 +3460,7 @@ impl Lifecycle {
         response = self
             .finish_success_response(
                 response,
+                signer,
                 active_limit.take(),
                 reserved.map(|reserved| reserved.into_response_accounting_guard()),
                 started.elapsed(),
@@ -3557,17 +3468,17 @@ impl Lifecycle {
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
                     canonical_model_id: ctx.canonical_model_id.clone(),
-                    upstream_name: router_chosen_upstream_name.clone(),
+                    upstream_name: routed.record.name.clone(),
                     requested_model: body_view.model(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                 },
                 ResponseTransformContext {
                     principal: principal.clone(),
-                    upstream: route.upstream.clone(),
+                    upstream: routed.route.upstream.clone(),
                     request_method: ctx.method.clone(),
                     request_path: ctx.path.clone(),
-                    dialect: route.dialect.clone(),
+                    dialect: routed.route.dialect.clone(),
                 },
                 prompt_cache_observation_context,
                 response_affinity_context,
@@ -3699,6 +3610,7 @@ impl Lifecycle {
     async fn finish_success_response(
         &self,
         response: Response<Body>,
+        signer: Arc<dyn Signer>,
         active_limit: Option<ActiveLimit>,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         duration: Duration,
@@ -3721,6 +3633,7 @@ impl Lifecycle {
             let response_status = response.status();
             let mut response = self.relay_response(
                 response,
+                signer,
                 response_status,
                 response_accounting_guard,
                 event_ctx.clone(),
@@ -3850,19 +3763,20 @@ impl Lifecycle {
         } else {
             None
         };
+        // Provider error text can echo the credential; the parser masks it
+        // before its store cap so a secret split by the cap cannot survive.
+        // Successful responses never get here.
         let (upstream_error_type, parsed_upstream_message) = canonical_upstream_error
-            .map(usage_parser::CanonicalUpstreamError::into_parts)
+            .map(|error| error.into_parts(signer.as_ref()))
             .unwrap_or_default();
-        let upstream_error_message = parsed_upstream_message.or_else(|| {
-            if status.is_client_error() || status.is_server_error() {
-                semantic_body
-                    .as_ref()
-                    .filter(|body| !body.is_empty())
-                    .map(|body| bounded_lossy_upstream_error_body(body, false))
-            } else {
-                None
-            }
-        });
+        let upstream_error_message = match parsed_upstream_message {
+            Some(message) => Some(message),
+            None if status.is_client_error() || status.is_server_error() => semantic_body
+                .as_ref()
+                .filter(|body| !body.is_empty())
+                .map(|body| scrubbed_upstream_error_body(signer.as_ref(), body, false)),
+            None => None,
+        };
         let mut downstream_body = if body_collect_failed {
             parts.status = StatusCode::BAD_GATEWAY;
             parts.headers.clear();
@@ -4100,6 +4014,139 @@ impl Lifecycle {
             numeric_attribute(Some(finalize_ms)).as_value(),
         );
         Response::from_parts(parts, Body::from(downstream_body))
+    }
+
+    /// Dispatch one attempt to `routed` (already announced with
+    /// `UpstreamAttempt`), and on a response emit `UpstreamResponseStarted` so
+    /// header subscribers ingest it even when the attempt later fails over.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_upstream_attempt(
+        &self,
+        reserved: Option<&Reserved>,
+        ctx: &RequestContext,
+        principal: &Principal,
+        routed: &RoutedUpstream<'_>,
+        signer: Arc<dyn Signer>,
+        observer: Option<&LifecycleContext>,
+        attempt_timings: &mut AttemptTimings,
+        shaped_body_out: &mut Option<Bytes>,
+    ) -> Result<Response<Body>, AttemptFailure> {
+        let attempt_scope = match reserved {
+            Some(reserved) => reserved.begin_attempt(),
+            None => Scoped::unreserved_for_lifecycle(),
+        };
+        let response = self
+            .attempt(
+                self.dispatcher.as_ref(),
+                attempt_scope,
+                ctx,
+                principal,
+                &routed.route,
+                routed.raw_passthrough_base_url.as_ref(),
+                signer,
+                observer,
+                attempt_timings,
+                shaped_body_out,
+            )
+            .await?;
+        if let Some(o) = observer {
+            o.set_attempt_timings(
+                attempt_timings.shape_ms,
+                attempt_timings.sign_ms,
+                attempt_timings.upstream_ttfb_ms,
+            );
+            o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
+                event_id: o.event_id().to_owned(),
+                status: response.status().as_u16(),
+                headers: header_snapshot_from(response.headers()),
+                bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
+                dns_ms: attempt_timings.dns_ms,
+                connect_ms: attempt_timings.connect_ms,
+                connection_reused: attempt_timings.connection_reused,
+                shape_ms: attempt_timings.shape_ms,
+                sign_ms: attempt_timings.sign_ms,
+                upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
+            });
+        }
+        Ok(response)
+    }
+
+    /// Terminal relay of a failed attempt that is not failed over.
+    fn relay_attempt_failure(
+        &self,
+        failure: AttemptFailure,
+        active_limit: Option<&ActiveLimit>,
+        observer: Option<&LifecycleContext>,
+        attempt_timings: &AttemptTimings,
+    ) -> Response<Body> {
+        let (mut response, failure) = failure.into_response_and_failure();
+        self.attach_limit_headers(&mut response, active_limit);
+        if let Some(o) = observer {
+            o.set_attempt_timings(
+                attempt_timings.shape_ms,
+                attempt_timings.sign_ms,
+                attempt_timings.upstream_ttfb_ms,
+            );
+            o.set_attempt_connection_timings(
+                attempt_timings.dns_ms,
+                attempt_timings.connect_ms,
+                attempt_timings.connection_reused,
+            );
+            o.terminate_failure(failure);
+        }
+        response
+    }
+
+    /// Terminal relay of an upstream 401 whose signer declined to refresh and
+    /// that is not failed over.
+    fn relay_unauthorized(
+        &self,
+        unauthorized: CollectedResponse,
+        signer: &dyn Signer,
+        active_limit: Option<&ActiveLimit>,
+        observer: Option<&LifecycleContext>,
+        attempt_timings: &AttemptTimings,
+    ) -> Response<Body> {
+        if let (Some(o), Some(body)) = (observer, unauthorized.body.as_deref())
+            && let Ok(Some(error_body)) = decode_full_body(
+                &unauthorized.headers,
+                body,
+                decompression_output_budget_bytes(self.config.messages_body_cap_bytes),
+            )
+            && !error_body.is_empty()
+        {
+            let (error_type, error_message) = usage_parser::observe_http_error_body(&error_body)
+                .map(|error| error.into_parts(signer))
+                .unwrap_or_default();
+            o.emit_lifecycle(
+                cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                    event_id: o.event_id().to_owned(),
+                    error_type: error_type.unwrap_or_default(),
+                    error_message: match error_message {
+                        Some(message) => message,
+                        None => scrubbed_upstream_error_body(signer, &error_body, false),
+                    },
+                },
+            );
+        }
+        let mut response = response_from_collected(unauthorized);
+        self.attach_limit_headers(&mut response, active_limit);
+        let status = response.status();
+        if let Some(o) = observer {
+            o.set_attempt_timings(
+                attempt_timings.shape_ms,
+                attempt_timings.sign_ms,
+                attempt_timings.upstream_ttfb_ms,
+            );
+            let code = if status.is_client_error() {
+                UpstreamErrorCode::Upstream4xx
+            } else {
+                UpstreamErrorCode::Upstream5xx
+            };
+            o.set_upstream_error(status, code);
+            o.finish();
+        }
+        response
     }
 
     fn emit_routing_failure_event(
@@ -4385,6 +4432,7 @@ impl Lifecycle {
     fn relay_response(
         &self,
         response: Response<Body>,
+        signer: Arc<dyn Signer>,
         status: StatusCode,
         response_accounting_guard: Option<ResponseAccountingGuard>,
         event_ctx: RequestEventContext,
@@ -4792,7 +4840,7 @@ impl Lifecycle {
                                 let usage_update =
                                     accumulate_sse_usage(&parsed_event, &mut usage);
                                 if let Some(err) =
-                                    usage_parser::detect_mid_stream_error(&parsed_event)
+                                    usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                                 {
                                     stream_provider_error_seen = true;
                                     downstream_drop_guard.mark_upstream_error(
@@ -4801,10 +4849,7 @@ impl Lifecycle {
                                     );
                                     if let Some(o) = observer.as_ref() {
                                         let error = cc_lb_lifecycle::StreamError {
-                                            error_type: err
-                                                .error_type
-                                                .clone()
-                                                .unwrap_or_default(),
+                                            error_type: err.error_type.clone().unwrap_or_default(),
                                             error_message: err
                                                 .error_message
                                                 .clone()
@@ -5479,7 +5524,7 @@ impl Lifecycle {
                             }
                             keepalive_response.observe(&parsed_event);
                             if let Some(err) =
-                                usage_parser::detect_mid_stream_error(&parsed_event)
+                                usage_parser::detect_mid_stream_error(&parsed_event, signer.as_ref())
                             {
                                 stream_provider_error_seen = true;
                                 downstream_drop_guard.mark_upstream_error(
@@ -5489,7 +5534,10 @@ impl Lifecycle {
                                 if let Some(o) = observer.as_ref() {
                                     let error = cc_lb_lifecycle::StreamError {
                                         error_type: err.error_type.clone().unwrap_or_default(),
-                                        error_message: err.error_message.clone().unwrap_or_default(),
+                                        error_message: err
+                                            .error_message
+                                            .clone()
+                                            .unwrap_or_default(),
                                     };
                                     o.emit_lifecycle(
                                         cc_lb_lifecycle::LifecycleEvent::StreamCompleted {
@@ -5985,14 +6033,19 @@ impl Lifecycle {
                     && !upstream_error_body.is_empty()
                 {
                     let (error_type, message) = usage_parser::observe_http_error_body(&upstream_error_body)
-                        .map(usage_parser::CanonicalUpstreamError::into_parts)
+                        .map(|error| error.into_parts(signer.as_ref()))
                         .unwrap_or_default();
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                         event_id: o.event_id().to_owned(),
                         error_type: error_type.unwrap_or_default(),
-                        error_message: message.unwrap_or_else(|| bounded_lossy_upstream_error_body(
-                            &upstream_error_body, upstream_error_body_truncated,
-                        )),
+                        error_message: match message {
+                            Some(message) => message,
+                            None => scrubbed_upstream_error_body(
+                                signer.as_ref(),
+                                &upstream_error_body,
+                                upstream_error_body_truncated,
+                            ),
+                        },
                     });
                 }
                 if stream_affinity_error.is_some() && !upstream_error_status {
@@ -6324,15 +6377,36 @@ fn terminal_candidates(
 struct CollectedResponse {
     status: StatusCode,
     headers: HeaderMap,
-    body: Bytes,
+    /// The upstream body, or `None` when it could not be read to EOF within
+    /// [`ERROR_BODY_COLLECT_CAP_BYTES`] and [`ERROR_BODY_COLLECT_DEADLINE`].
+    /// `None` means "no trustworthy body"; it is never a truncated prefix.
+    body: Option<Bytes>,
+}
+
+/// Deadline for reading a discarded upstream error body to EOF. A stalled
+/// body must not hold the refresh/failover decision (and with it the rest of
+/// the request timeout) hostage; the bound is short because the terminal
+/// relay regenerates a response when the body never arrives.
+const ERROR_BODY_COLLECT_DEADLINE: Duration = Duration::from_secs(10);
+/// Byte cap for the same read. Bodies that cannot be relayed completely are
+/// never relayed at all, so the cap only bounds how much memory a partial
+/// read may hold before it is dropped: the stored-sink collection bound
+/// already used for upstream error text.
+const ERROR_BODY_COLLECT_CAP_BYTES: usize = REQUEST_LOG_UPSTREAM_ERROR_BODY_COLLECT_BYTES;
+
+async fn collect_terminal_error_body(body: Body) -> Option<Bytes> {
+    let collected = tokio::time::timeout(
+        ERROR_BODY_COLLECT_DEADLINE,
+        http_body_util::Limited::new(body, ERROR_BODY_COLLECT_CAP_BYTES).collect(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    Some(collected.to_bytes())
 }
 
 async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
     let (parts, body) = response.into_parts();
-    let body = match body.collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_source) => Bytes::new(),
-    };
     CollectedResponse {
         status: parts.status,
         headers: {
@@ -6340,12 +6414,22 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
             strip_hop_by_hop(&mut headers);
             headers
         },
-        body,
+        body: collect_terminal_error_body(body).await,
     }
 }
 
 fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
-    let mut response = Response::new(Body::from(collected.body));
+    let Some(body) = collected.body else {
+        // A stalled, truncated, or failed upstream body is never relayed in
+        // part; the relayed status stays honest instead of echoing the
+        // upstream code next to proxy-generated bytes.
+        return anthropic_error_response(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE,
+        );
+    };
+    let mut response = Response::new(Body::from(body));
     *response.status_mut() = collected.status;
     *response.headers_mut() = collected.headers;
     response
@@ -6702,6 +6786,141 @@ fn prompt_cache_token_scope(headers: &HeaderMap) -> [u8; 32] {
         hasher.update(b"unauthenticated");
     }
     *hasher.finalize().as_bytes()
+}
+
+#[cfg(test)]
+mod upstream_error_scrub_tests {
+    use cc_lb_signer_anthropic_key::AnthropicKeySigner;
+
+    use super::*;
+
+    const KEY: &str = "sk-ant-api03-CANARYc4n4ry0123456789abcdefABCDEF-AAAA";
+    const MARKER: &str = REQUEST_LOG_UPSTREAM_ERROR_BODY_TRUNCATION_MARKER;
+
+    fn signer() -> AnthropicKeySigner {
+        AnthropicKeySigner::new(KEY, None).expect("signer")
+    }
+
+    fn assert_no_key_fragment(stored: &str) {
+        for fragment in KEY.as_bytes().windows(12) {
+            let fragment = std::str::from_utf8(fragment).expect("ascii key");
+            assert!(
+                !stored.contains(fragment),
+                "stored text keeps key fragment {fragment:?}"
+            );
+        }
+    }
+
+    /// Feeds `body` through the streaming collector in small chunks, the way
+    /// the relay does, and renders the stored text.
+    fn collected_and_stored(body: &[u8]) -> String {
+        let mut collected = Vec::new();
+        let mut truncated = false;
+        for chunk in body.chunks(97) {
+            append_bounded_upstream_error_body(&mut collected, chunk, &mut truncated);
+        }
+        scrubbed_upstream_error_body(&signer(), &collected, truncated)
+    }
+
+    fn body_with_key_at(offset: usize, total: usize) -> Vec<u8> {
+        let mut body = vec![b'x'; offset];
+        body.extend_from_slice(KEY.as_bytes());
+        body.resize(total.max(body.len()), b'y');
+        body
+    }
+
+    /// SEC-13: a key at the start, middle, end, or straddling the store cap is
+    /// masked before truncation, on both the buffered and streaming paths.
+    #[test]
+    fn sec_13_key_anywhere_before_cap_leaves_no_fragment() {
+        let cap = REQUEST_LOG_UPSTREAM_ERROR_BODY_MAX_BYTES;
+        let total = cap + 4 * 1024;
+        for offset in [
+            0,
+            cap / 2,
+            cap - MARKER.len() - 20,
+            cap - 20,
+            cap - 1,
+            cap + 100,
+        ] {
+            let body = body_with_key_at(offset, total);
+            for stored in [
+                collected_and_stored(&body),
+                scrubbed_upstream_error_body(&signer(), &body, false),
+            ] {
+                assert!(stored.len() <= cap, "offset {offset}: {}", stored.len());
+                assert!(stored.ends_with(MARKER), "offset {offset}");
+                assert_no_key_fragment(&stored);
+            }
+        }
+    }
+
+    /// SEC-13: a short error body that echoes the key twice keeps its text
+    /// but loses both copies, with no truncation marker.
+    #[test]
+    fn sec_13_repeated_key_in_short_body_is_masked() {
+        let body = format!(r#"{{"error":"bad key {KEY} (again: {KEY})"}}"#);
+
+        let stored = collected_and_stored(body.as_bytes());
+
+        assert_eq!(
+            stored,
+            r#"{"error":"bad key [REDACTED] (again: [REDACTED])"}"#
+        );
+    }
+
+    /// SEC-14 (unit): provider text without the key is handed back unchanged,
+    /// and a key in the structured message is masked.
+    #[test]
+    fn sec_14_structured_message_is_masked_and_clean_text_kept() {
+        let clean = br#"{"error":{"type":"rate_limit_error","message":"rate limit exceeded"}}"#;
+        let echoed = format!(r#"{{"error":{{"type":"auth","message":"echo {KEY}"}}}}"#);
+
+        let clean = usage_parser::observe_http_error_body(clean)
+            .map(|error| error.into_parts(&signer()))
+            .unwrap_or_default();
+        let echoed = usage_parser::observe_http_error_body(echoed.as_bytes())
+            .map(|error| error.into_parts(&signer()))
+            .unwrap_or_default();
+
+        assert_eq!(clean.1.as_deref(), Some("rate limit exceeded"));
+        assert_eq!(echoed.1.as_deref(), Some("echo [REDACTED]"));
+    }
+
+    fn message_with_key_at(offset: usize) -> String {
+        let mut message = "m".repeat(offset);
+        message.push_str(KEY);
+        message.push_str(&"t".repeat(2048));
+        message
+    }
+
+    /// SEC-13: a key inside a structured `error.message`, at or straddling
+    /// the 1024-byte message cap, is masked before the cap on the buffered,
+    /// unauthorized, and mid-stream paths.
+    #[test]
+    fn sec_13_structured_message_key_at_cap_leaves_no_fragment() {
+        for offset in [0, 1000, 1010, 1015, 1020, 1021, 1023, 1030] {
+            let message = message_with_key_at(offset);
+            let body = serde_json::json!({
+                "type": "error",
+                "error": { "type": "invalid_request_error", "message": message },
+            })
+            .to_string();
+            let (_, buffered) = usage_parser::observe_http_error_body(body.as_bytes())
+                .map(|error| error.into_parts(&signer()))
+                .unwrap_or_default();
+            let raw = format!("event: error\ndata: {body}\n\n");
+            let event = parse_sse_event(raw.as_bytes());
+            let streamed = usage_parser::detect_mid_stream_error(&event, &signer())
+                .and_then(|error| error.error_message);
+            for stored in [buffered, streamed] {
+                let stored = stored.expect("message extracted");
+                assert!(stored.len() <= 1024, "offset {offset}: {}", stored.len());
+                assert!(stored.ends_with("..."), "offset {offset}");
+                assert_no_key_fragment(&stored);
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod prompt_cache_token_scope_tests {
@@ -7237,6 +7456,323 @@ fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKi
     match kind {
         StorageUpstreamKind::AnthropicApiKey => CandidateUpstreamKind::AnthropicApiKey,
         StorageUpstreamKind::AnthropicOauth => CandidateUpstreamKind::AnthropicOauth,
+    }
+}
+
+fn storage_upstream_kind_label(kind: StorageUpstreamKind) -> &'static str {
+    match kind {
+        StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
+        StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
+    }
+}
+
+/// Distinct upstreams one request may try, counting the first. The
+/// same-upstream 401 refresh retry does not count against it.
+const MAX_UPSTREAM_ATTEMPTS: u8 = 3;
+
+/// Why an attempt moved to another upstream. Every reason is a failure that
+/// happened before the upstream processed the request, so retrying elsewhere
+/// cannot duplicate a generation.
+#[derive(Clone, Copy, Debug)]
+enum FailoverReason {
+    SignerBuild,
+    Sign,
+    Unauthorized,
+    RateLimited,
+}
+
+impl FailoverReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SignerBuild => "signer_build_failed",
+            Self::Sign => "sign_failed",
+            Self::Unauthorized => "upstream_401",
+            Self::RateLimited => "upstream_429",
+        }
+    }
+}
+
+/// One routing decision: the selected upstream and the trace data that
+/// `RouteCompleted` reports for it.
+struct RoutedUpstream<'v> {
+    record: &'v UpstreamRecord,
+    route: RouteDecision,
+    raw_passthrough_base_url: Option<Url>,
+    routing_trace: RoutingTrace,
+    selected_cache_score: Option<CacheScore>,
+    selected_cache_match: Option<SelectedCacheMatch>,
+    route_ms: u64,
+}
+
+impl<'v> RoutedUpstream<'v> {
+    fn new(
+        record: &'v UpstreamRecord,
+        route: RouteDecision,
+        raw_passthrough_base_url: Option<Url>,
+        pipeline_result: &FilterPipelineResult,
+        terminal_decision: TerminalDecision,
+        selected_cache_match: Option<SelectedCacheMatch>,
+        route_ms: u64,
+    ) -> Self {
+        let selected_cache_score = pipeline_result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.upstream_id == route.upstream_id)
+            .and_then(|candidate| candidate.cache_score.clone());
+        Self {
+            record,
+            route,
+            raw_passthrough_base_url,
+            routing_trace: pipeline_result.routing_trace(terminal_decision),
+            selected_cache_score,
+            selected_cache_match,
+            route_ms,
+        }
+    }
+}
+
+fn route_for_record(
+    record: &UpstreamRecord,
+    cached: &PrincipalSpecCached,
+) -> Result<(RouteDecision, Option<Url>), String> {
+    let raw_passthrough_base_url = record.base_url.clone();
+    let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
+        base_url: raw_passthrough_base_url
+            .clone()
+            .unwrap_or_else(default_anthropic_base_url),
+    });
+    let upstream = upstream_for_record(record)?;
+    let dialect = cached.resolved_dialect(&route_dialect).clone();
+    Ok((
+        RouteDecision {
+            upstream_id: record.id,
+            upstream,
+            dialect,
+        },
+        raw_passthrough_base_url,
+    ))
+}
+
+/// Emit `RouteCompleted` for `routed`. A failover emits it again for the next
+/// upstream; the request-event assembler keeps the last one.
+fn emit_route_completed(
+    observer: Option<&LifecycleContext>,
+    routed: &RoutedUpstream<'_>,
+    body_view: &RequestBodyView,
+) {
+    let Some(o) = observer else {
+        return;
+    };
+    let upstream_id = routed.route.upstream_id;
+    let selected_cache_score = routed.selected_cache_score.as_ref();
+    let selected_quota_candidate = resolved_candidate_urgency(&routed.routing_trace, upstream_id);
+    let subscription_trace = subscription_preference_trace(&routed.routing_trace);
+    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+        event_id: o.event_id().to_owned(),
+        result: Ok(cc_lb_lifecycle::RouteInfo {
+            upstream_id,
+            upstream_name: routed.record.name.clone(),
+            model: body_view.model(),
+            upstream_kind: Some(storage_upstream_kind_label(routed.record.kind).to_owned()),
+            route_ms: Some(routed.route_ms),
+            routing_trace: Some(routed.routing_trace.clone()),
+            predicted_cache_read_tokens: Some(
+                selected_cache_score.map_or(0, |score| score.predicted_cache_read_tokens),
+            ),
+            matched_v3_cache_key: selected_cache_score
+                .and_then(|score| score.matched_v3_cache_key.clone()),
+            breakpoint_content_block_index: selected_cache_score
+                .and_then(|score| score.breakpoint_content_block_index),
+            matched_content_block_index: selected_cache_score
+                .and_then(|score| score.matched_content_block_index),
+            lookback_distance: selected_cache_score.and_then(|score| score.lookback_distance),
+            predicted_cache_creation_tokens_5m: selected_cache_score
+                .map(|score| score.predicted_cache_creation_tokens_5m),
+            predicted_cache_creation_tokens_1h: selected_cache_score
+                .map(|score| score.predicted_cache_creation_tokens_1h),
+            token_estimate_source: selected_cache_score
+                .and_then(|score| score.token_estimate_source.clone()),
+            cache_value_micros: subscription_trace.and_then(|trace| {
+                trace
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.upstream_id == upstream_id)
+                    .and_then(|candidate| candidate.cache_value_micros)
+            }),
+            formula_winner_upstream_id: subscription_trace
+                .and_then(|trace| trace.formula_winner_upstream_id),
+            kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
+            quota_urgency_5h: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_5h),
+            quota_urgency_7d: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_7d),
+            quota_urgency_combined: selected_quota_candidate
+                .and_then(|candidate| candidate.quota_urgency_combined),
+            quota_warning_multiplier: selected_quota_candidate
+                .map(|candidate| candidate.warning_multiplier),
+        }),
+        routing_trace: Some(routed.routing_trace.clone()),
+    });
+}
+
+/// Re-routes a request after a failover-eligible failure. Re-runs the
+/// principal's filter pipeline over fresh candidates minus every upstream
+/// already tried, so one routing convention covers the first pick and each
+/// fallback.
+struct FailoverRouter<'a> {
+    view: &'a DynamicView,
+    cached: &'a PrincipalSpecCached,
+    router_pipeline: &'a RouterPipelineCache,
+    ctx: &'a RequestContext,
+    principal: &'a Principal,
+    warm_entries: &'a HashMap<Uuid, Vec<WarmCacheEntry>>,
+    observer: Option<&'a LifecycleContext>,
+    handle_span: &'a tracing::Span,
+    /// False when request affinity pins the upstream (web-search continuity
+    /// is account-bound).
+    enabled: bool,
+    excluded: Vec<Uuid>,
+    upstream_attempts: u8,
+}
+
+impl<'a> FailoverRouter<'a> {
+    /// Routes to the next upstream, or returns `None` when the caller must
+    /// relay the current failure. The caller announces the new route.
+    fn next(
+        &mut self,
+        lifecycle: &Lifecycle,
+        failed: &RoutedUpstream<'_>,
+        reason: FailoverReason,
+    ) -> Option<RoutedUpstream<'a>> {
+        if !self.enabled || self.upstream_attempts >= MAX_UPSTREAM_ATTEMPTS {
+            return None;
+        }
+        let failed_id = failed.route.upstream_id;
+        if !self.excluded.contains(&failed_id) {
+            self.excluded.push(failed_id);
+        }
+        let route_start = Instant::now();
+        let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
+            self.view,
+            &self.principal.id,
+            RequestKind::AnthropicMessages,
+            &self.ctx.cache_breakpoints,
+            self.warm_entries,
+            &*lifecycle.clock,
+        );
+        candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
+        // The last allowed attempt goes to an API key when one remains, so
+        // the attempt cap never strands a request on exhausted OAuth accounts.
+        let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+        if last_attempt
+            && candidates
+                .iter()
+                .any(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey)
+        {
+            candidates.retain(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey);
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut pipeline_result = execute_filter_pipeline(
+            &self.router_pipeline.user_filters,
+            self.ctx,
+            self.principal,
+            candidates,
+        );
+        if let Some(o) = self.observer {
+            for error in pipeline_result.internal_errors.drain(..) {
+                o.record_internal_error(error);
+            }
+        }
+        let terminal_decision = lifecycle.select_terminal_upstream(
+            self.router_pipeline.terminal.clone(),
+            &pipeline_result.candidates,
+        );
+        let upstream_id = terminal_decision.upstream_id.filter(|upstream_id| {
+            pipeline_result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.upstream_id == *upstream_id)
+        })?;
+        let record = self
+            .view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == upstream_id)?;
+        let (route, raw_passthrough_base_url) = match route_for_record(record, self.cached) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(
+                    upstream = %record.name,
+                    %error,
+                    "failover target has no upstream route; relaying the current failure"
+                );
+                return None;
+            }
+        };
+        self.upstream_attempts += 1;
+        let routed = RoutedUpstream::new(
+            record,
+            route,
+            raw_passthrough_base_url,
+            &pipeline_result,
+            terminal_decision,
+            selected_cache_matches.remove(&upstream_id),
+            duration_to_ms(route_start.elapsed()),
+        );
+        tracing::warn!(
+            from_upstream = %failed.record.name,
+            from_upstream_id = %failed_id,
+            to_upstream = %record.name,
+            to_upstream_id = %upstream_id,
+            reason = reason.as_str(),
+            "failing over to another upstream"
+        );
+        metrics::counter!(
+            "cc_lb_upstream_failover_total",
+            "reason" => reason.as_str(),
+            "from_kind" => storage_upstream_kind_label(failed.record.kind),
+            "to_kind" => storage_upstream_kind_label(record.kind)
+        )
+        .increment(1);
+        self.handle_span
+            .record("cc_lb.upstream.name", record.name.as_str());
+        self.handle_span
+            .record("cc_lb.upstream.id", tracing::field::display(upstream_id));
+        Some(routed)
+    }
+}
+
+/// Start the next attempt: clear the previous attempt's observations (the
+/// assembler resets on `UpstreamAttempt` with `attempt_num > 1`), then
+/// announce the upstream. The first dispatch stays the TTFB origin.
+fn announce_attempt(
+    observer: Option<&LifecycleContext>,
+    attempt_num: &mut u32,
+    upstream_id: Uuid,
+    attempt_timings: &mut AttemptTimings,
+    first_dispatch_started: Option<Instant>,
+) {
+    if *attempt_num > 0 {
+        attempt_timings.reset_attempt_stages();
+        if let Some(o) = observer {
+            o.reset_attempt_timings();
+            if let Some(dispatch_started) = first_dispatch_started {
+                o.set_io_timings(cc_lb_lifecycle::RequestIoTimings {
+                    retry_overhead_ms: Some(dispatch_started.elapsed().as_secs_f64() * 1_000.0),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    *attempt_num += 1;
+    if let Some(o) = observer {
+        o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamAttempt {
+            event_id: o.event_id().to_owned(),
+            attempt_num: *attempt_num,
+            upstream_id,
+        });
     }
 }
 

@@ -2,6 +2,8 @@
 mod admin_test_common;
 #[path = "admin_warmup_endpoints.rs"]
 mod admin_warmup_endpoints;
+#[path = "api_key_support.rs"]
+mod api_key_support;
 #[path = "audit_actor.rs"]
 mod audit_actor;
 
@@ -102,5 +104,9 @@ mod v1_status;
 mod v1_synchronous_rebind;
 #[path = "v1_upstreams.rs"]
 mod v1_upstreams;
+#[path = "v1_upstreams_api_key_read.rs"]
+mod v1_upstreams_api_key_read;
+#[path = "v1_upstreams_api_key_write.rs"]
+mod v1_upstreams_api_key_write;
 #[path = "wasm_upload.rs"]
 mod wasm_upload;

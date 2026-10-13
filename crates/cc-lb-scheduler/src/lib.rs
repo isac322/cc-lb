@@ -2,8 +2,8 @@
 //!
 //! Cluster-safe cron scheduling is achieved via storage-level idempotency-key
 //! deduplication, following the maintainer-recommended pattern from
-//! <https://github.com/apalis-dev/apalis/issues/281>. Every replica runs its
-//! own `CronStream`; duplicate pushes collide on the unique
+//! <https://github.com/apalis-dev/apalis/issues/281>. Every replica drives its
+//! own `Schedule`; duplicate pushes collide on the unique
 //! `(job_type, idempotency_key)` index so exactly one job per tick is queued.
 
 pub mod admin;

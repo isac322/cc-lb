@@ -29,6 +29,7 @@ use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 
 use cc_lb_clock::ClockHandle;
 use cc_lb_control::RequestEventBus;
+use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
 use cc_lb_control::{
     DynamicView, DynamicViewHolder,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
@@ -119,6 +120,8 @@ pub struct AdminState {
     pub event_bus: Option<Arc<dyn RequestEventBus>>,
     pub storage_tail: tokio::sync::broadcast::Sender<events::StorageTailUpdate>,
     pub clock: ClockHandle,
+    /// Org Admin API origin and probe bounds for API-key upstreams.
+    pub anthropic_org_api: AnthropicOrgApi,
 }
 
 pub fn router(state: AdminState) -> Router {

@@ -22,6 +22,11 @@ expression: "SchedulerConfig::default()"
       "interval_secs": 3600,
       "jitter_secs": 30
     },
+    "api_key_usage_poll": {
+      "enabled": true,
+      "interval_secs": 300,
+      "jitter_secs": 15
+    },
     "oauth_refresh_watchdog": {
       "enabled": true,
       "interval_secs": 9360,

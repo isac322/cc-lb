@@ -7,6 +7,7 @@ mod context;
 mod error;
 mod request;
 mod retry;
+mod scrub;
 mod traits;
 mod transform;
 
@@ -17,6 +18,7 @@ pub use request::{
     sign_request,
 };
 pub use retry::RetryDecision;
+pub use scrub::scrub_secret;
 pub use traits::{ApiKeyAwareSignerFactory, Signer, SignerFactory, UpstreamDialect};
 pub use transform::{
     ResponseTransformHook, SseEvent, SseEventTransformHook, TransformResponseRequest,

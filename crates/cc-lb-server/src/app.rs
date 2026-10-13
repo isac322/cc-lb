@@ -22,6 +22,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_clock::ClockHandle;
 use cc_lb_config::{Config, TlsConfig};
 use cc_lb_control::PromptCacheObservationSinkLike;
+use cc_lb_control::anthropic_api_key::AnthropicOrgApi;
 use cc_lb_control::{
     DynamicView, DynamicViewHolder,
     api_keys::{
@@ -321,6 +322,8 @@ pub enum BuildError {
     PgNotifyPoolUnavailable,
     #[error("cluster.instance_url is required when storage.kind=postgres")]
     ClusterInstanceUrlMissing,
+    #[error("anthropic org api origin is invalid: {0}")]
+    AnthropicOrgOrigin(#[source] url::ParseError),
 }
 
 impl App {
@@ -717,6 +720,8 @@ pub async fn seed_app_testing_storage(
                 oauth_tokens: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
             },
         )
         .await
@@ -1560,6 +1565,8 @@ async fn build_app_with_storage_inner(
             }
         });
     }
+    let anthropic_org_api =
+        AnthropicOrgApi::production().map_err(BuildError::AnthropicOrgOrigin)?;
     let scheduler_cancel = CancellationToken::new();
     let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
         crate::scheduler_dispatch::SchedulerDispatchDeps {
@@ -1584,6 +1591,7 @@ async fn build_app_with_storage_inner(
             keepalive_dispatcher,
             event_bus: event_bus.clone(),
             clock: clock.clone(),
+            anthropic_org_api: anthropic_org_api.clone(),
         },
     );
     let scheduler_tasks = opened_scheduler
@@ -1665,6 +1673,7 @@ async fn build_app_with_storage_inner(
         event_bus: Some(event_bus.clone()),
         storage_tail: storage_tail_tx,
         clock: clock.clone(),
+        anthropic_org_api,
     };
 
     server_state.transition_to_ready();
@@ -2343,8 +2352,12 @@ async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody> {
 }
 
 async fn readyz(State(state): State<ProxyState>) -> (StatusCode, Json<HealthBody>) {
-    let reason = readiness_blocker(&state);
-    let ready = reason.is_none();
+    let readiness = readiness(&state);
+    let ready = matches!(readiness, Readiness::Ready { .. });
+    let reason = match readiness {
+        Readiness::Ready { degraded } => degraded,
+        Readiness::NotReady(blocker) => Some(blocker),
+    };
 
     (
         if ready {
@@ -2362,56 +2375,76 @@ async fn readyz(State(state): State<ProxyState>) -> (StatusCode, Json<HealthBody
     )
 }
 
-fn readiness_blocker(state: &ProxyState) -> Option<&'static str> {
+enum Readiness {
+    /// Serving traffic. `degraded` names a non-fatal problem, such as an
+    /// OAuth upstream whose credentials cannot be decrypted, that routing
+    /// works around.
+    Ready {
+        degraded: Option<&'static str>,
+    },
+    NotReady(&'static str),
+}
+
+fn readiness(state: &ProxyState) -> Readiness {
     if state.drain_controller.is_draining() {
-        return Some("draining");
+        return Readiness::NotReady("draining");
     }
     if state.server_state.current() != ServerState::Ready {
-        return Some("startup_not_ready");
+        return Readiness::NotReady("startup_not_ready");
     }
 
     let view = state.dynamic_view.load();
     if !view.principal_view.has_any_active_principal() {
-        return Some("no_ready_principal");
+        return Readiness::NotReady("no_ready_principal");
     }
-    if !has_declared_ready_upstream(&view) {
-        return Some("no_ready_upstream");
-    }
-    if !oauth_credentials_decryptable(state.aead.as_ref(), view.upstreams_snapshot()) {
-        return Some("oauth_credentials_not_decryptable");
-    }
-
-    None
-}
-
-fn has_declared_ready_upstream(view: &DynamicView) -> bool {
-    view.upstreams_snapshot().iter().any(|upstream| {
-        upstream.enabled
-            && upstream.deleted_at_unix_secs.is_none()
-            && view
-                .upstream_status_snapshot
-                .entries
-                .get(&upstream.name)
-                .is_some_and(|entry| entry.status == cc_lb_control::ApplyStatus::Active)
-    })
-}
-
-fn oauth_credentials_decryptable(aead: &AeadService, upstreams: &[UpstreamRecord]) -> bool {
-    upstreams
+    let aead = state.aead.as_ref();
+    if !view
+        .upstreams_snapshot()
         .iter()
-        .filter(|upstream| {
-            upstream.enabled
-                && upstream.deleted_at_unix_secs.is_none()
-                && upstream.kind == UpstreamKind::AnthropicOauth
-        })
-        .all(|upstream| {
-            upstream
-                .oauth_credentials
-                .as_ref()
-                .is_some_and(|credentials| {
-                    credentials.decrypt(aead, upstream.id.as_bytes()).is_ok()
-                })
-        })
+        .any(|upstream| upstream_usable(&view, aead, upstream))
+    {
+        return Readiness::NotReady("no_ready_upstream");
+    }
+    let oauth_credentials_broken = view.upstreams_snapshot().iter().any(|upstream| {
+        upstream_live(upstream)
+            && upstream.kind == UpstreamKind::AnthropicOauth
+            && !oauth_credentials_decryptable(aead, upstream)
+    });
+
+    Readiness::Ready {
+        degraded: oauth_credentials_broken.then_some("oauth_credentials_not_decryptable"),
+    }
+}
+
+fn upstream_live(upstream: &UpstreamRecord) -> bool {
+    upstream.enabled && upstream.deleted_at_unix_secs.is_none()
+}
+
+/// An upstream routing can select: applied, and for OAuth, holding
+/// decryptable credentials that do not need an operator reconnect.
+fn upstream_usable(view: &DynamicView, aead: &AeadService, upstream: &UpstreamRecord) -> bool {
+    let applied = view
+        .upstream_status_snapshot
+        .entries
+        .get(&upstream.name)
+        .is_some_and(|entry| entry.status == cc_lb_control::ApplyStatus::Active);
+    if !upstream_live(upstream) || !applied {
+        return false;
+    }
+    match upstream.kind {
+        UpstreamKind::AnthropicApiKey => true,
+        UpstreamKind::AnthropicOauth => {
+            !cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+                && oauth_credentials_decryptable(aead, upstream)
+        }
+    }
+}
+
+fn oauth_credentials_decryptable(aead: &AeadService, upstream: &UpstreamRecord) -> bool {
+    upstream
+        .oauth_credentials
+        .as_ref()
+        .is_some_and(|credentials| credentials.decrypt(aead, upstream.id.as_bytes()).is_ok())
 }
 
 async fn timeout_error(error: tower::BoxError) -> Response<Body> {

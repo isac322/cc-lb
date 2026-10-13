@@ -461,6 +461,8 @@ async fn hydrate_notifications_refresh_peer_caches_without_view_rebuild() {
             oauth_tokens: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
         },
     )
     .await
