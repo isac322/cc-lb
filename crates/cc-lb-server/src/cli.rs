@@ -110,7 +110,8 @@ pub struct ExportDiagnosticsArgs {
     )]
     pub max_rows_per_sec: u64,
     /// Print per-UTC-day stored row counts (timestamp >= 1 ms) instead of exporting lines.
-    #[arg(long)]
+    /// Counts cover the `--from-ts`/`--to-ts` window only, so cursor bounds are rejected.
+    #[arg(long, conflicts_with_all = ["after_seq", "until_seq"])]
     pub count_only: bool,
 }
 

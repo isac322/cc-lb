@@ -374,19 +374,57 @@ async fn request_event_export_resume_never_skips_late_lower_seq(
         );
 
         // The ceiling must wait for A instead of returning while it is open.
-        let ceiling_storage = fixture.storage();
+        // A dedicated pool tagged with a unique application_name lets the
+        // test observe the ceiling's own poll statements in pg_stat_activity.
+        let schema = sqlx::query_scalar::<_, String>("SELECT current_schema()")
+            .fetch_one(storage.pool())
+            .await?;
+        let application_name = format!("ceiling-{}", uuid::Uuid::new_v4().simple());
+        let ceiling_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::from_str(&backend.url)?
+                    .options([("search_path", schema.as_str())])
+                    .application_name(&application_name),
+            )
+            .await?;
+        let ceiling_storage = PostgresStorage::new(ceiling_pool.clone(), system_clock());
         let ceiling = tokio::spawn(async move {
             ceiling_storage
                 .request_event_stable_seq_ceiling(std::time::Duration::from_secs(30))
                 .await
         });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Two distinct executions of the settle poll prove the first one
+        // returned false while A was open (a true result returns at once).
+        let mut poll_starts = std::collections::BTreeSet::new();
+        for _ in 0..1_200 {
+            if let Some(started) = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT query_start::text FROM pg_stat_activity \
+                 WHERE application_name = $1 \
+                   AND query LIKE '%pg_snapshot_xmin(pg_current_snapshot()) >%'",
+            )
+            .bind(&application_name)
+            .fetch_optional(storage.pool())
+            .await?
+            .flatten()
+            {
+                poll_starts.insert(started);
+            }
+            if poll_starts.len() >= 2 || ceiling.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         anyhow::ensure!(
-            !ceiling.is_finished(),
-            "stable ceiling returned while a lower seq was still uncommitted"
+            !ceiling.is_finished() && poll_starts.len() >= 2,
+            "stable ceiling must keep polling while a lower seq is uncommitted \
+             (finished={}, observed polls={})",
+            ceiling.is_finished(),
+            poll_starts.len()
         );
         tx_a.commit().await?;
         let ceiling = ceiling.await??;
+        ceiling_pool.close().await;
         anyhow::ensure!(
             ceiling == seq_b,
             "ceiling {ceiling} must be B's seq {seq_b}"

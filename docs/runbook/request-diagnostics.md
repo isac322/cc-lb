@@ -122,7 +122,7 @@ Options:
 | `--ceiling-wait-secs N` | `60` | How long to wait for in-flight inserts to settle while computing the stable ceiling, 1 to 3600. A timeout exits 1. |
 | `--page-size N` | `500` | Rows per storage page, 1 to 500. |
 | `--max-rows-per-sec N` | `500` | Average export rate, at least 1. |
-| `--count-only` | off | Print per-UTC-day stored row counts instead of exporting. |
+| `--count-only` | off | Print per-UTC-day stored row counts instead of exporting. Counts follow only `--from-ts`/`--to-ts`; combining it with `--after-seq` or `--until-seq` is rejected with a usage error (exit 2). |
 
 Export the days closest to their prune first. Run one Job per time range, oldest first:
 

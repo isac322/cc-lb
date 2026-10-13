@@ -231,39 +231,46 @@ impl RequestEventStore for PostgresStorage {
                     "request event stable seq ceiling max_wait {max_wait:?} is out of range"
                 ),
             })?;
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let ceiling =
-            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), 0) FROM request_events_v1")
+        // The whole operation (pool acquisition, the marker transaction and
+        // every poll) is bounded by `max_wait`; dropping the future on
+        // timeout rolls back an unfinished marker transaction.
+        let stabilize = async {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            let ceiling =
+                sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), 0) FROM request_events_v1")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            let marker_xid = sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
-        let marker_xid = sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-        let ceiling = i64_to_u64(ceiling, "request event stable seq ceiling")?;
-        loop {
-            let settled = sqlx::query_scalar::<_, bool>(
-                "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::text::xid8",
-            )
-            .bind(&marker_xid)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-            if settled {
-                return Ok(ceiling);
+            tx.commit().await.map_err(map_sqlx_error)?;
+            let ceiling = i64_to_u64(ceiling, "request event stable seq ceiling")?;
+            loop {
+                let settled = sqlx::query_scalar::<_, bool>(
+                    "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::text::xid8",
+                )
+                .bind(&marker_xid)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+                if settled {
+                    return Ok::<u64, StorageError>(ceiling);
+                }
+                tokio::time::sleep(STABLE_SEQ_CEILING_POLL_INTERVAL).await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(StorageError::Unavailable {
+        };
+        tokio::time::timeout_at(deadline, stabilize)
+            .await
+            .unwrap_or_else(|_| {
+                Err(StorageError::Unavailable {
                     message: format!(
-                        "request event seq ceiling {ceiling} did not stabilize within {max_wait:?}: \
-                         a transaction older than xid {marker_xid} is still open"
+                        "request event seq ceiling did not stabilize within {max_wait:?}: \
+                         an older transaction is still open or the database is unreachable"
                     ),
-                });
-            }
-            tokio::time::sleep(STABLE_SEQ_CEILING_POLL_INTERVAL).await;
-        }
+                })
+            })
     }
 
     async fn request_event_seq_bounds(

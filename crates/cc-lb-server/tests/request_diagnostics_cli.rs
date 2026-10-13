@@ -463,7 +463,7 @@ async fn sqlite_message_rows(db_path: &Path) -> usize {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serve_with_defaults_writes_no_diagnostics_lines() {
-    let server = common::spawn_test_server_with_env(
+    let mut server = common::spawn_test_server_with_env(
         "",
         &[
             (
@@ -497,10 +497,9 @@ async fn serve_with_defaults_writes_no_diagnostics_lines() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    // Give a (wrongly) enabled sink time to flush before asserting absence.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let stdout = server._process.stdout_snapshot();
+    // Stop the server gracefully: shutdown drains the assembler and any diagnostics sink, so
+    // once the process has exited its stdout is complete and absence is a real observation.
+    let stdout = server._process.terminate_and_collect_stdout();
     let schema_lines = split_lines(&stdout)
         .into_iter()
         .filter(|line| {
@@ -615,6 +614,36 @@ async fn count_only_matches_database_day_counts_without_ts0() {
         ranged_counts["days"],
         serde_json::json!({ DAY_B: 1, DAY_C: 1 })
     );
+}
+
+#[test]
+fn count_only_rejects_cursor_bounds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("missing.sqlite");
+    let config = path_arg(&write_sqlite_config(dir.path(), &db_path));
+    for bound in ["--after-seq", "--until-seq"] {
+        let output = run_cli(&[
+            "export-diagnostics",
+            "--config",
+            &config,
+            "--count-only",
+            bound,
+            "5",
+        ]);
+
+        // Rejected by argument parsing, before config or storage are touched.
+        assert_eq!(output.code, Some(2), "{bound}: stderr={}", output.stderr);
+        assert!(output.stdout.is_empty(), "{bound}: no counts printed");
+        assert!(
+            output.stderr.contains("--count-only") && output.stderr.contains(bound),
+            "{bound}: stderr={}",
+            output.stderr
+        );
+        assert!(
+            !output.stderr.contains("storage not found"),
+            "{bound}: rejected before opening storage"
+        );
+    }
 }
 
 #[tokio::test]

@@ -1049,6 +1049,11 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
     );
 
     // The delta/cursor path applies the same effective-kind filter.
+    // `current_request_event_cursor` is capped at the snapshot xmin horizon,
+    // which is cluster-wide: an open transaction in ANY schema or database
+    // (a sibling test process) hides these freshly committed rows. Wait for
+    // the horizon to pass them instead of assuming no concurrent writer.
+    wait_until_rows_below_xmin(storage.pool()).await?;
     let until_cursor = storage.current_request_event_cursor().await?;
     let delta_ids = |event_kind: Option<RequestEventKind>| async move {
         let events = storage
@@ -1176,4 +1181,25 @@ fn quote_ident(identifier: &str) -> String {
         "unsafe postgres identifier: {identifier}"
     );
     format!("\"{identifier}\"")
+}
+
+/// Waits (bounded) until every row in this schema's `request_events_v1` is
+/// below the cluster-wide snapshot xmin horizon, i.e. visible to the
+/// xmin-guarded cursor and delta reads.
+async fn wait_until_rows_below_xmin(pool: &PgPool) -> Result<()> {
+    for _ in 0..1_200 {
+        let settled = sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS ( \
+                 SELECT 1 FROM request_events_v1 \
+                 WHERE tx_id >= pg_snapshot_xmin(pg_current_snapshot()) \
+             )",
+        )
+        .fetch_one(pool)
+        .await?;
+        if settled {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("request events did not fall below the snapshot xmin horizon within 30s")
 }

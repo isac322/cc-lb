@@ -49,6 +49,7 @@ const SOURCE_KIND_INDEX_DDL: &str = "CREATE INDEX IF NOT EXISTS \
      (source_kind, list_ts_ms DESC, list_event_key DESC)";
 
 const ROWS: i64 = 200_000;
+const SEED_BATCH_ROWS: i64 = 10_000;
 const DAY_MS: u64 = 86_400_000;
 const SPAN_DAYS: u64 = 90;
 const BASE_MS: u64 = 1_790_000_000_000;
@@ -63,7 +64,7 @@ INSERT INTO request_events_v1 \
     (ts, event_id, list_ts_ms, list_event_key, list_status, model, source_kind, principal_id, payload) \
 SELECT to_timestamp(t.ts_ms / 1000.0), 'gate-' || g, t.ts_ms, 'gate-' || lpad(g::text, 7, '0'), \
        200, m.model, s.kind, 'gate-principal-' || (g % 50), convert_to('{}', 'UTF8') \
-FROM generate_series(1, $1::bigint) AS g \
+FROM generate_series($4::bigint, $5::bigint) AS g \
 CROSS JOIN LATERAL (SELECT $2::bigint + (g * $3::bigint / $1::bigint) AS ts_ms) AS t \
 CROSS JOIN LATERAL (SELECT CASE \
     WHEN g % 1000 = 7 THEN 'gpt-4o-mini-2024-07-18' \
@@ -269,13 +270,25 @@ async fn run_gate(pool: &PgPool) -> Result<()> {
         );
     }
 
-    sqlx::query(SEED_SQL)
-        .bind(ROWS)
-        .bind(i64::try_from(BASE_MS)?)
-        .bind(i64::try_from(SPAN_DAYS * DAY_MS)?)
-        .execute(pool)
-        .await
-        .context("seed synthetic request events")?;
+    // Autocommitted batches: the xmin horizon is cluster-wide, so one long
+    // 200k-row transaction would hold back xmin-guarded reads (tail cursor,
+    // delta, usage rollup) in every concurrently running test process.
+    for batch_start in (1..=ROWS).step_by(usize::try_from(SEED_BATCH_ROWS)?) {
+        let batch_end = (batch_start + SEED_BATCH_ROWS - 1).min(ROWS);
+        sqlx::query(SEED_SQL)
+            .bind(ROWS)
+            .bind(i64::try_from(BASE_MS)?)
+            .bind(i64::try_from(SPAN_DAYS * DAY_MS)?)
+            .bind(batch_start)
+            .bind(batch_end)
+            .execute(pool)
+            .await
+            .with_context(|| {
+                format!("seed synthetic request events {batch_start}..={batch_end}")
+            })?;
+    }
+    // (Index builds below are each one short transaction on this schema's
+    // private table; nothing here touches another schema.)
     let distinct_models =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(DISTINCT model) FROM request_events_v1")
             .fetch_one(pool)

@@ -133,6 +133,40 @@ impl TestProcess {
             .unwrap_or_default()
     }
 
+    /// Sends SIGTERM, waits for the graceful shutdown to finish, and returns everything the
+    /// server wrote to stdout. Graceful shutdown drains queued output (including the request
+    /// diagnostics sink), so the result is the server's complete stdout.
+    pub fn terminate_and_collect_stdout(&mut self) -> Vec<u8> {
+        let status = Command::new("kill")
+            .arg("-TERM")
+            .arg(self.child.id().to_string())
+            .status()
+            .expect("send SIGTERM to cc-lb child");
+        assert!(status.success(), "kill -TERM failed: {status}");
+        let deadline =
+            std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
+        loop {
+            if let Some(exit_status) = self.child.try_wait().expect("poll cc-lb child") {
+                // A normal exit (any code) means the shutdown path ran; death by signal does not.
+                assert!(
+                    exit_status.code().is_some(),
+                    "cc-lb died by signal after SIGTERM: {exit_status}\nstderr:\n{}",
+                    self.finish_stderr()
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cc-lb did not exit after SIGTERM"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
+        }
+        self.stdout_snapshot()
+    }
+
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
