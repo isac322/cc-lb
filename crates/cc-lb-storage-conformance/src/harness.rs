@@ -30,6 +30,15 @@ pub trait ConformanceBackend: Send + Sync + 'static {
     async fn wait_for_events_visible_for_rollup(&self, _storage: &Self::Storage) -> Result<()> {
         Ok(())
     }
+
+    /// Executes one SQL statement directly against the database behind
+    /// `storage` and returns the affected row count. Scenarios pass only
+    /// statements valid on every backend; they use it to simulate schema
+    /// drift the storage API cannot produce (for example a tampered
+    /// `_sqlx_migrations` row).
+    async fn execute_raw_sql(&self, _storage: &Self::Storage, _sql: &'static str) -> Result<u64> {
+        anyhow::bail!("execute_raw_sql is not supported by this conformance backend")
+    }
 }
 
 pub struct ConformanceFixture<B: ConformanceBackend> {

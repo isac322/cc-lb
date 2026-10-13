@@ -57,6 +57,8 @@ pub mod prompt_cache_simulator;
 mod request_classification;
 pub mod request_context;
 #[cfg(not(loom))]
+pub mod request_diagnostics_sink;
+#[cfg(not(loom))]
 pub mod request_timing;
 #[cfg(not(loom))]
 pub(crate) mod response_transform;
@@ -124,7 +126,10 @@ pub use lifecycle_cache_hit_miss_subscriber::{
 pub use lifecycle_cache_observation_subscriber::{
     CacheObservationSubscriberHandle, spawn_lifecycle_cache_observation_subscriber,
 };
-pub use lifecycle_event_assembler::{RequestEventAssemblerHandle, spawn_request_event_assembler};
+pub use lifecycle_event_assembler::{
+    RequestEventAssemblerHandle, spawn_request_event_assembler,
+    spawn_request_event_assembler_with_diagnostics,
+};
 pub use lifecycle_event_logger::{LifecycleEventLoggerHandle, spawn_lifecycle_event_logger};
 pub use lifecycle_limit_reconcile_subscriber::{
     LimitReconcileSubscriberHandle, spawn_lifecycle_limit_reconcile_subscriber,
@@ -155,6 +160,12 @@ pub use metrics_labels::{
 pub use pg_notify_fanout::{
     DEFAULT_PG_NOTIFY_CHANNEL, PARTIAL_NOTIFY_MPSC_CAPACITY, PartialRetentionCache, PgListener,
     PgNotifier, PgNotifyFanout,
+};
+#[cfg(not(loom))]
+pub use request_diagnostics_sink::{
+    REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT,
+    RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
+    StdoutRequestDiagnosticsSink,
 };
 #[cfg(not(loom))]
 pub use storage_tail_poller::StorageTailPoller;

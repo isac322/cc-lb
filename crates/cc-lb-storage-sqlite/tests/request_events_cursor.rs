@@ -880,3 +880,106 @@ async fn request_io_timing_list_fields_preserve_legacy_nulls_and_fractional_valu
     assert_eq!(legacy.response_body_downstream_poll_gap_ms, None);
     assert_eq!(legacy.retry_overhead_ms, None);
 }
+
+#[tokio::test]
+async fn redundant_indexes_are_dropped_and_thread_filter_keeps_its_index() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let database_url = format!(
+        "sqlite://{}",
+        temp_dir.path().join("redundant-indexes.sqlite").display()
+    );
+    let storage =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("open sqlite");
+    storage.initialize().await.expect("initialize sqlite");
+
+    let indexes = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("list indexes")
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    // 0097 and 0098.
+    for dropped in [
+        "request_events_v1_thread_ts",
+        "upstream_subscription_quota_checkpoints_range_idx",
+        "upstream_subscription_quota_checkpoints_anchor_idx",
+    ] {
+        assert!(
+            !indexes.contains(dropped),
+            "{dropped} must be dropped by its migration: {indexes:?}"
+        );
+    }
+    for kept in [
+        "request_events_v1_list_order_idx",
+        "request_events_v1_thread_list_order_idx",
+        "request_events_v1_event_kind_list_order_idx",
+        "request_events_v1_source_kind_list_order_idx",
+    ] {
+        assert!(indexes.contains(kept), "{kept} must remain: {indexes:?}");
+    }
+
+    let thread_plan = sqlx::query(
+        "EXPLAIN QUERY PLAN \
+         SELECT id, list_ts_ms, event_id FROM request_events_v1 \
+         WHERE thread_id = ?1 AND ts >= ?2 AND ts <= ?3 \
+         ORDER BY list_ts_ms DESC, list_event_key DESC, id DESC LIMIT ?4",
+    )
+    .bind("thread-a")
+    .bind(0_i64)
+    .bind(i64::MAX)
+    .bind(50_i64)
+    .fetch_all(storage.pool())
+    .await
+    .expect("explain thread-filtered list")
+    .into_iter()
+    .map(|row| row.get::<String, _>("detail"))
+    .collect::<Vec<_>>();
+    assert!(
+        thread_plan
+            .iter()
+            .any(|detail| detail.contains("request_events_v1_thread_list_order_idx")),
+        "thread filter must use thread_list_order_idx after thread_ts is gone: {thread_plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn open_sqlite_existing_never_creates_a_database() {
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+    let path = temp_dir.path().join("missing.sqlite");
+    let database_url = format!("sqlite://{}", path.display());
+    let missing = cc_lb_storage_sqlite::open_sqlite_existing(
+        &database_url,
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await;
+    assert!(
+        missing.is_err(),
+        "a missing database file must fail to open"
+    );
+    assert!(
+        !path.exists(),
+        "open_sqlite_existing must not create {path:?}"
+    );
+
+    let created =
+        cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_clock::SystemClock))
+            .await
+            .expect("create sqlite");
+    created.initialize().await.expect("initialize sqlite");
+    created.pool().close().await;
+
+    let existing = cc_lb_storage_sqlite::open_sqlite_existing(
+        &database_url,
+        Arc::new(cc_lb_clock::SystemClock),
+    )
+    .await
+    .expect("open existing sqlite");
+    existing
+        .verify_schema_current()
+        .await
+        .expect("a database migrated by this binary is current");
+}

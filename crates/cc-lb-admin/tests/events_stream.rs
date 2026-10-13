@@ -9,7 +9,11 @@ use axum::{
 };
 use cc_lb_config::Config;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_request_log::{RequestEventKind, RequestEventPartial, RequestEventUpdate};
+use cc_lb_domain::{InternalError, RoutingTrace};
+use cc_lb_request_log::{
+    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+    RequestDiagnostics, RequestEventKind, RequestEventPartial, RequestEventUpdate,
+};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -412,6 +416,119 @@ async fn events_stream_reconnect_with_last_event_id_still_requires_auth() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn events_stream_serves_stripped_backfill_and_live_finals_without_diagnostic_keys() {
+    let (_dir, storage) = temp_storage().await;
+    let full = with_diagnostics(request_event(1));
+    let stripped_row = stripped(request_event(2));
+    storage.append_request_event(&full).await.unwrap();
+    storage.append_request_event(&stripped_row).await.unwrap();
+    let bus = Arc::new(InMemoryBus::with_capacity(8));
+    let mut state = test_state(Config::default(), Some(storage));
+    state.event_bus = Some(bus.clone() as Arc<dyn RequestEventBus>);
+
+    let response = stream_response(state, Some("0")).await;
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains("event: cursor") {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("initial cursor frame timeout")
+            .expect("stream ended before initial cursor")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+    // Strip-on live final: the assembler publishes the same stripped row it stored.
+    bus.publish(RequestEventUpdate::final_(stripped(request_event(3)), 3));
+    while message_events(&text).len() < 3 {
+        let frame = timeout(Duration::from_secs(2), body.frame())
+            .await
+            .expect("live final frame timeout")
+            .expect("stream ended before live final")
+            .expect("frame ok");
+        if let Ok(data) = frame.into_data() {
+            text.push_str(std::str::from_utf8(&data).unwrap());
+        }
+    }
+
+    let events = message_events(&text);
+    let request_ids: Vec<_> = events
+        .iter()
+        .map(|event| event["request_id"].clone())
+        .collect();
+    assert_eq!(request_ids, ["req-1", "req-2", "req-3"]);
+    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        assert!(events[0].get(key).is_some(), "full backfill row lost {key}");
+        for event in &events[1..] {
+            assert!(
+                event.get(key).is_none(),
+                "stripped row still exposes {key}: {event}"
+            );
+        }
+    }
+    // The backfilled stripped row and the live stripped final are the same shape.
+    let normalize = |event: &Value| {
+        let mut event = event.as_object().unwrap().clone();
+        for key in ["request_id", "event_id", "ts", "ts_ms"] {
+            event.remove(key);
+        }
+        event
+    };
+    assert_eq!(normalize(&events[1]), normalize(&events[2]));
+    let mut full_without_diagnostics = normalize(&events[0]);
+    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        full_without_diagnostics.remove(key);
+    }
+    assert_eq!(full_without_diagnostics, normalize(&events[1]));
+}
+
+fn message_events(text: &str) -> Vec<Value> {
+    text.split("\n\n")
+        .filter(|frame| frame.lines().any(|line| line == "event: message"))
+        .filter_map(|frame| {
+            let data = frame.lines().find_map(|line| line.strip_prefix("data: "))?;
+            let value: Value = serde_json::from_str(data).ok()?;
+            Some(value["payload"]["event"].clone())
+        })
+        .filter(|event| event.is_object())
+        .collect()
+}
+
+fn with_diagnostics(mut event: RequestEvent) -> RequestEvent {
+    event.cache_control_message_indices = vec![0, 2];
+    event.cache_breakpoints = vec![RequestCacheBreakpoint {
+        block_index: 1,
+        source: RequestCacheBreakpointSource::System,
+        path: "system[0]".to_owned(),
+        message_index: None,
+        ttl: None,
+        prefix_hash: "prefix".to_owned(),
+        prefix_token_count: 64,
+        lookback_prefixes: Vec::new(),
+        token_estimate_source: None,
+    }];
+    event.routing_trace = Some(RoutingTrace::default());
+    event.iterations = Some(serde_json::json!([{ "input_tokens": 1 }]));
+    event.internal_errors = vec![InternalError {
+        message: Some("token=[REDACTED] tail".to_owned()),
+        ..InternalError::default()
+    }];
+    event
+}
+
+/// The row exactly as the assembler persists and publishes it with strip on.
+fn stripped(event: RequestEvent) -> RequestEvent {
+    let mut event = with_diagnostics(event);
+    let taken = RequestDiagnostics::take_from(&mut event);
+    assert!(
+        !taken.internal_errors.is_empty(),
+        "fixture carries diagnostics"
+    );
+    event
 }
 
 async fn stream_response(

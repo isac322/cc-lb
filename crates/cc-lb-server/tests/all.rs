@@ -80,6 +80,8 @@ mod reconcile_subscription_quota_hydration;
 mod reconciliation;
 #[path = "reload_atomic_swap.rs"]
 mod reload_atomic_swap;
+#[path = "request_diagnostics_cli.rs"]
+mod request_diagnostics_cli;
 #[path = "rfc_0002_fix_live_qa.rs"]
 mod rfc_0002_fix_live_qa;
 #[path = "scheduler_factory.rs"]
@@ -108,6 +110,8 @@ mod upstream_warmup_logshape;
 mod validate_fail_missing_tls;
 #[path = "validate_ok_config.rs"]
 mod validate_ok_config;
+#[path = "validate_strip_requires_log.rs"]
+mod validate_strip_requires_log;
 #[path = "version_includes_sha.rs"]
 mod version_includes_sha;
 #[path = "wasm_host_adversarial_policy.rs"]

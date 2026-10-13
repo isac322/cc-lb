@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 26] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 27] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -92,6 +92,12 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 26] = [
         kind: MetricKind::Counter,
         description: "Total events dropped from a bounded channel or queue by reason.",
         labels: &["reason"],
+    },
+    MetricDefinition {
+        name: "cc_lb_request_diagnostics_lines_total",
+        kind: MetricKind::Counter,
+        description: "Total request diagnostics stdout lines by outcome.",
+        labels: &["outcome"],
     },
     MetricDefinition {
         name: "cc_lb_compiled_module_cache_hits_total",
@@ -238,6 +244,11 @@ pub(crate) fn register_prometheus14_metrics() {
         "Total events dropped from a bounded channel or queue by reason."
     );
     metrics::describe_counter!(
+        "cc_lb_request_diagnostics_lines_total",
+        Unit::Count,
+        "Total request diagnostics stdout lines by outcome."
+    );
+    metrics::describe_counter!(
         "cc_lb_compiled_module_cache_hits_total",
         Unit::Count,
         "Total compiled Wasm module cache hits."
@@ -359,6 +370,11 @@ pub fn touch_prometheus14_metrics() {
     .increment(1);
     metrics::counter!("cc_lb_cache_observation_read_failed_total").increment(1);
     metrics::counter!("cc_lb_dropped_events_total", "reason" => "queue_full").increment(1);
+    metrics::counter!(
+        "cc_lb_request_diagnostics_lines_total",
+        "outcome" => "written"
+    )
+    .increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(1);
     metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(1);
@@ -414,9 +430,35 @@ pub(crate) fn touch_prometheus14_metric_handles() {
         .increment(0);
     }
     metrics::counter!("cc_lb_cache_observation_read_failed_total").increment(0);
+    for outcome in REQUEST_DIAGNOSTICS_LINE_OUTCOMES {
+        metrics::counter!(
+            "cc_lb_request_diagnostics_lines_total",
+            "outcome" => outcome
+        )
+        .increment(0);
+    }
+    for reason in REQUEST_DIAGNOSTICS_DROP_REASONS {
+        metrics::counter!("cc_lb_dropped_events_total", "reason" => reason).increment(0);
+    }
     metrics::counter!("cc_lb_compiled_module_cache_hits_total").increment(0);
     metrics::counter!("cc_lb_compiled_module_cache_misses_total").increment(0);
     metrics::counter!("cc_lb_compiled_module_cache_evictions_total").increment(0);
     metrics::gauge!("cc_lb_compiled_module_cache_entries").set(0.0);
     metrics::gauge!("cc_lb_compiled_module_cache_bytes").set(0.0);
 }
+
+/// Fixed `outcome` vocabulary of `cc_lb_request_diagnostics_lines_total`; must match
+/// `cc_lb_engine::request_diagnostics_sink`.
+const REQUEST_DIAGNOSTICS_LINE_OUTCOMES: [&str; 3] = ["written", "encode_error", "write_error"];
+
+/// `cc_lb_dropped_events_total` reasons emitted by the request diagnostics sink; must match
+/// `cc_lb_engine::request_diagnostics_sink`.
+const REQUEST_DIAGNOSTICS_DROP_REASONS: [&str; 7] = [
+    "request_diagnostics_queue_full",
+    "request_diagnostics_strip_queue_full",
+    "request_diagnostics_strip_send_timeout",
+    "request_diagnostics_queue_closed",
+    "request_diagnostics_job_panic",
+    "request_diagnostics_worker_panic",
+    "request_diagnostics_shutdown_timeout",
+];

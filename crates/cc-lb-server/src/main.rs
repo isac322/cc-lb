@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand, DoctorCommand};
 use cc_lb_server::doctor::{self, DoctorError};
+use cc_lb_server::request_events_cli::{self, RequestEventsCliError};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
 
@@ -28,6 +29,7 @@ enum RunError {
     Serve(cc_lb_server::app::ServeError),
     Cli(clap::Error),
     Doctor(DoctorError),
+    RequestEvents(RequestEventsCliError),
     Runtime(std::io::Error),
     Help(std::io::Error),
 }
@@ -66,6 +68,10 @@ fn main() -> ExitCode {
         Err(RunError::Doctor(error)) => {
             eprintln!("doctor: failed: {error}");
             ExitCode::FAILURE
+        }
+        Err(RunError::RequestEvents(error)) => {
+            eprintln!("{}", error.to_json());
+            ExitCode::from(error.exit_code())
         }
         Err(RunError::Runtime(error)) => {
             eprintln!("failed to build tokio runtime: {error}");
@@ -128,6 +134,15 @@ fn run() -> Result<(), RunError> {
             runtime
                 .block_on(doctor::run_list_abandoned_chain_entries(clock))
                 .map_err(RunError::Doctor)
+        }
+        Some(Command::RequestEvents { command }) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(RunError::Runtime)?;
+            runtime
+                .block_on(request_events_cli::run(command, clock))
+                .map_err(RunError::RequestEvents)
         }
         None => {
             let mut command = Cli::command();

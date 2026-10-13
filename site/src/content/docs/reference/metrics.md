@@ -18,6 +18,24 @@ For example, the per-upstream 429 rate is `sum by (upstream) (rate(cc_lb_request
 
 `cc_lb_stream_terminations_total{outcome,cause,upstream,model}` counts response body outcomes per routed upstream and requested model. Use it with request correlation logs to distinguish an upstream error from a client cancellation.
 
+## Request diagnostics log
+
+`cc_lb_request_diagnostics_lines_total{outcome}` counts stdout diagnostics lines when `observability.request_diagnostics_log` is on. `outcome` is `written`, `encode_error`, or `write_error`.
+
+Lines that never reach the writer increment `cc_lb_dropped_events_total{reason}` with one of these reasons:
+
+| Reason | Cause |
+| --- | --- |
+| `request_diagnostics_queue_full` | The queue was full with the strip off. A backfill restores the line. |
+| `request_diagnostics_strip_send_timeout` | With the strip on, the queue stayed full for 500 ms. |
+| `request_diagnostics_strip_queue_full` | With the strip on, the queue was full while the sink was still recovering from a timeout. |
+| `request_diagnostics_queue_closed` | The sink had already shut down. |
+| `request_diagnostics_job_panic` | Writing one line panicked. |
+| `request_diagnostics_worker_panic` | The writer thread panicked. |
+| `request_diagnostics_shutdown_timeout` | Shutdown stopped waiting for a stalled stdout after 2 seconds; counts every queued line the writer had not started. |
+
+Any `request_diagnostics_strip_*` drop is permanent loss of that request's diagnostic fields, so alert on any increase. With strip on, `request_diagnostics_shutdown_timeout` is permanent loss too. See [Request diagnostics log](/docs/operations/observability/#request-diagnostics-log) for delivery semantics.
+
 ## Scheduler metrics
 
 - `cclb_scheduler_jobs_total` tracks registered job lifecycle events.

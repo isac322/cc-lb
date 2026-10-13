@@ -324,6 +324,8 @@ pub enum BuildError {
     ClusterInstanceUrlMissing,
     #[error("anthropic org api origin is invalid: {0}")]
     AnthropicOrgOrigin(#[source] url::ParseError),
+    #[error("request diagnostics sink failed to start: {0}")]
+    RequestDiagnosticsSink(#[source] io::Error),
 }
 
 impl App {
@@ -1239,12 +1241,26 @@ async fn build_app_with_storage_inner(
     };
     let lifecycle_event_logger_handle =
         cc_lb_engine::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
-    let lifecycle_event_assembler_handle = cc_lb_engine::spawn_request_event_assembler(
-        lifecycle_assembler_rx,
-        storage.clone(),
-        Some(event_bus.clone()),
-        Arc::clone(&metrics_hook),
-    );
+    let diagnostics = if config.observability.request_diagnostics_log {
+        cc_lb_engine::RequestDiagnosticsOptions {
+            sink: Some(Arc::new(
+                cc_lb_engine::StdoutRequestDiagnosticsSink::new()
+                    .map_err(BuildError::RequestDiagnosticsSink)?,
+            )),
+            strip_payload: config.request_event_strip_diagnostics,
+        }
+    } else {
+        // Validation rejects strip without the log, so strip stays off here.
+        cc_lb_engine::RequestDiagnosticsOptions::default()
+    };
+    let lifecycle_event_assembler_handle =
+        cc_lb_engine::spawn_request_event_assembler_with_diagnostics(
+            lifecycle_assembler_rx,
+            storage.clone(),
+            Some(event_bus.clone()),
+            Arc::clone(&metrics_hook),
+            diagnostics,
+        );
     let lifecycle_pricing_subscriber_handle =
         cc_lb_pricing::spawn_lifecycle_pricing_subscriber(lifecycle_pricing_rx, event_bus.clone());
     let lifecycle_limit_reconcile_subscriber_handle =

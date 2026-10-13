@@ -1,6 +1,6 @@
 # ADR 0008 — Use-it-or-lose-it subscription quota urgency
 
-- Status: Accepted (five-hour pressure amended by ADR 0013 weekly pace gate)
+- Status: Accepted (five-hour pressure amended by ADR 0013 weekly pace gate; trace storage amended by the request diagnostics log, see "Amendment: routing trace storage")
 - Date: 2026-07-09
 - Ships with: pending
 - Supersedes: the retired WRH subscription-preference base-window quota urgency formula and capacity multiplier inside base quota urgency. ADR 0010 keeps this pressure formula but makes base-tier warning signals ranking-neutral; the existing `0.20` warning multiplier remains active only in `Overage`.
@@ -122,7 +122,7 @@ The existing non-Fable subscription-preference salt and trace version remain byt
 
 ## Trace and storage decision
 
-The full all-candidate routing trace already lives in `RequestEvent.routing_trace` payload JSON:
+The full all-candidate routing trace already lives in `RequestEvent.routing_trace` payload JSON. Since the request diagnostics log amendment below, it stays in the stored payload only while `request_event_strip_diagnostics` is off:
 
 ```text
 routing_trace.stages[*].subscription_preference.candidates[]
@@ -157,11 +157,17 @@ quota_effective_weight
 quota_uniform_fallback
 ```
 
-These columns store only the selected/kept upstream's values. The payload JSON remains the source for the urgency values (`quota_urgency_5h`, `quota_urgency_7d`, `quota_urgency_combined`), `quota_warning_multiplier`, and every losing candidate's values. Existing rows are not backfilled.
+These columns store only the selected/kept upstream's values. The payload JSON remains the source for the chosen upstream's urgency values (the top-level `quota_urgency_5h`, `quota_urgency_7d`, and `quota_urgency_combined` keys) and `quota_warning_multiplier`. Every losing candidate's values live in `routing_trace`, which the amendment below may move out of the database. Existing rows are not backfilled.
 
 Selection for these columns is by the terminally resolved/kept upstream ID. If that ID does not match a `CandidateUrgency` entry in the subscription-preference trace, all four chosen-upstream columns remain `NULL`; values must never be copied from the formula winner or the first candidate as a fallback.
 
 Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL` columns and a nullable checked `INTEGER` (`0`/`1`) for `quota_uniform_fallback`. Add Postgres migration `0078_request_events_quota_urgency.sql` with nullable `DOUBLE PRECISION` columns and nullable `BOOLEAN`. Neither migration may set non-null defaults or execute an `UPDATE` backfill.
+
+## Amendment: routing trace storage
+
+`routing_trace` is one of the five request-event diagnostic fields, with `cache_breakpoints`, `cache_control_message_indices`, `iterations`, and `internal_errors`. With `observability.request_diagnostics_log = true`, each stored row also produces a `cc_lb.request_diagnostics.v1` stdout line that carries the full trace. The exception is cache-keepalive renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped; they get no line, and their diagnostic fields, including the trace, are always empty (`docs/consistency-contract.md`, "Request events and dashboards"). With `request_event_strip_diagnostics = true`, which requires the log, new rows are stored without the trace, and `cc-lb request-events strip-diagnostics` removes it from older rows. The all-candidate trace is then available only in the diagnostics log.
+
+These stay in the database in every mode: the four chosen-upstream columns (`quota_weight_factor`, `quota_cache_multiplier`, `quota_effective_weight`, `quota_uniform_fallback`) and the top-level `quota_urgency_5h`, `quota_urgency_7d`, `quota_urgency_combined`, and `quota_warning_multiplier` payload keys. Aggregate queries over the chosen upstream are unaffected. Candidate-level debugging reads the diagnostics log when the strip is on.
 
 ## Consequences
 
@@ -172,7 +178,7 @@ Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL
 - Capacity no longer overrides quota urgency or creates a feedback loop where larger plans receive traffic merely because they are larger.
 - Cache-positive and on-pace candidates remain selectable because WRH uses `1 + pressure`, not raw pressure.
 - Warning signals stay independent from the pressure formula and remain observable without penalizing base-tier candidates; the Overage penalty remains unchanged.
-- Chosen-upstream columns support cheap aggregate queries, while payload JSON keeps full candidate-level debugging.
+- Chosen-upstream columns support cheap aggregate queries, while the all-candidate trace keeps full candidate-level debugging: in the payload JSON while `request_event_strip_diagnostics` is off, and in the request diagnostics log otherwise.
 
 ### Negative
 
@@ -215,7 +221,7 @@ Implementation must include local regression tests for:
 - All-on-pace base buckets using a neutral warning multiplier of `1.0`.
 - Allowed-to-warning and surpassed-threshold transitions preserving `KnownBase` and `PartialBase` winners, including zero-pressure ties, while warning-positive `Overage` selection retains the `0.20` multiplier.
 - Two otherwise-equal Fable candidates receiving different pressure, effective weights, and routing distribution from scoped weekly pressure.
-- All-candidate payload trace carrying U5/U7/combined/factor fields.
+- All-candidate payload trace carrying U5/U7/combined/factor fields (with `request_event_strip_diagnostics` off; with it on, the same trace is carried by the diagnostics log line).
 - Historical v10 payload JSON deserializing with the documented compatibility defaults.
 - Winner and losing candidates carrying distinct per-candidate trace values.
 - Overage-tier scoring remaining identical to v10, including non-uniform urgency differentiation and uniform fallback.

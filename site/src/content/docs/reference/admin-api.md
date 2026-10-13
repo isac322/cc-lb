@@ -27,3 +27,7 @@ For an OAuth upstream, create the resource, call the start endpoint, open the re
 ## Plugin chains
 
 A principal receives the built-in `subscription-preference` router entry at creation. Use the plugin-chain endpoints to add, remove, or reorder additional entries. Registry reference counts include principal chains and upstream warm-up dialect bindings.
+
+## Request event diagnostic fields
+
+Request event payloads can carry five diagnostic fields: `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. With `request_event_strip_diagnostics = true`, new rows are stored without them, so `GET /admin/v1/events/detail/{event_id}`, `GET /admin/v1/events/delta`, and the final updates on `GET /admin/v1/events/stream` omit these keys. Rows rewritten by `cc-lb request-events strip-diagnostics` omit them too. The fields are then available only in the stdout diagnostics log; see [Request diagnostics](/docs/reference/configuration/#request-diagnostics). The setting is off by default, and other payload fields are unchanged.

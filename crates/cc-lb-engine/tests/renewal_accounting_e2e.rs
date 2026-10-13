@@ -5,10 +5,19 @@ mod support;
 #[path = "renewal_accounting_e2e/postgres.rs"]
 mod postgres;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
-use cc_lb_lifecycle::LifecycleEvent;
+use cc_lb_engine::{
+    RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
+    spawn_request_event_assembler_with_diagnostics,
+};
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_observability::NoopMetricsHook;
+use cc_lb_request_log::{
+    RequestDiagnosticsRecord, RequestEventKind, render_request_diagnostics_line,
+};
 use cc_lb_storage_api::CacheKeepaliveTerminalReason;
 
 use support::RenewalAccountingScenario;
@@ -172,4 +181,91 @@ async fn renewal_duplicate_dispatch_blocked_by_claim() {
     // Then
     assert_eq!(scenario.http_calls(), 1);
     assert_eq!(scenario.row_counts().await, (1, 1, 1));
+}
+
+#[derive(Default)]
+struct RecordingDiagnosticsSink {
+    lines: Mutex<Vec<serde_json::Value>>,
+}
+
+#[async_trait]
+impl RequestDiagnosticsSink for RecordingDiagnosticsSink {
+    async fn offer(&self, record: RequestDiagnosticsRecord, _delivery: RequestDiagnosticsDelivery) {
+        let line = render_request_diagnostics_line(&record).expect("diagnostics record renders");
+        let value = serde_json::from_slice(&line).expect("diagnostics line is JSON");
+        self.lines.lock().expect("lines lock").push(value);
+    }
+
+    async fn shutdown(&self) {}
+}
+
+#[tokio::test]
+async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
+    // Given: the keepalive finalizer inserted the renewal row first.
+    let scenario = RenewalAccountingScenario::new().await;
+    let session = scenario.schedule(Some("renewal-key")).await;
+    assert!(scenario.claim(&session).await);
+    let completion = scenario.dispatch_and_finalize(&session, true, None).await;
+    let sink = Arc::new(RecordingDiagnosticsSink::default());
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let assembler = spawn_request_event_assembler_with_diagnostics(
+        rx,
+        scenario.request_event_store(),
+        None,
+        Arc::new(NoopMetricsHook),
+        RequestDiagnosticsOptions {
+            sink: Some(sink.clone() as Arc<dyn RequestDiagnosticsSink>),
+            strip_payload: false,
+        },
+    );
+
+    // When: the renewal's lifecycle events reach the assembler afterwards.
+    tx.send(LifecycleEvent::RequestStarted {
+        event_id: completion.event_id.clone(),
+        request_id: "renewal-observability".to_owned(),
+        ts_ms: 1_003_000,
+        stream: false,
+        source_kind: Some("renewal".to_owned()),
+        source_ref_id: Some(completion.source_ref_id.clone()),
+        event_kind: Some(RequestEventKind::Renewal),
+    })
+    .await
+    .expect("assembler is running");
+    tx.send(LifecycleEvent::RequestTerminated {
+        event_id: completion.event_id.clone(),
+        reason: TerminationReason::Success,
+        client_status: 200,
+        duration_ms: 5,
+        request_body_read_ms: None,
+        request_body_bytes: None,
+        finalize_ms: None,
+        first_body_chunk_ms: None,
+        first_content_delta_ms: None,
+        dns_ms: None,
+        connect_ms: None,
+        connection_reused: None,
+        internal_errors: Vec::new(),
+        proxy_setup_ms: None,
+        setup_timings: Default::default(),
+        io_timings: Default::default(),
+        upstream_body_ms: None,
+        event_kind: Some(RequestEventKind::Renewal),
+    })
+    .await
+    .expect("assembler is running");
+    drop(tx);
+    assembler.shutdown().await;
+
+    // Then: the assembler's insert hit ON CONFLICT, and its single line carries the
+    // finalizer row's cursor.
+    assert_eq!(scenario.row_counts().await, (1, 1, 1));
+    let lines = sink.lines.lock().expect("lines lock").clone();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one line per renewal row: {lines:?}"
+    );
+    assert_eq!(lines[0]["event_id"], completion.event_id.as_str());
+    assert_eq!(lines[0]["seq"], completion.cursor);
+    assert_eq!(lines[0]["source_kind"], "renewal");
 }

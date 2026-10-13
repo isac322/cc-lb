@@ -11,13 +11,18 @@ use cc_lb_lifecycle::{
 use cc_lb_observability::EngineMetricsHook;
 use cc_lb_request_log::{
     CostBreakdown as LifecycleCostBreakdown, RequestCacheBreakpoint, RequestCacheState,
-    RequestEventKind, RequestEventPartial, RequestEventUpdate,
+    RequestDiagnostics, RequestDiagnosticsRecord, RequestDiagnosticsSource, RequestEventKind,
+    RequestEventPartial, RequestEventUpdate,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::metrics_labels::PartialTrigger;
+use crate::request_diagnostics_sink::{
+    REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT, RequestDiagnosticsDelivery, RequestDiagnosticsOptions,
+    RequestDiagnosticsSink,
+};
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
 pub const DEFAULT_ASSEMBLER_TTL: Duration = Duration::from_secs(300);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
@@ -64,6 +69,7 @@ struct ParseIdentity {
 pub struct RequestEventAssemblerHandle {
     shutdown_tx: oneshot::Sender<()>,
     join: JoinHandle<()>,
+    diagnostics_sink: Option<Arc<dyn RequestDiagnosticsSink>>,
 }
 
 impl RequestEventAssemblerHandle {
@@ -71,6 +77,10 @@ impl RequestEventAssemblerHandle {
         let _ = self.shutdown_tx.send(());
         if let Err(error) = self.join.await {
             tracing::warn!(%error, "lifecycle event assembler task panicked");
+        }
+        // The assembler has stopped offering, so the sink can drain what it accepted.
+        if let Some(sink) = self.diagnostics_sink {
+            sink.shutdown().await;
         }
     }
 }
@@ -81,6 +91,25 @@ pub fn spawn_request_event_assembler(
     bus: Option<Arc<dyn RequestEventBus>>,
     metrics: Arc<dyn EngineMetricsHook>,
 ) -> RequestEventAssemblerHandle {
+    spawn_request_event_assembler_with_diagnostics(
+        rx,
+        storage,
+        bus,
+        metrics,
+        RequestDiagnosticsOptions::default(),
+    )
+}
+
+/// Like [`spawn_request_event_assembler`], additionally emitting one diagnostics record per
+/// persisted row and, when `diagnostics.strip_payload` is set, persisting rows without the
+/// five diagnostic fields.
+pub fn spawn_request_event_assembler_with_diagnostics(
+    rx: mpsc::Receiver<LifecycleEvent>,
+    storage: Arc<dyn RequestEventStore>,
+    bus: Option<Arc<dyn RequestEventBus>>,
+    metrics: Arc<dyn EngineMetricsHook>,
+    diagnostics: RequestDiagnosticsOptions,
+) -> RequestEventAssemblerHandle {
     spawn_with_config(
         rx,
         storage,
@@ -88,6 +117,7 @@ pub fn spawn_request_event_assembler(
         metrics,
         DEFAULT_ASSEMBLER_MAP_CAP,
         DEFAULT_ASSEMBLER_TTL,
+        diagnostics,
     )
 }
 
@@ -98,8 +128,10 @@ pub fn spawn_with_config(
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
+    diagnostics: RequestDiagnosticsOptions,
 ) -> RequestEventAssemblerHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let diagnostics_sink = diagnostics.sink.clone();
     let join = tokio::spawn(assembler_loop(
         rx,
         storage,
@@ -107,9 +139,14 @@ pub fn spawn_with_config(
         metrics,
         map_cap,
         ttl,
+        diagnostics,
         shutdown_rx,
     ));
-    RequestEventAssemblerHandle { shutdown_tx, join }
+    RequestEventAssemblerHandle {
+        shutdown_tx,
+        join,
+        diagnostics_sink,
+    }
 }
 
 #[derive(Default)]
@@ -556,6 +593,7 @@ fn unix_now_ms() -> u64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assembler_loop(
     mut rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
@@ -563,10 +601,14 @@ async fn assembler_loop(
     metrics: Arc<dyn EngineMetricsHook>,
     map_cap: usize,
     ttl: Duration,
+    diagnostics: RequestDiagnosticsOptions,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut partials: HashMap<EventId, Partial> = HashMap::new();
-    let mut breaker = StorageCircuitBreaker::default();
+    let mut writer = RowWriter {
+        breaker: StorageCircuitBreaker::default(),
+        diagnostics,
+    };
     let mut sweeper = tokio::time::interval(SWEEP_INTERVAL);
     sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     sweeper.tick().await;
@@ -579,19 +621,19 @@ async fn assembler_loop(
             biased;
                 event = rx.recv() => {
                     match event {
-                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut breaker, &mut partials, map_cap, event).await,
+                        Some(event) => handle_event(&*storage, bus.as_deref(), metrics.as_ref(), &mut writer, &mut partials, map_cap, event).await,
                         None => break,
                     }
                 }
                 _ = finalization_tick.tick() => {
-                    flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut breaker, &mut partials).await;
+                    flush_expired_terminations(&*storage, bus.as_deref(), metrics.as_ref(), &mut writer, &mut partials).await;
                 }
             _ = sweeper.tick() => {
                 flush_expired_orphans(
                     &*storage,
                     bus.as_deref(),
                     metrics.as_ref(),
-                    &mut breaker,
+                    &mut writer,
                     &mut partials,
                     ttl,
                 )
@@ -610,7 +652,7 @@ async fn assembler_loop(
                 &*storage,
                 bus.as_deref(),
                 metrics.as_ref(),
-                &mut breaker,
+                &mut writer,
                 &mut partials,
                 map_cap,
                 event,
@@ -630,7 +672,7 @@ async fn assembler_loop(
                     &*storage,
                     bus.as_deref(),
                     metrics.as_ref(),
-                    &mut breaker,
+                    &mut writer,
                     &mut partials,
                     map_cap,
                     event,
@@ -651,7 +693,7 @@ async fn assembler_loop(
         &*storage,
         bus.as_deref(),
         metrics.as_ref(),
-        &mut breaker,
+        &mut writer,
         &mut partials,
     )
     .await;
@@ -699,12 +741,20 @@ impl StorageCircuitBreaker {
     }
 }
 
+/// State shared by every durable row insert: the storage breaker plus the diagnostics sink and
+/// strip-on-write flag.
+#[derive(Default)]
+struct RowWriter {
+    breaker: StorageCircuitBreaker,
+    diagnostics: RequestDiagnosticsOptions,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn write_finalized_rows(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics_hook: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     event_id: &EventId,
     partial: &Partial,
     reason: &TerminationReason,
@@ -712,18 +762,24 @@ async fn write_finalized_rows(
     duration_ms: u64,
     is_orphan: bool,
 ) {
-    let row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
+    let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
+    // Strip before the insert so the stored row, the bus final, and every reader agree; the
+    // taken fields then exist only in the diagnostics line.
+    let stripped = writer
+        .diagnostics
+        .strip_payload
+        .then(|| RequestDiagnostics::take_from(&mut row));
     let mut attempts: u32 = 0;
     let cursor = loop {
         attempts += 1;
         match storage.append_request_event(&row).await {
             Ok(cursor) => {
-                breaker.record_success();
+                writer.breaker.record_success();
                 break cursor;
             }
             Err(error) => {
-                breaker.record_failure();
-                if let Some(backoff) = breaker.backoff_for(attempts) {
+                writer.breaker.record_failure();
+                if let Some(backoff) = writer.breaker.backoff_for(attempts) {
                     tracing::warn!(
                         %error,
                         lifecycle_event_id = %event_id,
@@ -744,6 +800,31 @@ async fn write_finalized_rows(
             }
         }
     };
+    // Offer only after the insert committed (a finally failed insert returned above) so the
+    // line carries the row's storage cursor, and before the bus final.
+    if let Some(sink) = writer.diagnostics.sink.as_deref() {
+        let (diagnostics, delivery) = match stripped {
+            Some(diagnostics) => (
+                diagnostics,
+                RequestDiagnosticsDelivery::BoundedWait(REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT),
+            ),
+            None => (
+                RequestDiagnostics::cloned_from(&row),
+                RequestDiagnosticsDelivery::BestEffort,
+            ),
+        };
+        sink.offer(
+            RequestDiagnosticsRecord::new(
+                RequestDiagnosticsSource::Live,
+                cursor,
+                event_id.clone(),
+                &row,
+                diagnostics,
+            ),
+            delivery,
+        )
+        .await;
+    }
     if let Some(bus) = bus {
         bus.publish(RequestEventUpdate::final_(row, cursor));
     }
@@ -759,7 +840,7 @@ async fn flush_expired_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let now = Instant::now();
@@ -787,7 +868,7 @@ async fn flush_expired_terminations(
                 storage,
                 bus,
                 metrics,
-                breaker,
+                writer,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -804,7 +885,7 @@ async fn force_flush_terminations(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let pending: Vec<EventId> = partials
@@ -821,7 +902,7 @@ async fn force_flush_terminations(
                 storage,
                 bus,
                 metrics,
-                breaker,
+                writer,
                 &event_id,
                 &partial,
                 &term.reason,
@@ -882,7 +963,7 @@ async fn handle_event(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -942,7 +1023,7 @@ async fn handle_event(
                 storage,
                 bus,
                 metrics,
-                breaker,
+                writer,
                 &event_id,
                 &partial,
                 reason,
@@ -992,7 +1073,7 @@ async fn handle_event(
                 storage,
                 bus,
                 metrics,
-                breaker,
+                writer,
                 &event_id,
                 &partial,
                 &termination.reason,
@@ -1045,7 +1126,7 @@ async fn handle_event(
             storage,
             bus,
             metrics,
-            breaker,
+            writer,
             &event_id,
             &partial,
             &term.reason,
@@ -1056,7 +1137,7 @@ async fn handle_event(
         .await;
     }
     if partials.len() > map_cap {
-        evict_oldest(storage, bus, metrics, breaker, partials).await;
+        evict_oldest(storage, bus, metrics, writer, partials).await;
     }
 }
 
@@ -1514,7 +1595,7 @@ async fn flush_expired_orphans(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
     ttl: Duration,
 ) {
@@ -1534,7 +1615,7 @@ async fn flush_expired_orphans(
                 storage,
                 bus,
                 metrics,
-                breaker,
+                writer,
                 &event_id,
                 &partial,
                 &TerminationReason::Dropped,
@@ -1562,7 +1643,7 @@ async fn evict_oldest(
     storage: &dyn RequestEventStore,
     bus: Option<&dyn RequestEventBus>,
     metrics: &dyn EngineMetricsHook,
-    breaker: &mut StorageCircuitBreaker,
+    writer: &mut RowWriter,
     partials: &mut HashMap<EventId, Partial>,
 ) {
     let Some((oldest_key, _)) = partials
@@ -1597,7 +1678,7 @@ async fn evict_oldest(
         storage,
         bus,
         metrics,
-        breaker,
+        writer,
         &oldest_key,
         &partial,
         &term.reason,
@@ -1864,7 +1945,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1913,7 +1994,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1962,7 +2043,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestTerminated {
@@ -1992,7 +2073,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
         )
         .await;
@@ -3131,7 +3212,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_MAP_CAP,
             LifecycleEvent::RequestStarted {
@@ -3160,7 +3241,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
         )
@@ -3181,7 +3262,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             DEFAULT_ASSEMBLER_TTL,
         )
@@ -3214,7 +3295,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &event_id,
             &partial,
             &TerminationReason::Success,
@@ -3263,7 +3344,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             map_cap,
             LifecycleEvent::RequestStarted {
@@ -3303,7 +3384,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             map_cap,
             LifecycleEvent::RequestStarted {
@@ -3333,7 +3414,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             map_cap,
             LifecycleEvent::RequestStarted {
@@ -3359,7 +3440,7 @@ mod tests {
             &store,
             None,
             metrics.as_ref(),
-            &mut StorageCircuitBreaker::default(),
+            &mut RowWriter::default(),
             &mut partials,
             map_cap,
             LifecycleEvent::RequestTerminated {
@@ -4329,5 +4410,601 @@ mod tests {
                 previous_emit = partial.last_partial_emit_ts;
             }
         }
+    }
+
+    /// Records every offered diagnostics record as the JSON object the stdout sink would write.
+    #[derive(Default)]
+    struct CapturingDiagnosticsSink {
+        offers: StdMutex<Vec<(serde_json::Value, RequestDiagnosticsDelivery)>>,
+        /// `offers.len()` observed by each `shutdown` call.
+        shutdowns: StdMutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl RequestDiagnosticsSink for CapturingDiagnosticsSink {
+        async fn offer(
+            &self,
+            record: RequestDiagnosticsRecord,
+            delivery: RequestDiagnosticsDelivery,
+        ) {
+            let line = cc_lb_request_log::render_request_diagnostics_line(&record)
+                .expect("diagnostics record renders");
+            let value = serde_json::from_slice(&line).expect("diagnostics line is JSON");
+            self.offers
+                .lock()
+                .expect("offers lock")
+                .push((value, delivery));
+        }
+
+        async fn shutdown(&self) {
+            let offered = self.offers.lock().expect("offers lock").len();
+            self.shutdowns.lock().expect("shutdowns lock").push(offered);
+        }
+    }
+
+    impl CapturingDiagnosticsSink {
+        fn lines(&self) -> Vec<serde_json::Value> {
+            self.offers
+                .lock()
+                .expect("offers lock")
+                .iter()
+                .map(|(value, _)| value.clone())
+                .collect()
+        }
+
+        fn deliveries(&self) -> Vec<RequestDiagnosticsDelivery> {
+            self.offers
+                .lock()
+                .expect("offers lock")
+                .iter()
+                .map(|(_, delivery)| *delivery)
+                .collect()
+        }
+    }
+
+    /// Storage with the adapters' `ON CONFLICT (event_id)` contract: a duplicate insert stores
+    /// nothing and returns the existing row's cursor.
+    #[derive(Default)]
+    struct ConflictingStore {
+        rows: StdMutex<Vec<(u64, RequestEvent)>>,
+    }
+
+    #[async_trait]
+    impl RequestEventStore for ConflictingStore {
+        async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<u64> {
+            let mut rows = self.rows.lock().expect("rows lock");
+            if let Some((seq, _)) = rows
+                .iter()
+                .find(|(_, existing)| existing.event_id == event.event_id)
+            {
+                return Ok(*seq);
+            }
+            let seq = u64::try_from(rows.len()).expect("row count fits u64") + 1;
+            rows.push((seq, event.clone()));
+            Ok(seq)
+        }
+    }
+
+    fn diagnostics_writer(sink: &Arc<CapturingDiagnosticsSink>, strip_payload: bool) -> RowWriter {
+        RowWriter {
+            breaker: StorageCircuitBreaker::default(),
+            diagnostics: RequestDiagnosticsOptions {
+                sink: Some(Arc::clone(sink) as Arc<dyn RequestDiagnosticsSink>),
+                strip_payload,
+            },
+        }
+    }
+
+    /// A partial whose finalized row carries all five diagnostic fields.
+    fn partial_with_diagnostics(event_id: &EventId) -> Partial {
+        let mut partial = Partial::new(Instant::now(), event_id.clone());
+        partial.request_id = Some(format!("req-{event_id}"));
+        partial.ts_ms = 1_730_000_000_123;
+        partial.parse = Some(ParseInfo {
+            model: Some("claude-sonnet-4-5".to_owned()),
+            cache_control_message_indices: vec![1, 4],
+            ..Default::default()
+        });
+        partial.cache_breakpoints = vec![RequestCacheBreakpoint {
+            block_index: 2,
+            source: cc_lb_request_log::RequestCacheBreakpointSource::Message,
+            path: "messages[1].content[0]".to_owned(),
+            message_index: Some(1),
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "prefix-hash".to_owned(),
+            prefix_token_count: 512,
+            lookback_prefixes: vec![cc_lb_request_log::RequestCacheLookbackPrefix {
+                prefix_hash: "lookback-hash".to_owned(),
+                content_block_index: 1,
+                lookback_distance: 1,
+            }],
+            token_estimate_source: Some("bytes".to_owned()),
+        }];
+        partial.routing_trace = Some(RoutingTrace::default());
+        partial.usage.iterations = Some(serde_json::json!([{ "input_tokens": 3 }]));
+        partial.internal_errors = vec![InternalError {
+            message: Some("token=[REDACTED] tail".to_owned()),
+            ..InternalError::default()
+        }];
+        partial
+    }
+
+    fn diagnostic_values(row: &RequestEvent) -> [serde_json::Value; 5] {
+        [
+            serde_json::to_value(&row.cache_breakpoints).expect("breakpoints serialize"),
+            serde_json::to_value(&row.cache_control_message_indices).expect("indices serialize"),
+            serde_json::to_value(&row.routing_trace).expect("trace serializes"),
+            serde_json::to_value(&row.iterations).expect("iterations serialize"),
+            serde_json::to_value(&row.internal_errors).expect("errors serialize"),
+        ]
+    }
+
+    fn line_diagnostic_values(line: &serde_json::Value) -> [serde_json::Value; 5] {
+        [
+            line["cache_breakpoints"].clone(),
+            line["cache_control_message_indices"].clone(),
+            line["routing_trace"].clone(),
+            line["iterations"].clone(),
+            line["internal_errors"].clone(),
+        ]
+    }
+
+    fn terminated(event_id: &EventId) -> LifecycleEvent {
+        LifecycleEvent::RequestTerminated {
+            event_id: event_id.clone(),
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 42,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            first_body_chunk_ms: None,
+            first_content_delta_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            internal_errors: Vec::new(),
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            event_kind: None,
+        }
+    }
+
+    fn ready_termination(deadline: Instant) -> TerminationInfo {
+        TerminationInfo {
+            reason: TerminationReason::Success,
+            client_status: 200,
+            duration_ms: 42,
+            deadline,
+            expects_priced: false,
+            expects_cache: true,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn strip_off_line_carries_five_fields_and_storage_seq_without_touching_the_row() {
+        let store = CapturingStore::default();
+        // Start the cursor away from 1 so the line provably carries the returned seq.
+        store.cursor.store(41, Ordering::Relaxed);
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let event_id = eid("diag-strip-off");
+        let partial = partial_with_diagnostics(&event_id);
+        let expected_row = finalize_base(&partial, &TerminationReason::Success, 200, 42, false);
+        assert!(
+            diagnostic_values(&expected_row)
+                .iter()
+                .all(|value| !value.is_null() && value != &serde_json::json!([])),
+            "fixture must populate all five fields"
+        );
+
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink, false),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock").clone();
+        assert_eq!(rows.len(), 1);
+        // Strip off: the stored payload is byte-identical to the pre-feature row.
+        assert_eq!(
+            serde_json::to_vec(&rows[0]).expect("row serializes"),
+            serde_json::to_vec(&expected_row).expect("row serializes")
+        );
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(sink.deliveries(), [RequestDiagnosticsDelivery::BestEffort]);
+        assert_eq!(lines[0]["source"], "live");
+        assert_eq!(lines[0]["seq"], 42);
+        assert_eq!(lines[0]["event_id"], "diag-strip-off");
+        assert_eq!(lines[0]["request_id"], "req-diag-strip-off");
+        assert_eq!(lines[0]["ts_ms"], 1_730_000_000_123_u64);
+        assert_eq!(lines[0]["status"], 200);
+        assert_eq!(
+            line_diagnostic_values(&lines[0]),
+            diagnostic_values(&expected_row)
+        );
+        assert_eq!(
+            lines[0]["cache_breakpoints"][0]["lookback_prefixes"][0]["prefix_hash"],
+            "lookback-hash"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn default_writer_persists_the_same_bytes_as_a_strip_off_sink_writer() {
+        let event_id = eid("diag-default-parity");
+        let partial = partial_with_diagnostics(&event_id);
+        let metrics = noop_metrics();
+        let mut stored = Vec::new();
+        for mut writer in [
+            RowWriter::default(),
+            diagnostics_writer(&Arc::new(CapturingDiagnosticsSink::default()), false),
+        ] {
+            let store = CapturingStore::default();
+            write_finalized_rows(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &event_id,
+                &partial,
+                &TerminationReason::Success,
+                200,
+                42,
+                false,
+            )
+            .await;
+            let rows = store.rows.lock().expect("capturing store lock");
+            assert_eq!(rows.len(), 1);
+            stored.push(serde_json::to_vec(&rows[0]).expect("row serializes"));
+        }
+        assert_eq!(stored[0], stored[1]);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&stored[0]).expect("payload is JSON");
+        assert!(
+            cc_lb_request_log::REQUEST_DIAGNOSTIC_PAYLOAD_KEYS
+                .iter()
+                .all(|key| payload.get(*key).is_some()),
+            "default-off rows keep every diagnostic key: {payload}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn strip_on_persists_and_publishes_row_without_five_fields_but_line_keeps_them() {
+        use cc_lb_control::event_bus::InMemoryBus;
+
+        let store = CapturingStore::default();
+        let bus = Arc::new(InMemoryBus::new());
+        let mut updates = bus.subscribe();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let event_id = eid("diag-strip-on");
+        let partial = partial_with_diagnostics(&event_id);
+        let unstripped = finalize_base(&partial, &TerminationReason::Success, 200, 42, false);
+
+        write_finalized_rows(
+            &store,
+            Some(bus.as_ref() as &dyn RequestEventBus),
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink, true),
+            &event_id,
+            &partial,
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("capturing store lock").clone();
+        assert_eq!(rows.len(), 1);
+        let payload = serde_json::to_value(&rows[0]).expect("row serializes");
+        for key in cc_lb_request_log::REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+            assert!(
+                payload.get(key).is_none(),
+                "stored payload still has {key}: {payload}"
+            );
+        }
+        // Only the five fields moved; everything else is the unstripped row.
+        let mut expected_row = unstripped.clone();
+        let _ = RequestDiagnostics::take_from(&mut expected_row);
+        assert_eq!(rows[0], expected_row);
+
+        let mut final_event = None;
+        while let Ok(update) = updates.try_recv() {
+            if let RequestEventUpdate::Final(update) = update {
+                final_event = Some(update);
+            }
+        }
+        let final_event = final_event.expect("final update was published");
+        assert_eq!(
+            final_event.event, rows[0],
+            "bus final equals the stored row"
+        );
+        assert_eq!(final_event.cursor, 1);
+
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            sink.deliveries(),
+            [RequestDiagnosticsDelivery::BoundedWait(
+                REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT
+            )]
+        );
+        assert_eq!(lines[0]["seq"], 1);
+        assert_eq!(
+            line_diagnostic_values(&lines[0]),
+            diagnostic_values(&unstripped),
+            "the line is the only copy and must carry the taken fields"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn finally_failed_insert_emits_no_line() {
+        let store = CapturingStore::default();
+        store.fail_next.store(u64::MAX, Ordering::Relaxed);
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let event_id = eid("diag-insert-lost");
+
+        for strip_payload in [false, true] {
+            write_finalized_rows(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut diagnostics_writer(&sink, strip_payload),
+                &event_id,
+                &partial_with_diagnostics(&event_id),
+                &TerminationReason::Success,
+                200,
+                42,
+                false,
+            )
+            .await;
+        }
+
+        assert!(store.rows.lock().expect("capturing store lock").is_empty());
+        assert_eq!(
+            store.attempts.load(Ordering::Relaxed),
+            2 * (u64::try_from(STORAGE_WRITE_BACKOFF.len()).expect("len fits u64") + 1)
+        );
+        assert!(sink.lines().is_empty(), "no row, no line");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_persisting_path_emits_one_line_with_the_returned_seq() {
+        let store = CapturingStore::default();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let mut writer = diagnostics_writer(&sink, false);
+        let mut partials = HashMap::new();
+        let started = |event_id: &EventId| LifecycleEvent::RequestStarted {
+            event_id: event_id.clone(),
+            request_id: format!("req-{event_id}"),
+            ts_ms: 1_730_000_000_000,
+            stream: false,
+            source_kind: None,
+            source_ref_id: None,
+            event_kind: None,
+        };
+
+        // Normal: started, then a terminal that is immediately ready.
+        let normal = eid("diag-path-normal");
+        for event in [started(&normal), terminated(&normal)] {
+            handle_event(
+                &store,
+                None,
+                metrics.as_ref(),
+                &mut writer,
+                &mut partials,
+                16,
+                event,
+            )
+            .await;
+        }
+
+        // Orphan: a terminal without any prior partial.
+        let orphan = eid("diag-path-orphan");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            terminated(&orphan),
+        )
+        .await;
+
+        // Grace flush: a terminated partial whose grace deadline has passed.
+        let grace = eid("diag-path-grace");
+        let mut partial = partial_with_diagnostics(&grace);
+        partial.termination = Some(ready_termination(Instant::now()));
+        partials.insert(grace.clone(), partial);
+        flush_expired_terminations(&store, None, metrics.as_ref(), &mut writer, &mut partials)
+            .await;
+
+        // TTL sweep: an unterminated partial older than the TTL.
+        let ttl_orphan = eid("diag-path-ttl");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            started(&ttl_orphan),
+        )
+        .await;
+        partials
+            .get_mut(&ttl_orphan)
+            .expect("ttl partial is present")
+            .inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("monotonic clock has advanced past 2 seconds"),
+        );
+        flush_expired_orphans(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        // Cap eviction: a terminated partial evicted when the map overflows.
+        let evicted = eid("diag-path-evicted");
+        let mut partial = partial_with_diagnostics(&evicted);
+        partial.inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("monotonic clock has advanced past 1 second"),
+        );
+        partial.termination = Some(ready_termination(Instant::now() + Duration::from_secs(60)));
+        partials.insert(evicted.clone(), partial);
+        let survivor = eid("diag-path-survivor");
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            1,
+            started(&survivor),
+        )
+        .await;
+        assert!(!partials.contains_key(&evicted));
+
+        // Shutdown force-flush: a terminated partial still inside its grace window.
+        let forced = eid("diag-path-forced");
+        let mut partial = partial_with_diagnostics(&forced);
+        partial.termination = Some(ready_termination(Instant::now() + Duration::from_secs(60)));
+        partials.insert(forced.clone(), partial);
+        force_flush_terminations(&store, None, metrics.as_ref(), &mut writer, &mut partials).await;
+
+        let rows = store.rows.lock().expect("capturing store lock").clone();
+        let row_ids: Vec<_> = rows
+            .iter()
+            .map(|row| row.event_id.clone().expect("row has event_id"))
+            .collect();
+        assert_eq!(
+            row_ids,
+            [normal, orphan, grace, ttl_orphan, evicted, forced]
+        );
+        let lines = sink.lines();
+        assert_eq!(lines.len(), rows.len(), "exactly one line per written row");
+        for (index, (line, row)) in lines.iter().zip(&rows).enumerate() {
+            let seq = u64::try_from(index).expect("index fits u64") + 1;
+            assert_eq!(line["event_id"], serde_json::json!(row.event_id));
+            assert_eq!(line["seq"], seq, "line {index} carries its row's cursor");
+            assert_eq!(line["status"], row.status);
+            assert_eq!(line_diagnostic_values(line), diagnostic_values(row));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ttl_orphan_then_late_terminal_keeps_first_row_and_first_line_matches_it() {
+        let store = ConflictingStore::default();
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let metrics = noop_metrics();
+        let mut writer = diagnostics_writer(&sink, false);
+        let mut partials = HashMap::new();
+        let event_id = eid("diag-late-terminal");
+        let mut partial = partial_with_diagnostics(&event_id);
+        partial.inserted_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(2))
+                .expect("monotonic clock has advanced past 2 seconds"),
+        );
+        partials.insert(event_id.clone(), partial);
+
+        flush_expired_orphans(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            Duration::from_secs(1),
+        )
+        .await;
+        handle_event(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut writer,
+            &mut partials,
+            16,
+            terminated(&event_id),
+        )
+        .await;
+
+        let rows = store.rows.lock().expect("rows lock").clone();
+        assert_eq!(rows.len(), 1, "ON CONFLICT keeps the TTL orphan row");
+        let (seq, row) = &rows[0];
+        let lines = sink.lines();
+        assert_eq!(lines.len(), 2, "the late terminal emits a second line");
+        for line in &lines {
+            assert_eq!(line["event_id"], "diag-late-terminal");
+            assert_eq!(line["seq"], *seq);
+        }
+        // First line per event_id wins, and it is the one that matches the DB row.
+        assert_eq!(lines[0]["ts_ms"], serde_json::json!(row.ts_ms));
+        assert_eq!(lines[0]["status"], row.status);
+        assert_eq!(line_diagnostic_values(&lines[0]), diagnostic_values(row));
+        assert_ne!(row.ts_ms, Some(0));
+        assert_eq!(
+            lines[1]["ts_ms"], 0,
+            "the late orphan line has no start timestamp"
+        );
+        assert_ne!(lines[1]["status"], lines[0]["status"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_shutdown_drains_the_sink_after_the_assembler_stops() {
+        let (tx, rx) = mpsc::channel(8);
+        let store = Arc::new(CapturingStore::default());
+        let sink = Arc::new(CapturingDiagnosticsSink::default());
+        let handle = spawn_request_event_assembler_with_diagnostics(
+            rx,
+            store.clone(),
+            None,
+            noop_metrics(),
+            RequestDiagnosticsOptions {
+                sink: Some(Arc::clone(&sink) as Arc<dyn RequestDiagnosticsSink>),
+                strip_payload: true,
+            },
+        );
+
+        for event_id in ["diag-shutdown-1", "diag-shutdown-2"] {
+            tx.send(terminated(&eid(event_id)))
+                .await
+                .expect("assembler is running");
+        }
+        handle.shutdown().await;
+
+        assert_eq!(store.rows.lock().expect("capturing store lock").len(), 2);
+        let ids: Vec<_> = sink
+            .lines()
+            .iter()
+            .map(|line| line["event_id"].clone())
+            .collect();
+        assert_eq!(ids, ["diag-shutdown-1", "diag-shutdown-2"]);
+        assert_eq!(
+            *sink.shutdowns.lock().expect("shutdowns lock"),
+            [2],
+            "sink shutdown runs once, after every offer"
+        );
     }
 }

@@ -189,7 +189,7 @@ There is no admin route that triggers a catalog refresh.
 
 ## Request events and dashboards
 
-Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycle_event_assembler.rs`, `crates/cc-lb-admin/src/events_routes.rs`, `crates/cc-lb-admin/src/dashboard_routes.rs`, `crates/cc-lb-admin/src/response_cache.rs`.
+Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycle_event_assembler.rs`, `crates/cc-lb-engine/src/request_diagnostics_sink.rs`, `crates/cc-lb-admin/src/events_routes.rs`, `crates/cc-lb-admin/src/dashboard_routes.rs`, `crates/cc-lb-admin/src/response_cache.rs`.
 
 **Request rows: async best-effort.** The proxy response does not wait for the request event row:
 
@@ -199,6 +199,14 @@ Code: `crates/cc-lb-control/src/event_bus.rs`, `crates/cc-lb-engine/src/lifecycl
 - On shutdown, the assembler drains the channel and any overflow tasks for up to 2 s, then flushes held rows.
 
 Once the insert commits, the assembler publishes `RequestEventUpdate::Final` on the bus.
+
+**Diagnostics line: async, after the insert.** With `observability.request_diagnostics_log` on, the assembler queues one `cc_lb.request_diagnostics.v1` stdout line after the insert commits and before it publishes `RequestEventUpdate::Final`. A dedicated thread writes queued lines; the queue holds 1024 lines. A failed insert produces no line.
+
+- With `request_event_strip_diagnostics` off, the queue offer never waits. A full queue drops the line and counts `request_diagnostics_queue_full`; the row still holds the diagnostic fields, so `cc-lb request-events export-diagnostics` can restore it.
+- With `request_event_strip_diagnostics` on, the row is stored without the five diagnostic fields, and the assembler waits up to 500 ms for queue space, which delays the `Final` publish by the same amount. On timeout the line is dropped as `request_diagnostics_strip_send_timeout`, and later offers stop waiting until the queue is at least half empty (`request_diagnostics_strip_queue_full`). These drops, and lines still queued at SIGKILL or OOM, are lost for good.
+- Graceful shutdown drains the queue for up to 2 s. If stdout is still stalled at the deadline, shutdown proceeds without joining the writer thread and without logging (logs share the stalled stdout). Every queued line the writer has not started is counted as `request_diagnostics_shutdown_timeout`; the line being written records its own outcome if the write returns before exit, so no line is counted twice.
+- The first line per `event_id` matches the stored row. A late terminal event for an already persisted orphan row can produce a second line that the database ignored; consumers keep the first.
+- Cache-keepalive renewal rows are inserted by the renewal finalizer, and the assembler emits their line when their lifecycle events arrive. A renewal row whose lifecycle events were dropped (`lifecycle_assembler_full`) or that is finalized after the assembler has stopped has a stored row but no line. Its diagnostic fields are always empty, so `export-diagnostics` restores the count and nothing diagnostic is lost.
 
 **Event reads.** `GET /admin/v1/events/recent` and `GET /admin/v1/events/delta` read committed rows only. They never include rows still held by the assembler. `GET /admin/v1/events/stream` first backfills committed rows after the client's `Last-Event-ID`, querying at most 500 (`BACKFILL_MAX_EVENTS`). The stream's principal, upstream, and model filters are applied to those rows before they are returned. If the backfill returns 500 rows, the stream sends `reset` and ends. With filters active, a client 500 or more rows behind can get fewer than 500 matching rows back and no reset, and rows past the first 500 of the gap are then not replayed; do not infer a reset from the cursor gap alone. After the backfill it streams live bus updates and, on Postgres, updates from `StorageTailPoller`, which polls storage every `event_bus.storage_tail_poll_interval_ms`. A lagging subscriber receives `reset` and the stream closes.
 

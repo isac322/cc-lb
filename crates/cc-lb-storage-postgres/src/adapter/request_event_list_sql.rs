@@ -88,17 +88,38 @@ pub(super) async fn list_request_events(
     storage: &PostgresStorage,
     query: &RequestEventListQuery,
 ) -> StorageResult<Vec<RequestEventListItem>> {
-    if query.limit == 0 || query.until_unix_secs < query.since_unix_secs {
+    let Some(mut builder) = list_request_events_query("", query)? else {
         return Ok(Vec::new());
+    };
+
+    let rows = builder
+        .build_query_as::<ListRow>()
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+    rows.into_iter().map(list_row_to_item).collect()
+}
+
+/// Builds the list statement behind `prefix` (empty for execution,
+/// `EXPLAIN …` for plan inspection), so plan tests see the exact production
+/// SQL. `None` means the page is empty without querying.
+pub(super) fn list_request_events_query(
+    prefix: &str,
+    query: &RequestEventListQuery,
+) -> StorageResult<Option<QueryBuilder<Postgres>>> {
+    if query.limit == 0 || query.until_unix_secs < query.since_unix_secs {
+        return Ok(None);
     }
     let Some(since) =
         unix_secs_to_datetime_lower(query.since_unix_secs, "request event list since")?
     else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let until = unix_secs_to_datetime_upper(query.until_unix_secs, "request event list until")?;
 
-    let mut builder = QueryBuilder::<Postgres>::new(LIST_REQUEST_EVENTS_SELECT);
+    let mut builder =
+        QueryBuilder::<Postgres>::new(format!("{prefix}{LIST_REQUEST_EVENTS_SELECT}"));
     builder.push_bind(since);
 
     if let Some(until) = until {
@@ -178,14 +199,7 @@ pub(super) async fn list_request_events(
 
     builder.push(" ORDER BY r.list_ts_ms DESC, r.list_event_key DESC LIMIT ");
     builder.push_bind(u64_to_i64(query.limit as u64, "request event list limit")?);
-
-    let rows = builder
-        .build_query_as::<ListRow>()
-        .fetch_all(&storage.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-    rows.into_iter().map(list_row_to_item).collect()
+    Ok(Some(builder))
 }
 
 pub(super) async fn get_request_event(

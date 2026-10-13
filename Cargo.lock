@@ -1134,6 +1134,7 @@ name = "cc-lb-request-log"
 version = "1.0.1"
 dependencies = [
  "cc-lb-domain",
+ "chrono",
  "serde",
  "serde_json",
  "uuid",

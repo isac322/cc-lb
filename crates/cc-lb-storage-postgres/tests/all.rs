@@ -12,6 +12,8 @@ mod cache_keepalive_session_reads;
 mod cache_keepalive_sessions;
 #[path = "crash_recovery.rs"]
 mod crash_recovery;
+#[path = "drop_redundant_indexes.rs"]
+mod drop_redundant_indexes;
 #[path = "hook_metadata_mode_backfill.rs"]
 mod hook_metadata_mode_backfill;
 #[path = "migration_versions.rs"]
@@ -26,6 +28,8 @@ mod prompt_cache_observation;
 mod quota_aggregates;
 #[path = "request_event_cost_components.rs"]
 mod request_event_cost_components;
+#[path = "request_event_filter_index_plans.rs"]
+mod request_event_filter_index_plans;
 #[path = "request_event_projections.rs"]
 mod request_event_projections;
 #[path = "request_events_cursor.rs"]

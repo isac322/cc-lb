@@ -28,6 +28,8 @@ pub struct Config {
     pub timeouts: TimeoutsConfig,
     #[serde(default = "default_request_event_retention_days")]
     pub request_event_retention_days: u64,
+    #[serde(default)]
+    pub request_event_strip_diagnostics: bool,
     pub price_catalog: PriceCatalogConfig,
     pub storage: StorageConfig,
     #[serde(default)]
@@ -59,6 +61,7 @@ impl Default for Config {
             body: BodyConfig::default(),
             timeouts: TimeoutsConfig::default(),
             request_event_retention_days: default_request_event_retention_days(),
+            request_event_strip_diagnostics: false,
             price_catalog: PriceCatalogConfig::default(),
             storage: StorageConfig::default(),
             scheduler: SchedulerConfig::default(),
@@ -635,6 +638,8 @@ pub struct ObservabilityConfig {
     #[serde(default = "default_true")]
     pub log_redaction: bool,
     pub user_prompt_redaction: bool,
+    #[serde(default)]
+    pub request_diagnostics_log: bool,
 }
 
 impl Default for ObservabilityConfig {
@@ -644,6 +649,7 @@ impl Default for ObservabilityConfig {
             otlp_endpoint: None,
             log_redaction: true,
             user_prompt_redaction: false,
+            request_diagnostics_log: false,
         }
     }
 }

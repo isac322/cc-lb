@@ -54,6 +54,8 @@ pub struct TestProcess {
     child: Child,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_thread: Option<ThreadJoinHandle<()>>,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stdout_thread: Option<ThreadJoinHandle<()>>,
 }
 
 impl Drop for TestProcess {
@@ -63,11 +65,14 @@ impl Drop for TestProcess {
         if let Some(stderr_thread) = self.stderr_thread.take() {
             let _ = stderr_thread.join();
         }
+        if let Some(stdout_thread) = self.stdout_thread.take() {
+            let _ = stdout_thread.join();
+        }
     }
 }
 
 impl TestProcess {
-    fn spawn(config_path: &Path) -> Self {
+    fn spawn(config_path: &Path, envs: &[(String, String)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
             .arg("serve")
             .arg("--config")
@@ -77,7 +82,8 @@ impl TestProcess {
                 "0000000000000000000000000000000000000000000000000000000000000000",
             )
             .env("CC_LB_ADMIN_TOKEN", "admin-token")
-            .stdout(Stdio::null())
+            .envs(envs.iter().map(|(key, value)| (key, value)))
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn cc-lb binary");
@@ -91,12 +97,40 @@ impl TestProcess {
                 *captured = stderr_bytes;
             }
         });
+        // stdout is drained continuously (a full pipe would block the server) and kept so
+        // tests can inspect the stdout NDJSON lines while the server is still running.
+        let mut stdout_pipe = child.stdout.take().expect("child stdout pipe");
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stdout_sink = Arc::clone(&stdout);
+        let stdout_thread = std::thread::spawn(move || {
+            let mut chunk = [0_u8; 8192];
+            loop {
+                match stdout_pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => {
+                        if let Ok(mut captured) = stdout_sink.lock() {
+                            captured.extend_from_slice(&chunk[..read]);
+                        }
+                    }
+                }
+            }
+        });
 
         Self {
             child,
             stderr,
             stderr_thread: Some(stderr_thread),
+            stdout,
+            stdout_thread: Some(stdout_thread),
         }
+    }
+
+    /// Bytes the server has written to stdout so far.
+    pub fn stdout_snapshot(&self) -> Vec<u8> {
+        self.stdout
+            .lock()
+            .map(|bytes| bytes.clone())
+            .unwrap_or_default()
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
@@ -131,6 +165,13 @@ impl Drop for TestServer {
     }
 }
 
+impl TestServer {
+    /// Path of the TOML config the server was started with.
+    pub fn config_path(&self) -> PathBuf {
+        self._config_dir.path().join("cc-lb.toml")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedTestKey {
     pub key_id: String,
@@ -147,6 +188,19 @@ pub async fn spawn_test_server_with_extra_config(extra_toml: &str) -> TestServer
         AppConfig::default(),
         Vec::new(),
         TestTopology::Single,
+        &[],
+    )
+    .await
+}
+
+/// Like [`spawn_test_server_with_extra_config`], with extra environment variables for the child.
+pub async fn spawn_test_server_with_env(extra_toml: &str, envs: &[(String, String)]) -> TestServer {
+    spawn_test_server_with_options(
+        extra_toml,
+        AppConfig::default(),
+        Vec::new(),
+        TestTopology::Single,
+        envs,
     )
     .await
 }
@@ -155,7 +209,14 @@ pub async fn spawn_test_server_with_fake_config(
     extra_toml: &str,
     fake_config: AppConfig,
 ) -> TestServer {
-    spawn_test_server_with_options(extra_toml, fake_config, Vec::new(), TestTopology::Single).await
+    spawn_test_server_with_options(
+        extra_toml,
+        fake_config,
+        Vec::new(),
+        TestTopology::Single,
+        &[],
+    )
+    .await
 }
 
 pub async fn spawn_test_server_with_two_upstreams(
@@ -167,6 +228,7 @@ pub async fn spawn_test_server_with_two_upstreams(
         fake_config,
         Vec::new(),
         TestTopology::SubscriptionPreferencePair,
+        &[],
     )
     .await
 }
@@ -181,6 +243,7 @@ pub async fn spawn_test_server_with_principal_limits(
         fake_config,
         principal_limits,
         TestTopology::Single,
+        &[],
     )
     .await
 }
@@ -229,6 +292,7 @@ async fn spawn_test_server_with_options(
     fake_config: AppConfig,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
+    envs: &[(String, String)],
 ) -> TestServer {
     let fake_listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -240,8 +304,14 @@ async fn spawn_test_server_with_options(
         );
 
     for attempt in 1..=SERVER_START_ATTEMPTS {
-        match spawn_test_server_attempt(extra_toml, fake_addr, principal_limits.clone(), topology)
-            .await
+        match spawn_test_server_attempt(
+            extra_toml,
+            fake_addr,
+            principal_limits.clone(),
+            topology,
+            envs,
+        )
+        .await
         {
             Ok(spawned) => {
                 return TestServer {
@@ -273,6 +343,7 @@ async fn spawn_test_server_attempt(
     fake_addr: SocketAddr,
     principal_limits: Vec<Limit>,
     topology: TestTopology,
+    envs: &[(String, String)],
 ) -> Result<SpawnedTestServer, StartupFailure> {
     let proxy_listener = reserve_addr();
     let admin_listener = reserve_addr();
@@ -295,7 +366,7 @@ async fn spawn_test_server_attempt(
 
     drop((proxy_listener, admin_listener, metrics_listener));
 
-    let mut process = TestProcess::spawn(&config_path);
+    let mut process = TestProcess::spawn(&config_path, envs);
 
     wait_for_proxy_ready_or_exit(&mut process, proxy_addr, &managed_key).await?;
     wait_for_status_or_exit(&mut process, admin_addr, "/admin/health", 200).await?;

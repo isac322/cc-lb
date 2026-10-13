@@ -35,6 +35,63 @@ pub struct RequestEventStreamFilters {
     pub event_kind: Option<cc_lb_request_log::RequestEventKind>,
 }
 
+/// One page of the operator diagnostics export: rows with
+/// `after_seq < seq <= until_seq`, optionally narrowed to the half-open
+/// `[from_ts_ms, to_ts_ms)` window on the stored list timestamp, in ascending
+/// storage-cursor order and at most `limit` rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestEventExportPage {
+    pub after_seq: u64,
+    pub until_seq: u64,
+    pub from_ts_ms: Option<u64>,
+    pub to_ts_ms: Option<u64>,
+    pub limit: usize,
+}
+
+/// One batch of the operator payload scan: raw stored payloads for
+/// `after_seq < seq <= until_seq` in ascending storage-cursor order, at most
+/// `limit` rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestEventPayloadScan {
+    pub after_seq: u64,
+    pub until_seq: u64,
+    pub limit: usize,
+}
+
+/// Shared body of `MetaStore::verify_schema_current`.
+///
+/// `expected` is every migration embedded in the binary as
+/// `(version, checksum)`; `applied` is every successfully applied
+/// `_sqlx_migrations` row as `(version, checksum)`. Each expected version
+/// must be applied with an identical checksum. Applied versions the binary
+/// does not know (written by a newer release) are allowed.
+pub fn verify_applied_migrations<'a>(
+    expected: impl IntoIterator<Item = (i64, &'a [u8])>,
+    applied: &[(i64, Vec<u8>)],
+) -> crate::StorageResult<()> {
+    let applied = applied
+        .iter()
+        .map(|(version, checksum)| (*version, checksum.as_slice()))
+        .collect::<std::collections::HashMap<i64, &[u8]>>();
+    let mut missing = Vec::new();
+    let mut mismatched = Vec::new();
+    for (version, checksum) in expected {
+        match applied.get(&version) {
+            None => missing.push(version),
+            Some(applied_checksum) if *applied_checksum != checksum => mismatched.push(version),
+            Some(_) => {}
+        }
+    }
+    if missing.is_empty() && mismatched.is_empty() {
+        return Ok(());
+    }
+    Err(crate::StorageError::Fatal {
+        message: format!(
+            "database schema is not current for this binary: missing migration versions {missing:?}, checksum mismatch versions {mismatched:?}"
+        ),
+    })
+}
+
 /// Shared contract for the request-log `model` filter.
 ///
 /// Historical SQL (list and histogram), the in-memory live tail, the SSE
@@ -62,12 +119,13 @@ pub struct RequestEventStreamFilters {
 /// SQL form: bind both patterns from [`model_filter_like_patterns`] as a
 /// disjunction — `lower(model) LIKE <p1> ESCAPE '\' OR lower(model) LIKE
 /// <p2> ESCAPE '\'`. Every pattern is left-anchored on a literal prefix
-/// (`c%` and `claude-%c%`), never a bare `%c%` contains, so the clause stays
-/// index-safe: Postgres can range-seek `request_events_v1_lower_model_list_
-/// order_idx` (`lower(model) text_pattern_ops`) on either arm, and SQLite's
-/// equivalent predicate keeps the same shape. `claude-` is the only vendor
-/// prefix modeled; stored model names in this system are `claude-*` or
-/// literal non-vendor names.
+/// (`c%` and `claude-%c%`), never a bare `%c%` contains, so neither arm
+/// degenerates into an unbounded substring search. Neither backend keeps a
+/// dedicated `lower(model)` index: the planner never chose one for this
+/// disjunction, so the predicate is evaluated while walking the list order
+/// index (Postgres `tests/request_event_filter_index_plans.rs` guards this).
+/// `claude-` is the only vendor prefix modeled; stored model names in this
+/// system are `claude-*` or literal non-vendor names.
 pub fn model_filter_matches(needle: &str, model: Option<&str>) -> bool {
     let Some(core) = model_filter_core(needle) else {
         // Absent filter: no restriction — every row passes, including
@@ -347,7 +405,49 @@ pub struct UsageRollupRun {
 
 #[cfg(test)]
 mod tests {
-    use super::{model_filter_like_patterns, model_filter_matches};
+    use super::{model_filter_like_patterns, model_filter_matches, verify_applied_migrations};
+    use crate::StorageError;
+
+    #[test]
+    fn verify_applied_migrations_accepts_exact_and_newer_schema() {
+        let expected: [(i64, &[u8]); 2] = [(1, b"aa"), (2, b"bb")];
+        let applied = vec![(1, b"aa".to_vec()), (2, b"bb".to_vec())];
+        assert!(verify_applied_migrations(expected, &applied).is_ok());
+
+        let newer = vec![
+            (1, b"aa".to_vec()),
+            (2, b"bb".to_vec()),
+            (3, b"cc".to_vec()),
+        ];
+        assert!(verify_applied_migrations(expected, &newer).is_ok());
+    }
+
+    #[test]
+    fn verify_applied_migrations_lists_missing_and_mismatched_versions() {
+        let expected: [(i64, &[u8]); 3] = [(1, b"aa"), (2, b"bb"), (3, b"cc")];
+        let applied = vec![(1, b"aa".to_vec()), (2, b"XX".to_vec())];
+        let Err(StorageError::Fatal { message }) = verify_applied_migrations(expected, &applied)
+        else {
+            panic!("missing and mismatched migrations must fail as Fatal");
+        };
+        assert!(
+            message.contains("missing migration versions [3]"),
+            "{message}"
+        );
+        assert!(
+            message.contains("checksum mismatch versions [2]"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn verify_applied_migrations_rejects_empty_database() {
+        let expected: [(i64, &[u8]); 1] = [(1, b"aa")];
+        assert!(matches!(
+            verify_applied_migrations(expected, &[]),
+            Err(StorageError::Fatal { .. })
+        ));
+    }
 
     #[test]
     fn model_filter_matches_case_insensitive() {

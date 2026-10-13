@@ -3,12 +3,13 @@ use async_trait::async_trait;
 use crate::{
     ApiKeyMutation, AuditEntry, AuditQueryScope, BackendKind, CacheKeepaliveDecisionRow,
     ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
-    PriceCatalogSnapshotFetch, RequestEvent, RequestEventHistogramBucket,
+    PriceCatalogSnapshotFetch, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStreamFilters,
-    RuntimeChangeNotifier, StorageError, StorageResult, StoredApiKeyRecord, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageTokenInterval, UsageTokenIntervalSum,
+    RequestEventListItem, RequestEventListQuery, RequestEventPayloadScan,
+    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
+    RequestEventStreamFilters, RuntimeChangeNotifier, StorageError, StorageResult,
+    StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun, UsageTokenInterval,
+    UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
@@ -160,6 +161,92 @@ pub trait RequestEventStore: Send + Sync {
         let _ = event_id;
         Err(StorageError::Fatal {
             message: "get_request_event is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    /// Returns the highest cursor `C` such that no row with `seq <= C` can
+    /// still commit: every such row is already visible (or never will be).
+    /// Paging `export_request_events` with `until_seq` clamped to `C` and
+    /// resuming from the last returned `seq` therefore never skips a lower
+    /// `seq` committed by a slower transaction. Postgres waits at most
+    /// `max_wait` for in-flight transactions and fails with `Unavailable` on
+    /// timeout; single-writer backends return the current maximum.
+    async fn request_event_stable_seq_ceiling(
+        &self,
+        max_wait: std::time::Duration,
+    ) -> StorageResult<u64> {
+        let _ = max_wait;
+        Err(StorageError::Fatal {
+            message: "request_event_stable_seq_ceiling is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    /// Returns `(MIN(seq), MAX(seq))` over rows whose stored list timestamp
+    /// lies in the half-open window `[from_ts_ms, to_ts_ms)`, or `None` when
+    /// no row matches. Operator export only.
+    async fn request_event_seq_bounds(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Option<(u64, u64)>> {
+        let _ = (from_ts_ms, to_ts_ms);
+        Err(StorageError::Fatal {
+            message: "request_event_seq_bounds is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    /// Returns one page of full events in ascending cursor order (see
+    /// [`RequestEventExportPage`]). Postgres returns only rows already below
+    /// the snapshot xmin horizon, like `query_request_events_between_cursors`.
+    async fn export_request_events(
+        &self,
+        page: &RequestEventExportPage,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        let _ = page;
+        Err(StorageError::Fatal {
+            message: "export_request_events is not implemented for this storage backend".to_owned(),
+        })
+    }
+
+    /// Returns `(utc_day_index, row_count)` pairs, ascending by day, where
+    /// `utc_day_index = list_ts_ms / 86_400_000`, over rows with
+    /// `from_ts_ms <= list_ts_ms < to_ts_ms`. Reads no payload.
+    async fn request_event_day_counts(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        let _ = (from_ts_ms, to_ts_ms);
+        Err(StorageError::Fatal {
+            message: "request_event_day_counts is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    /// Returns raw stored payload bytes `(seq, payload)` in ascending cursor
+    /// order (see [`RequestEventPayloadScan`]). No decoding and no xmin guard.
+    async fn scan_request_event_payloads(
+        &self,
+        scan: &RequestEventPayloadScan,
+    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
+        let _ = scan;
+        Err(StorageError::Fatal {
+            message: "scan_request_event_payloads is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
+    /// Replaces the stored payload of each `(seq, payload)` row and returns
+    /// the number of rows updated. A `seq` that no longer exists (for example
+    /// pruned concurrently) updates nothing and is not an error. Neither the
+    /// cursor nor any other column changes.
+    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
+        let _ = rows;
+        Err(StorageError::Fatal {
+            message: "rewrite_request_event_payloads is not implemented for this storage backend"
+                .to_owned(),
         })
     }
 }
@@ -362,6 +449,16 @@ pub trait MetaStore: Send + Sync {
         Err(StorageError::Fatal {
             message: "compare_and_put_meta_value is not implemented for this storage backend"
                 .to_owned(),
+        })
+    }
+
+    /// Verifies, without migrating, that every migration embedded in this
+    /// binary is recorded as successfully applied with the same checksum.
+    /// A missing version or a checksum mismatch returns `Fatal` listing them;
+    /// versions applied by a newer binary are allowed.
+    async fn verify_schema_current(&self) -> StorageResult<()> {
+        Err(StorageError::Fatal {
+            message: "verify_schema_current is not implemented for this storage backend".to_owned(),
         })
     }
 }

@@ -150,6 +150,7 @@ See the [install and configure guide](https://cc-lb.bhyoo.com/docs/getting-start
 - [Runtime management](./docs/runtime-management.md): database-backed upstreams, principals, keys, and plugin chains
 - [Upstream warm-up](./docs/upstream-warmup.md): OAuth warm-up and quota-aware scheduling
 - [Distributed scheduler](./docs/scheduler.md): topology, retry classes, metrics, and runbook
+- [Request diagnostics](./docs/runbook/request-diagnostics.md): stdout diagnostics log, backfill, and stripping diagnostic fields from stored rows
 - [Plugin author guide](./docs/plugin-author-guide.md): Wasmtime filter and shape hooks
 
 ### Stream diagnostics
@@ -170,6 +171,10 @@ The `proxy.handle` span stays open through terminal lifecycle completion and rec
 Admin HTTP requests use a separate `admin.request` span with bounded matched-route templates, response status/error categories, and optional request-ID correlation, not raw paths, query strings, authentication headers, credentials, or bodies. Request IDs are span attributes, never metric labels. Instrumentation creates no per-chunk child spans and does not wait for telemetry export on the request path; this is not a zero-overhead guarantee. See the [Prometheus and OTLP contract](./docs/request-latency-unaccounted-remediation.md#13-prometheus-and-otlp-contract) for timing boundaries and residual computation.
 
 The `stream latency breakdown` log runs on a dedicated worker with a fixed 4,096-entry queue, so emitting it cannot delay the final downstream body bytes. Queue overflow and closure increment `cc_lb_dropped_events_total` with bounded `stream_completion_observer_*` reasons; panic accounting and recovery apply to unwind builds, while the release profile aborts native Rust panics. Mandatory lifecycle events, accounting, affinity decisions, and stream termination metrics remain inline. Graceful server shutdown prioritizes durable writer flushes, then waits up to the existing cleanup budget for remaining stream completion logs before telemetry teardown; a timeout increments `stream_completion_observer_shutdown_timeout` and leaves the worker detached.
+
+### Request diagnostics log
+
+Set `observability.request_diagnostics_log = true` (or `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG=true`) to write one JSON line per stored request event to stdout; renewal rows finalized after the assembler has stopped are the exception ([consistency contract](./docs/consistency-contract.md#request-events-and-dashboards)), and a backfill restores them. Each line starts with `{"schema":"cc_lb.request_diagnostics.v1",` and carries the event's `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Setting top-level `request_event_strip_diagnostics = true` (Helm: `config.requestEventStripDiagnostics`) then stores new rows without those five fields: admin API event detail, delta, and stream payloads omit them, and the log line is their only copy. The strip requires the log, and both default to off. `cc-lb request-events export-diagnostics` backfills lines from stored rows, and `cc-lb request-events strip-diagnostics` removes the fields from older rows; see the [request diagnostics runbook](./docs/runbook/request-diagnostics.md).
 
 ## Plugin authors
 

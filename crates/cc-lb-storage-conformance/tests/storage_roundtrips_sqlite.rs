@@ -18,8 +18,8 @@ use cc_lb_storage_conformance::{
         anthropic_compatibility_kv_store, atomicity, cache_keepalive_session_reads, managed_keys,
         organization_metadata_store, plan_tier_store, plugin_registry_store,
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
-        request_event_list, request_event_principal_costs, storage_roundtrips,
-        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        request_event_list, request_event_operator, request_event_principal_costs,
+        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         storage_roundtrips_upstream_diagnostics, upstream_api_key_store, upstream_rate_limit_store,
         upstream_subscription_metadata_store, upstream_subscription_quota_store,
         warmup_attempts_store,
@@ -62,6 +62,17 @@ impl ConformanceBackend for SqliteConformanceBackend {
 
     fn kind(&self) -> BackendKind {
         BackendKind::Sqlite
+    }
+
+    async fn execute_raw_sql(
+        &self,
+        storage: &Self::Storage,
+        sql: &'static str,
+    ) -> anyhow::Result<u64> {
+        Ok(sqlx::query(sql)
+            .execute(storage.pool())
+            .await?
+            .rows_affected())
     }
 }
 
@@ -210,6 +221,22 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_sqlite() {
     run_sqlite_scenario(
         "request_event_list_model_filter_matches_case_insensitive_prefix",
         request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
+    );
+}
+
+#[test]
+fn request_event_operator_methods_sqlite() {
+    run_sqlite_scenario(
+        "request_event_operator_methods",
+        request_event_operator::request_event_operator_methods,
+    );
+}
+
+#[test]
+fn verify_schema_current_detects_drift_sqlite() {
+    run_sqlite_scenario(
+        "verify_schema_current_detects_drift",
+        request_event_operator::verify_schema_current_detects_drift,
     );
 }
 
