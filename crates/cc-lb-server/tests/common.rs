@@ -88,8 +88,8 @@ impl TestProcess {
             .spawn()
             .expect("spawn cc-lb binary");
         // Both pipes are drained continuously (a full pipe would block the server) and kept so
-        // tests can inspect the output while the server is still running: diagnostics lines on
-        // stderr, tracing on stdout.
+        // tests can inspect the output while the server is still running: stdout carries tracing
+        // and the request diagnostics lines.
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let stderr_thread = drain_pipe(
             child.stderr.take().expect("child stderr pipe"),
@@ -113,14 +113,6 @@ impl TestProcess {
     /// Bytes the server has written to stdout so far.
     pub fn stdout_snapshot(&self) -> Vec<u8> {
         self.stdout
-            .lock()
-            .map(|bytes| bytes.clone())
-            .unwrap_or_default()
-    }
-
-    /// Bytes the server has written to stderr so far.
-    pub fn stderr_snapshot(&self) -> Vec<u8> {
-        self.stderr
             .lock()
             .map(|bytes| bytes.clone())
             .unwrap_or_default()
@@ -158,25 +150,14 @@ impl TestProcess {
     }
 
     /// Sends SIGTERM, waits for the graceful shutdown to finish, and returns everything the
-    /// server wrote to stdout. Graceful shutdown drains queued output, so the result is the
-    /// server's complete stdout.
+    /// server wrote to stdout. Graceful shutdown drains queued output (including the request
+    /// diagnostics sink), so the result is the server's complete stdout.
     pub fn terminate_and_collect_stdout(&mut self) -> Vec<u8> {
         self.terminate_and_wait();
         if let Some(stdout_thread) = self.stdout_thread.take() {
             let _ = stdout_thread.join();
         }
         self.stdout_snapshot()
-    }
-
-    /// Sends SIGTERM, waits for the graceful shutdown to finish, and returns everything the
-    /// server wrote to stderr. Graceful shutdown drains the request diagnostics sink, so the
-    /// result is the server's complete stderr.
-    pub fn terminate_and_collect_stderr(&mut self) -> Vec<u8> {
-        self.terminate_and_wait();
-        if let Some(stderr_thread) = self.stderr_thread.take() {
-            let _ = stderr_thread.join();
-        }
-        self.stderr_snapshot()
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {

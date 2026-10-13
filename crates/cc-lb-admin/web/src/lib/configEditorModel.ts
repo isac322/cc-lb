@@ -242,7 +242,7 @@ export const CONFIG_EDITOR_SECTIONS = [
       {
         path: 'request_event_strip_diagnostics',
         impact:
-          'Stops storing diagnostic fields in the database; they then exist only in the stderr diagnostics log.',
+          'Stops storing diagnostic fields in the database; they then exist only in the stdout diagnostics log.',
       },
     ],
   },
@@ -1327,9 +1327,9 @@ const CONFIG_FIELD_GUIDANCE: readonly {
     pattern: 'observability.request_diagnostics_log',
     guidance: {
       description:
-        'Write one cc_lb.request_diagnostics.v1 JSON line per persisted request event to stderr (tracing stays on stdout), carrying cache breakpoints, routing trace, iterations, and internal errors. Renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped get no line; their diagnostic fields are empty.',
+        'Write one cc_lb.request_diagnostics.v1 JSON line per persisted request event to stdout, carrying cache breakpoints, routing trace, iterations, and internal errors. Renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped get no line; their diagnostic fields are empty.',
       enabled:
-        'Diagnostics reach your log pipeline for analysis; stderr volume grows by roughly 2–25 KiB per request.',
+        'Diagnostics reach your log pipeline for analysis; stdout volume grows by roughly 2–25 KiB per request.',
       disabled:
         'No diagnostics lines are written; the fields stay only in stored request events.',
       impactDimensions: ['observability', 'cost'],
@@ -1404,9 +1404,9 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       description:
         'Drop cache breakpoints, cache-control indices, routing trace, iterations, and internal errors from stored request events. Requires observability.request_diagnostics_log.',
       enabled:
-        'Stored rows shrink substantially; the diagnostic fields exist only in the stderr diagnostics log.',
+        'Stored rows shrink substantially; the diagnostic fields exist only in the stdout diagnostics log.',
       disabled:
-        'Stored rows keep the diagnostic fields alongside the stderr log, at higher database storage cost.',
+        'Stored rows keep the diagnostic fields alongside the stdout log, at higher database storage cost.',
       impactDimensions: ['storage', 'observability'],
     },
   },

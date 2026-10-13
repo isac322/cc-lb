@@ -528,7 +528,7 @@ describe('resolved editor model', () => {
       advanced: false,
       dangerous: true,
       dangerImpact:
-        'Stops storing diagnostic fields in the database; they then exist only in the stderr diagnostics log.',
+        'Stops storing diagnostic fields in the database; they then exist only in the stdout diagnostics log.',
     });
     expect(
       classifyConfigLeaf('observability.request_diagnostics_log', 'boolean'),

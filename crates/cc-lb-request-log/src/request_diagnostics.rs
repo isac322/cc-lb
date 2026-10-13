@@ -1,5 +1,4 @@
-//! Per-request diagnostic fields shipped as structured NDJSON: live lines go to process
-//! stderr, and the backfill CLI writes the same lines to stdout.
+//! Per-request diagnostic fields shipped as structured stdout NDJSON.
 //!
 //! The five diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
 //! `cache_control_message_indices`, `routing_trace`, `iterations`,

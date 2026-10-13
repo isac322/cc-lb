@@ -1,8 +1,8 @@
 //! Per-request diagnostics delivery (`cc_lb.request_diagnostics.v1`).
 //!
 //! The request event assembler hands one [`RequestDiagnosticsRecord`] per persisted row to a
-//! [`RequestDiagnosticsSink`]. The stderr sink renders and writes each record on a dedicated OS
-//! thread, so neither serialization nor a stalled stderr pipe runs on the proxy request path.
+//! [`RequestDiagnosticsSink`]. The stdout sink renders and writes each record on a dedicated OS
+//! thread, so neither serialization nor a stalled stdout pipe runs on the proxy request path.
 
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -31,7 +31,7 @@ pub trait RequestDiagnosticsSink: Send + Sync {
     /// awaits at most the `BoundedWait` timeout. Drops are counted internally.
     async fn offer(&self, record: RequestDiagnosticsRecord, delivery: RequestDiagnosticsDelivery);
     /// Drain queued records: called once, after the assembler task has stopped. Returns within
-    /// two seconds even when stderr is stalled.
+    /// two seconds even when stdout is stalled.
     async fn shutdown(&self);
 }
 
@@ -39,7 +39,7 @@ pub const REQUEST_DIAGNOSTICS_QUEUE_CAPACITY: usize = 1024;
 pub const REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 /// Budget for draining queued lines at shutdown. Matches the assembler's own overflow drain
 /// grace (`OVERFLOW_DRAIN_GRACE`), so the assembler shutdown hook stays bounded end to end and
-/// a stalled stderr pipe cannot hold the server's sequential shutdown hooks until SIGKILL.
+/// a stalled stdout pipe cannot hold the server's sequential shutdown hooks until SIGKILL.
 const REQUEST_DIAGNOSTICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Assembler-side diagnostics configuration. The default (`sink: None`) does zero work.
@@ -169,14 +169,11 @@ impl WorkerState {
     }
 }
 
-/// Writes one compact JSON line per record to process stderr from a dedicated OS thread.
+/// Writes one compact JSON line per record to process stdout from a dedicated OS thread.
 ///
-/// Stderr, not stdout: tracing writes its JSON log lines under the `std::io::Stdout` mutex
-/// (`cc-lb-observability` init), so a diagnostics line stalled in a pipe write would block
-/// unrelated request-path tracing on that lock. Nothing else in the serve process writes to
-/// stderr after startup (only preflight/exit errors do), and container runtimes capture stderr
-/// into the same container log as stdout — the CRI stream field reads `stderr`.
-pub struct StderrRequestDiagnosticsSink {
+/// Lines share the stdout pipe and its `std::io::Stdout` mutex with tracing, so a stalled log
+/// collector also delays request-path tracing writes while this thread holds the lock.
+pub struct StdoutRequestDiagnosticsSink {
     sender: ArcSwapOption<mpsc::Sender<QueueMessage>>,
     completion: watch::Receiver<bool>,
     degraded: AtomicBool,
@@ -184,11 +181,11 @@ pub struct StderrRequestDiagnosticsSink {
     recorders: Recorders,
 }
 
-impl StderrRequestDiagnosticsSink {
+impl StdoutRequestDiagnosticsSink {
     pub fn new() -> std::io::Result<Self> {
         Self::spawn(
             REQUEST_DIAGNOSTICS_QUEUE_CAPACITY,
-            Box::new(write_stderr_line),
+            Box::new(write_stdout_line),
             METRICS_RECORDERS,
         )
     }
@@ -235,7 +232,7 @@ impl StderrRequestDiagnosticsSink {
 }
 
 #[async_trait]
-impl RequestDiagnosticsSink for StderrRequestDiagnosticsSink {
+impl RequestDiagnosticsSink for StdoutRequestDiagnosticsSink {
     async fn offer(&self, record: RequestDiagnosticsRecord, delivery: RequestDiagnosticsDelivery) {
         let Some(sender) = self.sender.load_full() else {
             (self.recorders.drop)(QUEUE_CLOSED_REASON, 1);
@@ -249,7 +246,7 @@ impl RequestDiagnosticsSink for StderrRequestDiagnosticsSink {
             RequestDiagnosticsDelivery::BoundedWait(timeout) => timeout,
         };
         if self.degraded.load(Ordering::Relaxed) {
-            // One timeout per stderr-stall episode: stay non-blocking until the worker has
+            // One timeout per stdout-stall episode: stay non-blocking until the worker has
             // drained the queue to at least half empty.
             if sender.capacity() >= sender.max_capacity().div_ceil(2) {
                 self.degraded.store(false, Ordering::Relaxed);
@@ -290,11 +287,11 @@ impl RequestDiagnosticsSink for StderrRequestDiagnosticsSink {
         })
         .await;
         if drained.is_err() {
-            // The worker is stuck in a stderr write. Leave the thread detached instead of
+            // The worker is stuck in a stdout write. Leave the thread detached instead of
             // joining it, and count every record it has not started plus the record it is
             // still writing, suppressing that record's own outcome if the write ever returns.
-            // Deliberately no log here: the collector that stalled stderr often tails stdout
-            // too, and a tracing write could then block shutdown.
+            // Deliberately no log here: tracing writes to the same stalled stdout and would
+            // block shutdown.
             let dropped =
                 self.worker.queued.swap(0, Ordering::AcqRel) + self.worker.steal_in_flight();
             if dropped > 0 {
@@ -304,17 +301,17 @@ impl RequestDiagnosticsSink for StderrRequestDiagnosticsSink {
     }
 }
 
-impl Drop for StderrRequestDiagnosticsSink {
+impl Drop for StdoutRequestDiagnosticsSink {
     fn drop(&mut self) {
         self.sender.store(None);
     }
 }
 
-/// One `write_all` on the locked process stderr, so a line never interleaves with other stderr
+/// One `write_all` on the locked process stdout, so a line never interleaves with tracing
 /// output in-process. Deliberately bypasses the redacting tracing writer: producers already
 /// redacted these values, and text redaction over compact JSON could corrupt the line.
-fn write_stderr_line(line: &[u8]) -> std::io::Result<()> {
-    std::io::stderr().lock().write_all(line)
+fn write_stdout_line(line: &[u8]) -> std::io::Result<()> {
+    std::io::stdout().lock().write_all(line)
 }
 
 // These catches protect unwind builds. They cannot intercept the workspace release profile's
@@ -506,7 +503,7 @@ mod tests {
                 if probe.fail_first.swap(false, Ordering::SeqCst) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
-                        "injected stderr failure",
+                        "injected stdout failure",
                     ));
                 }
                 probe.lines.lock().expect("line lock").push(line.to_vec());
@@ -529,8 +526,8 @@ mod tests {
         wake.notify_all();
     }
 
-    fn sink(capacity: usize, probe: &Arc<OutputProbe>) -> StderrRequestDiagnosticsSink {
-        StderrRequestDiagnosticsSink::spawn(capacity, probe.output(), TEST_RECORDERS)
+    fn sink(capacity: usize, probe: &Arc<OutputProbe>) -> StdoutRequestDiagnosticsSink {
+        StdoutRequestDiagnosticsSink::spawn(capacity, probe.output(), TEST_RECORDERS)
             .expect("spawn diagnostics worker")
     }
 
@@ -588,7 +585,7 @@ mod tests {
         entered(&entered_rx, "first line");
         sink.offer(record("evt-2"), RequestDiagnosticsDelivery::BestEffort)
             .await;
-        // The queue is full while stderr is stalled; BestEffort must return immediately.
+        // The queue is full while stdout is stalled; BestEffort must return immediately.
         tokio::time::timeout(
             Duration::from_secs(1),
             sink.offer(record("evt-3"), RequestDiagnosticsDelivery::BestEffort),
@@ -665,7 +662,7 @@ mod tests {
         sink.offer(record("evt-2"), strip).await;
         sink.offer(record("evt-3"), strip).await;
 
-        // Queue full and stderr stalled: the offer waits exactly the strip timeout, then drops.
+        // Queue full and stdout stalled: the offer waits exactly the strip timeout, then drops.
         let started = tokio::time::Instant::now();
         sink.offer(record("evt-timeout"), strip).await;
         let waited = started.elapsed();
@@ -712,12 +709,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn shutdown_with_stalled_stderr_returns_at_deadline_and_counts_every_accepted_line() {
+    async fn shutdown_with_stalled_stdout_returns_at_deadline_and_counts_every_accepted_line() {
         let _serial = SERIAL.lock().await;
         reset_recorded();
         let (entered_tx, entered_rx) = std_mpsc::sync_channel(4);
         let released: Release = Arc::new((StdMutex::new(false), Condvar::new()));
-        // The writer blocks until released: a stderr pipe nobody reads.
+        // The writer blocks until released: a stdout pipe nobody reads.
         let probe = OutputProbe::blocking(entered_tx, Arc::clone(&released));
         let sink = sink(4, &probe);
 
@@ -735,7 +732,7 @@ mod tests {
             sink.shutdown(),
         )
         .await
-        .expect("shutdown must not wait for a stalled stderr write");
+        .expect("shutdown must not wait for a stalled stdout write");
         let waited = started.elapsed();
         assert!(
             waited >= REQUEST_DIAGNOSTICS_SHUTDOWN_TIMEOUT
@@ -746,7 +743,7 @@ mod tests {
         // in-flight line, whose write outcome shutdown claimed by stealing it.
         assert_eq!(recorded(), [SHUTDOWN_TIMEOUT_REASON; 3]);
 
-        // Once stderr unblocks, the detached worker finishes writing the stolen line — its bytes
+        // Once stdout unblocks, the detached worker finishes writing the stolen line — its bytes
         // land, but the outcome stays suppressed — and skips the swept queued lines: each record
         // is counted exactly once, conservatively as dropped.
         release(&released);

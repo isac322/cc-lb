@@ -1,6 +1,6 @@
 # Request diagnostics log and payload strip
 
-This runbook moves the five request-event diagnostic fields out of the database and into the diagnostics log, which the serve process writes to stderr (tracing log lines stay on stdout; container runtimes capture both into the same container log, where diagnostics lines carry the `stderr` CRI stream field). The fields are `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Each step that changes a production database, deployment, or configuration needs approval under your change process before you run it.
+This runbook moves the five request-event diagnostic fields out of the database and into the stdout diagnostics log. The fields are `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Each step that changes a production database, deployment, or configuration needs approval under your change process before you run it.
 
 The procedure has three phases:
 
@@ -14,7 +14,8 @@ Line format, delivery semantics, and metrics are described in the [observability
 
 ## Before you start
 
-- The log agent must route stderr lines that start with `{"schema":"cc_lb.request_diagnostics.v1",` to the diagnostics sink (in a container, that is the CRI `stderr` stream), and must reassemble container-runtime partial lines (Fluent Bit: `multiline.parser cri`). Lines are often larger than 16 KiB, and a runtime splits those into partial records.
+- The log agent must route stdout lines that start with `{"schema":"cc_lb.request_diagnostics.v1",` to the diagnostics sink, and must reassemble container-runtime partial lines (Fluent Bit: `multiline.parser cri`). Lines are often larger than 16 KiB, and a runtime splits those into partial records.
+- Diagnostics lines share the stdout pipe and its in-process lock with tracing logs. A stalled log collector or full stdout pipe therefore also delays request-path tracing writes, which can slow requests. Keep the collector healthy before turning the log on, and watch `cc_lb_dropped_events_total{reason=~"request_diagnostics_.*"}`: a rising count is the early sign of a stalled stdout.
 - The sink must answer "distinct `event_id` per UTC day of `ts_ms`, keeping the first ingested line per `event_id` and excluding `ts_ms = 0`". Reconciliation depends on this query.
 - Rows older than `request_event_retention_days` (default 90) are pruned. Any day the backfill has not exported before its prune is lost to the sink, so plan the backfill to finish ahead of the oldest days' prune.
 - On Postgres, check free WAL space. Step 6 rewrites every pre-flip row, and step 8 rebuilds indexes. Both produce a lot of WAL.
@@ -107,7 +108,7 @@ cc-lb request-events export-diagnostics --config /etc/cc-lb/cc-lb.toml --until-s
 
 The command reads the configuration with the same loader and validation as `cc-lb config validate`, including environment overrides. It never runs migrations, refuses a database whose applied migrations do not match the binary, and on SQLite refuses to create a missing database file. It does not start the proxy or admin listeners.
 
-- stdout carries only `cc_lb.request_diagnostics.v1` lines with `"source":"backfill"` — unlike the live log, which the serve process writes to stderr, the export command writes its lines to stdout.
+- stdout carries only `cc_lb.request_diagnostics.v1` lines with `"source":"backfill"`.
 - stderr carries JSON progress: `{"kind":"export_progress","last_seq":N,"rows":R,"seq_ceiling":C}` after each page, then `{"kind":"export_summary","rows":R,"last_seq":N,"seq_ceiling":C,"resume_safe":true,"days":{"YYYY-MM-DD":count},"days_excluded_ts0":Z}`.
 - Errors go to stderr as `{"error":"..."}`. Exit code 2 means a configuration, argument, or schema problem, or a missing SQLite file; exit code 1 means any other failure.
 

@@ -379,7 +379,7 @@ async fn serve_live_lines_match_export_byte_for_byte() {
     let (db_event_ids, live_lines) = loop {
         let db_event_ids = sqlite_event_ids(&server.sqlite_path).await;
         let message_rows = sqlite_message_rows(&server.sqlite_path).await;
-        let live_lines = first_live_lines(&server._process.stderr_snapshot());
+        let live_lines = first_live_lines(&server._process.stdout_snapshot());
         if message_rows >= REQUESTS && db_event_ids.iter().all(|id| live_lines.contains_key(id)) {
             break (db_event_ids, live_lines);
         }
@@ -420,10 +420,10 @@ async fn serve_live_lines_match_export_byte_for_byte() {
     assert!(routed >= REQUESTS, "exported {routed} /v1/messages rows");
 }
 
-/// First stderr line per `event_id` among diagnostics lines (first line wins).
-fn first_live_lines(stderr: &[u8]) -> BTreeMap<String, Vec<u8>> {
+/// First stdout line per `event_id` among diagnostics lines (first line wins).
+fn first_live_lines(stdout: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut lines = BTreeMap::new();
-    for line in split_lines(stderr) {
+    for line in split_lines(stdout) {
         if !line.starts_with(LINE_PREFIX) || !line.ends_with(b"\n") {
             continue;
         }
@@ -498,9 +498,9 @@ async fn serve_with_defaults_writes_no_diagnostics_lines() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // Stop the server gracefully: shutdown drains the assembler and any diagnostics sink, so
-    // once the process has exited its stderr is complete and absence is a real observation.
-    let stderr = server._process.terminate_and_collect_stderr();
-    let schema_lines = split_lines(&stderr)
+    // once the process has exited its stdout is complete and absence is a real observation.
+    let stdout = server._process.terminate_and_collect_stdout();
+    let schema_lines = split_lines(&stdout)
         .into_iter()
         .filter(|line| {
             line.windows(b"cc_lb.request_diagnostics.v1".len())
@@ -510,8 +510,8 @@ async fn serve_with_defaults_writes_no_diagnostics_lines() {
     assert_eq!(
         schema_lines,
         0,
-        "stderr={}",
-        String::from_utf8_lossy(&stderr)
+        "stdout={}",
+        String::from_utf8_lossy(&stdout)
     );
 
     // Strip is off by default, so stored payloads keep their diagnostic keys.

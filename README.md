@@ -150,7 +150,7 @@ See the [install and configure guide](https://cc-lb.bhyoo.com/docs/getting-start
 - [Runtime management](./docs/runtime-management.md): database-backed upstreams, principals, keys, and plugin chains
 - [Upstream warm-up](./docs/upstream-warmup.md): OAuth warm-up and quota-aware scheduling
 - [Distributed scheduler](./docs/scheduler.md): topology, retry classes, metrics, and runbook
-- [Request diagnostics](./docs/runbook/request-diagnostics.md): stderr diagnostics log, backfill, and stripping diagnostic fields from stored rows
+- [Request diagnostics](./docs/runbook/request-diagnostics.md): stdout diagnostics log, backfill, and stripping diagnostic fields from stored rows
 - [Plugin author guide](./docs/plugin-author-guide.md): Wasmtime filter and shape hooks
 
 ### Stream diagnostics
@@ -174,7 +174,7 @@ The `stream latency breakdown` log runs on a dedicated worker with a fixed 4,096
 
 ### Request diagnostics log
 
-Set `observability.request_diagnostics_log = true` (or `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG=true`) to write one JSON line per stored request event to stderr — tracing logs stay on stdout, and container runtimes capture both streams into the same container log; renewal rows finalized after the assembler has stopped are the exception ([consistency contract](./docs/consistency-contract.md#request-events-and-dashboards)), and a backfill restores them. Each line starts with `{"schema":"cc_lb.request_diagnostics.v1",` and carries the event's `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Setting top-level `request_event_strip_diagnostics = true` (Helm: `config.requestEventStripDiagnostics`) then stores new rows without those five fields: admin API event detail, delta, and stream payloads omit them, and the log line is their only copy. The strip requires the log, and both default to off. `cc-lb request-events export-diagnostics` backfills lines from stored rows, and `cc-lb request-events strip-diagnostics` removes the fields from older rows; see the [request diagnostics runbook](./docs/runbook/request-diagnostics.md).
+Set `observability.request_diagnostics_log = true` (or `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG=true`) to write one JSON line per stored request event to stdout; renewal rows finalized after the assembler has stopped are the exception ([consistency contract](./docs/consistency-contract.md#request-events-and-dashboards)), and a backfill restores them. Each line starts with `{"schema":"cc_lb.request_diagnostics.v1",` and carries the event's `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Setting top-level `request_event_strip_diagnostics = true` (Helm: `config.requestEventStripDiagnostics`) then stores new rows without those five fields: admin API event detail, delta, and stream payloads omit them, and the log line is their only copy. The strip requires the log, and both default to off. `cc-lb request-events export-diagnostics` backfills lines from stored rows, and `cc-lb request-events strip-diagnostics` removes the fields from older rows; see the [request diagnostics runbook](./docs/runbook/request-diagnostics.md).
 
 ## Plugin authors
 

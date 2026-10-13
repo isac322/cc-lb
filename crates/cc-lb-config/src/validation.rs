@@ -303,7 +303,7 @@ fn validate_oauth(config: &Config) -> Result<(), ValidationError> {
 }
 
 /// Stripping diagnostic fields from stored rows is only lossless when the
-/// stderr diagnostics log carries them instead.
+/// stdout diagnostics log carries them instead.
 fn validate_request_diagnostics(config: &Config) -> Result<(), ValidationError> {
     if config.request_event_strip_diagnostics && !config.observability.request_diagnostics_log {
         return Err(ValidationError::new(

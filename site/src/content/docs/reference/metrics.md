@@ -20,7 +20,7 @@ For example, the per-upstream 429 rate is `sum by (upstream) (rate(cc_lb_request
 
 ## Request diagnostics log
 
-`cc_lb_request_diagnostics_lines_total{outcome}` counts stderr diagnostics lines when `observability.request_diagnostics_log` is on. `outcome` is `written`, `encode_error`, or `write_error`.
+`cc_lb_request_diagnostics_lines_total{outcome}` counts stdout diagnostics lines when `observability.request_diagnostics_log` is on. `outcome` is `written`, `encode_error`, or `write_error`.
 
 Lines that never reach the writer increment `cc_lb_dropped_events_total{reason}` with one of these reasons:
 
@@ -32,7 +32,7 @@ Lines that never reach the writer increment `cc_lb_dropped_events_total{reason}`
 | `request_diagnostics_queue_closed` | The sink had already shut down. |
 | `request_diagnostics_job_panic` | Writing one line panicked. |
 | `request_diagnostics_worker_panic` | The writer thread panicked. |
-| `request_diagnostics_shutdown_timeout` | Shutdown stopped waiting for a stalled stderr after 2 seconds; counts every line the writer had not finished, queued or in flight. |
+| `request_diagnostics_shutdown_timeout` | Shutdown stopped waiting for a stalled stdout after 2 seconds; counts every line the writer had not finished, queued or in flight. |
 
 Any `request_diagnostics_strip_*` drop is permanent loss of that request's diagnostic fields, so alert on any increase. With strip on, `request_diagnostics_shutdown_timeout` is permanent loss too. See [Request diagnostics log](/docs/operations/observability/#request-diagnostics-log) for delivery semantics.
 

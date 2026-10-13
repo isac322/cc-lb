@@ -1267,7 +1267,7 @@ async fn build_app_with_storage_inner(
     let diagnostics = if config.observability.request_diagnostics_log {
         cc_lb_engine::RequestDiagnosticsOptions {
             sink: Some(Arc::new(
-                cc_lb_engine::StderrRequestDiagnosticsSink::new()
+                cc_lb_engine::StdoutRequestDiagnosticsSink::new()
                     .map_err(BuildError::RequestDiagnosticsSink)?,
             )),
             strip_payload: config.request_event_strip_diagnostics,
