@@ -94,6 +94,8 @@ mod scheduler_startup_hard_fail;
 mod scheduler_startup_no_migration_collision;
 #[path = "server_starts_and_responds.rs"]
 mod server_starts_and_responds;
+#[path = "shutdown_hook_completion.rs"]
+mod shutdown_hook_completion;
 #[path = "thinking_budget_service_tier_e2e.rs"]
 mod thinking_budget_service_tier_e2e;
 #[path = "tls_common.rs"]

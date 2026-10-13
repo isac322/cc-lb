@@ -209,7 +209,7 @@ pub async fn fetch_matched_observation(
 /// Precondition: the server under test runs with `request_event_strip_diagnostics = false`
 /// (the default). This reader takes `cache_breakpoints` from the stored payload, and strip-on-write
 /// removes that key from `request_events_v1.payload` (the field then exists only on the
-/// `cc_lb.request_diagnostics.v1` stdout line), so these live QA checks are invalid with strip on.
+/// `cc_lb.request_diagnostics.v1` stderr line), so these live QA checks are invalid with strip on.
 #[derive(Debug)]
 pub struct SettledEvent {
     pub id: i64,

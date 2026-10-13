@@ -165,7 +165,7 @@ pub use pg_notify_fanout::{
 pub use request_diagnostics_sink::{
     REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT,
     RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
-    StdoutRequestDiagnosticsSink,
+    StderrRequestDiagnosticsSink,
 };
 #[cfg(not(loom))]
 pub use storage_tail_poller::StorageTailPoller;

@@ -128,7 +128,7 @@ config:
   # -- Stop persisting request diagnostic fields (cache_breakpoints, cache_control_message_indices,
   # routing_trace, iterations, internal_errors) in the database. Requires
   # `request_diagnostics_log = true` under [observability] (set it in extraToml or with
-  # CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG). The fields are then only on stdout.
+  # CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG). The fields are then only on stderr.
   requestEventStripDiagnostics: false
 
   priceCatalog:

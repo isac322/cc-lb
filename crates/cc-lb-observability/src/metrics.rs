@@ -96,7 +96,7 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 27] = [
     MetricDefinition {
         name: "cc_lb_request_diagnostics_lines_total",
         kind: MetricKind::Counter,
-        description: "Total request diagnostics stdout lines by outcome.",
+        description: "Total request diagnostics stderr lines by outcome.",
         labels: &["outcome"],
     },
     MetricDefinition {
@@ -246,7 +246,7 @@ pub(crate) fn register_prometheus14_metrics() {
     metrics::describe_counter!(
         "cc_lb_request_diagnostics_lines_total",
         Unit::Count,
-        "Total request diagnostics stdout lines by outcome."
+        "Total request diagnostics stderr lines by outcome."
     );
     metrics::describe_counter!(
         "cc_lb_compiled_module_cache_hits_total",

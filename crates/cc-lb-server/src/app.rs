@@ -406,6 +406,29 @@ impl App {
             }
         };
 
+        // The proxy task ended. When a shutdown run started it, the hooks
+        // (assembler flush, diagnostics drain, subscriber shutdowns) are still
+        // running inside the detached shutdown task; returning now would let
+        // `main` drop the runtime and cut them off mid-write (#948). Wait for
+        // `drain_complete`, which the shutdown task sends only after every hook
+        // finished, bounded by SHUTDOWN_HOOKS_TIMEOUT so a wedged hook cannot
+        // hold the process forever. A proxy that stopped on its own with no
+        // shutdown started keeps the old behavior: no hooks are running, so
+        // there is nothing to wait for.
+        if signals.is_shutdown_started()
+            && tokio::time::timeout(
+                signal::SHUTDOWN_HOOKS_TIMEOUT,
+                signal::wait_for_shutdown(signals.subscribe_drain_complete()),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = signal::SHUTDOWN_HOOKS_TIMEOUT.as_secs(),
+                "shutdown hooks did not finish before the bound; they continue detached"
+            );
+        }
+
         if let Some(cancel) = notify_cancel {
             cancel.cancel();
         }
@@ -1244,7 +1267,7 @@ async fn build_app_with_storage_inner(
     let diagnostics = if config.observability.request_diagnostics_log {
         cc_lb_engine::RequestDiagnosticsOptions {
             sink: Some(Arc::new(
-                cc_lb_engine::StdoutRequestDiagnosticsSink::new()
+                cc_lb_engine::StderrRequestDiagnosticsSink::new()
                     .map_err(BuildError::RequestDiagnosticsSink)?,
             )),
             strip_payload: config.request_event_strip_diagnostics,

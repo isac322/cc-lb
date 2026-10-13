@@ -13,54 +13,102 @@ type ShutdownHook = Arc<dyn Fn() -> ShutdownHookFuture + Send + Sync + 'static>;
 
 use cc_lb_engine::DrainController;
 
+/// Upper bound on `App::start`'s wait for the shutdown hooks after the proxy
+/// listener has stopped. The hooks run inside `ShutdownRunner::run`, which already
+/// bounds each of them internally (the lifecycle assembler's 2 s overflow
+/// drain plus its final flush, the diagnostics sink's 2 s drain, and the other
+/// per-subscriber shutdowns that all sit within the 500 ms
+/// `SHUTDOWN_TASK_TIMEOUT` cleanup budget used for the sibling tasks). 15 s
+/// exceeds their combined bound by a wide margin while still guaranteeing the
+/// process cannot be held forever by a wedged hook. On expiry `start` warns
+/// and returns; the hooks keep running detached.
+pub const SHUTDOWN_HOOKS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Owns everything needed to run the shutdown sequence exactly once.
+/// `start` spawns the run detached (not through `SignalTasks`) on purpose:
+/// `SignalTasks` aborts its tracked tasks when the last owner drops, and an
+/// aborted shutdown run would cut off the hooks (assembler flush, diagnostics
+/// drain) mid-flight and lose their writes. The detached task always runs the
+/// hooks to completion and sends `drain_complete` (#948).
 #[derive(Clone)]
-pub struct SignalHandle {
+struct ShutdownRunner {
     shutdown: watch::Sender<bool>,
     drain_complete: watch::Sender<bool>,
     drain: DrainController,
     drain_timeout: Duration,
     shutdown_started: Arc<AtomicBool>,
-    tasks: SignalTasks,
     shutdown_hooks: ShutdownHooks,
 }
 
-impl SignalHandle {
-    pub fn subscribe(&self) -> watch::Receiver<bool> {
-        self.shutdown.subscribe()
-    }
+#[derive(Clone)]
+pub struct SignalHandle {
+    runner: ShutdownRunner,
+    tasks: SignalTasks,
+}
 
-    pub fn subscribe_drain_complete(&self) -> watch::Receiver<bool> {
-        self.drain_complete.subscribe()
-    }
-
-    pub fn start_shutdown(&self) {
+impl ShutdownRunner {
+    fn start(&self) {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        let shutdown = self.shutdown.clone();
-        let drain_complete = self.drain_complete.clone();
-        let drain = self.drain.clone();
-        let drain_timeout = self.drain_timeout;
-        let shutdown_hooks = self.shutdown_hooks.clone();
-        self.tasks.spawn(async move {
-            run_shutdown(
-                shutdown,
-                drain_complete,
-                drain,
-                drain_timeout,
-                shutdown_hooks,
-            )
-            .await;
-        });
+        tokio::spawn(self.clone().run());
+    }
+
+    fn is_started(&self) -> bool {
+        self.shutdown_started.load(Ordering::Acquire)
+    }
+
+    async fn run(self) {
+        self.drain.trigger();
+        let _ = self.shutdown.send(true);
+
+        // Drain in-flight requests BEFORE running shutdown hooks: the hooks stop
+        // background writers (request-event assembler, pricing, logger) that must
+        // still be alive to persist the terminal events of draining requests.
+        let timed_out = self.drain.await_drained(self.drain_timeout).await;
+        if timed_out {
+            let force_closed = self.drain.mark_force_closed();
+            tracing::warn!(
+                force_closed,
+                "graceful drain deadline elapsed with proxy request handlers still in flight"
+            );
+        }
+
+        // Runs even on drain timeout so shutdown cannot hang forever.
+        self.shutdown_hooks.run_all().await;
+
+        let _ = self.drain_complete.send(true);
+    }
+}
+
+impl SignalHandle {
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.runner.shutdown.subscribe()
+    }
+
+    pub fn subscribe_drain_complete(&self) -> watch::Receiver<bool> {
+        self.runner.drain_complete.subscribe()
+    }
+
+    pub fn start_shutdown(&self) {
+        self.runner.start();
+    }
+
+    /// Whether a shutdown run has been triggered (signal or `start_shutdown`).
+    /// `App::start` uses this to decide whether the proxy task ended as part
+    /// of a graceful shutdown — in which case it waits for `drain_complete` —
+    /// or on its own, in which case it must not wait.
+    pub fn is_shutdown_started(&self) -> bool {
+        self.runner.is_started()
     }
 
     pub fn is_draining(&self) -> bool {
-        self.drain.is_draining()
+        self.runner.drain.is_draining()
     }
 
     pub fn set_draining(&self, draining: bool) {
-        self.drain.set_draining(draining);
+        self.runner.drain.set_draining(draining);
     }
 
     pub fn add_shutdown_hook<F, Fut>(&self, hook: F)
@@ -68,36 +116,10 @@ impl SignalHandle {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        self.shutdown_hooks.push(Arc::new(move || Box::pin(hook())));
+        self.runner
+            .shutdown_hooks
+            .push(Arc::new(move || Box::pin(hook())));
     }
-}
-
-async fn run_shutdown(
-    shutdown: watch::Sender<bool>,
-    drain_complete: watch::Sender<bool>,
-    drain: DrainController,
-    drain_timeout: Duration,
-    shutdown_hooks: ShutdownHooks,
-) {
-    drain.trigger();
-    let _ = shutdown.send(true);
-
-    // Drain in-flight requests BEFORE running shutdown hooks: the hooks stop
-    // background writers (request-event assembler, pricing, logger) that must
-    // still be alive to persist the terminal events of draining requests.
-    let timed_out = drain.await_drained(drain_timeout).await;
-    if timed_out {
-        let force_closed = drain.mark_force_closed();
-        tracing::warn!(
-            force_closed,
-            "graceful drain deadline elapsed with proxy request handlers still in flight"
-        );
-    }
-
-    // Runs even on drain timeout so shutdown cannot hang forever.
-    shutdown_hooks.run_all().await;
-
-    let _ = drain_complete.send(true);
 }
 
 pub fn install(
@@ -108,16 +130,18 @@ pub fn install(
     let (shutdown, _) = watch::channel(false);
     let (drain_complete, _) = watch::channel(false);
     let handle = SignalHandle {
-        shutdown,
-        drain_complete,
-        drain,
-        drain_timeout,
-        shutdown_started: Arc::new(AtomicBool::new(false)),
+        runner: ShutdownRunner {
+            shutdown,
+            drain_complete,
+            drain,
+            drain_timeout,
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            shutdown_hooks: ShutdownHooks::default(),
+        },
         tasks: SignalTasks::default(),
-        shutdown_hooks: ShutdownHooks::default(),
     };
 
-    install_sigterm(handle.clone());
+    install_sigterm(&handle);
     install_sighup(sighup_handler, handle.tasks.clone());
     handle
 }
@@ -134,57 +158,25 @@ pub async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 }
 
 #[cfg(unix)]
-fn install_sigterm(handle: SignalHandle) {
-    let shutdown = handle.shutdown.clone();
-    let drain_complete = handle.drain_complete.clone();
-    let drain = handle.drain.clone();
-    let drain_timeout = handle.drain_timeout;
-    let shutdown_started = handle.shutdown_started.clone();
-    let shutdown_hooks = handle.shutdown_hooks.clone();
-    let tasks = handle.tasks;
-    tasks.spawn(async move {
+fn install_sigterm(handle: &SignalHandle) {
+    let runner = handle.runner.clone();
+    handle.tasks.spawn(async move {
         let Ok(mut term) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         else {
             return;
         };
         let _ = term.recv().await;
-        if shutdown_started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        run_shutdown(
-            shutdown,
-            drain_complete,
-            drain,
-            drain_timeout,
-            shutdown_hooks,
-        )
-        .await;
+        runner.start();
     });
 }
 
 #[cfg(not(unix))]
-fn install_sigterm(handle: SignalHandle) {
-    let shutdown = handle.shutdown.clone();
-    let drain_complete = handle.drain_complete.clone();
-    let drain = handle.drain.clone();
-    let drain_timeout = handle.drain_timeout;
-    let shutdown_started = handle.shutdown_started.clone();
-    let shutdown_hooks = handle.shutdown_hooks.clone();
-    let tasks = handle.tasks;
-    tasks.spawn(async move {
+fn install_sigterm(handle: &SignalHandle) {
+    let runner = handle.runner.clone();
+    handle.tasks.spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            if shutdown_started.swap(true, Ordering::AcqRel) {
-                return;
-            }
-            run_shutdown(
-                shutdown,
-                drain_complete,
-                drain,
-                drain_timeout,
-                shutdown_hooks,
-            )
-            .await;
+            runner.start();
         }
     });
 }

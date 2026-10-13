@@ -4412,7 +4412,7 @@ mod tests {
         }
     }
 
-    /// Records every offered diagnostics record as the JSON object the stdout sink would write.
+    /// Records every offered diagnostics record as the JSON object the stderr sink would write.
     #[derive(Default)]
     struct CapturingDiagnosticsSink {
         offers: StdMutex<Vec<(serde_json::Value, RequestDiagnosticsDelivery)>>,

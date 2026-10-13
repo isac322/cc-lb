@@ -6,7 +6,8 @@
 //! binds no listener and handles no requests, and it does not initialize tracing.
 //!
 //! stdout carries only data lines (`cc_lb.request_diagnostics.v1` NDJSON or the `day_counts`
-//! line). Progress, summaries and errors go to stderr as JSON lines.
+//! line) — unlike the live diagnostics sink, which writes to stderr. Progress, summaries and
+//! errors go to stderr as JSON lines.
 
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
