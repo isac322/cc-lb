@@ -1,12 +1,16 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{BackendKind, MetaStore, StorageError, StorageResult};
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, StorageError, StorageResult, verify_applied_migrations,
+};
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[async_trait]
 impl MetaStore for PostgresStorage {
     async fn initialize(&self) -> StorageResult<()> {
-        sqlx::migrate!("./migrations")
+        MIGRATOR
             .run(&self.pool)
             .await
             .map_err(|error| StorageError::Fatal {
@@ -82,6 +86,26 @@ impl MetaStore for PostgresStorage {
             }
             .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Read-only: never migrates, so an operator CLI pointed at an older or
+    /// tampered schema fails instead of rewriting it.
+    async fn verify_schema_current(&self) -> StorageResult<()> {
+        let applied: Vec<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT version, checksum FROM _sqlx_migrations WHERE success ORDER BY version",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Fatal {
+            message: format!("cannot read applied migrations from _sqlx_migrations: {error}"),
+        })?;
+        verify_applied_migrations(
+            MIGRATOR
+                .iter()
+                .filter(|migration| !migration.migration_type.is_down_migration())
+                .map(|migration| (migration.version, migration.checksum.as_ref())),
+            &applied,
+        )
     }
 }
 

@@ -15,18 +15,21 @@ use std::{
 
 use async_trait::async_trait;
 use cc_lb_clock::{ClockHandle, SystemClock, TestClock};
+// `RequestEventStore` methods are in scope through the quota macro's
+// `use cc_lb_storage_api::RequestEventStore as _;` above.
 use cc_lb_storage_api::{
-    BackendKind, ChangeChannel, MetaStore, PluginRegistryStore, UpstreamCreate, UpstreamKind,
-    UpstreamStore, UpstreamUpdate, WasmBlob, WasmRegistryEntryInput,
+    BackendKind, ChangeChannel, MetaStore, PluginRegistryStore, RequestEvent,
+    RequestEventExportPage, RequestEventPayloadScan, UpstreamCreate, UpstreamKind, UpstreamStore,
+    UpstreamUpdate, WasmBlob, WasmRegistryEntryInput,
 };
 use cc_lb_storage_conformance::{
-    harness::ConformanceBackend,
+    harness::{ConformanceBackend, ConformanceFixture},
     scenarios::{
         anthropic_compatibility_kv_store, cache_keepalive_session_reads,
         organization_metadata_store, plan_tier_store, plugin_registry_store,
         pool_quota_history_store, price_catalog, principal_store, prompt_cache_observation_store,
-        request_event_list, request_event_principal_costs, storage_roundtrips,
-        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        request_event_list, request_event_operator, request_event_principal_costs,
+        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         storage_roundtrips_upstream_diagnostics, upstream_api_key_store, upstream_rate_limit_store,
         upstream_subscription_metadata_store, upstream_subscription_quota_store,
         warmup_attempts_store,
@@ -143,6 +146,17 @@ impl ConformanceBackend for PostgresConformanceBackend {
             "timed out waiting for seeded request events to fall below the Postgres snapshot xmin horizon"
         );
     }
+
+    async fn execute_raw_sql(
+        &self,
+        storage: &Self::Storage,
+        sql: &'static str,
+    ) -> anyhow::Result<u64> {
+        Ok(sqlx::query(sql)
+            .execute(storage.pool())
+            .await?
+            .rows_affected())
+    }
 }
 
 #[async_trait]
@@ -255,6 +269,287 @@ fn request_event_list_model_filter_matches_case_insensitive_prefix_postgres() {
         "request_event_list_model_filter_matches_case_insensitive_prefix",
         request_event_list::request_event_list_model_filter_matches_case_insensitive_prefix,
     );
+}
+
+#[test]
+fn request_event_operator_methods_postgres() {
+    run_postgres_scenario(
+        "request_event_operator_methods",
+        request_event_operator::request_event_operator_methods,
+    );
+}
+
+#[test]
+fn verify_schema_current_detects_drift_postgres() {
+    run_postgres_scenario(
+        "verify_schema_current_detects_drift",
+        request_event_operator::verify_schema_current_detects_drift,
+    );
+}
+
+#[test]
+fn request_event_export_resume_never_skips_late_lower_seq_postgres() {
+    run_postgres_scenario(
+        "request_event_export_resume_never_skips_late_lower_seq",
+        request_event_export_resume_never_skips_late_lower_seq,
+    );
+}
+
+async fn insert_raw_request_event(
+    conn: &mut sqlx::PgConnection,
+    event_id: &str,
+    ts_ms: u64,
+) -> anyhow::Result<u64> {
+    let payload = serde_json::to_string(&RequestEvent {
+        ts: ts_ms / 1_000,
+        ts_ms: Some(ts_ms),
+        request_id: format!("{event_id}-request"),
+        event_id: Some(event_id.to_owned()),
+        status: 200,
+        ..Default::default()
+    })?;
+    let seq = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO request_events_v1 (ts, event_id, list_ts_ms, list_event_key, payload) \
+         VALUES (to_timestamp($1::double precision / 1000.0), $2, $1, $2, convert_to($3, 'UTF8')) \
+         RETURNING seq",
+    )
+    .bind(i64::try_from(ts_ms)?)
+    .bind(event_id)
+    .bind(payload)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(u64::try_from(seq)?)
+}
+
+/// Regression for the export seq gap: transaction B takes its xid first,
+/// then transaction A takes a later xid and the LOWER seq, then B commits
+/// while A is still open. The xmin guard alone exposes B (its xid is below
+/// every open xid) but not A, so a pager that resumes from `seq > B` skips A
+/// forever. Clamping to `request_event_stable_seq_ceiling` waits for A.
+async fn request_event_export_resume_never_skips_late_lower_seq(
+    backend: Arc<PostgresConformanceBackend>,
+) -> anyhow::Result<()> {
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+    let result = async {
+        let storage = fixture.storage();
+        let ts_ms = 1_728_000_000_000_u64;
+
+        let mut tx_b = storage.pool().begin().await?;
+        sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *tx_b)
+            .await?;
+        let mut tx_a = storage.pool().begin().await?;
+        let seq_a = insert_raw_request_event(&mut tx_a, "gap-a", ts_ms).await?;
+        let seq_b = insert_raw_request_event(&mut tx_b, "gap-b", ts_ms + 1).await?;
+        anyhow::ensure!(
+            seq_a < seq_b,
+            "A must hold the lower seq: {seq_a} vs {seq_b}"
+        );
+        tx_b.commit().await?;
+
+        // The gap: under the xmin guard alone, B is exported while A is not.
+        let mut exposed = Vec::new();
+        for _ in 0..200 {
+            exposed = storage
+                .export_request_events(&RequestEventExportPage {
+                    after_seq: 0,
+                    until_seq: seq_b,
+                    from_ts_ms: None,
+                    to_ts_ms: None,
+                    limit: 10,
+                })
+                .await?
+                .into_iter()
+                .map(|(seq, _)| seq)
+                .collect::<Vec<_>>();
+            if !exposed.is_empty() {
+                break;
+            }
+            // A sibling test's open transaction can hold xmin below B.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        anyhow::ensure!(
+            exposed == [seq_b],
+            "precondition: the xmin guard exposes only B while A is open, got {exposed:?}"
+        );
+
+        // The ceiling must wait for A instead of returning while it is open.
+        // A dedicated pool tagged with a unique application_name lets the
+        // test observe the ceiling's own poll statements in pg_stat_activity.
+        let schema = sqlx::query_scalar::<_, String>("SELECT current_schema()")
+            .fetch_one(storage.pool())
+            .await?;
+        let application_name = format!("ceiling-{}", uuid::Uuid::new_v4().simple());
+        let ceiling_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                PgConnectOptions::from_str(&backend.url)?
+                    .options([("search_path", schema.as_str())])
+                    .application_name(&application_name),
+            )
+            .await?;
+        let ceiling_storage = PostgresStorage::new(ceiling_pool.clone(), system_clock());
+        let ceiling = tokio::spawn(async move {
+            ceiling_storage
+                .request_event_stable_seq_ceiling(std::time::Duration::from_secs(30))
+                .await
+        });
+        // Two distinct executions of the settle poll prove the first one
+        // returned false while A was open (a true result returns at once).
+        let mut poll_starts = std::collections::BTreeSet::new();
+        for _ in 0..1_200 {
+            if let Some(started) = sqlx::query_scalar::<_, Option<String>>(
+                "SELECT query_start::text FROM pg_stat_activity \
+                 WHERE application_name = $1 \
+                   AND query LIKE '%pg_snapshot_xmin(pg_current_snapshot()) >%'",
+            )
+            .bind(&application_name)
+            .fetch_optional(storage.pool())
+            .await?
+            .flatten()
+            {
+                poll_starts.insert(started);
+            }
+            if poll_starts.len() >= 2 || ceiling.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        anyhow::ensure!(
+            !ceiling.is_finished() && poll_starts.len() >= 2,
+            "stable ceiling must keep polling while a lower seq is uncommitted \
+             (finished={}, observed polls={})",
+            ceiling.is_finished(),
+            poll_starts.len()
+        );
+        tx_a.commit().await?;
+        let ceiling = ceiling.await??;
+        ceiling_pool.close().await;
+        anyhow::ensure!(
+            ceiling == seq_b,
+            "ceiling {ceiling} must be B's seq {seq_b}"
+        );
+
+        // Resumable paging (limit 1) up to the ceiling sees both rows.
+        let mut after_seq = 0;
+        let mut exported = Vec::new();
+        loop {
+            let page = storage
+                .export_request_events(&RequestEventExportPage {
+                    after_seq,
+                    until_seq: ceiling,
+                    from_ts_ms: None,
+                    to_ts_ms: None,
+                    limit: 1,
+                })
+                .await?;
+            let Some((seq, _)) = page.last() else {
+                break;
+            };
+            after_seq = *seq;
+            exported.push(*seq);
+        }
+        anyhow::ensure!(
+            exported == [seq_a, seq_b],
+            "export clamped to the stable ceiling must include the late lower seq: {exported:?}"
+        );
+
+        // Timeout: an open transaction older than the snapshot fails the call.
+        let mut blocker = storage.pool().begin().await?;
+        sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *blocker)
+            .await?;
+        let timed_out = storage
+            .request_event_stable_seq_ceiling(std::time::Duration::from_millis(100))
+            .await;
+        blocker.rollback().await?;
+        anyhow::ensure!(
+            matches!(
+                timed_out,
+                Err(cc_lb_storage_api::StorageError::Unavailable { .. })
+            ),
+            "an unsettled ceiling must time out as Unavailable, got {timed_out:?}"
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
+}
+
+#[test]
+fn request_event_export_respects_snapshot_xmin_postgres() {
+    run_postgres_scenario(
+        "request_event_export_respects_snapshot_xmin",
+        request_event_export_respects_snapshot_xmin,
+    );
+}
+
+/// QA 11 (export xmin guard): a row committed after a still-running writer
+/// took its xid stays out of the export until that writer finishes, exactly
+/// like `query_request_events_between_cursors`. The raw payload scan has no
+/// such guard.
+async fn request_event_export_respects_snapshot_xmin(
+    backend: Arc<PostgresConformanceBackend>,
+) -> anyhow::Result<()> {
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
+    let result = async {
+        let storage = fixture.storage();
+        let mut in_flight_writer = storage.pool().begin().await?;
+        sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *in_flight_writer)
+            .await?;
+
+        let ts_ms = 1_728_000_000_000_u64;
+        let seq = storage
+            .append_request_event(&RequestEvent {
+                ts: ts_ms / 1_000,
+                ts_ms: Some(ts_ms),
+                request_id: "xmin-guard-request".to_owned(),
+                event_id: Some("xmin-guard-event".to_owned()),
+                status: 200,
+                ..Default::default()
+            })
+            .await?;
+        let page = RequestEventExportPage {
+            after_seq: 0,
+            until_seq: seq,
+            from_ts_ms: None,
+            to_ts_ms: None,
+            limit: 10,
+        };
+        let hidden = storage.export_request_events(&page).await?;
+        anyhow::ensure!(
+            hidden.is_empty(),
+            "export must hide rows above the snapshot xmin horizon, got {} rows",
+            hidden.len()
+        );
+        let scanned = storage
+            .scan_request_event_payloads(&RequestEventPayloadScan {
+                after_seq: 0,
+                until_seq: seq,
+                limit: 10,
+            })
+            .await?;
+        anyhow::ensure!(
+            scanned.iter().map(|(row_seq, _)| *row_seq).eq([seq]),
+            "payload scan reads committed rows without the xmin guard"
+        );
+
+        in_flight_writer.rollback().await?;
+        backend.wait_for_events_visible_for_rollup(&storage).await?;
+        let visible = storage.export_request_events(&page).await?;
+        anyhow::ensure!(
+            visible.iter().map(|(row_seq, _)| *row_seq).eq([seq]),
+            "export must return the row once the horizon passes it"
+        );
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
 }
 
 #[test]

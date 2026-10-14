@@ -125,12 +125,19 @@ config:
   # -- Days to retain request events in the database.
   requestEventRetentionDays: 90
 
+  # -- Stop persisting request diagnostic fields (cache_breakpoints, cache_control_message_indices,
+  # routing_trace, iterations, internal_errors) in the database. Requires
+  # `request_diagnostics_log = true` under [observability] (set it in extraToml or with
+  # CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG). The fields are then only on stdout.
+  requestEventStripDiagnostics: false
+
   priceCatalog:
     # -- Writable cache path for the LiteLLM price catalog (on the data volume).
     cachePath: /var/lib/cc-lb/litellm.json
 
   # -- Extra raw TOML appended verbatim to the generated config. Use for
-  # [oauth.*], [timeouts], [observability], [circuit_breaker], etc.
+  # [oauth.*], [timeouts], [observability], [circuit_breaker], etc. Top-level keys
+  # must not go here; use the dedicated values.
   extraToml: ""
 
 # -- RUST_LOG value for the container.

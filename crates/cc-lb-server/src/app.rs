@@ -324,6 +324,8 @@ pub enum BuildError {
     ClusterInstanceUrlMissing,
     #[error("anthropic org api origin is invalid: {0}")]
     AnthropicOrgOrigin(#[source] url::ParseError),
+    #[error("request diagnostics sink failed to start: {0}")]
+    RequestDiagnosticsSink(#[source] io::Error),
 }
 
 impl App {
@@ -403,6 +405,29 @@ impl App {
                 server_join_result(proxy.await)
             }
         };
+
+        // The proxy task ended. When a shutdown run started it, the hooks
+        // (assembler flush, diagnostics drain, subscriber shutdowns) are still
+        // running inside the detached shutdown task; returning now would let
+        // `main` drop the runtime and cut them off mid-write (#948). Wait for
+        // `drain_complete`, which the shutdown task sends only after every hook
+        // finished, bounded by SHUTDOWN_HOOKS_TIMEOUT so a wedged hook cannot
+        // hold the process forever. A proxy that stopped on its own with no
+        // shutdown started keeps the old behavior: no hooks are running, so
+        // there is nothing to wait for.
+        if signals.is_shutdown_started()
+            && tokio::time::timeout(
+                signal::SHUTDOWN_HOOKS_TIMEOUT,
+                signal::wait_for_shutdown(signals.subscribe_drain_complete()),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = signal::SHUTDOWN_HOOKS_TIMEOUT.as_secs(),
+                "shutdown hooks did not finish before the bound; they continue detached"
+            );
+        }
 
         if let Some(cancel) = notify_cancel {
             cancel.cancel();
@@ -1239,12 +1264,26 @@ async fn build_app_with_storage_inner(
     };
     let lifecycle_event_logger_handle =
         cc_lb_engine::spawn_lifecycle_event_logger(lifecycle_event_logger_rx);
-    let lifecycle_event_assembler_handle = cc_lb_engine::spawn_request_event_assembler(
-        lifecycle_assembler_rx,
-        storage.clone(),
-        Some(event_bus.clone()),
-        Arc::clone(&metrics_hook),
-    );
+    let diagnostics = if config.observability.request_diagnostics_log {
+        cc_lb_engine::RequestDiagnosticsOptions {
+            sink: Some(Arc::new(
+                cc_lb_engine::StdoutRequestDiagnosticsSink::new()
+                    .map_err(BuildError::RequestDiagnosticsSink)?,
+            )),
+            strip_payload: config.request_event_strip_diagnostics,
+        }
+    } else {
+        // Validation rejects strip without the log, so strip stays off here.
+        cc_lb_engine::RequestDiagnosticsOptions::default()
+    };
+    let lifecycle_event_assembler_handle =
+        cc_lb_engine::spawn_request_event_assembler_with_diagnostics(
+            lifecycle_assembler_rx,
+            storage.clone(),
+            Some(event_bus.clone()),
+            Arc::clone(&metrics_hook),
+            diagnostics,
+        );
     let lifecycle_pricing_subscriber_handle =
         cc_lb_pricing::spawn_lifecycle_pricing_subscriber(lifecycle_pricing_rx, event_bus.clone());
     let lifecycle_limit_reconcile_subscriber_handle =

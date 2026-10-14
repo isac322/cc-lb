@@ -63,9 +63,28 @@ pub async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'st
 }
 
 pub async fn open_sqlite(database_url: &str, clock: ClockHandle) -> StorageResult<SqliteStorage> {
+    open_sqlite_with(database_url, clock, true).await
+}
+
+/// Opens an existing SQLite database without ever creating the file, so an
+/// operator command pointed at a wrong path fails instead of producing an
+/// empty database. Applies the same connection options as [`open_sqlite`]
+/// and runs no migrations.
+pub async fn open_sqlite_existing(
+    database_url: &str,
+    clock: ClockHandle,
+) -> StorageResult<SqliteStorage> {
+    open_sqlite_with(database_url, clock, false).await
+}
+
+async fn open_sqlite_with(
+    database_url: &str,
+    clock: ClockHandle,
+    create_if_missing: bool,
+) -> StorageResult<SqliteStorage> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(map_sqlx_error)?
-        .create_if_missing(true)
+        .create_if_missing(create_if_missing)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)

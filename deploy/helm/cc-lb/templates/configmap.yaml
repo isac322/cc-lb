@@ -7,6 +7,7 @@ metadata:
 data:
   cc-lb.toml: |
     request_event_retention_days = {{ .Values.config.requestEventRetentionDays }}
+    request_event_strip_diagnostics = {{ .Values.config.requestEventStripDiagnostics }}
 
     [runtime]
     data_dir = {{ .Values.config.dataDir | quote }}

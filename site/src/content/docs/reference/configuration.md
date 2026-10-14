@@ -31,3 +31,27 @@ Cache keepalive is configured per principal. The principal object controls wheth
 Use SQLite for local or bounded single-node operation. Use Postgres when multiple replicas must share durable job claims, idempotency keys, and cache-keepalive fences.
 
 After changing scheduler or affinity retention settings, restart the server so all workers use the same startup policy.
+
+## Request diagnostics
+
+Two startup settings control where the request-event diagnostic fields live: `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Both default to `false`, and changes take effect only after a restart.
+
+| Key | Default | Environment variable | Effect |
+| --- | --- | --- | --- |
+| `observability.request_diagnostics_log` | `false` | `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG` | Writes one `cc_lb.request_diagnostics.v1` JSON line to stdout for each stored request event. |
+| `request_event_strip_diagnostics` (top level) | `false` | `CC_LB_REQUEST_EVENT_STRIP_DIAGNOSTICS` | Stores new request events without the five fields. The stdout line is then their only copy. |
+
+```toml
+request_event_strip_diagnostics = false
+
+[observability]
+request_diagnostics_log = true
+```
+
+Validation rejects `request_event_strip_diagnostics = true` unless `observability.request_diagnostics_log = true`, because the fields would otherwise be discarded. With the strip on, admin API event reads omit the five fields; see the [admin API reference](/docs/reference/admin-api/#request-event-diagnostic-fields).
+
+`observability.log_redaction` and `observability.user_prompt_redaction` do not apply to diagnostics lines. Those lines bypass the tracing writer, and the values in them are redacted where they are produced: internal error messages and routing traces are capped and redacted before they reach the row.
+
+With the Helm chart, set `config.requestEventStripDiagnostics` for the strip. The chart has no value for the log key. Set it in `config.extraToml` under an `[observability]` table, or with the `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG` environment variable in `env`. Never put a bare top-level key in `config.extraToml`: the chart appends it after its generated tables, so it would land inside the last table and fail to load.
+
+The [observability guide](/docs/operations/observability/#request-diagnostics-log) describes the line format and delivery, and the [request diagnostics runbook](https://github.com/isac322/cc-lb/blob/master/docs/runbook/request-diagnostics.md) covers backfill, reconciliation, and stripping existing rows.

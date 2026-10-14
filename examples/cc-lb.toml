@@ -1,3 +1,9 @@
+# Top-level keys must precede the first [table].
+# Stop persisting request diagnostic fields (cache_breakpoints,
+# cache_control_message_indices, routing_trace, iterations, internal_errors)
+# in stored request events. Requires observability.request_diagnostics_log = true.
+# request_event_strip_diagnostics = false
+
 # Listener addresses for the proxy, admin stub, and Prometheus metrics listener.
 [listener]
 proxy_addr = "127.0.0.1:8080"
@@ -40,6 +46,12 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 # otlp_endpoint = "http://127.0.0.1:4317"
+# Write one cc_lb.request_diagnostics.v1 JSON line per persisted request event
+# to stdout for a log shipper. Renewal rows whose lifecycle events were dropped
+# or that were finalized after the assembler stopped get no line; their
+# diagnostic fields are empty. Log redaction settings do not apply to these lines;
+# producers redact these values before persistence.
+# request_diagnostics_log = false
 
 # Configure the admin provider registry explicitly. The token itself remains
 # in the environment named by this static-token provider.

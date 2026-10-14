@@ -277,10 +277,11 @@ fn registry_holds_every_definition_group_without_duplicates() {
         "cc_lb_routing_tier_selections_total",
         "cc_lb_request_body_size_bytes",
         "cc_lb_request_unaccounted_duration_seconds",
+        "cc_lb_request_diagnostics_lines_total",
     ] {
         assert!(unique.contains(name), "{name} is not registered");
     }
-    assert_eq!(definitions.len(), 66);
+    assert_eq!(definitions.len(), 67);
 }
 
 #[test]
@@ -337,5 +338,42 @@ fn zero_initialized_series_fabricate_no_attribution() {
     assert!(
         attributed.is_empty(),
         "zero-init must not pre-register attribution-labelled series: {attributed:?}"
+    );
+}
+
+#[test]
+fn request_diagnostics_series_are_zero_initialized_with_fixed_vocabulary() {
+    let exposition = render(register_metrics);
+
+    let outcomes = exposition
+        .samples_of("cc_lb_request_diagnostics_lines_total")
+        .filter_map(|sample| sample.labels.get("outcome").cloned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        outcomes,
+        BTreeSet::from(["written", "encode_error", "write_error"].map(str::to_owned)),
+        "every diagnostics line outcome is visible before the first request"
+    );
+
+    let reasons = exposition
+        .samples_of("cc_lb_dropped_events_total")
+        .filter_map(|sample| sample.labels.get("reason").cloned())
+        .filter(|reason| reason.starts_with("request_diagnostics_"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        reasons,
+        BTreeSet::from(
+            [
+                "request_diagnostics_queue_full",
+                "request_diagnostics_strip_queue_full",
+                "request_diagnostics_strip_send_timeout",
+                "request_diagnostics_queue_closed",
+                "request_diagnostics_job_panic",
+                "request_diagnostics_worker_panic",
+                "request_diagnostics_shutdown_timeout",
+            ]
+            .map(str::to_owned)
+        ),
+        "every diagnostics drop reason is alertable from process start"
     );
 }

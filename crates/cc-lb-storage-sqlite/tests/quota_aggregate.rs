@@ -330,3 +330,52 @@ async fn quota_usage_token_intervals_include_both_boundaries_and_use_covering_in
         detail.contains("USING COVERING INDEX usage_rollups_v2_token_interval_idx")
     }));
 }
+
+/// 0098 drops `range_idx`/`anchor_idx`: the primary key
+/// (upstream_id, window, source, changed_at_unix_millis, sample_id) must still
+/// serve the DESC latest-fingerprint lookup without a scan or a sort.
+#[tokio::test]
+async fn quota_latest_checkpoint_lookup_uses_primary_key_after_duplicate_drop() {
+    let (_temp_dir, storage) = quota_storage("latest-checkpoint-plan.sqlite").await;
+    let indexes = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'index' AND tbl_name = 'upstream_subscription_quota_checkpoints_v1'",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("list checkpoint indexes");
+    for dropped in [
+        "upstream_subscription_quota_checkpoints_range_idx",
+        "upstream_subscription_quota_checkpoints_anchor_idx",
+    ] {
+        assert!(
+            !indexes.iter().any(|name| name == dropped),
+            "{dropped} must be dropped by 0098: {indexes:?}"
+        );
+    }
+
+    let plan = sqlx::query(
+        "EXPLAIN QUERY PLAN \
+         SELECT semantic_fingerprint FROM upstream_subscription_quota_checkpoints_v1 \
+         WHERE upstream_id = ? AND window = ? AND source = ? \
+         ORDER BY changed_at_unix_millis DESC, sample_id DESC \
+         LIMIT 1",
+    )
+    .bind(Uuid::from_u128(0x0097).to_string())
+    .bind("5h")
+    .bind("header")
+    .fetch_all(storage.pool())
+    .await
+    .expect("explain latest checkpoint lookup")
+    .into_iter()
+    .map(|row| row.try_get::<String, _>("detail").expect("plan detail"))
+    .collect::<Vec<_>>();
+    assert!(
+        plan.iter().any(|detail| detail.contains("USING")),
+        "latest checkpoint lookup must use an index: {plan:?}"
+    );
+    assert!(
+        !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
+        "latest checkpoint lookup must not sort: {plan:?}"
+    );
+}

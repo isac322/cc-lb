@@ -269,7 +269,44 @@ async fn run_regression(pool: &PgPool) -> Result<()> {
     assert_raw_payload_list_semantics(&storage).await?;
     assert_order_index_is_usable(pool).await?;
     assert_histogram_matches_list(&storage).await?;
+    assert_payload_rewrite_keeps_cursor_columns(&storage).await?;
 
+    Ok(())
+}
+
+/// QA 15: the operator payload rewrite assigns only `payload`, so neither the
+/// tail cursor (`seq`) nor the usage-rollup cursor (`tx_id`, `seq`) moves and
+/// no consumer re-reads the row.
+async fn assert_payload_rewrite_keeps_cursor_columns(storage: &PostgresStorage) -> Result<()> {
+    let event_id = "cursor-event-00";
+    let read_cursor_columns = move || async move {
+        sqlx::query_as::<_, (i64, String, Vec<u8>)>(
+            "SELECT seq, tx_id::text, payload FROM request_events_v1 WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_one(storage.pool())
+        .await
+    };
+    let (seq, tx_id, payload) = read_cursor_columns().await?;
+
+    let mut map = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&payload)?;
+    map.insert("rewrite_marker".to_owned(), serde_json::Value::Bool(true));
+    let rewritten = serde_json::to_vec(&map)?;
+    let affected = storage
+        .rewrite_request_event_payloads(&[(u64::try_from(seq)?, rewritten.clone())])
+        .await?;
+    ensure!(affected == 1, "rewrite must update exactly the target row");
+
+    let (seq_after, tx_id_after, payload_after) = read_cursor_columns().await?;
+    ensure!(seq_after == seq, "rewrite moved seq {seq} -> {seq_after}");
+    ensure!(
+        tx_id_after == tx_id,
+        "rewrite moved tx_id {tx_id} -> {tx_id_after}"
+    );
+    ensure!(
+        payload_after == rewritten,
+        "rewrite must store the new payload"
+    );
     Ok(())
 }
 
@@ -320,12 +357,27 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
     for index in [
         "request_events_v1_list_order_idx",
         "request_events_v1_principal_list_order_idx",
-        "request_events_v1_lower_model_list_order_idx",
         "request_events_v1_upstream_list_order_idx",
+        "request_events_v1_thread_list_order_idx",
+        "request_events_v1_upstream_id_idx",
+        // Kept by the P1-2 gate (Outcome B): the planner chooses it for
+        // source_kind filters (tests/request_event_filter_index_plans.rs).
+        "request_events_v1_source_kind_list_order_idx",
     ] {
         ensure!(
             indexes.contains(index),
             "missing request-event index {index}"
+        );
+    }
+    // 0134 (redundant with thread_list_order_idx) and the P1-2 gated 0137
+    // drop (tests/request_event_filter_index_plans.rs).
+    for index in [
+        "request_events_v1_thread_ts",
+        "request_events_v1_lower_model_list_order_idx",
+    ] {
+        ensure!(
+            !indexes.contains(index),
+            "request-event index {index} must be dropped by its migration"
         );
     }
     Ok(())
@@ -997,6 +1049,11 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
     );
 
     // The delta/cursor path applies the same effective-kind filter.
+    // `current_request_event_cursor` is capped at the snapshot xmin horizon,
+    // which is cluster-wide: an open transaction in ANY schema or database
+    // (a sibling test process) hides these freshly committed rows. Wait for
+    // the horizon to pass them instead of assuming no concurrent writer.
+    wait_until_rows_below_xmin(storage.pool()).await?;
     let until_cursor = storage.current_request_event_cursor().await?;
     let delta_ids = |event_kind: Option<RequestEventKind>| async move {
         let events = storage
@@ -1124,4 +1181,25 @@ fn quote_ident(identifier: &str) -> String {
         "unsafe postgres identifier: {identifier}"
     );
     format!("\"{identifier}\"")
+}
+
+/// Waits (bounded) until every row in this schema's `request_events_v1` is
+/// below the cluster-wide snapshot xmin horizon, i.e. visible to the
+/// xmin-guarded cursor and delta reads.
+async fn wait_until_rows_below_xmin(pool: &PgPool) -> Result<()> {
+    for _ in 0..1_200 {
+        let settled = sqlx::query_scalar::<_, bool>(
+            "SELECT NOT EXISTS ( \
+                 SELECT 1 FROM request_events_v1 \
+                 WHERE tx_id >= pg_snapshot_xmin(pg_current_snapshot()) \
+             )",
+        )
+        .fetch_one(pool)
+        .await?;
+        if settled {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("request events did not fall below the snapshot xmin horizon within 30s")
 }

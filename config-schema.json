@@ -78,6 +78,7 @@
       "$ref": "#/$defs/ObservabilityConfig",
       "default": {
         "log_redaction": true,
+        "request_diagnostics_log": false,
         "tracing_level": "info",
         "user_prompt_redaction": false
       }
@@ -100,6 +101,10 @@
       "format": "uint64",
       "default": 90,
       "minimum": 0
+    },
+    "request_event_strip_diagnostics": {
+      "type": "boolean",
+      "default": false
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
@@ -532,6 +537,10 @@
             "string",
             "null"
           ]
+        },
+        "request_diagnostics_log": {
+          "type": "boolean",
+          "default": false
         },
         "tracing_level": {
           "type": "string",

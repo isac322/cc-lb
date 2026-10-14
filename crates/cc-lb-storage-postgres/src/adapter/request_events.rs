@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
-    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
-    RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
-    model_filter_like_patterns, model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventExportPage, RequestEventHistogramBucket, RequestEventHistogramQuery,
+    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem,
+    RequestEventListQuery, RequestEventPayloadScan, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
+    model_filter_matches, normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use super::request_event_list_sql::{self, parse_event_kind, status_class_range};
 use crate::{
@@ -21,6 +22,16 @@ use crate::{
 };
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
+/// Poll interval while waiting for the snapshot xmin horizon to pass the
+/// stable-ceiling snapshot's xmax.
+const STABLE_SEQ_CEILING_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Upper bounds clamp to `i64::MAX`: a bound past every storable value means
+/// "no upper limit", never an error.
+fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
 
 #[async_trait]
 impl CacheKeepaliveProjectionStore for PostgresStorage {
@@ -196,6 +207,217 @@ impl RequestEventStore for PostgresStorage {
 
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         request_event_list_sql::get_request_event(self, event_id).await
+    }
+
+    /// In one transaction: read `MAX(seq)` under snapshot `S`, then assign
+    /// this transaction's own xid `N`, then commit. `N` is assigned after
+    /// `S`, so every transaction in flight at `S` has an xid `< N`. (Note
+    /// that `pg_snapshot_xmax` is `latestCompletedXid + 1`, not "first
+    /// unassigned xid", so it cannot bound running writers.) The call then
+    /// waits until `pg_snapshot_xmin > N`: once `N` has committed, any xid
+    /// `< N` still running lies below xmax and in xip, keeping xmin at or
+    /// below it; with none running, xmin moves past `N`. Appends assign their
+    /// xid before `nextval()` (`insert_request_event_in_tx`), so a row with
+    /// `seq <= MAX(seq)` not visible in `S` belonged to a transaction in
+    /// flight at `S`. When the wait ends, every row at or below the returned
+    /// ceiling is final and lies below the export's xmin guard: paging
+    /// `seq > after` up to this ceiling never steps past a lower seq that
+    /// commits later.
+    async fn request_event_stable_seq_ceiling(&self, max_wait: Duration) -> StorageResult<u64> {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(max_wait)
+            .ok_or_else(|| StorageError::Fatal {
+                message: format!(
+                    "request event stable seq ceiling max_wait {max_wait:?} is out of range"
+                ),
+            })?;
+        // The whole operation (pool acquisition, the marker transaction and
+        // every poll) is bounded by `max_wait`; dropping the future on
+        // timeout rolls back an unfinished marker transaction.
+        let stabilize = async {
+            let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+            let ceiling =
+                sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), 0) FROM request_events_v1")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+            let marker_xid = sqlx::query_scalar::<_, String>("SELECT pg_current_xact_id()::text")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            let ceiling = i64_to_u64(ceiling, "request event stable seq ceiling")?;
+            loop {
+                let settled = sqlx::query_scalar::<_, bool>(
+                    "SELECT pg_snapshot_xmin(pg_current_snapshot()) > $1::text::xid8",
+                )
+                .bind(&marker_xid)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+                if settled {
+                    return Ok::<u64, StorageError>(ceiling);
+                }
+                tokio::time::sleep(STABLE_SEQ_CEILING_POLL_INTERVAL).await;
+            }
+        };
+        tokio::time::timeout_at(deadline, stabilize)
+            .await
+            .unwrap_or_else(|_| {
+                Err(StorageError::Unavailable {
+                    message: format!(
+                        "request event seq ceiling did not stabilize within {max_wait:?}: \
+                         an older transaction is still open or the database is unreachable"
+                    ),
+                })
+            })
+    }
+
+    async fn request_event_seq_bounds(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Option<(u64, u64)>> {
+        if to_ts_ms <= from_ts_ms {
+            return Ok(None);
+        }
+        let (min_seq, max_seq) = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+            "SELECT MIN(seq), MAX(seq) FROM request_events_v1 \
+             WHERE list_ts_ms >= $1 AND list_ts_ms < $2",
+        )
+        .bind(u64_to_i64(from_ts_ms, "request event seq bounds from")?)
+        .bind(u64_to_i64_saturating(to_ts_ms))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        match (min_seq, max_seq) {
+            (Some(min_seq), Some(max_seq)) => Ok(Some((
+                i64_to_u64(min_seq, "request event seq bounds min")?,
+                i64_to_u64(max_seq, "request event seq bounds max")?,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    async fn export_request_events(
+        &self,
+        page: &RequestEventExportPage,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        if page.limit == 0 || page.until_seq <= page.after_seq {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<
+            _,
+            (i64, Option<String>, Option<String>, Option<String>, Vec<u8>),
+        >(
+            "SELECT seq, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
+             WHERE seq > $1 AND seq <= $2 \
+               AND ($3::bigint IS NULL OR list_ts_ms >= $3) \
+               AND ($4::bigint IS NULL OR list_ts_ms < $4) \
+               AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
+             ORDER BY seq ASC LIMIT $5",
+        )
+        .bind(u64_to_i64(
+            page.after_seq,
+            "request event export after_seq",
+        )?)
+        .bind(u64_to_i64_saturating(page.until_seq))
+        .bind(
+            page.from_ts_ms
+                .map(|value| u64_to_i64(value, "request event export from_ts_ms"))
+                .transpose()?,
+        )
+        .bind(page.to_ts_ms.map(u64_to_i64_saturating))
+        .bind(u64_to_i64(page.limit as u64, "request event export limit")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|(seq, source_kind, source_ref_id, event_kind, payload)| {
+                let cursor = i64_to_u64(seq, "request event cursor")?;
+                let event =
+                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
+                Ok((cursor, event))
+            })
+            .collect()
+    }
+
+    async fn request_event_day_counts(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        if to_ts_ms <= from_ts_ms {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT list_ts_ms / 86400000 AS utc_day, COUNT(*) FROM request_events_v1 \
+             WHERE list_ts_ms >= $1 AND list_ts_ms < $2 \
+             GROUP BY 1 ORDER BY 1",
+        )
+        .bind(u64_to_i64(from_ts_ms, "request event day counts from")?)
+        .bind(u64_to_i64_saturating(to_ts_ms))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|(day, count)| {
+                Ok((
+                    i64_to_u64(day, "request event day index")?,
+                    i64_to_u64(count, "request event day count")?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn scan_request_event_payloads(
+        &self,
+        scan: &RequestEventPayloadScan,
+    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
+        if scan.limit == 0 || scan.until_seq <= scan.after_seq {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
+            "SELECT seq, payload FROM request_events_v1 \
+             WHERE seq > $1 AND seq <= $2 ORDER BY seq ASC LIMIT $3",
+        )
+        .bind(u64_to_i64(scan.after_seq, "request event scan after_seq")?)
+        .bind(u64_to_i64_saturating(scan.until_seq))
+        .bind(u64_to_i64(scan.limit as u64, "request event scan limit")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|(seq, payload)| Ok((i64_to_u64(seq, "request event cursor")?, payload)))
+            .collect()
+    }
+
+    /// One autocommit statement per batch. Only `payload` is assigned, so
+    /// `seq` and the insert-time `tx_id` stay put and no cursor moves.
+    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let seqs = rows
+            .iter()
+            .map(|(seq, _)| u64_to_i64(*seq, "request event rewrite seq"))
+            .collect::<StorageResult<Vec<i64>>>()?;
+        let payloads = rows
+            .iter()
+            .map(|(_, payload)| payload.as_slice())
+            .collect::<Vec<&[u8]>>();
+        let result = sqlx::query(
+            "UPDATE request_events_v1 AS r SET payload = v.payload \
+             FROM UNNEST($1::bigint[], $2::bytea[]) AS v(seq, payload) \
+             WHERE r.seq = v.seq",
+        )
+        .bind(seqs)
+        .bind(payloads)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -474,15 +696,50 @@ async fn request_event_histogram(
         bucket.bucket_start_unix_secs = bucket_start_ms / 1_000;
     }
 
+    let Some(mut builder) = request_event_histogram_query("", query)? else {
+        return Ok(Vec::new());
+    };
+
+    let rows = builder
+        .build_query_as::<(i64, i64, i64)>()
+        .fetch_all(&storage.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+    for (bucket_index, total_count, error_count) in rows {
+        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
+            message: "request event histogram bucket index is negative".to_owned(),
+        })?;
+        let Some(bucket) = buckets.get_mut(bucket_index) else {
+            return Err(StorageError::Corrupted {
+                message: "request event histogram bucket index is out of range".to_owned(),
+            });
+        };
+        bucket.total_count = i64_to_u64(total_count, "request event histogram total count")?;
+        bucket.error_count = i64_to_u64(error_count, "request event histogram error count")?;
+    }
+
+    Ok(buckets)
+}
+
+/// Builds the histogram statement behind `prefix` (empty for execution,
+/// `EXPLAIN …` for plan inspection), so plan tests see the exact production
+/// SQL. `None` means the window cannot match any row.
+fn request_event_histogram_query(
+    prefix: &str,
+    query: &RequestEventHistogramQuery,
+) -> StorageResult<Option<QueryBuilder<Postgres>>> {
+    let range_start_ms = query.since_unix_secs.saturating_mul(1_000);
     let Some(since) =
         unix_secs_to_datetime_lower(query.since_unix_secs, "request event histogram since")?
     else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let until =
         unix_secs_to_datetime_upper(query.until_unix_secs, "request event histogram until")?;
 
-    let mut builder = QueryBuilder::<Postgres>::new("SELECT LEAST(GREATEST((r.list_ts_ms - ");
+    let mut builder =
+        QueryBuilder::<Postgres>::new(format!("{prefix}SELECT LEAST(GREATEST((r.list_ts_ms - "));
     builder.push_bind(u64_to_i64(
         range_start_ms,
         "request event histogram range start",
@@ -536,8 +793,8 @@ async fn request_event_histogram(
         builder.push_bind(principal_id);
     }
     // Model filter: identical disjunction to the SQLite histogram — see
-    // `model_filter_like_patterns`. Both arms stay left-anchored so the
-    // `lower(r.model) text_pattern_ops` index remains usable on each.
+    // `model_filter_like_patterns`. It is evaluated on rows reached through
+    // the time-window indexes; no `lower(model)` index exists (0137).
     if let Some([prefix_pattern, contains_pattern]) = query
         .filters
         .model
@@ -592,27 +849,53 @@ async fn request_event_histogram(
     }
 
     builder.push(" GROUP BY bucket_index");
+    Ok(Some(builder))
+}
 
-    let rows = builder
-        .build_query_as::<(i64, i64, i64)>()
-        .fetch_all(&storage.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-    for (bucket_index, total_count, error_count) in rows {
-        let bucket_index = usize::try_from(bucket_index).map_err(|_| StorageError::Corrupted {
-            message: "request event histogram bucket index is negative".to_owned(),
-        })?;
-        let Some(bucket) = buckets.get_mut(bucket_index) else {
-            return Err(StorageError::Corrupted {
-                message: "request event histogram bucket index is out of range".to_owned(),
-            });
-        };
-        bucket.total_count = i64_to_u64(total_count, "request event histogram total count")?;
-        bucket.error_count = i64_to_u64(error_count, "request event histogram error count")?;
+/// Plan inspection for index regression tests: `EXPLAIN (FORMAT JSON)` of
+/// the exact statement `request_event_histogram` executes, or `None` when the
+/// query would not run.
+#[doc(hidden)]
+pub async fn explain_request_event_histogram(
+    storage: &PostgresStorage,
+    query: &RequestEventHistogramQuery,
+) -> StorageResult<Option<serde_json::Value>> {
+    if query.bucket_count == 0
+        || query.bucket_ms == 0
+        || query.until_unix_secs < query.since_unix_secs
+    {
+        return Ok(None);
     }
+    let Some(mut builder) = request_event_histogram_query("EXPLAIN (FORMAT JSON) ", query)? else {
+        return Ok(None);
+    };
+    builder
+        .build_query_scalar::<serde_json::Value>()
+        .fetch_one(&storage.pool)
+        .await
+        .map(Some)
+        .map_err(map_sqlx_error)
+}
 
-    Ok(buckets)
+/// Plan inspection for index regression tests: `EXPLAIN (FORMAT JSON)` of
+/// the exact statement `list_request_events` executes, or `None` when the
+/// query would not run.
+#[doc(hidden)]
+pub async fn explain_request_event_list(
+    storage: &PostgresStorage,
+    query: &RequestEventListQuery,
+) -> StorageResult<Option<serde_json::Value>> {
+    let Some(mut builder) =
+        request_event_list_sql::list_request_events_query("EXPLAIN (FORMAT JSON) ", query)?
+    else {
+        return Ok(None);
+    };
+    builder
+        .build_query_scalar::<serde_json::Value>()
+        .fetch_one(&storage.pool)
+        .await
+        .map(Some)
+        .map_err(map_sqlx_error)
 }
 
 fn request_event_from_storage(
@@ -644,6 +927,20 @@ async fn insert_request_event_in_tx(
         reason: "must be present".to_owned(),
     })?;
     let payload = serde_json::to_vec(event)?;
+    // Assign this transaction's xid BEFORE the INSERT runs `nextval()` for
+    // `seq`. Inside the INSERT itself `seq` (column 1) would be allocated
+    // before the `tx_id` default calls `pg_current_xact_id()`, so a snapshot
+    // taken between the two would not list this writer as in flight while
+    // its lower `seq` is still uncommitted. With the xid assigned first, every
+    // allocated `seq` belongs to a transaction that already has an xid, so
+    // `request_event_stable_seq_ceiling` (which waits for xmin to pass the
+    // snapshot's xmax) covers every in-flight lower `seq`. Both callers
+    // (`append_request_event` and `append_request_event_with_projections`)
+    // run this insert as the first statement of their transaction.
+    sqlx::query("SELECT pg_current_xact_id()")
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
     sqlx::query_scalar::<_, i64>(
             "INSERT INTO request_events_v1 \
               (ts, source_kind, source_ref_id, principal_id, upstream_id, key_id, model, upstream_name, thread_id, \

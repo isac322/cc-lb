@@ -6,7 +6,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use cc_lb_engine::StorageTailPoller;
+use cc_lb_control::{InMemoryBus, RequestEventBus};
+use cc_lb_domain::InternalError;
+use cc_lb_engine::{
+    RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
+    StorageTailPoller, spawn_request_event_assembler_with_diagnostics,
+};
+use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
+use cc_lb_observability::NoopMetricsHook;
+use cc_lb_request_log::{
+    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, RequestDiagnosticsRecord, RequestEventUpdate,
+    render_request_diagnostics_line,
+};
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
 };
@@ -177,6 +188,116 @@ async fn storage_tail_poller_does_not_advance_past_ineligible_cursor() {
 
     shutdown_tx.send(true).expect("shutdown signal sends");
     handle.await.expect("poller task joins");
+}
+
+#[derive(Default)]
+struct RecordingDiagnosticsSink {
+    lines: Mutex<Vec<serde_json::Value>>,
+}
+
+#[async_trait]
+impl RequestDiagnosticsSink for RecordingDiagnosticsSink {
+    async fn offer(&self, record: RequestDiagnosticsRecord, _delivery: RequestDiagnosticsDelivery) {
+        let line = render_request_diagnostics_line(&record).expect("diagnostics record renders");
+        let value = serde_json::from_slice(&line).expect("diagnostics line is JSON");
+        self.lines.lock().expect("lines lock").push(value);
+    }
+
+    async fn shutdown(&self) {}
+}
+
+#[tokio::test]
+async fn strip_on_local_final_and_cross_replica_tail_carry_the_same_stripped_row() {
+    let storage = TestStorage::new();
+    // Another replica observes this pod's rows only through the storage tail.
+    let (tail_tx, mut tail_rx) = tokio::sync::broadcast::channel(16);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let poller = StorageTailPoller::spawn(
+        storage.as_request_event_store(),
+        tail_tx,
+        Duration::from_millis(10),
+        0,
+        shutdown_rx,
+    );
+    let bus = Arc::new(InMemoryBus::new());
+    let mut local = bus.subscribe();
+    let sink = Arc::new(RecordingDiagnosticsSink::default());
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    let assembler = spawn_request_event_assembler_with_diagnostics(
+        rx,
+        storage.as_request_event_store(),
+        Some(bus.clone() as Arc<dyn RequestEventBus>),
+        Arc::new(NoopMetricsHook),
+        RequestDiagnosticsOptions {
+            sink: Some(sink.clone() as Arc<dyn RequestDiagnosticsSink>),
+            strip_payload: true,
+        },
+    );
+
+    tx.send(LifecycleEvent::RequestTerminated {
+        event_id: "event-strip-tail".to_owned(),
+        reason: TerminationReason::Success,
+        client_status: 200,
+        duration_ms: 17,
+        request_body_read_ms: None,
+        request_body_bytes: None,
+        finalize_ms: None,
+        first_body_chunk_ms: None,
+        first_content_delta_ms: None,
+        dns_ms: None,
+        connect_ms: None,
+        connection_reused: None,
+        internal_errors: vec![InternalError {
+            message: Some("upstream refused".to_owned()),
+            ..InternalError::default()
+        }],
+        proxy_setup_ms: None,
+        setup_timings: Default::default(),
+        io_timings: Default::default(),
+        upstream_body_ms: None,
+        event_kind: None,
+    })
+    .await
+    .expect("assembler is running");
+
+    let tail = tokio::time::timeout(Duration::from_secs(1), tail_rx.recv())
+        .await
+        .expect("tail poller should broadcast the stored row")
+        .expect("tail broadcast should be open");
+    drop(tx);
+    assembler.shutdown().await;
+
+    let mut local_final = None;
+    while let Ok(update) = local.try_recv() {
+        if let RequestEventUpdate::Final(update) = update {
+            local_final = Some(update);
+        }
+    }
+    let local_final = local_final.expect("assembler published a local final");
+    assert_eq!(local_final.cursor, tail.cursor);
+    assert_eq!(
+        local_final.event, tail.event,
+        "local SSE final and cross-replica tail see the same row"
+    );
+    let payload = serde_json::to_value(&tail.event).expect("row serializes");
+    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        assert!(
+            payload.get(key).is_none(),
+            "tail row still has {key}: {payload}"
+        );
+    }
+
+    let lines = sink.lines.lock().expect("lines lock").clone();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["seq"], tail.cursor);
+    assert_eq!(lines[0]["event_id"], "event-strip-tail");
+    assert_eq!(
+        lines[0]["internal_errors"][0]["message"],
+        "upstream refused"
+    );
+
+    shutdown_tx.send(true).expect("shutdown signal sends");
+    poller.await.expect("poller task joins");
 }
 
 struct HorizonBlockedStorage {

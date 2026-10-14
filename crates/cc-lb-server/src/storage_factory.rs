@@ -77,6 +77,12 @@ pub enum StorageFactoryError {
     ConnectionFailed { message: String },
     #[error("storage initialization failed: {message}")]
     InitFailed { message: String },
+    #[error("storage not found: {path}")]
+    StorageNotFound { path: String },
+    #[error("storage schema is not current: {message}")]
+    SchemaMismatch { message: String },
+    #[error("WAL size probe failed: {message}")]
+    WalProbe { message: String },
 }
 
 pub async fn open_storage(
@@ -89,6 +95,178 @@ pub async fn open_storage(
             pool: pool_config,
         } => open_postgres(url, pool_config, clock).await,
         StorageConfig::Sqlite { path } => open_sqlite(path, clock).await,
+    }
+}
+
+/// Opens storage for an operator maintenance command.
+///
+/// Unlike [`open_storage`], this never runs `initialize()` (so it never migrates), spawns no
+/// pool-metrics task, caps the Postgres pool at two connections, never creates a
+/// missing SQLite file ([`StorageFactoryError::StorageNotFound`]), and refuses a database whose
+/// applied migrations do not match this binary ([`StorageFactoryError::SchemaMismatch`]).
+pub async fn open_storage_for_maintenance(
+    config: &StorageConfig,
+    clock: cc_lb_clock::ClockHandle,
+) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    match config {
+        StorageConfig::Postgres {
+            url,
+            pool: pool_config,
+        } => open_postgres_for_maintenance(url, pool_config, clock).await,
+        StorageConfig::Sqlite { path } => open_sqlite_for_maintenance(path, clock).await,
+    }
+}
+
+#[cfg(feature = "postgres")]
+const MAINTENANCE_MAX_CONNECTIONS: u32 = 2;
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn verify_schema_current<S>(storage: &S) -> Result<(), StorageFactoryError>
+where
+    S: cc_lb_storage_api::MetaStore + ?Sized,
+{
+    storage
+        .verify_schema_current()
+        .await
+        .map_err(|error| StorageFactoryError::SchemaMismatch {
+            message: error.to_string(),
+        })
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn open_sqlite_for_maintenance(
+    _path: &Path,
+    _clock: cc_lb_clock::ClockHandle,
+) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "sqlite".to_owned(),
+    })
+}
+
+#[cfg(feature = "sqlite")]
+async fn open_sqlite_for_maintenance(
+    path: &Path,
+    clock: cc_lb_clock::ClockHandle,
+) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    let exists = path
+        .try_exists()
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: format!("{}: {error}", path.display()),
+        })?;
+    if !exists {
+        return Err(StorageFactoryError::StorageNotFound {
+            path: path.display().to_string(),
+        });
+    }
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = cc_lb_storage_sqlite::open_sqlite_existing(&database_url, clock)
+        .await
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: error.to_string(),
+        })?;
+    verify_schema_current(&storage).await?;
+    Ok(Arc::new(storage))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn open_postgres_for_maintenance(
+    _url: &str,
+    _pool: &cc_lb_config::PostgresPoolConfig,
+    _clock: cc_lb_clock::ClockHandle,
+) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "postgres".to_owned(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn open_postgres_for_maintenance(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+    clock: cc_lb_clock::ClockHandle,
+) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    let pool = open_postgres_pool(url, &maintenance_pool_config(pool_config)).await?;
+    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool, clock);
+    verify_schema_current(&storage).await?;
+    Ok(Arc::new(storage))
+}
+
+#[cfg(feature = "postgres")]
+fn maintenance_pool_config(
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> cc_lb_config::PostgresPoolConfig {
+    let mut maintenance = pool_config.clone();
+    maintenance.max_connections = MAINTENANCE_MAX_CONNECTIONS;
+    maintenance.min_connections = 0;
+    maintenance
+}
+
+/// Reads the total size of the Postgres WAL directory (`pg_ls_waldir()`, which needs
+/// `pg_monitor` or superuser) so maintenance writes can pause while WAL is above a limit.
+pub struct WalSizeProbe {
+    #[cfg(feature = "postgres")]
+    pool: sqlx::PgPool,
+}
+
+/// Opens a [`WalSizeProbe`] and takes one reading, so a missing `pg_monitor` grant fails before
+/// the caller writes anything.
+pub async fn open_wal_size_probe(
+    config: &StorageConfig,
+) -> Result<WalSizeProbe, StorageFactoryError> {
+    match config {
+        StorageConfig::Postgres {
+            url,
+            pool: pool_config,
+        } => open_postgres_wal_size_probe(url, pool_config).await,
+        StorageConfig::Sqlite { .. } => Err(StorageFactoryError::WalProbe {
+            message: "WAL probing requires postgres storage".to_owned(),
+        }),
+    }
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn open_postgres_wal_size_probe(
+    _url: &str,
+    _pool: &cc_lb_config::PostgresPoolConfig,
+) -> Result<WalSizeProbe, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "postgres".to_owned(),
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn open_postgres_wal_size_probe(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+) -> Result<WalSizeProbe, StorageFactoryError> {
+    let mut probe_pool_config = maintenance_pool_config(pool_config);
+    probe_pool_config.max_connections = 1;
+    let pool = open_postgres_pool(url, &probe_pool_config).await?;
+    let probe = WalSizeProbe { pool };
+    probe.wal_bytes().await?;
+    Ok(probe)
+}
+
+impl WalSizeProbe {
+    #[cfg(not(feature = "postgres"))]
+    pub async fn wal_bytes(&self) -> Result<u64, StorageFactoryError> {
+        Err(StorageFactoryError::FeatureDisabled {
+            backend: "postgres".to_owned(),
+        })
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn wal_bytes(&self) -> Result<u64, StorageFactoryError> {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(size), 0)::bigint FROM pg_ls_waldir()")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| StorageFactoryError::WalProbe {
+                    message: error.to_string(),
+                })?;
+        u64::try_from(total).map_err(|_| StorageFactoryError::WalProbe {
+            message: format!("pg_ls_waldir() reported a negative size: {total}"),
+        })
     }
 }
 

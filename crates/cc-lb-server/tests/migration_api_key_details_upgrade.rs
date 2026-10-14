@@ -39,8 +39,8 @@ const OAUTH_ID: Uuid = Uuid::from_u128(0x0096_0000_0000_0000_0000_0000_0000_0002
 const DELETED_ID: Uuid = Uuid::from_u128(0x0096_0000_0000_0000_0000_0000_0000_0003);
 const DISABLED_ID: Uuid = Uuid::from_u128(0x0096_0000_0000_0000_0000_0000_0000_0004);
 
-/// STO-01: the new migrations are the heads, and the file set is exactly
-/// the previous heads plus one new file per backend.
+/// STO-01: each backend gains exactly one new migration directly after the
+/// previous head; later migrations may follow it.
 #[test]
 fn sto01_new_migrations_are_the_heads() {
     for (dir, previous, new) in [
@@ -63,8 +63,15 @@ fn sto01_new_migrations_are_the_heads() {
             })
             .collect::<Vec<_>>();
         files.sort();
-        let tail = &files[files.len().saturating_sub(2)..];
-        assert_eq!(tail, [previous, new], "{dir} heads");
+        let position = files
+            .iter()
+            .position(|name| name == previous)
+            .expect("previous head present");
+        assert_eq!(
+            files.get(position + 1).map(String::as_str),
+            Some(new),
+            "{dir}: the new migration directly follows the previous head"
+        );
     }
     let postgres = std::fs::read_to_string(
         Path::new(POSTGRES_MIGRATIONS).join("0133_upstream_workspace_and_key_details.sql"),
@@ -115,11 +122,14 @@ async fn sto02_sqlite_upgrade_preserves_rows_and_is_idempotent() {
 
     let after = sqlite_snapshot(storage.pool()).await;
     assert_eq!(after, before, "existing rows are untouched");
-    let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-        .fetch_one(storage.pool())
-        .await
-        .expect("migration version");
-    assert_eq!(version, SQLITE_AFTER);
+    let applied: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = ? AND success)",
+    )
+    .bind(SQLITE_AFTER)
+    .fetch_one(storage.pool())
+    .await
+    .expect("migration version");
+    assert!(applied, "migration {SQLITE_AFTER} is applied");
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM upstream_spec_v1 WHERE workspace_id IS NOT NULL),
                 (SELECT COUNT(*) FROM upstream_api_key_details_v1),
@@ -182,11 +192,14 @@ async fn postgres_upgrade(pool: &PgPool) {
 
     let after = postgres_snapshot(pool).await;
     assert_eq!(after, before, "existing rows are untouched");
-    let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-        .fetch_one(pool)
-        .await
-        .expect("migration version");
-    assert_eq!(version, POSTGRES_AFTER);
+    let applied: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1 AND success)",
+    )
+    .bind(POSTGRES_AFTER)
+    .fetch_one(pool)
+    .await
+    .expect("migration version");
+    assert!(applied, "migration {POSTGRES_AFTER} is applied");
     let counts: (i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM upstream_spec_v1 WHERE workspace_id IS NOT NULL),
                 (SELECT COUNT(*) FROM upstream_api_key_details_v1),

@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
-    RequestEventHistogramBucket, RequestEventHistogramQuery, RequestEventKeyLastUsed,
-    RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem, RequestEventListQuery,
-    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
-    RequestEventStore, RequestEventStreamFilters, StorageError, StorageResult,
-    model_filter_like_patterns, model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventExportPage, RequestEventHistogramBucket, RequestEventHistogramQuery,
+    RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem,
+    RequestEventListQuery, RequestEventPayloadScan, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
+    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
+    model_filter_matches, normalize_usage_rollup_dimension,
 };
 use sqlx::AssertSqlSafe;
 use std::{collections::BTreeMap, time::Instant};
@@ -189,6 +190,172 @@ impl RequestEventStore for SqliteStorage {
 
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         request_event_list_sql::get_request_event(self, event_id).await
+    }
+
+    /// Writers serialize on `BEGIN IMMEDIATE`, so ids commit in allocation
+    /// order and the visible maximum is already stable.
+    async fn request_event_stable_seq_ceiling(
+        &self,
+        max_wait: std::time::Duration,
+    ) -> StorageResult<u64> {
+        let _ = max_wait;
+        self.current_request_event_cursor().await
+    }
+
+    async fn request_event_seq_bounds(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Option<(u64, u64)>> {
+        if to_ts_ms <= from_ts_ms {
+            return Ok(None);
+        }
+        let (min_id, max_id) = sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+            "SELECT MIN(id), MAX(id) FROM request_events_v1 \
+             WHERE list_ts_ms >= ? AND list_ts_ms < ?",
+        )
+        .bind(u64_to_i64(from_ts_ms, "request event seq bounds from")?)
+        .bind(u64_to_i64_upper(to_ts_ms))
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        match (min_id, max_id) {
+            (Some(min_id), Some(max_id)) => Ok(Some((
+                i64_to_u64(min_id, "request event seq bounds min")?,
+                i64_to_u64(max_id, "request event seq bounds max")?,
+            ))),
+            _ => Ok(None),
+        }
+    }
+
+    async fn export_request_events(
+        &self,
+        page: &RequestEventExportPage,
+    ) -> StorageResult<Vec<(u64, RequestEvent)>> {
+        if page.limit == 0 || page.until_seq <= page.after_seq {
+            return Ok(Vec::new());
+        }
+        let rows =
+            sqlx::query_as::<_, (i64, Option<String>, Option<String>, Option<String>, String)>(
+                "SELECT id, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
+                 WHERE id > ? AND id <= ? \
+                   AND (? IS NULL OR list_ts_ms >= ?) \
+                   AND (? IS NULL OR list_ts_ms < ?) \
+                 ORDER BY id ASC LIMIT ?",
+            )
+            .bind(u64_to_i64(
+                page.after_seq,
+                "request event export after_seq",
+            )?)
+            .bind(u64_to_i64_upper(page.until_seq))
+            .bind(option_u64_to_i64(
+                page.from_ts_ms,
+                "request event export from_ts_ms",
+            )?)
+            .bind(option_u64_to_i64(
+                page.from_ts_ms,
+                "request event export from_ts_ms",
+            )?)
+            .bind(page.to_ts_ms.map(u64_to_i64_upper))
+            .bind(page.to_ts_ms.map(u64_to_i64_upper))
+            .bind(usize_to_i64(page.limit, "request event export limit")?)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|(id, source_kind, source_ref_id, event_kind, payload)| {
+                let cursor = i64_to_u64(id, "request event cursor")?;
+                let event =
+                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
+                Ok((cursor, event))
+            })
+            .collect()
+    }
+
+    async fn request_event_day_counts(
+        &self,
+        from_ts_ms: u64,
+        to_ts_ms: u64,
+    ) -> StorageResult<Vec<(u64, u64)>> {
+        if to_ts_ms <= from_ts_ms {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT list_ts_ms / 86400000 AS utc_day, COUNT(*) FROM request_events_v1 \
+             WHERE list_ts_ms >= ? AND list_ts_ms < ? \
+             GROUP BY 1 ORDER BY 1",
+        )
+        .bind(u64_to_i64(from_ts_ms, "request event day counts from")?)
+        .bind(u64_to_i64_upper(to_ts_ms))
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|(day, count)| {
+                Ok((
+                    i64_to_u64(day, "request event day index")?,
+                    i64_to_u64(count, "request event day count")?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn scan_request_event_payloads(
+        &self,
+        scan: &RequestEventPayloadScan,
+    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
+        if scan.limit == 0 || scan.until_seq <= scan.after_seq {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, (i64, String)>(
+            "SELECT id, payload FROM request_events_v1 \
+             WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?",
+        )
+        .bind(u64_to_i64(scan.after_seq, "request event scan after_seq")?)
+        .bind(u64_to_i64_upper(scan.until_seq))
+        .bind(usize_to_i64(scan.limit, "request event scan limit")?)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter()
+            .map(|(id, payload)| {
+                Ok((
+                    i64_to_u64(id, "request event cursor")?,
+                    payload.into_bytes(),
+                ))
+            })
+            .collect()
+    }
+
+    /// One `BEGIN IMMEDIATE` transaction per batch. Only `payload` is
+    /// assigned, so `id` (the cursor) never moves.
+    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let mut decoded = Vec::with_capacity(rows.len());
+        for (seq, payload) in rows {
+            let id = u64_to_i64(*seq, "request event rewrite seq")?;
+            let payload =
+                std::str::from_utf8(payload).map_err(|error| StorageError::Corrupted {
+                    message: format!("request event {seq} rewrite payload is not UTF-8: {error}"),
+                })?;
+            decoded.push((id, payload));
+        }
+        let mut tx = self.begin_immediate().await?;
+        let mut rewritten = 0_u64;
+        for (id, payload) in decoded {
+            let result = sqlx::query("UPDATE request_events_v1 SET payload = ? WHERE id = ?")
+                .bind(payload)
+                .bind(id)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            rewritten = rewritten.saturating_add(result.rows_affected());
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(rewritten)
     }
 }
 

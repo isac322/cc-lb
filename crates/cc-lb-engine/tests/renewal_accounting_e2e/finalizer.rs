@@ -17,6 +17,10 @@ pub(crate) struct Completion {
     pub(crate) reservation_id: Option<String>,
     pub(crate) event_key_id: Option<String>,
     pub(crate) projection_key_id: Option<String>,
+    pub(crate) event_id: String,
+    pub(crate) source_ref_id: String,
+    /// Storage cursor of the row the finalizer inserted first.
+    pub(crate) cursor: u64,
 }
 
 pub(crate) struct FinalizeInput<'a> {
@@ -44,7 +48,7 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
     );
     let event = renewal_event(&event_id, &source_ref_id, &input, cost.total_micros);
     let projections = renewal_projections(&source_ref_id, &input, cost.total_micros);
-    input
+    let cursor = input
         .storage
         .append_request_event_with_projections(&event, &projections)
         .await
@@ -69,7 +73,7 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
     }
     if let Some(bus) = input.bus {
         bus.publish_lifecycle(LifecycleEvent::RequestStarted {
-            event_id,
+            event_id: event_id.clone(),
             request_id: "renewal-observability".to_owned(),
             ts_ms: 1_003_000,
             stream: false,
@@ -86,6 +90,9 @@ pub(crate) async fn persist_finalization(input: FinalizeInput<'_>) -> Completion
             .turn
             .as_ref()
             .and_then(|turn| turn.accounting_key_id.clone()),
+        event_id,
+        source_ref_id,
+        cursor,
     }
 }
 

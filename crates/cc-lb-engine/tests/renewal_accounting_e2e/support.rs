@@ -208,6 +208,10 @@ impl RenewalAccountingScenario {
         self.fixture.http.calls()
     }
 
+    pub(crate) fn request_event_store(&self) -> Arc<dyn cc_lb_storage_api::RequestEventStore> {
+        self.fixture.storage.clone()
+    }
+
     pub(crate) async fn terminal_reason(&self) -> Option<CacheKeepaliveTerminalReason> {
         self.fixture
             .storage
