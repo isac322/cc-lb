@@ -15,8 +15,8 @@ use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
     KeyInputError, NormalizedApiKey, PreflightInput, PreflightMode, PreflightOutcome,
     PreflightRequest, PreflightVerdict, endpoint_operator_message, http_status, key_hint,
-    normalize_api_key, operator_message, prefix_gate, resolve_api_key, run_preflight,
-    validate_base_url, validate_workspace_id,
+    normalize_api_key, operator_message, prefix_gate, run_preflight, validate_base_url,
+    validate_workspace_id,
 };
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability, ApiKeyWorkspace,
@@ -25,6 +25,7 @@ use cc_lb_storage_api::{
 use serde_json::json;
 use url::Url;
 
+use super::recheck::stored_api_key;
 use crate::AdminState;
 use crate::auth::AdminIdentity;
 use crate::v1::upstreams::{UpstreamError, audit_upstream_action, effective_base_url};
@@ -319,7 +320,7 @@ pub(crate) async fn prepare_api_key_update(
     let key = match new_key.as_ref() {
         Some(key) => key,
         None => {
-            stored_key = decrypt_stored_key(state, current)?;
+            stored_key = stored_api_key(state, current)?;
             &stored_key
         }
     };
@@ -479,15 +480,6 @@ pub(crate) fn validate_workspace_input(workspace_id: &str) -> Result<(), Upstrea
             false,
         ))
     }
-}
-
-fn decrypt_stored_key(
-    state: &AdminState,
-    record: &UpstreamRecord,
-) -> Result<NormalizedApiKey, UpstreamError> {
-    let stored = resolve_api_key(state.aead.as_ref(), record)
-        .map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)?;
-    normalize_api_key(&stored).map_err(|_| UpstreamError::ApiKeyCredentialDecrypt)
 }
 
 fn now_unix_secs(state: &AdminState) -> u64 {

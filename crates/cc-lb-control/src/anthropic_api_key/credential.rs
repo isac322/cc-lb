@@ -3,6 +3,8 @@
 use cc_lb_aead::AeadService;
 use cc_lb_storage_api::UpstreamRecord;
 
+use super::normalize::NormalizedApiKey;
+
 /// Why an anthropic api-key credential could not be resolved. Callers map each
 /// reason onto their own error type; the variants carry no key material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,21 @@ pub fn resolve_api_key(
         return Err(ApiKeyResolutionError::LegacyEncoding);
     }
     Ok(key)
+}
+
+/// The stored key for re-use by a probe, exactly as [`resolve_api_key`]
+/// hands it to the signer.
+///
+/// The paste-time rules of
+/// [`normalize_api_key`](super::normalize::normalize_api_key) (no internal
+/// spaces, at most 512 bytes) are not applied: a key stored before they
+/// existed still proxies, so re-checking it or re-probing it after a
+/// `base_url` or workspace edit must not refuse it either.
+pub fn resolve_stored_api_key(
+    aead: &AeadService,
+    record: &UpstreamRecord,
+) -> Result<NormalizedApiKey, ApiKeyResolutionError> {
+    resolve_api_key(aead, record).map(NormalizedApiKey::stored)
 }
 
 #[cfg(test)]

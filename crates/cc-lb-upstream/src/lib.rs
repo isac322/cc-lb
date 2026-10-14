@@ -10,6 +10,7 @@ mod retry;
 mod scrub;
 mod traits;
 mod transform;
+mod url;
 
 pub use context::DialectShapeContext;
 pub use error::{DialectError, ResponseTransformError, SignerError, UpstreamError};
@@ -24,6 +25,7 @@ pub use transform::{
     ResponseTransformHook, SseEvent, SseEventTransformHook, TransformResponseRequest,
     TransformResponseResult, TransformSseEventRequest, TransformSseEventResult,
 };
+pub use url::upstream_request_url;
 
 mod private {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

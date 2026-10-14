@@ -6489,9 +6489,11 @@ impl UpstreamDialect for RawPassthroughDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let mut url = self.base_url.clone();
-        url.set_path(context.path.trim_start_matches('/'));
-        url.set_query(context.query.as_deref());
+        let url = cc_lb_upstream::upstream_request_url(
+            &self.base_url,
+            &context.path,
+            context.query.as_deref(),
+        );
         Ok(builder.shaped_request(
             url,
             context.method.clone(),

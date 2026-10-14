@@ -13,6 +13,7 @@ use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
     ApiKeyResolution, ApiKeyType, ApiKeyWorkspace, ApiKeyWorkspaceMode, RemediationCode,
 };
+use cc_lb_upstream::upstream_request_url;
 use http::{Method, StatusCode};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
@@ -349,10 +350,7 @@ impl InferenceProbe<'_> {
     }
 
     async fn models(&self, workspace_id: Option<&str>) -> Result<ProbeResponse, ProbeFailure> {
-        let url = self
-            .base_url
-            .join("v1/models")
-            .map_err(|_| ProbeFailure::Unreachable)?;
+        let url = upstream_request_url(self.base_url, "/v1/models", None);
         send(
             self.api,
             self.budget(),
@@ -372,10 +370,7 @@ impl InferenceProbe<'_> {
         model: &str,
         workspace_id: Option<&str>,
     ) -> Result<ProbeResponse, ProbeFailure> {
-        let url = self
-            .base_url
-            .join("v1/messages/count_tokens")
-            .map_err(|_| ProbeFailure::Unreachable)?;
+        let url = upstream_request_url(self.base_url, "/v1/messages/count_tokens", None);
         let body = serde_json::to_vec(&serde_json::json!({
             "model": model,
             "messages": [{"role": "user", "content": "ping"}]
