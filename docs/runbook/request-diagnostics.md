@@ -28,14 +28,13 @@ The release that adds these settings also applies these migrations on startup:
 | --- | --- | --- |
 | Postgres | `0134_drop_request_events_thread_ts_index` | Drops `request_events_v1_thread_ts`; `request_events_v1_thread_list_order_idx` serves the thread filter and histogram. |
 | Postgres | `0135_drop_quota_checkpoint_duplicate_indexes` | Drops `upstream_subscription_quota_checkpoints_range_idx` and `upstream_subscription_quota_checkpoints_anchor_idx`; the primary key serves both orders. |
-| Postgres | `0136_request_events_payload_storage_main` | `ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE MAIN`. Catalog-only, no table rewrite. |
-| Postgres | `0137_drop_request_events_lower_model_index` | Drops `request_events_v1_lower_model_list_order_idx`; the planner serves the model filter from the list order index. |
+| Postgres | `0136_drop_request_events_lower_model_index` | Drops `request_events_v1_lower_model_list_order_idx`; the planner serves the model filter from the list order index. |
 | SQLite | `0097_drop_request_events_thread_ts_index` | Drops `request_events_v1_thread_ts`. |
 | SQLite | `0098_drop_quota_checkpoint_duplicate_indexes` | Drops the two duplicate checkpoint indexes. |
 
 Each Postgres migration sets `SET LOCAL lock_timeout = '1s'` and runs inside sqlx's migration transaction under its advisory lock. If a lock is not granted within one second, the migration fails, the transaction rolls back without recording the version, and the new pod fails to start. Old pods keep serving when the rollout keeps them until a new pod is ready (for example `maxUnavailable: 0`). Fix the lock holder and restart the pod.
 
-After `0136`, new and updated `payload` values are compressed and kept inline in the heap. They move to TOAST only when a value still exceeds about 8 KB after compression. Existing values keep their current storage. While the strip setting is still off, full payloads that compress below about 8 KB are stored inline too, so the heap grows faster during the verification period.
+No migration changes the storage of `request_events_v1.payload`. Setting it to `STORAGE MAIN` is an operator step in step 4, after the strip is on in every pod.
 
 The migrations are one-way. Once they are applied, an older binary fails at startup with sqlx `VersionMissing`. Rollback is a forward fix only.
 
@@ -157,6 +156,21 @@ After every pod runs with the strip on, record the flip cursor with the step 2 q
 
 With the strip on, the assembler waits up to 500 ms for queue space before it drops a line. A line dropped while the strip is on is lost for good. Alert on any increase of `cc_lb_dropped_events_total{reason=~"request_diagnostics_strip_.*"}`.
 
+### Set payload storage to MAIN (Postgres)
+
+After `C_FLIP` is recorded and before step 6, switch `request_events_v1.payload` to `STORAGE MAIN`. New and rewritten payloads are then compressed and kept inline in the heap, and move to TOAST only when a value still exceeds about 8 KB after compression. Stripped payloads create no TOAST data, and the step 6 rewrite moves old payloads out of TOAST, so step 7 can truncate it.
+
+Do not apply it while any pod still has the strip off. Under `STORAGE MAIN`, full payloads that compress to 2 to 8 KB also stay inline. In a benchmark this grew the heap about ninefold and made histogram queries about five times slower, because every scan of the heap reads those payloads.
+
+The change is catalog-only: it rewrites no rows, and existing values keep their current storage until they are updated. It takes a brief `ACCESS EXCLUSIVE` lock on `request_events_v1`, so run it with a short lock timeout and retry until it succeeds:
+
+```sql
+SET lock_timeout = '1s';
+ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE MAIN;
+```
+
+Confirm it with `SELECT attstorage FROM pg_attribute WHERE attrelid = 'request_events_v1'::regclass AND attname = 'payload';`, which returns `m`. SQLite has no equivalent setting; skip this step there.
+
 ## 5. Final reconcile (hard gate)
 
 Reconcile every day that contains rows with a cursor at or below `C_FLIP`, as in step 3. Do not continue until every day matches. Step 6 destroys the database copy.
@@ -232,6 +246,6 @@ Rebuild bloated indexes one at a time with `REINDEX INDEX CONCURRENTLY <name>;` 
 
 ## 9. Rollback
 
-- Strip: set `request_event_strip_diagnostics = false` and roll out. New rows store the fields again. Rows already stripped stay stripped; their fields exist only in the sink.
+- Strip: set `request_event_strip_diagnostics = false` and roll out. New rows store the fields again. Rows already stripped stay stripped; their fields exist only in the sink. On Postgres, first revert the payload storage with the same lock timeout and retry, `ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE EXTENDED;`, so full payloads go to TOAST again. Values already stored inline stay inline until they are rewritten.
 - Log: set `request_diagnostics_log = false` only after the strip is off, or validation rejects the configuration.
 - Binary: once the migrations are applied, an older binary fails at startup with `VersionMissing`. Fix forward.

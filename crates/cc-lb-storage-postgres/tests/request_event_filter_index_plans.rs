@@ -1,4 +1,4 @@
-//! P1-2 gate for migration 0137 and the kept `source_kind` index.
+//! P1-2 gate for migration 0136 and the kept `source_kind` index.
 //!
 //! `request_events_v1_lower_model_list_order_idx` (0105) and
 //! `request_events_v1_source_kind_list_order_idx` (0100) are dropped only if
@@ -12,7 +12,7 @@
 //! Outcome A (planner never uses the index): the drop migration ships, the
 //! constant below is `true`, and the test also proves the remaining plans
 //! still avoid a sequential scan once the index is gone. This is the result
-//! for `lower_model` (0137).
+//! for `lower_model` (0136).
 //! Outcome B (planner uses it for a selective case): no drop migration, the
 //! constant is `false`, and the test keeps guarding that the index is present
 //! and chosen. This is the result for `source_kind`: the planner chooses it
@@ -32,7 +32,7 @@ use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-/// Outcome of the gate for 0137: `true` = Outcome A (index dropped).
+/// Outcome of the gate for 0136: `true` = Outcome A (index dropped).
 const LOWER_MODEL_INDEX_DROPPED: bool = true;
 /// Outcome of the gate for the `source_kind` index: `false` = Outcome B
 /// (index kept on Postgres and SQLite).
@@ -331,7 +331,7 @@ async fn run_gate(pool: &PgPool) -> Result<()> {
             LOWER_MODEL_INDEX,
             LOWER_MODEL_INDEX_DROPPED,
             &lower_model_users,
-            "postgres 0137",
+            "postgres 0136",
         ),
         (
             SOURCE_KIND_INDEX,

@@ -794,7 +794,7 @@ fn request_event_histogram_query(
     }
     // Model filter: identical disjunction to the SQLite histogram — see
     // `model_filter_like_patterns`. It is evaluated on rows reached through
-    // the time-window indexes; no `lower(model)` index exists (0137).
+    // the time-window indexes; no `lower(model)` index exists (0136).
     if let Some([prefix_pattern, contains_pattern]) = query
         .filters
         .model

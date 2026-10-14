@@ -1,7 +1,9 @@
-//! Migrations 0134–0136: the redundant `request_events_v1_thread_ts` and the
-//! checkpoint `range_idx`/`anchor_idx` duplicates are gone, the queries they
-//! used to serve still avoid a sequential scan, and `request_events_v1.payload`
-//! uses `STORAGE MAIN` so mid-sized payloads stay inline.
+//! Migrations 0134–0135: the redundant `request_events_v1_thread_ts` and the
+//! checkpoint `range_idx`/`anchor_idx` duplicates are gone and the queries they
+//! used to serve still avoid a sequential scan. Migrations leave
+//! `request_events_v1.payload` on the default `EXTENDED` storage; the operator
+//! step `SET STORAGE MAIN` (docs/runbook/request-diagnostics.md, step 4) keeps
+//! mid-sized payloads inline once applied.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
@@ -18,7 +20,7 @@ fn postgres_url() -> Option<String> {
 }
 
 #[test]
-fn redundant_indexes_are_dropped_and_payload_storage_is_main() {
+fn redundant_indexes_are_dropped_and_payload_storage_main_is_operator_step() {
     let Some(url) = postgres_url() else {
         eprintln!(
             "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
@@ -46,7 +48,7 @@ async fn run(pool: &PgPool) -> Result<()> {
 
     assert_index_set(pool).await?;
     assert_checkpoint_queries_avoid_seq_scan(pool).await?;
-    assert_payload_storage_main(pool, &storage).await?;
+    assert_payload_storage_operator_step(pool, &storage).await?;
     Ok(())
 }
 
@@ -227,20 +229,56 @@ async fn payload_storage(pool: &PgPool, event_id: &str) -> Result<(i32, bool)> {
     Ok((bytes, inline))
 }
 
-/// QA 21: after 0136, a ~2 KB payload and a ~5 KB incompressible payload stay
-/// in the heap (the latter would be moved to TOAST under the default
-/// `EXTENDED` storage), while a 20 KB incompressible payload that cannot fit
-/// a heap page is still externalized.
-async fn assert_payload_storage_main(pool: &PgPool, storage: &PostgresStorage) -> Result<()> {
-    let attstorage = sqlx::query_scalar::<_, String>(
+async fn payload_attstorage(pool: &PgPool) -> Result<String> {
+    Ok(sqlx::query_scalar::<_, String>(
         "SELECT attstorage::text FROM pg_attribute \
          WHERE attrelid = 'request_events_v1'::regclass AND attname = 'payload'",
     )
     .fetch_one(pool)
+    .await?)
+}
+
+/// QA 21: migrations must leave `payload` on `EXTENDED`, because `STORAGE MAIN`
+/// while the strip is off keeps full 2–8 KB payloads inline and bloats the
+/// heap. A ~5 KB incompressible payload is moved to TOAST under `EXTENDED`.
+/// After the runbook's operator step `SET STORAGE MAIN`, a ~2 KB payload and a
+/// ~5 KB incompressible payload stay in the heap, while a 20 KB incompressible
+/// payload that cannot fit a heap page is still externalized.
+async fn assert_payload_storage_operator_step(
+    pool: &PgPool,
+    storage: &PostgresStorage,
+) -> Result<()> {
+    let attstorage = payload_attstorage(pool).await?;
+    ensure!(
+        attstorage == "x",
+        "migrations must leave request_events_v1.payload on STORAGE EXTENDED, \
+         got attstorage={attstorage}"
+    );
+    append_with_blob(
+        storage,
+        "toast-5kb-extended",
+        0,
+        incompressible_ascii(5_000, 0x0136),
+    )
     .await?;
+    let (extended_bytes, extended_inline) = payload_storage(pool, "toast-5kb-extended").await?;
+    ensure!(
+        extended_bytes >= 5_000,
+        "5 KB payload is {extended_bytes} bytes"
+    );
+    ensure!(
+        !extended_inline,
+        "a ~5 KB incompressible payload must move to TOAST under STORAGE EXTENDED"
+    );
+
+    // The operator step from docs/runbook/request-diagnostics.md.
+    sqlx::query("ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE MAIN")
+        .execute(pool)
+        .await?;
+    let attstorage = payload_attstorage(pool).await?;
     ensure!(
         attstorage == "m",
-        "request_events_v1.payload must use STORAGE MAIN, got attstorage={attstorage}"
+        "the operator step must set STORAGE MAIN, got attstorage={attstorage}"
     );
 
     append_with_blob(storage, "toast-2kb", 1, "x".repeat(1_800)).await?;
