@@ -369,7 +369,7 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
             "missing request-event index {index}"
         );
     }
-    // 0134 (redundant with thread_list_order_idx) and the P1-2 gated 0136
+    // 0134 (redundant with thread_list_order_idx) and the P1-2 gated 0137
     // drop (tests/request_event_filter_index_plans.rs).
     for index in [
         "request_events_v1_thread_ts",

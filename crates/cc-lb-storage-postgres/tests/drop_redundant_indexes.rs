@@ -1,9 +1,10 @@
-//! Migrations 0134–0135: the redundant `request_events_v1_thread_ts` and the
-//! checkpoint `range_idx`/`anchor_idx` duplicates are gone and the queries they
-//! used to serve still avoid a sequential scan. Migrations leave
-//! `request_events_v1.payload` on the default `EXTENDED` storage; the operator
-//! step `SET STORAGE MAIN` (docs/runbook/request-diagnostics.md, step 4) keeps
-//! mid-sized payloads inline once applied.
+//! Migrations 0134–0135 and 0138: the redundant `request_events_v1_thread_ts`
+//! and the checkpoint `range_idx`/`anchor_idx` duplicates are gone and the
+//! queries they used to serve still avoid a sequential scan. After every
+//! migration (0136 sets `STORAGE MAIN`, 0138 restores it),
+//! `request_events_v1.payload` is on the default `EXTENDED` storage; the
+//! operator step `SET STORAGE MAIN` (docs/runbook/request-diagnostics.md,
+//! step 4) keeps mid-sized payloads inline once applied.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
@@ -238,9 +239,10 @@ async fn payload_attstorage(pool: &PgPool) -> Result<String> {
     .await?)
 }
 
-/// QA 21: migrations must leave `payload` on `EXTENDED`, because `STORAGE MAIN`
-/// while the strip is off keeps full 2–8 KB payloads inline and bloats the
-/// heap. A ~5 KB incompressible payload is moved to TOAST under `EXTENDED`.
+/// QA 21: after every migration (0138 reverts 0136), `payload` is on
+/// `EXTENDED`, because `STORAGE MAIN` while the strip is off keeps full 2–8 KB
+/// payloads inline and bloats the heap. A ~5 KB incompressible payload is
+/// moved to TOAST under `EXTENDED`.
 /// After the runbook's operator step `SET STORAGE MAIN`, a ~2 KB payload and a
 /// ~5 KB incompressible payload stay in the heap, while a 20 KB incompressible
 /// payload that cannot fit a heap page is still externalized.
@@ -251,7 +253,7 @@ async fn assert_payload_storage_operator_step(
     let attstorage = payload_attstorage(pool).await?;
     ensure!(
         attstorage == "x",
-        "migrations must leave request_events_v1.payload on STORAGE EXTENDED, \
+        "0138 must leave request_events_v1.payload on STORAGE EXTENDED, \
          got attstorage={attstorage}"
     );
     append_with_blob(

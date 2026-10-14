@@ -28,13 +28,15 @@ The release that adds these settings also applies these migrations on startup:
 | --- | --- | --- |
 | Postgres | `0134_drop_request_events_thread_ts_index` | Drops `request_events_v1_thread_ts`; `request_events_v1_thread_list_order_idx` serves the thread filter and histogram. |
 | Postgres | `0135_drop_quota_checkpoint_duplicate_indexes` | Drops `upstream_subscription_quota_checkpoints_range_idx` and `upstream_subscription_quota_checkpoints_anchor_idx`; the primary key serves both orders. |
-| Postgres | `0136_drop_request_events_lower_model_index` | Drops `request_events_v1_lower_model_list_order_idx`; the planner serves the model filter from the list order index. |
+| Postgres | `0136_request_events_payload_storage_main` | `ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE MAIN`. Catalog-only, no table rewrite. `0138` reverts it. |
+| Postgres | `0137_drop_request_events_lower_model_index` | Drops `request_events_v1_lower_model_list_order_idx`; the planner serves the model filter from the list order index. |
+| Postgres | `0138_request_events_payload_storage_extended` | `ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE EXTENDED`. Catalog-only, no table rewrite. |
 | SQLite | `0097_drop_request_events_thread_ts_index` | Drops `request_events_v1_thread_ts`. |
 | SQLite | `0098_drop_quota_checkpoint_duplicate_indexes` | Drops the two duplicate checkpoint indexes. |
 
 Each Postgres migration sets `SET LOCAL lock_timeout = '1s'` and runs inside sqlx's migration transaction under its advisory lock. If a lock is not granted within one second, the migration fails, the transaction rolls back without recording the version, and the new pod fails to start. Old pods keep serving when the rollout keeps them until a new pod is ready (for example `maxUnavailable: 0`). Fix the lock holder and restart the pod.
 
-No migration changes the storage of `request_events_v1.payload`. Setting it to `STORAGE MAIN` is an operator step in step 4, after the strip is on in every pod.
+After the migrations, `request_events_v1.payload` is back on the default `STORAGE EXTENDED`. A deployment that ran `0136` without `0138` kept new payloads inline in the meantime; those values stay inline until they are rewritten. Setting the column to `STORAGE MAIN` is an operator step in step 4, after the strip is on in every pod.
 
 The migrations are one-way. Once they are applied, an older binary fails at startup with sqlx `VersionMissing`. Rollback is a forward fix only.
 
@@ -158,7 +160,7 @@ With the strip on, the assembler waits up to 500 ms for queue space before it dr
 
 ### Set payload storage to MAIN (Postgres)
 
-After `C_FLIP` is recorded and before step 6, switch `request_events_v1.payload` to `STORAGE MAIN`. New and rewritten payloads are then compressed and kept inline in the heap, and move to TOAST only when a value still exceeds about 8 KB after compression. Stripped payloads create no TOAST data, and the step 6 rewrite moves old payloads out of TOAST, so step 7 can truncate it.
+After `C_FLIP` is recorded and before step 6, switch `request_events_v1.payload` to `STORAGE MAIN`. New and rewritten payloads are then compressed and kept inline in the heap, and move to TOAST only when a value still exceeds about 8 KB after compression. Stripped payloads written from then on create no TOAST data, and the step 6 rewrite moves the payloads it strips out of TOAST. Stripped rows written before this change, while the column was still `EXTENDED`, may already sit in TOAST; step 6 skips them because they carry no diagnostic fields, so step 7 moves them separately.
 
 Do not apply it while any pod still has the strip off. Under `STORAGE MAIN`, full payloads that compress to 2 to 8 KB also stay inline. In a benchmark this grew the heap about ninefold and made histogram queries about five times slower, because every scan of the heap reads those payloads.
 
@@ -207,7 +209,7 @@ Expect the following on Postgres. The figures come from a 50,000-row synthetic t
 - Each rewritten row adds about 2 KB of heap, because the stripped payload is stored inline. For 1.5 million rows that is about 3 GB.
 - Most updates are not HOT, because densely packed old pages have no free space. Every index on `request_events_v1` gains an entry per row.
 - WAL is roughly the new heap bytes plus index entries plus full-page images, about 3 to 4 KB per row. Set `--max-wal-bytes` well below your free WAL space, or lower `--max-rows-per-sec`.
-- Old TOAST values are deleted, but their space is not returned until step 7.
+- Old TOAST values of the rows it rewrites are deleted, but their space is not returned until step 7. Rows it skips because they carry no diagnostic fields keep their TOAST values; step 7 covers them.
 
 ## 7. VACUUM (Postgres)
 
@@ -218,7 +220,7 @@ SELECT pg_size_pretty(pg_relation_size(reltoastrelid)) FROM pg_class WHERE relna
 VACUUM (VERBOSE) request_events_v1;
 ```
 
-VACUUM truncates the TOAST relation only down to its highest page that still holds a live chunk. Disk comes back in full only when no live TOAST chunk remains. In testing, stripping every row truncated the TOAST relation to zero, while leaving the newest 20% unstripped truncated nothing.
+VACUUM truncates the TOAST relation only down to its highest page that still holds a live chunk. Disk comes back in full only when no live TOAST chunk remains. In testing, stripping every row truncated the TOAST relation to zero, while leaving the newest 20% unstripped truncated nothing. Rows written already stripped before the `STORAGE MAIN` change in step 4 can still hold TOAST chunks, so expect them here.
 
 If the size did not drop, find the rows that still hold chunks (Postgres 16 or later; this is a full scan):
 
@@ -226,7 +228,7 @@ If the size did not drop, find the rows that still hold chunks (Postgres 16 or l
 SELECT seq FROM request_events_v1 WHERE pg_column_toast_chunk_id(payload) IS NOT NULL LIMIT 100;
 ```
 
-These are payloads that exceed about 8 KB even after compression, or rows written above `C_FLIP` by a pod that still had the strip off, which step 4 prevents. Strip any that still carry diagnostics with `--after-seq` and `--until-seq`. Otherwise accept them, or move them inline with an approved update such as `UPDATE request_events_v1 SET payload = payload || ''::bytea WHERE seq = ANY(...)`. Then vacuum again.
+These are payloads that exceed about 8 KB even after compression, rows written already stripped while the column was still `EXTENDED` (before the step 4 `STORAGE MAIN` change), or rows written above `C_FLIP` by a pod that still had the strip off, which step 4 prevents. Strip any that still carry diagnostics with `--after-seq` and `--until-seq`; the strip skips rows without diagnostic fields, so it does not move the already-stripped ones. Accept the rest, or move them inline with an approved update such as `UPDATE request_events_v1 SET payload = payload || ''::bytea WHERE seq = ANY(...)`, in small batches. Then vacuum again.
 
 Truncation takes a brief `ACCESS EXCLUSIVE` lock on the TOAST relation, which standbys replay. The heap does not shrink; it grew in step 6.
 
