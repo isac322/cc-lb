@@ -207,6 +207,32 @@ async fn prb_no_workspace_header_classifies_unknown_ok() {
     assert_eq!(codes(&custom), vec![RemediationCode::NonAnthropicBaseUrl]);
 }
 
+/// Preflight probes the URL live traffic reaches: the proxy keeps only the
+/// `base_url` origin, so a path prefix, with or without a trailing slash, is
+/// dropped here too.
+#[tokio::test]
+async fn prb_base_url_path_prefix_probes_the_proxied_urls() {
+    for suffix in ["", "prefix", "prefix/", "v1/"] {
+        let fake = Fake::spawn().await;
+        let base_url = fake.url.join(suffix).expect("prefixed base url");
+        let outcome = preflight(&fake.org_api(), PLAIN, &base_url, None).await;
+
+        assert_eq!(outcome.wire.verdict, PreflightVerdict::Ok, "{base_url}");
+        assert_eq!(fake.requests(MODELS).len(), 1, "{base_url}");
+        assert_eq!(fake.requests(COUNT_TOKENS).len(), 1, "{base_url}");
+        let paths: Vec<String> = fake
+            .recorder
+            .snapshot()
+            .into_iter()
+            .map(|request| request.path)
+            .collect();
+        assert!(
+            paths.iter().all(|path| path.starts_with("/v1/")),
+            "{base_url}: {paths:?}"
+        );
+    }
+}
+
 /// PRB-01: a bound key is ok, workspace-bound, and never reaches the org API.
 #[tokio::test]
 async fn prb_01_bound_key_ok() {

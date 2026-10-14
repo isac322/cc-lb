@@ -802,6 +802,63 @@ async fn crt_09_ciphertext_is_bound_to_upstream_id() {
     }
 }
 
+/// A key stored before the paste-time rules (over 512 bytes, or an internal
+/// space) still proxies, so editing the host or workspace and Re-check reuse
+/// it byte-identical instead of failing with a decrypt error.
+#[tokio::test]
+async fn upd_legacy_stored_key_outside_input_rules_is_reused() {
+    let long = format!("sk-ant-api03-{}LONG", "x".repeat(600));
+    let spaced = "sk-ant-api03-LEGACY key00000000000000000SPCE".to_owned();
+    for key in [long, spaced] {
+        let harness = harness().await;
+        let id = harness
+            .seed_legacy_api_key_upstream("legacy", &key)
+            .await
+            .id;
+
+        let host = harness
+            .put(
+                id,
+                &etag(&harness, id).await,
+                json!({"base_url": custom_host(&harness)}),
+            )
+            .await;
+        assert_eq!(host.status, StatusCode::OK, "{}", host.body);
+
+        let skipped = harness
+            .put(
+                id,
+                &etag(&harness, id).await,
+                json!({"workspace_id": "wrkspc_P", "skip_preflight": true}),
+            )
+            .await;
+        assert_eq!(skipped.status, StatusCode::OK, "{}", skipped.body);
+        assert_eq!(skipped.body["api_key_access"]["verified"], false);
+
+        let recheck = harness
+            .request("POST", &format!("{UPSTREAMS}/{id}/preflight"), None, None)
+            .await;
+        assert_eq!(recheck.status, StatusCode::OK, "{}", recheck.body);
+
+        let sent = harness.requests(COUNT_TOKENS);
+        assert!(!sent.is_empty());
+        assert!(
+            sent.iter()
+                .all(|request| request.header("x-api-key") == Some(key.as_str())),
+            "the stored key is probed exactly as stored"
+        );
+        let ciphertext = harness.record(id).await.api_key_ciphertext;
+        assert_eq!(
+            ciphertext.and_then(|sealed| harness.state.aead.decrypt(&sealed, id.as_bytes()).ok()),
+            Some(key.as_bytes().to_vec()),
+            "the stored key is never rewritten"
+        );
+        for response in [&host, &skipped, &recheck] {
+            assert_no_key_material(&response.body.to_string(), &key);
+        }
+    }
+}
+
 #[tokio::test]
 async fn crt_10_custom_base_url_skips_org_probes() {
     let harness = harness().await;

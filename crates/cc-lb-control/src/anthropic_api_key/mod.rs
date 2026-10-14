@@ -20,7 +20,7 @@ pub mod workspace_id;
 pub use api_key_id::validate_api_key_id;
 pub use billing::{BillingStopKind, classify_billing_stop};
 pub use client::{AnthropicOrgApi, ProbeHttpClient, ProbeLimits};
-pub use credential::{ApiKeyResolutionError, resolve_api_key};
+pub use credential::{ApiKeyResolutionError, resolve_api_key, resolve_stored_api_key};
 pub use gate::prefix_gate;
 pub use hint::key_hint;
 pub use host::{org_api_applies, validate_base_url};

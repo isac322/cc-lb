@@ -12,10 +12,10 @@ use axum::{
 };
 use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
-    NormalizedApiKey, normalize_api_key,
+    NormalizedApiKey,
     preflight::{PreflightInput, PreflightMode, run_preflight},
     remediation::{endpoint_operator_message, operator_message},
-    resolve_api_key,
+    resolve_stored_api_key,
     wire::PreflightVerdict,
 };
 use cc_lb_storage_api::{
@@ -52,19 +52,18 @@ pub(super) async fn load_api_key_upstream(
     Ok(record)
 }
 
-/// The stored key, decrypted with the upstream id as AAD. Every failure
-/// (missing, undecryptable, not a usable key) is the flat 500
+/// The stored key, decrypted with the upstream id as AAD, exactly as the
+/// signer sends it. Paste-time input rules do not apply: a key stored before
+/// them still proxies, so every stored-key probe accepts it too. A key the
+/// signer could not send either (missing, undecryptable, not a valid header
+/// value, pre-#848 encoding) is the flat 500
 /// `api_key_credential_decrypt_failed` and carries no key material.
 pub(super) fn stored_api_key(
     state: &AdminState,
     record: &UpstreamRecord,
 ) -> Result<NormalizedApiKey, UpstreamError> {
-    let plaintext = resolve_api_key(&state.aead, record).map_err(|error| {
+    resolve_stored_api_key(&state.aead, record).map_err(|error| {
         tracing::warn!(upstream_id = %record.id, ?error, "stored api key could not be resolved");
-        UpstreamError::ApiKeyCredentialDecrypt
-    })?;
-    normalize_api_key(&plaintext).map_err(|error| {
-        tracing::warn!(upstream_id = %record.id, %error, "stored api key is not a usable key");
         UpstreamError::ApiKeyCredentialDecrypt
     })
 }

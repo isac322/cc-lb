@@ -7,8 +7,14 @@ use zeroize::Zeroizing;
 /// Longest accepted key, in bytes.
 pub const MAX_API_KEY_BYTES: usize = 512;
 
-/// An API key after the outer ASCII trim, guaranteed non-empty, printable
-/// ASCII (`0x21..=0x7E`), and at most [`MAX_API_KEY_BYTES`] long.
+/// An API key ready to probe.
+///
+/// A pasted key comes from [`normalize_api_key`]: outer ASCII trim, then
+/// non-empty, printable ASCII (`0x21..=0x7E`), and at most
+/// [`MAX_API_KEY_BYTES`] long. A stored key comes from
+/// [`resolve_stored_api_key`](super::credential::resolve_stored_api_key)
+/// byte-identical to what the signer sends, so a key stored before those
+/// input rules existed is probed as live traffic uses it.
 ///
 /// The buffer is zeroed on drop and `Debug` never prints the key.
 #[derive(Clone, PartialEq, Eq)]
@@ -17,6 +23,11 @@ pub struct NormalizedApiKey(Zeroizing<String>);
 impl NormalizedApiKey {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    /// Wraps a stored key that already passed `resolve_api_key`.
+    pub(super) fn stored(key: Zeroizing<String>) -> Self {
+        Self(key)
     }
 }
 
