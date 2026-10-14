@@ -30,7 +30,7 @@ All notable changes to this project will be documented in this file.
 - **Behavior change:** the proxy now strips any client-supplied `anthropic-workspace-id` header from every upstream request. API-key upstreams send their configured workspace instead.
 - Changing an API-key upstream's `base_url` does not require re-entering the key. An admin who can edit an upstream can therefore direct its stored key to any host they set. The change is audited with the old and new hosts, never the key, and the key is re-checked at the new host. Upstream `base_url` values must use `http` or `https` and must not contain credentials.
 - Redundant indexes are dropped. Postgres: `request_events_v1_thread_ts` (0134), `upstream_subscription_quota_checkpoints_range_idx` and `upstream_subscription_quota_checkpoints_anchor_idx` (0135), and `request_events_v1_lower_model_list_order_idx` (0137). SQLite: `request_events_v1_thread_ts` (0097) and the two checkpoint indexes (0098). Existing indexes and the checkpoint primary key serve the same queries. Each Postgres drop uses a 1 s lock timeout; an operator may drop the indexes beforehand with `DROP INDEX CONCURRENTLY IF EXISTS`.
-- Postgres stores `request_events_v1.payload` with `STORAGE MAIN` (0136). New and rewritten payloads are compressed and kept inline unless they still exceed about 8 KB, so payloads without diagnostic fields create no TOAST data. Existing values are not rewritten by the migration.
+- Postgres keeps `request_events_v1.payload` on the default `STORAGE EXTENDED`: 0136 sets `STORAGE MAIN` and 0138 restores `EXTENDED`. Under `STORAGE MAIN` with the strip off, full 2–8 KB payloads stay in the heap and slow queries that scan it. The request diagnostics runbook instead adds an operator step that sets `STORAGE MAIN` once the strip is on in every pod; new and rewritten payloads are then compressed and kept inline unless they still exceed about 8 KB, so stripped payloads create no TOAST data.
 
 ### Removed
 
@@ -65,7 +65,7 @@ All notable changes to this project will be documented in this file.
 ### Upgrade notes
 
 - With `request_event_strip_diagnostics = true`, admin API event detail, delta, and stream final payloads omit `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`, as do rows rewritten by `strip-diagnostics`. The setting is opt-in; the default keeps the current payloads.
-- Postgres migrations 0134 to 0137 and SQLite migrations 0097 and 0098 make a binary downgrade impossible: an older binary fails at startup with `VersionMissing`. Roll back by fixing forward. Avoid a manual `VACUUM` on `request_events_v1` or `upstream_subscription_quota_checkpoints_v1` during the rollout, because it holds the lock the migrations wait for and new pods fail to start until it ends.
+- Postgres migrations 0134 to 0138 and SQLite migrations 0097 and 0098 make a binary downgrade impossible: an older binary fails at startup with `VersionMissing`. Roll back by fixing forward. Avoid a manual `VACUUM` on `request_events_v1` or `upstream_subscription_quota_checkpoints_v1` during the rollout, because it holds the lock the migrations wait for and new pods fail to start until it ends.
 
 ## [1.0.1] - 2026-10-02
 
