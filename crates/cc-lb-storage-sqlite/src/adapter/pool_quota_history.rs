@@ -9,6 +9,37 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 #[async_trait]
 impl PoolQuotaHistoryStore for SqliteStorage {
+    async fn prune_pool_quota_history_before(
+        &self,
+        cutoff_unix_secs: i64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            "DELETE FROM pool_subscription_quota_history_v1 WHERE rowid IN ( \
+             SELECT candidate.rowid FROM pool_subscription_quota_history_v1 candidate \
+             WHERE candidate.snapshot_at_unix_secs < ?1 \
+               AND candidate.rowid <> ( \
+                 SELECT anchor.rowid FROM pool_subscription_quota_history_v1 anchor \
+                 WHERE anchor.quota_window = candidate.quota_window \
+                   AND anchor.snapshot_at_unix_secs <= ?1 \
+                 ORDER BY anchor.snapshot_at_unix_secs DESC LIMIT 1 \
+               ) \
+             ORDER BY candidate.snapshot_at_unix_secs, candidate.quota_window LIMIT ?2)",
+        )
+        .bind(cutoff_unix_secs)
+        .bind(super::request_events::usize_to_i64(
+            batch_size,
+            "pool quota prune batch size",
+        )?)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
     async fn record_pool_quota_snapshots(
         &self,
         records: &[PoolQuotaSnapshotRecord],

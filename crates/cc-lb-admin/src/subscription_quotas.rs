@@ -1007,7 +1007,7 @@ pub async fn record_pool_quota_snapshots_now(
 ) -> Result<(), StorageError> {
     let computed_at_unix_millis = i64::try_from(now_unix_millis(clock)).unwrap_or(i64::MAX);
     let snapshot_at_unix_secs = computed_at_unix_millis / 1_000;
-    let records = pool_quota_snapshots_from_aggregate(
+    let mut records = pool_quota_snapshots_from_aggregate(
         aggregate,
         snapshot_at_unix_secs,
         computed_at_unix_millis,
@@ -1015,7 +1015,52 @@ pub async fn record_pool_quota_snapshots_now(
     if records.is_empty() {
         return Ok(());
     }
+    let windows = records
+        .iter()
+        .map(|record| record.window)
+        .collect::<Vec<_>>();
+    let latest = storage
+        .list_latest_pool_quota_snapshot_summaries(&windows)
+        .await?;
+    records.retain(|record| {
+        should_record_pool_quota_snapshot(
+            record,
+            latest
+                .iter()
+                .find(|summary| summary.window == record.window),
+        )
+    });
+    if records.is_empty() {
+        return Ok(());
+    }
     PoolQuotaHistoryStore::record_pool_quota_snapshots(storage, &records).await
+}
+
+fn should_record_pool_quota_snapshot(
+    record: &PoolQuotaSnapshotRecord,
+    latest: Option<&PoolQuotaSnapshotSummaryRecord>,
+) -> bool {
+    let Some(latest) = latest else {
+        return true;
+    };
+    let utilization_unchanged = match (record.utilization, latest.utilization) {
+        (Some(current), Some(previous)) => (current - previous).abs() < 0.001,
+        (None, None) => true,
+        _ => false,
+    };
+    !(record
+        .snapshot_at_unix_secs
+        .saturating_sub(latest.snapshot_at_unix_secs)
+        < 3_600
+        && utilization_unchanged
+        && record.eligible_upstreams == latest.eligible_upstreams
+        && record.contributing_upstreams == latest.contributing_upstreams
+        && record.stale_upstreams == latest.stale_upstreams
+        && record.missing_observation_upstreams == latest.missing_observation_upstreams
+        && record.missing_metadata_upstreams == latest.missing_metadata_upstreams
+        && record.header_contributing_upstreams == latest.header_contributing_upstreams
+        && record.api_contributing_upstreams == latest.api_contributing_upstreams
+        && record.policy_version == latest.policy_version)
 }
 
 fn build_aggregate_window_response(
@@ -1838,6 +1883,80 @@ fn now_unix_millis(clock: &dyn Clock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_for_deadband() -> PoolQuotaSnapshotRecord {
+        PoolQuotaSnapshotRecord {
+            snapshot_at_unix_secs: 10_000,
+            window: SubscriptionQuotaWindow::FiveHour,
+            utilization: Some(0.0),
+            weighted_utilization_sum: 0.0,
+            capacity_ratio_sum: 1.0,
+            eligible_upstreams: 2,
+            contributing_upstreams: 1,
+            stale_upstreams: 0,
+            missing_observation_upstreams: 1,
+            missing_metadata_upstreams: 0,
+            header_contributing_upstreams: 1,
+            api_contributing_upstreams: 0,
+            max_observed_at_unix_millis: Some(10_000_000),
+            computed_at_unix_millis: 10_000_000,
+            policy_version: POOL_QUOTA_POLICY_VERSION,
+        }
+    }
+
+    #[test]
+    fn pool_snapshot_deadband_keeps_first_sample_changes_and_hourly_heartbeat() {
+        let mut record = snapshot_for_deadband();
+        assert!(should_record_pool_quota_snapshot(&record, None));
+        let latest = PoolQuotaSnapshotSummaryRecord::from(&record);
+        assert!(!should_record_pool_quota_snapshot(&record, Some(&latest)));
+        record.snapshot_at_unix_secs += 3_599;
+        record.utilization = Some(0.000_999);
+        assert!(!should_record_pool_quota_snapshot(&record, Some(&latest)));
+        record.utilization = Some(0.001);
+        assert!(should_record_pool_quota_snapshot(&record, Some(&latest)));
+        record.utilization = Some(0.0);
+        record.snapshot_at_unix_secs += 1;
+        assert!(should_record_pool_quota_snapshot(&record, Some(&latest)));
+    }
+
+    #[test]
+    fn pool_snapshot_deadband_preserves_missing_utilization_transitions() {
+        let mut record = snapshot_for_deadband();
+        let mut latest = PoolQuotaSnapshotSummaryRecord::from(&record);
+        record.utilization = None;
+        assert!(should_record_pool_quota_snapshot(&record, Some(&latest)));
+        latest.utilization = None;
+        assert!(!should_record_pool_quota_snapshot(&record, Some(&latest)));
+        record.utilization = Some(0.0);
+        assert!(should_record_pool_quota_snapshot(&record, Some(&latest)));
+    }
+
+    #[test]
+    fn pool_snapshot_deadband_preserves_all_population_and_policy_changes() {
+        let original = snapshot_for_deadband();
+        let latest = PoolQuotaSnapshotSummaryRecord::from(&original);
+        let changes: [fn(&mut PoolQuotaSnapshotRecord); 8] = [
+            |record| record.eligible_upstreams += 1,
+            |record| record.contributing_upstreams += 1,
+            |record| record.stale_upstreams += 1,
+            |record| record.missing_observation_upstreams += 1,
+            |record| record.missing_metadata_upstreams += 1,
+            |record| record.header_contributing_upstreams += 1,
+            |record| record.api_contributing_upstreams += 1,
+            |record| record.policy_version += 1,
+        ];
+        for change in changes {
+            let mut record = original.clone();
+            change(&mut record);
+            assert!(should_record_pool_quota_snapshot(&record, Some(&latest)));
+        }
+        let mut record = original;
+        record.max_observed_at_unix_millis = Some(10_001_000);
+        record.computed_at_unix_millis = 10_001_000;
+        record.weighted_utilization_sum = 0.000_01;
+        assert!(!should_record_pool_quota_snapshot(&record, Some(&latest)));
+    }
 
     #[test]
     fn quota_data_states_preserve_absent_and_unobserved() {

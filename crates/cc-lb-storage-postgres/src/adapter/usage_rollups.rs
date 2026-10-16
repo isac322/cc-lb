@@ -110,6 +110,40 @@ struct UpstreamIdentity {
 
 #[async_trait]
 impl UsageRollupStore for PostgresStorage {
+    async fn prune_usage_rollups_before(
+        &self,
+        minute_cutoff_unix_secs: u64,
+        hour_cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let minute_cutoff = u64_to_i64(minute_cutoff_unix_secs, "usage rollup minute cutoff")?;
+        let hour_cutoff = u64_to_i64(hour_cutoff_unix_secs, "usage rollup hour cutoff")?;
+        let limit = u64_to_i64(batch_size as u64, "usage rollup prune batch size")?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut removed = 0u64;
+        for sql in [
+            "DELETE FROM usage_rollups_v2 WHERE ctid IN (SELECT ctid FROM usage_rollups_v2 WHERE (resolution = 'minute' AND bucket_start_unix_secs < $1) OR (resolution = 'hour' AND bucket_start_unix_secs < $2) ORDER BY bucket_start_unix_secs LIMIT $3)",
+            "DELETE FROM overview_excluded_error_rollups_v1 WHERE ctid IN (SELECT ctid FROM overview_excluded_error_rollups_v1 WHERE (resolution = 'minute' AND bucket_start_unix_secs < $1) OR (resolution = 'hour' AND bucket_start_unix_secs < $2) ORDER BY bucket_start_unix_secs LIMIT $3)",
+        ] {
+            if removed == limit as u64 {
+                break;
+            }
+            removed += sqlx::query(sql)
+                .bind(minute_cutoff)
+                .bind(hour_cutoff)
+                .bind(limit - removed as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?
+                .rows_affected();
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(removed)
+    }
+
     async fn rollup_usage_once(&self) -> StorageResult<UsageRollupRun> {
         rollup_usage_once_inner(self).await
     }
@@ -239,7 +273,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     // assigned at INSERT, visible at COMMIT), so a seq high-water-mark would skip
     // it forever. xmin never advances past an in-flight txn, so tx_id order does not.
     let rows = sqlx::query(
-        "SELECT seq, tx_id::text AS tx_id_text, payload, upstream_id FROM request_events_v1 \
+        "SELECT seq, tx_id::text AS tx_id_text, EXTRACT(EPOCH FROM ts)::bigint AS ts_secs, source_kind, event_kind, list_ts_ms, principal_id, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, error_code FROM request_events_v1 \
           WHERE (tx_id, seq) > ($1::xid8, $2) \
             AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
           ORDER BY tx_id ASC, seq ASC LIMIT $3",
@@ -270,10 +304,93 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
     for row in &rows {
         let seq = row.try_get::<i64, _>("seq").map_err(map_sqlx_error)?;
         let tx_id_text: String = row.try_get("tx_id_text").map_err(map_sqlx_error)?;
-        let payload: Vec<u8> = row.try_get("payload").map_err(map_sqlx_error)?;
-        let table_upstream_id: Option<Uuid> = row.try_get("upstream_id").map_err(map_sqlx_error)?;
-        let event: RequestEvent = serde_json::from_slice(&payload)?;
-        let upstream = resolve_upstream_identity(&event, table_upstream_id, &upstreams);
+        let event = RequestEvent {
+            ts: i64_to_u64(
+                row.try_get("ts_secs").map_err(map_sqlx_error)?,
+                "request event ts",
+            )?,
+            source_kind: row.try_get("source_kind").map_err(map_sqlx_error)?,
+            event_kind: row
+                .try_get::<Option<String>, _>("event_kind")
+                .map_err(map_sqlx_error)?
+                .as_deref()
+                .map(super::request_event_list_sql::parse_event_kind)
+                .transpose()?,
+            ts_ms: row
+                .try_get::<Option<i64>, _>("list_ts_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event ts_ms"))
+                .transpose()?,
+            principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+            upstream_id: row.try_get("upstream_id").map_err(map_sqlx_error)?,
+            upstream_name: row.try_get("upstream_name").map_err(map_sqlx_error)?,
+            model: row.try_get("model").map_err(map_sqlx_error)?,
+            status: u16::try_from(
+                row.try_get::<Option<i32>, _>("list_status")
+                    .map_err(map_sqlx_error)?
+                    .ok_or_else(|| StorageError::Corrupted {
+                        message: "request event status missing".to_owned(),
+                    })?,
+            )
+            .map_err(|_| StorageError::Corrupted {
+                message: "request event status out of range".to_owned(),
+            })?,
+            input_tokens: row
+                .try_get::<Option<i64>, _>("input_tokens")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event input_tokens"))
+                .transpose()?,
+            output_tokens: row
+                .try_get::<Option<i64>, _>("output_tokens")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event output_tokens"))
+                .transpose()?,
+            cache_creation_input_tokens: row
+                .try_get::<Option<i64>, _>("cache_creation_input_tokens")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event cache_creation_input_tokens"))
+                .transpose()?,
+            cache_read_input_tokens: row
+                .try_get::<Option<i64>, _>("cache_read_input_tokens")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event cache_read_input_tokens"))
+                .transpose()?,
+            cost_usd_micros: row
+                .try_get("list_cost_usd_micros")
+                .map_err(map_sqlx_error)?,
+            duration_ms: i64_to_u64(
+                row.try_get("duration_ms").map_err(map_sqlx_error)?,
+                "request event duration_ms",
+            )?,
+            proxy_setup_ms: row
+                .try_get::<Option<i64>, _>("proxy_setup_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event proxy_setup_ms"))
+                .transpose()?,
+            shape_ms: row
+                .try_get::<Option<i64>, _>("shape_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event shape_ms"))
+                .transpose()?,
+            sign_ms: row
+                .try_get::<Option<i64>, _>("sign_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event sign_ms"))
+                .transpose()?,
+            upstream_ttfb_ms: row
+                .try_get::<Option<i64>, _>("upstream_ttfb_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event upstream_ttfb_ms"))
+                .transpose()?,
+            upstream_body_ms: row
+                .try_get::<Option<i64>, _>("upstream_body_ms")
+                .map_err(map_sqlx_error)?
+                .map(|value| i64_to_u64(value, "request event upstream_body_ms"))
+                .transpose()?,
+            error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
+            ..RequestEvent::default()
+        };
+        let upstream = resolve_upstream_identity(&event, event.upstream_id, &upstreams);
 
         cursor_seq = seq;
         cursor_xid = tx_id_text;

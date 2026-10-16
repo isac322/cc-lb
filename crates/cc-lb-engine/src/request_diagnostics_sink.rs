@@ -19,9 +19,9 @@ use tokio::sync::watch;
 /// How the assembler wants a record delivered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestDiagnosticsDelivery {
-    /// strip OFF: the DB still holds the fields, so drop on a full queue (try_send).
+    /// Drop on a full queue (`try_send`).
     BestEffort,
-    /// strip ON: the line is the only copy, so wait up to the timeout for queue space.
+    /// Wait up to the timeout for queue space because the log is the only diagnostic copy.
     BoundedWait(Duration),
 }
 
@@ -36,7 +36,7 @@ pub trait RequestDiagnosticsSink: Send + Sync {
 }
 
 pub const REQUEST_DIAGNOSTICS_QUEUE_CAPACITY: usize = 1024;
-pub const REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+pub const REQUEST_DIAGNOSTICS_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 /// Budget for draining queued lines at shutdown. Matches the assembler's own overflow drain
 /// grace (`OVERFLOW_DRAIN_GRACE`), so the assembler shutdown hook stays bounded end to end and
 /// a stalled stdout pipe cannot hold the server's sequential shutdown hooks until SIGKILL.
@@ -47,8 +47,6 @@ const REQUEST_DIAGNOSTICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct RequestDiagnosticsOptions {
     /// `None` keeps the feature off: no clone, no render, no thread.
     pub sink: Option<Arc<dyn RequestDiagnosticsSink>>,
-    /// Remove the five diagnostic fields from the row before it is persisted.
-    pub strip_payload: bool,
 }
 
 impl std::fmt::Debug for RequestDiagnosticsOptions {
@@ -58,7 +56,6 @@ impl std::fmt::Debug for RequestDiagnosticsOptions {
                 "sink",
                 &self.sink.as_ref().map(|_| "RequestDiagnosticsSink"),
             )
-            .field("strip_payload", &self.strip_payload)
             .finish()
     }
 }
@@ -655,27 +652,27 @@ mod tests {
         let released: Release = Arc::new((StdMutex::new(false), Condvar::new()));
         let probe = OutputProbe::blocking(entered_tx, Arc::clone(&released));
         let sink = sink(2, &probe);
-        let strip = RequestDiagnosticsDelivery::BoundedWait(REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT);
+        let delivery = RequestDiagnosticsDelivery::BoundedWait(REQUEST_DIAGNOSTICS_SEND_TIMEOUT);
 
-        sink.offer(record("evt-1"), strip).await;
+        sink.offer(record("evt-1"), delivery).await;
         entered(&entered_rx, "first line");
-        sink.offer(record("evt-2"), strip).await;
-        sink.offer(record("evt-3"), strip).await;
+        sink.offer(record("evt-2"), delivery).await;
+        sink.offer(record("evt-3"), delivery).await;
 
-        // Queue full and stdout stalled: the offer waits exactly the strip timeout, then drops.
+        // Queue full and stdout stalled: wait exactly the send timeout, then drop.
         let started = tokio::time::Instant::now();
-        sink.offer(record("evt-timeout"), strip).await;
+        sink.offer(record("evt-timeout"), delivery).await;
         let waited = started.elapsed();
         assert!(
-            waited >= REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT
-                && waited < REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT + Duration::from_millis(5),
-            "bounded wait lasts the strip timeout, waited {waited:?}"
+            waited >= REQUEST_DIAGNOSTICS_SEND_TIMEOUT
+                && waited < REQUEST_DIAGNOSTICS_SEND_TIMEOUT + Duration::from_millis(5),
+            "bounded wait lasts the send timeout, waited {waited:?}"
         );
         assert!(sink.degraded.load(Ordering::Relaxed));
 
         // Degraded: later rows do not pay the timeout again during the same stall.
         let started = tokio::time::Instant::now();
-        sink.offer(record("evt-degraded"), strip).await;
+        sink.offer(record("evt-degraded"), delivery).await;
         assert_eq!(started.elapsed(), Duration::ZERO);
 
         release(&released);
@@ -683,7 +680,7 @@ mod tests {
         // queued records, so the queue is empty and at least half empty again.
         wait_recorded(5);
 
-        sink.offer(record("evt-recovered"), strip).await;
+        sink.offer(record("evt-recovered"), delivery).await;
         assert!(!sink.degraded.load(Ordering::Relaxed));
         wait_recorded(6);
         sink.shutdown().await;
@@ -845,7 +842,7 @@ mod tests {
         assert!(line.starts_with(br#"{"schema":"cc_lb.request_diagnostics.v1","#));
         let value: serde_json::Value = serde_json::from_slice(line).expect("line is valid JSON");
         let object = value.as_object().expect("line is a JSON object");
-        assert_eq!(object.len(), 21, "every key is present: {object:?}");
+        assert_eq!(object.len(), 29, "every key is present: {object:?}");
         assert_eq!(
             value["internal_errors"][0]["message"],
             "token=[REDACTED] tail"

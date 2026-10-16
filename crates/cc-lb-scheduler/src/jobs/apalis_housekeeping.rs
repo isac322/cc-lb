@@ -119,6 +119,8 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
 
     async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
         let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
+        let done_job_cutoff =
+            retention_cutoff(now_unix_secs, self.config.dlq_retention_days.min(1));
         let job_cutoff = retention_cutoff(now_unix_secs, self.config.dlq_retention_days);
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
         let cache_keepalive_sessions_removed = self
@@ -126,8 +128,14 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff).await?;
         let jobs_removed = sqlx::query(
-            "DELETE FROM Jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < ?1",
+            "DELETE FROM Jobs
+             WHERE done_at IS NOT NULL
+               AND (
+                   (status = 'Done' AND done_at < ?1)
+                   OR (status IN ('Failed', 'Killed') AND done_at < ?2)
+               )",
         )
+        .bind(unix_i64(done_job_cutoff, "done_job_cutoff")?)
         .bind(unix_i64(job_cutoff, "job_cutoff")?)
         .execute(&self.pool)
         .await?
@@ -318,6 +326,9 @@ impl ApalisHousekeepingJobHandler<Postgres> {
     async fn prune(&self, now_unix_secs: u64) -> Result<ApalisHousekeepingJobStats> {
         let worker_cutoff = now_unix_secs.saturating_sub(APALIS_WORKER_RETENTION_SECS);
         let worker_cutoff_timestamp = utc_timestamp(worker_cutoff, "worker_cutoff")?;
+        let done_job_cutoff =
+            retention_cutoff(now_unix_secs, self.config.dlq_retention_days.min(1));
+        let done_job_cutoff_timestamp = utc_timestamp(done_job_cutoff, "done_job_cutoff")?;
         let job_cutoff = retention_cutoff(now_unix_secs, self.config.dlq_retention_days);
         let job_cutoff_timestamp = utc_timestamp(job_cutoff, "job_cutoff")?;
         let reaped = self.reap_stale_locks(now_unix_secs).await?;
@@ -326,8 +337,14 @@ impl ApalisHousekeepingJobHandler<Postgres> {
             .await?;
         let workers_removed = self.prune_stale_workers(worker_cutoff_timestamp).await?;
         let jobs_removed = sqlx::query(
-            "DELETE FROM apalis.jobs WHERE status IN ('Done','Failed') AND done_at IS NOT NULL AND done_at < $1",
+            "DELETE FROM apalis.jobs
+             WHERE done_at IS NOT NULL
+               AND (
+                   (status = 'Done' AND done_at < $1)
+                   OR (status IN ('Failed', 'Killed') AND done_at < $2)
+               )",
         )
+        .bind(done_job_cutoff_timestamp)
         .bind(job_cutoff_timestamp)
         .execute(&self.pool)
         .await?

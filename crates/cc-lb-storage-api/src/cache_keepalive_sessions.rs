@@ -287,6 +287,16 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         &self,
         cutoff_unix_secs: u64,
     ) -> StorageResult<u64>;
+
+    /// Removes at most `batch_size` expired decision and turn history rows.
+    async fn prune_cache_keepalive_history_before(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = (cutoff_unix_secs, batch_size);
+        Ok(0)
+    }
 }
 
 pub fn cache_keepalive_job_key(session_key_hash: &str, generation: u64) -> String {

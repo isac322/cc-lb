@@ -19,6 +19,42 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for SqliteStorage {
+    async fn prune_subscription_quota_checkpoints_before(
+        &self,
+        cutoff_unix_millis: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            "DELETE FROM upstream_subscription_quota_checkpoints_v1 WHERE rowid IN ( \
+             SELECT candidate.rowid FROM upstream_subscription_quota_checkpoints_v1 candidate \
+             WHERE candidate.changed_at_unix_millis < ?1 \
+               AND candidate.rowid <> ( \
+                 SELECT anchor.rowid FROM upstream_subscription_quota_checkpoints_v1 anchor \
+                 WHERE anchor.upstream_id = candidate.upstream_id \
+                   AND anchor.window = candidate.window AND anchor.source = candidate.source \
+                   AND anchor.changed_at_unix_millis <= ?1 \
+                 ORDER BY anchor.changed_at_unix_millis DESC, anchor.sample_id DESC LIMIT 1 \
+               ) \
+             ORDER BY candidate.changed_at_unix_millis, candidate.sample_id, candidate.rowid \
+             LIMIT ?2)",
+        )
+        .bind(u64_to_i64(
+            cutoff_unix_millis,
+            "quota checkpoint prune cutoff",
+        )?)
+        .bind(super::request_events::usize_to_i64(
+            batch_size,
+            "quota checkpoint prune batch size",
+        )?)
+        .execute(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
     async fn record_subscription_quota_samples(
         &self,
         records: &[SubscriptionQuotaSample],
@@ -126,12 +162,29 @@ pub(super) async fn insert_checkpoint_if_changed(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
-    let latest_fingerprint = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT semantic_fingerprint FROM upstream_subscription_quota_checkpoints_v1 \
-         WHERE upstream_id = ? AND window = ? AND source = ? \
-         ORDER BY changed_at_unix_millis DESC, sample_id DESC \
-         LIMIT 1",
+    let unchanged = sqlx::query_scalar::<_, bool>(
+        "SELECT semantic_fingerprint = ?1 OR ( \
+             status IS ?2 AND resets_at_unix_secs IS ?3 AND overage_in_use IS ?4 \
+             AND fallback_available IS ?5 AND disabled_reason IS ?6 \
+             AND extra_usage_enabled IS ?7 AND utilization IS NOT NULL \
+             AND ?8 IS NOT NULL AND ABS(utilization - ?8) < 0.001 \
+         ) FROM upstream_subscription_quota_checkpoints_v1 \
+         WHERE upstream_id = ?9 AND window = ?10 AND source = ?11 \
+         ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1",
     )
+    .bind(&record.semantic_fingerprint.as_bytes()[..])
+    .bind(record.status.map(SubscriptionQuotaStatus::as_str))
+    .bind(
+        record
+            .resets_at_unix_secs
+            .map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs"))
+            .transpose()?,
+    )
+    .bind(record.overage_in_use)
+    .bind(record.fallback_available)
+    .bind(record.disabled_reason.as_deref())
+    .bind(record.extra_usage_enabled)
+    .bind(record.utilization)
     .bind(record.upstream_id.to_string())
     .bind(record.window.as_str())
     .bind(record.source.as_str())
@@ -139,7 +192,7 @@ pub(super) async fn insert_checkpoint_if_changed(
     .await
     .map_err(map_sqlx_error)?;
 
-    if latest_fingerprint.as_deref() == Some(&record.semantic_fingerprint.as_bytes()[..]) {
+    if unchanged == Some(true) {
         return Ok(false);
     }
 

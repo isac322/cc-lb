@@ -90,9 +90,9 @@ which must be considered before rolling back a worker.
 
 ### Upstream-affinity retention
 
-`[upstream_affinity] ttl_days = 90` sets the retention policy, independently of request-log retention. Values must be positive; `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS` is the environment override. Restart the server after changing the TTL so the proxy and cleanup worker use the same startup policy.
+`[upstream_affinity] ttl_days = 7` sets the retention policy (default `7` days), independently of request-log retention. Values must be positive; `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS` is the environment override. Restart the server after changing the TTL so the proxy and cleanup worker use the same startup policy.
 
-Rows expire when their last successful binding observation is at least the configured number of days old, or their explicit expiry has passed. Existing NULL-expiry rows also age out. Ordinary replay reads do not refresh the timestamp. The proxy rejects expired unknown affinity with a local 503 even before the purge runs.
+Rows expire when their last successful binding observation is at least the configured number of days old, or their explicit expiry has passed. Existing NULL-expiry rows also age out. Ordinary replay reads do not refresh the timestamp, so lowering the TTL causes existing bindings older than the new TTL to fail closed with a local 503 immediately after upgrade even before the purge runs.
 
 The recurring job removes expired rows through indexed, bounded batches. PostgreSQL skips locked candidates and rechecks expiry before deletion, so an in-flight renewal is not removed as stale. A shorter TTL applies to existing rows after restart; increasing it cannot restore rows already deleted. Disabling `scheduler.recurring_jobs.upstream_affinity_purge` stops physical cleanup, not the proxy's logical expiry check. SQLite can reuse freed pages without immediately shrinking its database file.
 

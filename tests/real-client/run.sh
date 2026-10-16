@@ -640,12 +640,13 @@ PY
 fi
 
 if [ "$client" = "senpi" ]; then
-  python3 - "$TMP_DIR/cc-lb.sqlite" "$upstream" <<'PY'
+  python3 - "$TMP_DIR/cc-lb.sqlite" "$upstream" "$TMP_DIR/proxy.log" <<'PY'
+import json
 import sqlite3
 import sys
 import time
 
-database, upstream = sys.argv[1:]
+database, upstream, proxy_log = sys.argv[1:]
 expected_kinds = {"main", "subagent"}
 if upstream == "custom":
     expected_kinds.add("look_at")
@@ -654,19 +655,45 @@ rows = []
 stable_rows = None
 stable_since = None
 quiescent = False
+
+def diagnostics_prefix_hashes(log_path):
+    hashes = {}
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith('{"schema":"cc_lb.request_diagnostics.v1",'):
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    bps = rec.get("cache_breakpoints") or []
+                    if bps and isinstance(bps[-1], dict):
+                        hashes[rec.get("event_id")] = bps[-1].get("prefix_hash")
+    except OSError:
+        pass
+    return hashes
+
 while time.monotonic() < deadline:
+    diag_hashes = diagnostics_prefix_hashes(proxy_log)
     with sqlite3.connect(database) as connection:
-        rows = connection.execute(
+        raw_rows = connection.execute(
             """
             SELECT DISTINCT request_kind, observed_session_id, session_id_source,
-                            client_app, json_extract(payload, '$.cache_prefix_hash')
+                            client_app, event_id
             FROM request_events_v1
             WHERE request_kind IS NOT NULL
             ORDER BY request_kind, observed_session_id
             """
         ).fetchall()
+    rows = [
+        (r[0], r[1], r[2], r[3], diag_hashes.get(r[4]))
+        for r in raw_rows
+    ]
     kinds = {row[0] for row in rows}
-    if expected_kinds.issubset(kinds):
+    if expected_kinds.issubset(kinds) and (
+        upstream != "anthropic-direct"
+        or all(row[4] is not None for row in rows if row[0] in {"main", "subagent"})
+    ):
         now = time.monotonic()
         if rows != stable_rows:
             stable_rows = rows

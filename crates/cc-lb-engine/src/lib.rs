@@ -163,7 +163,7 @@ pub use pg_notify_fanout::{
 };
 #[cfg(not(loom))]
 pub use request_diagnostics_sink::{
-    REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT,
+    REQUEST_DIAGNOSTICS_QUEUE_CAPACITY, REQUEST_DIAGNOSTICS_SEND_TIMEOUT,
     RequestDiagnosticsDelivery, RequestDiagnosticsOptions, RequestDiagnosticsSink,
     StdoutRequestDiagnosticsSink,
 };

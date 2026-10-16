@@ -70,10 +70,102 @@ impl UsagePruner {
             .prune_upstream_api_usage(cutoff_secs.min(utc_month_start_unix_secs(now_ms / 1_000)))
             .await;
 
+        let minute_cutoff_secs =
+            now_ms.saturating_sub(self.retention_days.min(14).saturating_mul(DAY_MS)) / 1_000;
+        let quota_cutoff_ms =
+            now_ms.saturating_sub(self.retention_days.min(30).saturating_mul(DAY_MS));
+        self.prune_usage_rollups(minute_cutoff_secs, cutoff_secs)
+            .await;
+        self.prune_subscription_quota_checkpoints(quota_cutoff_ms)
+            .await;
+        self.prune_pool_quota_history((quota_cutoff_ms / 1_000) as i64)
+            .await;
+        self.prune_cache_keepalive_history(minute_cutoff_secs).await;
+
         PruneResult {
             request_events_removed,
             audit_log_removed,
             upstream_api_usage_removed,
+        }
+    }
+
+    async fn prune_usage_rollups(&self, minute_cutoff_secs: u64, hour_cutoff_secs: u64) {
+        loop {
+            let removed = match self
+                .storage
+                .prune_usage_rollups_before(minute_cutoff_secs, hour_cutoff_secs, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    tracing::warn!(%error, "usage pruner failed to prune usage rollups");
+                    break;
+                }
+            };
+            if removed < PRUNE_BATCH_SIZE as u64 {
+                break;
+            }
+            tokio::time::sleep(PRUNE_BATCH_SLEEP).await;
+        }
+    }
+
+    async fn prune_subscription_quota_checkpoints(&self, cutoff_ms: u64) {
+        loop {
+            let removed = match self
+                .storage
+                .prune_subscription_quota_checkpoints_before(cutoff_ms, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    tracing::warn!(%error, "usage pruner failed to prune subscription quota checkpoints");
+                    break;
+                }
+            };
+            if removed < PRUNE_BATCH_SIZE as u64 {
+                break;
+            }
+            tokio::time::sleep(PRUNE_BATCH_SLEEP).await;
+        }
+    }
+
+    async fn prune_pool_quota_history(&self, cutoff_secs: i64) {
+        loop {
+            let removed = match self
+                .storage
+                .prune_pool_quota_history_before(cutoff_secs, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    tracing::warn!(%error, "usage pruner failed to prune pool quota history");
+                    break;
+                }
+            };
+            if removed < PRUNE_BATCH_SIZE as u64 {
+                break;
+            }
+            tokio::time::sleep(PRUNE_BATCH_SLEEP).await;
+        }
+    }
+
+    async fn prune_cache_keepalive_history(&self, cutoff_secs: u64) {
+        loop {
+            let removed = match self
+                .storage
+                .prune_cache_keepalive_history_before(cutoff_secs, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
+                Err(error) => {
+                    tracing::warn!(%error, "usage pruner failed to prune cache keepalive history");
+                    break;
+                }
+            };
+            if removed < PRUNE_BATCH_SIZE as u64 {
+                break;
+            }
+            tokio::time::sleep(PRUNE_BATCH_SLEEP).await;
         }
     }
 

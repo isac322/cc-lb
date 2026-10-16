@@ -21,6 +21,7 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
         include_str!("../migrations/sqlite/0008_slim_oauth_usage_poll_cursors.sql"),
         include_str!("../migrations/sqlite/0009_purge_retired_job_payloads.sql"),
         include_str!("../migrations/sqlite/0010_drop_anthropic_compat_etag.sql"),
+        include_str!("../migrations/sqlite/0011_drop_apalis_duplicate_id_index.sql"),
     ];
 }
 
@@ -36,6 +37,7 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Postgres {
         include_str!("../migrations/postgres/0008_slim_oauth_usage_poll_cursors.sql"),
         include_str!("../migrations/postgres/0009_purge_retired_job_payloads.sql"),
         include_str!("../migrations/postgres/0010_drop_anthropic_compat_etag.sql"),
+        include_str!("../migrations/postgres/0011_drop_apalis_duplicate_id_index.sql"),
     ];
 }
 

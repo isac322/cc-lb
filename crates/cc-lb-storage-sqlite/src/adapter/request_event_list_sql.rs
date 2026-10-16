@@ -282,15 +282,20 @@ pub(super) async fn get_request_event(
     storage: &SqliteStorage,
     event_id: &str,
 ) -> StorageResult<Option<RequestEvent>> {
-    let payload =
-        sqlx::query_scalar::<_, String>("SELECT payload FROM request_events_v1 WHERE event_id = ?")
-            .bind(event_id)
-            .fetch_optional(storage.pool())
-            .await
-            .map_err(map_sqlx_error)?;
+    static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "SELECT {} FROM request_events_v1 WHERE event_id = ?",
+            super::request_event_row::REQUEST_EVENT_COLUMNS,
+        )
+    });
+    let row = sqlx::query(SQL.as_str())
+        .bind(event_id)
+        .fetch_optional(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
 
-    payload
-        .map(|payload| serde_json::from_str(&payload).map_err(Into::into))
+    row.as_ref()
+        .map(super::request_event_row::row_to_request_event)
         .transpose()
 }
 

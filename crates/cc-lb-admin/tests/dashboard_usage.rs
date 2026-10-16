@@ -6,9 +6,9 @@ use axum::http::{StatusCode, header};
 use cc_lb_clock::{ClockHandle, TestClock};
 use cc_lb_config::Config;
 use cc_lb_storage_api::{
-    RequestEvent, RequestEventPayloadScan, RequestEventStore, UsageRollupStore,
-    normalize_usage_rollup_dimension,
+    RequestEvent, RequestEventStore, UsageRollupStore, normalize_usage_rollup_dimension,
 };
+
 use config_admin_common::{
     app, authed_bytes, authed_bytes_with_headers, authed_json, temp_storage,
     temp_storage_with_clock, test_state, test_state_with_clock,
@@ -866,19 +866,10 @@ async fn usage_503_when_storage_missing() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
-/// QA 15: diagnostics leave the stored payload either at write time
-/// (strip-on-write) or later through the operator rewrite. Neither path may
-/// change usage rollups or principal cost components, and a rewrite must not
-/// make the rollup cursor count rows twice.
+/// Diagnostics are log-only. Whether supplied to storage or taken out first,
+/// they must not affect relational rollups or principal cost components.
 #[tokio::test]
-async fn usage_is_unchanged_by_diagnostic_strip_on_write_and_rewrite() {
-    const DIAGNOSTIC_KEYS: [&str; 5] = [
-        "cache_breakpoints",
-        "cache_control_message_indices",
-        "routing_trace",
-        "iterations",
-        "internal_errors",
-    ];
+async fn usage_is_unchanged_when_diagnostics_are_taken_before_storage() {
     const USAGE_URI: &str = "/admin/v1/dashboard/usage?range=1h&step=minute&group_by=principal";
 
     let clock = test_clock();
@@ -898,12 +889,13 @@ async fn usage_is_unchanged_by_diagnostic_strip_on_write_and_rewrite() {
         event.cost_cache_creation_5m_micros = Some(0);
         event.cost_cache_creation_1h_micros = Some(0);
         event.cost_cache_read_micros = Some(cost * 7);
-        event.cache_control_message_indices = vec![0, 2];
+        event.routing_trace = Some(cc_lb_domain::RoutingTrace::default());
+        event.cache_control_message_indices = vec![1, 3];
         event.iterations = Some(serde_json::json!([{ "input_tokens": age }]));
+        event.internal_errors = vec![cc_lb_domain::InternalError::default()];
         event
     });
 
-    // Diagnostics kept in the payload (strip off).
     let (_full_dir, full_storage) = temp_storage_with_clock(clock.clone()).await;
     for event in &events {
         full_storage.append_request_event(event).await.unwrap();
@@ -922,16 +914,13 @@ async fn usage_is_unchanged_by_diagnostic_strip_on_write_and_rewrite() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Strip-on-write: the same rows persisted without the diagnostic fields.
     let (_stripped_dir, stripped_storage) = temp_storage_with_clock(clock.clone()).await;
     for event in &events {
-        let mut stripped = event.clone();
-        stripped.cache_control_message_indices.clear();
-        stripped.iterations = None;
-        stripped_storage
-            .append_request_event(&stripped)
-            .await
-            .unwrap();
+        let mut event = event.clone();
+        let diagnostics = cc_lb_request_log::RequestDiagnostics::take_from(&mut event);
+        assert!(diagnostics.routing_trace.is_some());
+        assert!(event.routing_trace.is_none());
+        stripped_storage.append_request_event(&event).await.unwrap();
     }
     stripped_storage.rollup_usage_once().await.unwrap();
     let (status, _, stripped_usage, _) = authed_json(
@@ -946,56 +935,7 @@ async fn usage_is_unchanged_by_diagnostic_strip_on_write_and_rewrite() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(stripped_usage, baseline, "strip-on-write changed usage");
-
-    // Operator rewrite of the already rolled-up rows.
-    let until_seq = full_storage.current_request_event_cursor().await.unwrap();
-    let scanned = full_storage
-        .scan_request_event_payloads(&RequestEventPayloadScan {
-            after_seq: 0,
-            until_seq,
-            limit: 10,
-        })
-        .await
-        .unwrap();
-    assert_eq!(scanned.len(), events.len());
-    let rewrites = scanned
-        .into_iter()
-        .map(|(seq, payload)| {
-            let mut map =
-                serde_json::from_slice::<serde_json::Map<String, Value>>(&payload).unwrap();
-            for key in DIAGNOSTIC_KEYS {
-                map.remove(key);
-            }
-            (seq, serde_json::to_vec(&map).unwrap())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        full_storage
-            .rewrite_request_event_payloads(&rewrites)
-            .await
-            .unwrap(),
-        2
-    );
-    let rerun = full_storage.rollup_usage_once().await.unwrap();
-    assert_eq!(
-        rerun.processed_events, 0,
-        "rewritten rows must not be rolled up twice"
-    );
-    // A fresh app so no per-state dashboard cache can mask a changed result.
-    let (status, _, rewritten_usage, _) = authed_json(
-        app(test_state_with_clock(
-            Config::default(),
-            Some(full_storage),
-            clock,
-        )),
-        "GET",
-        USAGE_URI,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(rewritten_usage, baseline, "payload rewrite changed usage");
+    assert_eq!(stripped_usage, baseline, "taking diagnostics changed usage");
 }
 
 fn test_clock() -> ClockHandle {

@@ -320,7 +320,7 @@ fn small_partial(name: &str) -> RequestEventPartial {
 
 fn large_partial(name: &str) -> RequestEventPartial {
     RequestEventPartial {
-        cache_prefix_hash: Some(format!("sha256:{}", "x".repeat(8_192))),
+        thread_id: Some(format!("thread:{}", "x".repeat(8_192))),
         upstream_name: Some(format!("upstream-{name}")),
         input_tokens: Some(100),
         request_body_first_chunk_ms: None,

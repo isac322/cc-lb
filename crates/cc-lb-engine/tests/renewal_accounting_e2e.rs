@@ -215,7 +215,6 @@ async fn renewal_row_yields_one_diagnostics_line_with_the_finalizer_seq() {
         Arc::new(NoopMetricsHook),
         RequestDiagnosticsOptions {
             sink: Some(sink.clone() as Arc<dyn RequestDiagnosticsSink>),
-            strip_payload: false,
         },
     );
 

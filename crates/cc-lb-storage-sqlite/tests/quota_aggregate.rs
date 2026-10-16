@@ -218,7 +218,7 @@ async fn quota_provider_lots_preserve_reset_cycles_without_full_records() {
 }
 
 #[tokio::test]
-async fn quota_usage_token_intervals_include_both_boundaries_and_use_covering_indexes() {
+async fn quota_usage_token_intervals_include_both_boundaries_and_use_range_indexes() {
     let (_temp_dir, storage) = quota_storage("token-intervals.sqlite").await;
     let upstream_id = Uuid::from_u128(0x300);
     for (resolution, bucket, tokens) in [
@@ -326,9 +326,12 @@ async fn quota_usage_token_intervals_include_both_boundaries_and_use_covering_in
                 .expect("token plan detail")
         })
         .collect::<Vec<_>>();
-    assert!(token_details.iter().any(|detail| {
-        detail.contains("USING COVERING INDEX usage_rollups_v2_token_interval_idx")
-    }));
+    assert!(
+        token_details.iter().any(|detail| {
+            detail.contains("USING INDEX usage_rollups_v2_upstream_resolution_bucket_idx")
+        }),
+        "token intervals retain the upstream/resolution/bucket range index: {token_details:?}"
+    );
 }
 
 /// 0098 drops `range_idx`/`anchor_idx`: the primary key
@@ -377,5 +380,147 @@ async fn quota_latest_checkpoint_lookup_uses_primary_key_after_duplicate_drop() 
     assert!(
         !plan.iter().any(|detail| detail.contains("TEMP B-TREE")),
         "latest checkpoint lookup must not sort: {plan:?}"
+    );
+}
+
+#[tokio::test]
+async fn quota_checkpoint_deadband_preserves_exact_latest_and_semantic_changes() {
+    let (_dir, storage) = quota_storage("quota-deadband.sqlite").await;
+    let upstream_id = Uuid::from_u128(0x301);
+    let sample = |at, id, utilization, status| SubscriptionQuotaSample {
+        upstream_id,
+        window: SubscriptionQuotaWindow::FiveHour,
+        source: SubscriptionQuotaSource::Header,
+        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis: at,
+        sample_id: Uuid::from_u128(id),
+        utilization,
+        status,
+        resets_at_unix_secs: Some(18_000),
+        surpassed_threshold: None,
+        representative_claim: None,
+        fallback_percentage: None,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
+        disabled_reason: None,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: at,
+    };
+    let records = [
+        sample(100, 1, Some(0.25), Some(SubscriptionQuotaStatus::Allowed)),
+        sample(200, 2, Some(0.2505), Some(SubscriptionQuotaStatus::Allowed)),
+        sample(300, 3, Some(0.2515), Some(SubscriptionQuotaStatus::Allowed)),
+        sample(
+            400,
+            4,
+            Some(0.2516),
+            Some(SubscriptionQuotaStatus::Rejected),
+        ),
+        sample(500, 5, None, Some(SubscriptionQuotaStatus::Rejected)),
+    ];
+    for record in &records[..2] {
+        storage
+            .record_subscription_quota_samples(std::slice::from_ref(record))
+            .await
+            .expect("record sample");
+    }
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await
+        .expect("exact latest");
+    assert_eq!(latest, vec![records[1].clone()]);
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1")
+            .fetch_one(storage.pool())
+            .await
+            .expect("checkpoint count");
+    assert_eq!(
+        count, 1,
+        "sub-deadband sample skips only historical checkpoint"
+    );
+    storage
+        .record_subscription_quota_samples(&records[2..])
+        .await
+        .expect("record changes");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1")
+            .fetch_one(storage.pool())
+            .await
+            .expect("checkpoint count");
+    assert_eq!(
+        count, 4,
+        "threshold, status and Some-to-None changes survive"
+    );
+}
+
+#[tokio::test]
+async fn quota_checkpoint_pruning_is_bounded_and_retains_partition_anchors() {
+    let (_dir, storage) = quota_storage("quota-prune.sqlite").await;
+    let upstream_id = Uuid::from_u128(0x302);
+    let mut records = vec![
+        quota_checkpoint(upstream_id, 100, 1, 0.1, Some(18_000)),
+        quota_checkpoint(upstream_id, 200, 2, 0.2, Some(18_000)),
+        quota_checkpoint(upstream_id, 200, 3, 0.3, Some(18_000)),
+        quota_checkpoint(upstream_id, 300, 4, 0.4, Some(18_000)),
+    ];
+    let mut other = quota_checkpoint(upstream_id, 50, 5, 0.5, Some(18_000));
+    other.source = SubscriptionQuotaSource::Api;
+    records.push(other);
+    storage
+        .put_subscription_quota_checkpoints(&records)
+        .await
+        .expect("seed checkpoints");
+    assert_eq!(
+        storage
+            .prune_subscription_quota_checkpoints_before(250, 0)
+            .await
+            .expect("zero batch"),
+        0
+    );
+    assert_eq!(
+        storage
+            .prune_subscription_quota_checkpoints_before(250, 1)
+            .await
+            .expect("first batch"),
+        1
+    );
+    assert_eq!(
+        storage
+            .prune_subscription_quota_checkpoints_before(250, 10)
+            .await
+            .expect("second batch"),
+        1
+    );
+    let ids = sqlx::query_scalar::<_, String>(
+        "SELECT sample_id FROM upstream_subscription_quota_checkpoints_v1 ORDER BY sample_id",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .expect("retained anchors");
+    assert_eq!(
+        ids,
+        vec![
+            Uuid::from_u128(3).to_string(),
+            Uuid::from_u128(4).to_string(),
+            Uuid::from_u128(5).to_string()
+        ]
+    );
+    assert_eq!(
+        storage
+            .prune_subscription_quota_checkpoints_before(300, 10)
+            .await
+            .expect("inclusive anchor"),
+        1
+    );
+    assert_eq!(
+        storage
+            .prune_subscription_quota_checkpoints_before(300, 10)
+            .await
+            .expect("stable anchors"),
+        0
     );
 }

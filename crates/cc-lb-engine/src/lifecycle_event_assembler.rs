@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::metrics_labels::PartialTrigger;
 use crate::request_diagnostics_sink::{
-    REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT, RequestDiagnosticsDelivery, RequestDiagnosticsOptions,
+    REQUEST_DIAGNOSTICS_SEND_TIMEOUT, RequestDiagnosticsDelivery, RequestDiagnosticsOptions,
     RequestDiagnosticsSink,
 };
 pub const DEFAULT_ASSEMBLER_MAP_CAP: usize = 4096;
@@ -60,9 +60,6 @@ struct ParseIdentity {
     parent_session_id: Option<String>,
     client_app: Option<String>,
     session_id_source: Option<String>,
-    message_id: Option<String>,
-    message_index: Option<u64>,
-    message_count: Option<u64>,
     cache_control_message_indices: Vec<u64>,
 }
 
@@ -101,8 +98,7 @@ pub fn spawn_request_event_assembler(
 }
 
 /// Like [`spawn_request_event_assembler`], additionally emitting one diagnostics record per
-/// persisted row and, when `diagnostics.strip_payload` is set, persisting rows without the
-/// five diagnostic fields.
+/// persisted row. Diagnostic fields are log-only and are removed before persistence and publish.
 pub fn spawn_request_event_assembler_with_diagnostics(
     rx: mpsc::Receiver<LifecycleEvent>,
     storage: Arc<dyn RequestEventStore>,
@@ -182,11 +178,9 @@ struct Partial {
     upstream_stream_diagnostics: Option<UpstreamStreamDiagnostics>,
     cost: Option<LifecycleCostBreakdown>,
     cache_state: Option<RequestCacheState>,
-    cache_control_block_count: Option<u64>,
     thinking_budget_tokens: Option<u64>,
     reasoning_effort: Option<String>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
-    cache_prefix_hash: Option<String>,
     termination: Option<TerminationInfo>,
 
     /// `RouteCompleted.routing_trace` top-level field. Populated on both Ok
@@ -216,7 +210,6 @@ struct Partial {
 
     upstream_body_ms: Option<u64>,
     finalize_ms: Option<u64>,
-    first_body_chunk_ms: Option<u64>,
     proxy_setup_ms: Option<u64>,
     internal_errors: Vec<InternalError>,
 
@@ -282,7 +275,7 @@ impl Partial {
                 )
             })
             .unwrap_or((None, None, None));
-        let (upstream_id, upstream_name, route_ms, route_matched_v3_cache_key) = self
+        let (upstream_id, upstream_name, route_ms) = self
             .route
             .as_ref()
             .map(|route| {
@@ -290,10 +283,9 @@ impl Partial {
                     Some(route.upstream_id),
                     Some(route.upstream_name.clone()),
                     route.route_ms,
-                    route.matched_v3_cache_key.clone(),
                 )
             })
-            .unwrap_or((None, None, None, None));
+            .unwrap_or((None, None, None));
         let cost = self.cost_options();
         let ts_ms = self.ts_ms;
 
@@ -370,37 +362,15 @@ impl Partial {
                 .then_some(self.usage.cache_read_input_tokens),
             thinking_tokens: (self.usage_seen && self.usage.thinking_tokens > 0)
                 .then_some(self.usage.thinking_tokens),
-            web_search_requests: (self.usage_seen && self.usage.web_search_requests > 0)
-                .then_some(self.usage.web_search_requests),
-            web_fetch_requests: (self.usage_seen && self.usage.web_fetch_requests > 0)
-                .then_some(self.usage.web_fetch_requests),
             service_tier: self.usage.service_tier.clone(),
-            inference_geo: self.usage.inference_geo.clone(),
             cost_usd_micros: cost.total,
             cost_input_micros: cost.input,
             cost_output_micros: cost.output,
             cost_cache_creation_5m_micros: cost.cache_creation_5m,
             cost_cache_creation_1h_micros: cost.cache_creation_1h,
             cost_cache_read_micros: cost.cache_read,
-            cache_control_block_count: self.cache_control_block_count,
             thinking_budget_tokens: self.thinking_budget_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
-            cache_prefix_hash: self.cache_prefix_hash.clone(),
-            matched_v3_cache_key: route_matched_v3_cache_key.or_else(|| {
-                self.parse
-                    .as_ref()
-                    .and_then(|parse| parse.matched_v3_cache_key.clone())
-            }),
-            quota_urgency_5h: self.route.as_ref().and_then(|route| route.quota_urgency_5h),
-            quota_urgency_7d: self.route.as_ref().and_then(|route| route.quota_urgency_7d),
-            quota_urgency_combined: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_urgency_combined),
-            quota_warning_multiplier: self
-                .route
-                .as_ref()
-                .and_then(|route| route.quota_warning_multiplier),
             request_body_read_ms: self.request_body_read_ms,
             request_body_bytes: self.request_body_bytes,
             request_body_first_chunk_ms: self.io_timings.request_body_first_chunk_ms,
@@ -434,7 +404,6 @@ impl Partial {
             upstream_ttfb_ms: self.upstream_ttfb_ms,
             upstream_body_ms: self.upstream_body_ms,
             finalize_ms: self.finalize_ms,
-            first_body_chunk_ms: self.first_body_chunk_ms,
         }
     }
 
@@ -741,8 +710,7 @@ impl StorageCircuitBreaker {
     }
 }
 
-/// State shared by every durable row insert: the storage breaker plus the diagnostics sink and
-/// strip-on-write flag.
+/// State shared by every durable row insert: the storage breaker and diagnostics sink.
 #[derive(Default)]
 struct RowWriter {
     breaker: StorageCircuitBreaker,
@@ -763,12 +731,25 @@ async fn write_finalized_rows(
     is_orphan: bool,
 ) {
     let mut row = finalize_base(partial, reason, client_status, duration_ms, is_orphan);
-    // Strip before the insert so the stored row, the bus final, and every reader agree; the
-    // taken fields then exist only in the diagnostics line.
-    let stripped = writer
-        .diagnostics
-        .strip_payload
-        .then(|| RequestDiagnostics::take_from(&mut row));
+    // Diagnostic fields exist only in the log; every DB and bus reader sees the same row.
+    let mut diagnostics = RequestDiagnostics::take_from(&mut row);
+    if let Some(route) = partial.route.as_ref() {
+        diagnostics.matched_v3_cache_key = route.matched_v3_cache_key.clone().or_else(|| {
+            partial
+                .parse
+                .as_ref()
+                .and_then(|parse| parse.matched_v3_cache_key.clone())
+        });
+        diagnostics.breakpoint_content_block_index =
+            route.breakpoint_content_block_index.map(u64::from);
+        diagnostics.matched_content_block_index = route.matched_content_block_index.map(u64::from);
+        diagnostics.lookback_distance = route.lookback_distance.map(u64::from);
+        diagnostics.predicted_cache_read_tokens = route.predicted_cache_read_tokens.map(u64::from);
+        diagnostics.predicted_cache_creation_tokens_5m =
+            route.predicted_cache_creation_tokens_5m.map(u64::from);
+        diagnostics.predicted_cache_creation_tokens_1h =
+            route.predicted_cache_creation_tokens_1h.map(u64::from);
+    }
     let mut attempts: u32 = 0;
     let cursor = loop {
         attempts += 1;
@@ -803,16 +784,6 @@ async fn write_finalized_rows(
     // Offer only after the insert committed (a finally failed insert returned above) so the
     // line carries the row's storage cursor, and before the bus final.
     if let Some(sink) = writer.diagnostics.sink.as_deref() {
-        let (diagnostics, delivery) = match stripped {
-            Some(diagnostics) => (
-                diagnostics,
-                RequestDiagnosticsDelivery::BoundedWait(REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT),
-            ),
-            None => (
-                RequestDiagnostics::cloned_from(&row),
-                RequestDiagnosticsDelivery::BestEffort,
-            ),
-        };
         sink.offer(
             RequestDiagnosticsRecord::new(
                 RequestDiagnosticsSource::Live,
@@ -821,7 +792,7 @@ async fn write_finalized_rows(
                 &row,
                 diagnostics,
             ),
-            delivery,
+            RequestDiagnosticsDelivery::BoundedWait(REQUEST_DIAGNOSTICS_SEND_TIMEOUT),
         )
         .await;
     }
@@ -985,7 +956,6 @@ async fn handle_event(
         dns_ms,
         connect_ms,
         connection_reused,
-        first_body_chunk_ms,
         io_timings,
         internal_errors,
         event_kind,
@@ -1012,7 +982,6 @@ async fn handle_event(
             partial.dns_ms = *dns_ms;
             partial.connect_ms = *connect_ms;
             partial.connection_reused = *connection_reused;
-            partial.first_body_chunk_ms = *first_body_chunk_ms;
             partial.internal_errors = internal_errors.clone();
             partial.io_timings = *io_timings;
             // Terminal-carried classification is the only metadata left when
@@ -1047,9 +1016,6 @@ async fn handle_event(
         partial.connect_ms = partial.connect_ms.or(*connect_ms);
         partial.connection_reused = partial.connection_reused.or(*connection_reused);
         merge_io_timings(&mut partial.io_timings, *io_timings);
-        if partial.first_body_chunk_ms.is_none() {
-            partial.first_body_chunk_ms = *first_body_chunk_ms;
-        }
         partial.internal_errors = internal_errors.clone();
         // Terminal kind is a fallback only: a classification already merged
         // from `RequestStarted` (including renewal precedence) stays
@@ -1185,11 +1151,9 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
             if partial.request_body_bytes.is_none() {
                 partial.request_body_bytes = Some(info.body_bytes);
             }
-            partial.cache_control_block_count = info.cache_control_block_count;
             partial.thinking_budget_tokens = info.thinking_budget_tokens;
             partial.reasoning_effort = info.reasoning_effort.clone();
             partial.cache_breakpoints = info.cache_breakpoints.clone();
-            partial.cache_prefix_hash = info.cache_prefix_hash.clone();
             partial.parse = Some(info);
         }
         // Intentional no-op: parse failures are committed as terminal causes.
@@ -1277,9 +1241,6 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
                 partial.stream_success = Some(success.sse_event_count);
                 partial.stream_body_bytes = success.body_bytes;
                 partial.stream_body_chunk_count = success.body_chunk_count;
-                if success.first_body_chunk_ms.is_some() {
-                    partial.first_body_chunk_ms = success.first_body_chunk_ms;
-                }
                 partial.stream_message_start_ms = success.stream_message_start_ms;
                 partial.stream_content_block_start_ms = success.stream_content_block_start_ms;
                 partial.stream_first_content_delta_ms = success.stream_first_content_delta_ms;
@@ -1365,17 +1326,7 @@ fn finalize_base(
         route_model,
         route_ms,
         route_routing_trace,
-        matched_v3_cache_key,
-        breakpoint_content_block_index,
-        matched_content_block_index,
-        lookback_distance,
-        predicted_cache_read_tokens,
-        predicted_cache_creation_tokens_5m,
-        predicted_cache_creation_tokens_1h,
         token_estimate_source,
-        cache_value_micros,
-        formula_winner_upstream_id,
-        kept_upstream_id,
     ) = partial
         .route
         .as_ref()
@@ -1386,23 +1337,10 @@ fn finalize_base(
                 r.model.clone(),
                 r.route_ms,
                 r.routing_trace.clone(),
-                r.matched_v3_cache_key.clone(),
-                r.breakpoint_content_block_index.map(u64::from),
-                r.matched_content_block_index.map(u64::from),
-                r.lookback_distance.map(u64::from),
-                r.predicted_cache_read_tokens.map(u64::from),
-                r.predicted_cache_creation_tokens_5m.map(u64::from),
-                r.predicted_cache_creation_tokens_1h.map(u64::from),
                 r.token_estimate_source.clone(),
-                r.cache_value_micros,
-                r.formula_winner_upstream_id,
-                r.kept_upstream_id,
             )
         })
-        .unwrap_or((
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None,
-        ));
+        .unwrap_or_default();
     let model = route_model.or_else(|| partial.parse.as_ref().and_then(|p| p.model.clone()));
     let auth_ms = partial.auth.as_ref().and_then(|a| a.auth_ms);
     let routing_trace = partial.routing_trace.clone().or(route_routing_trace);
@@ -1418,9 +1356,6 @@ fn finalize_base(
             parent_session_id: p.parent_session_id.clone(),
             client_app: p.client_app.clone(),
             session_id_source: p.session_id_source.clone(),
-            message_id: p.message_id.clone(),
-            message_index: p.message_index,
-            message_count: p.message_count,
             cache_control_message_indices: p.cache_control_message_indices.clone(),
         })
         .unwrap_or_default();
@@ -1470,44 +1405,10 @@ fn finalize_base(
         cache_read_input_tokens: partial
             .usage_seen
             .then_some(partial.usage.cache_read_input_tokens),
-        cache_state: partial.cache_state,
-        cache_control_block_count: partial.cache_control_block_count,
         thinking_budget_tokens: partial.thinking_budget_tokens,
         reasoning_effort: partial.reasoning_effort.clone(),
         cache_breakpoints: partial.cache_breakpoints.clone(),
-        cache_prefix_hash: partial.cache_prefix_hash.clone(),
-        matched_v3_cache_key: matched_v3_cache_key.or_else(|| {
-            partial
-                .parse
-                .as_ref()
-                .and_then(|parse| parse.matched_v3_cache_key.clone())
-        }),
-        breakpoint_content_block_index,
-        matched_content_block_index,
-        lookback_distance,
-        predicted_cache_read_tokens,
-        predicted_cache_creation_tokens_5m,
-        predicted_cache_creation_tokens_1h,
         token_estimate_source,
-        cache_value_micros,
-        formula_winner_upstream_id,
-        kept_upstream_id,
-        quota_urgency_5h: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_urgency_5h),
-        quota_urgency_7d: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_urgency_7d),
-        quota_urgency_combined: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_urgency_combined),
-        quota_warning_multiplier: partial
-            .route
-            .as_ref()
-            .and_then(|route| route.quota_warning_multiplier),
         cost_usd_micros: cost.total,
         cost_input_micros: cost.input,
         cost_output_micros: cost.output,
@@ -1516,12 +1417,7 @@ fn finalize_base(
         cost_cache_read_micros: cost.cache_read,
         thinking_tokens: (partial.usage.thinking_tokens > 0)
             .then_some(partial.usage.thinking_tokens),
-        web_search_requests: (partial.usage.web_search_requests > 0)
-            .then_some(partial.usage.web_search_requests),
-        web_fetch_requests: (partial.usage.web_fetch_requests > 0)
-            .then_some(partial.usage.web_fetch_requests),
         service_tier: partial.usage.service_tier.clone(),
-        inference_geo: partial.usage.inference_geo.clone(),
         sse_event_count: partial.stream_success,
         thread_id: identity.thread_id,
         observed_session_id: identity.observed_session_id,
@@ -1531,9 +1427,6 @@ fn finalize_base(
         parent_session_id: identity.parent_session_id,
         client_app: identity.client_app,
         session_id_source: identity.session_id_source,
-        message_id: identity.message_id,
-        message_index: identity.message_index,
-        message_count: identity.message_count,
         cache_control_message_indices: identity.cache_control_message_indices,
         auth_ms,
         route_ms,
@@ -1569,7 +1462,6 @@ fn finalize_base(
         upstream_ttfb_ms: partial.upstream_ttfb_ms,
         upstream_body_ms: partial.upstream_body_ms,
         finalize_ms: partial.finalize_ms,
-        first_body_chunk_ms: partial.first_body_chunk_ms,
         body_chunk_count: partial.stream_body_chunk_count,
         body_bytes: partial.stream_body_bytes,
         stream_message_start_ms: partial.stream_message_start_ms,
@@ -1693,10 +1585,6 @@ async fn evict_oldest(
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use cc_lb_domain::{
-        CandidateUrgency, StageDecision, SubscriptionPreferenceTrace, SubscriptionTier,
-        TerminalDecision, TerminalStrategy,
-    };
     use cc_lb_lifecycle::{
         AuthFailure, ParseFailure, RouteInfo, StreamError, StreamSuccess, UsageSource,
     };
@@ -1817,9 +1705,6 @@ mod tests {
     fn noop_metrics() -> Arc<dyn EngineMetricsHook> {
         Arc::new(NoopMetricsHook)
     }
-
-    include!("lifecycle_event_assembler_quota_support_test.rs");
-    include!("lifecycle_event_assembler_quota_tests.rs");
 
     #[test]
     fn cost_options_estimates_from_usage_until_authoritative_price_arrives() {
@@ -2103,7 +1988,6 @@ mod tests {
         assert_eq!(row.cache_tokenize_ms, Some(6.0));
         assert_eq!(row.prepare_signer_ms, Some(7.0));
         assert_eq!(row.upstream_body_ms, Some(41));
-        assert_eq!(row.first_body_chunk_ms, Some(0));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3007,14 +2891,12 @@ mod tests {
             Some("terminal_without_partial")
         );
         assert!(rows[0].input_tokens.is_none());
-        assert!(rows[0].cache_state.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orphan_terminated_carries_connection_timings_and_internal_errors() {
+    async fn orphan_terminated_persists_connection_timings_but_not_internal_errors() {
         // A dispatch failure never produces `UpstreamResponseStarted`, so the
-        // terminal snapshot is the only carrier of connection timings and the
-        // accumulated internal-error history.
+        // terminal snapshot is the only carrier of connection timings.
         let (tx, rx) = mpsc::channel(16);
         let store = Arc::new(CapturingStore::default());
         let handle = spawn_request_event_assembler(rx, store.clone(), None, noop_metrics());
@@ -3053,14 +2935,7 @@ mod tests {
         assert_eq!(rows[0].dns_ms, Some(5));
         assert_eq!(rows[0].connect_ms, Some(18));
         assert_eq!(rows[0].connection_reused, Some(false));
-        assert_eq!(
-            rows[0].internal_errors,
-            vec![InternalError {
-                stage: cc_lb_domain::InternalErrorStage::Relay,
-                kind: cc_lb_domain::InternalErrorKind::Unavailable,
-                message: Some("connection refused".to_owned()),
-            }]
-        );
+        assert!(rows[0].internal_errors.is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4485,12 +4360,11 @@ mod tests {
         }
     }
 
-    fn diagnostics_writer(sink: &Arc<CapturingDiagnosticsSink>, strip_payload: bool) -> RowWriter {
+    fn diagnostics_writer(sink: &Arc<CapturingDiagnosticsSink>) -> RowWriter {
         RowWriter {
             breaker: StorageCircuitBreaker::default(),
             diagnostics: RequestDiagnosticsOptions {
                 sink: Some(Arc::clone(sink) as Arc<dyn RequestDiagnosticsSink>),
-                strip_payload,
             },
         }
     }
@@ -4530,12 +4404,14 @@ mod tests {
     }
 
     fn diagnostic_values(row: &RequestEvent) -> [serde_json::Value; 5] {
+        let diagnostics = RequestDiagnostics::cloned_from(row);
         [
-            serde_json::to_value(&row.cache_breakpoints).expect("breakpoints serialize"),
-            serde_json::to_value(&row.cache_control_message_indices).expect("indices serialize"),
-            serde_json::to_value(&row.routing_trace).expect("trace serializes"),
-            serde_json::to_value(&row.iterations).expect("iterations serialize"),
-            serde_json::to_value(&row.internal_errors).expect("errors serialize"),
+            serde_json::to_value(&diagnostics.cache_breakpoints).expect("breakpoints serialize"),
+            serde_json::to_value(&diagnostics.cache_control_message_indices)
+                .expect("indices serialize"),
+            serde_json::to_value(&diagnostics.routing_trace).expect("trace serializes"),
+            serde_json::to_value(&diagnostics.iterations).expect("iterations serialize"),
+            serde_json::to_value(&diagnostics.internal_errors).expect("errors serialize"),
         ]
     }
 
@@ -4584,7 +4460,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn strip_off_line_carries_five_fields_and_storage_seq_without_touching_the_row() {
+    async fn diagnostic_line_carries_five_fields_and_storage_seq_without_persisting_diagnostics() {
         let store = CapturingStore::default();
         // Start the cursor away from 1 so the line provably carries the returned seq.
         store.cursor.store(41, Ordering::Relaxed);
@@ -4592,19 +4468,20 @@ mod tests {
         let metrics = noop_metrics();
         let event_id = eid("diag-strip-off");
         let partial = partial_with_diagnostics(&event_id);
-        let expected_row = finalize_base(&partial, &TerminationReason::Success, 200, 42, false);
+        let mut expected_row = finalize_base(&partial, &TerminationReason::Success, 200, 42, false);
         assert!(
             diagnostic_values(&expected_row)
                 .iter()
                 .all(|value| !value.is_null() && value != &serde_json::json!([])),
             "fixture must populate all five fields"
         );
+        let _ = RequestDiagnostics::take_from(&mut expected_row);
 
         write_finalized_rows(
             &store,
             None,
             metrics.as_ref(),
-            &mut diagnostics_writer(&sink, false),
+            &mut diagnostics_writer(&sink),
             &event_id,
             &partial,
             &TerminationReason::Success,
@@ -4616,14 +4493,19 @@ mod tests {
 
         let rows = store.rows.lock().expect("capturing store lock").clone();
         assert_eq!(rows.len(), 1);
-        // Strip off: the stored payload is byte-identical to the pre-feature row.
+        // Only operational fields are persisted, regardless of log delivery.
         assert_eq!(
             serde_json::to_vec(&rows[0]).expect("row serializes"),
             serde_json::to_vec(&expected_row).expect("row serializes")
         );
         let lines = sink.lines();
         assert_eq!(lines.len(), 1);
-        assert_eq!(sink.deliveries(), [RequestDiagnosticsDelivery::BestEffort]);
+        assert_eq!(
+            sink.deliveries(),
+            [RequestDiagnosticsDelivery::BoundedWait(
+                REQUEST_DIAGNOSTICS_SEND_TIMEOUT
+            )]
+        );
         assert_eq!(lines[0]["source"], "live");
         assert_eq!(lines[0]["seq"], 42);
         assert_eq!(lines[0]["event_id"], "diag-strip-off");
@@ -4632,23 +4514,30 @@ mod tests {
         assert_eq!(lines[0]["status"], 200);
         assert_eq!(
             line_diagnostic_values(&lines[0]),
-            diagnostic_values(&expected_row)
+            diagnostic_values(&finalize_base(
+                &partial,
+                &TerminationReason::Success,
+                200,
+                42,
+                false
+            ))
         );
-        assert_eq!(
-            lines[0]["cache_breakpoints"][0]["lookback_prefixes"][0]["prefix_hash"],
-            "lookback-hash"
+        assert!(
+            lines[0]["cache_breakpoints"][0]
+                .get("lookback_prefixes")
+                .is_none()
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn default_writer_persists_the_same_bytes_as_a_strip_off_sink_writer() {
+    async fn default_writer_persists_the_same_bytes_as_a_sink_writer() {
         let event_id = eid("diag-default-parity");
         let partial = partial_with_diagnostics(&event_id);
         let metrics = noop_metrics();
         let mut stored = Vec::new();
         for mut writer in [
             RowWriter::default(),
-            diagnostics_writer(&Arc::new(CapturingDiagnosticsSink::default()), false),
+            diagnostics_writer(&Arc::new(CapturingDiagnosticsSink::default())),
         ] {
             let store = CapturingStore::default();
             write_finalized_rows(
@@ -4671,16 +4560,22 @@ mod tests {
         assert_eq!(stored[0], stored[1]);
         let payload: serde_json::Value =
             serde_json::from_slice(&stored[0]).expect("payload is JSON");
-        assert!(
-            cc_lb_request_log::REQUEST_DIAGNOSTIC_PAYLOAD_KEYS
-                .iter()
-                .all(|key| payload.get(*key).is_some()),
-            "default-off rows keep every diagnostic key: {payload}"
-        );
+        for key in [
+            "cache_breakpoints",
+            "cache_control_message_indices",
+            "routing_trace",
+            "iterations",
+            "internal_errors",
+        ] {
+            assert!(
+                payload.get(key).is_none(),
+                "database rows never carry {key}: {payload}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn strip_on_persists_and_publishes_row_without_five_fields_but_line_keeps_them() {
+    async fn persists_and_publishes_row_without_five_fields_but_line_keeps_them() {
         use cc_lb_control::event_bus::InMemoryBus;
 
         let store = CapturingStore::default();
@@ -4696,7 +4591,7 @@ mod tests {
             &store,
             Some(bus.as_ref() as &dyn RequestEventBus),
             metrics.as_ref(),
-            &mut diagnostics_writer(&sink, true),
+            &mut diagnostics_writer(&sink),
             &event_id,
             &partial,
             &TerminationReason::Success,
@@ -4709,7 +4604,13 @@ mod tests {
         let rows = store.rows.lock().expect("capturing store lock").clone();
         assert_eq!(rows.len(), 1);
         let payload = serde_json::to_value(&rows[0]).expect("row serializes");
-        for key in cc_lb_request_log::REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        for key in [
+            "cache_breakpoints",
+            "cache_control_message_indices",
+            "routing_trace",
+            "iterations",
+            "internal_errors",
+        ] {
             assert!(
                 payload.get(key).is_none(),
                 "stored payload still has {key}: {payload}"
@@ -4738,7 +4639,7 @@ mod tests {
         assert_eq!(
             sink.deliveries(),
             [RequestDiagnosticsDelivery::BoundedWait(
-                REQUEST_DIAGNOSTICS_STRIP_SEND_TIMEOUT
+                REQUEST_DIAGNOSTICS_SEND_TIMEOUT
             )]
         );
         assert_eq!(lines[0]["seq"], 1);
@@ -4757,26 +4658,24 @@ mod tests {
         let metrics = noop_metrics();
         let event_id = eid("diag-insert-lost");
 
-        for strip_payload in [false, true] {
-            write_finalized_rows(
-                &store,
-                None,
-                metrics.as_ref(),
-                &mut diagnostics_writer(&sink, strip_payload),
-                &event_id,
-                &partial_with_diagnostics(&event_id),
-                &TerminationReason::Success,
-                200,
-                42,
-                false,
-            )
-            .await;
-        }
+        write_finalized_rows(
+            &store,
+            None,
+            metrics.as_ref(),
+            &mut diagnostics_writer(&sink),
+            &event_id,
+            &partial_with_diagnostics(&event_id),
+            &TerminationReason::Success,
+            200,
+            42,
+            false,
+        )
+        .await;
 
         assert!(store.rows.lock().expect("capturing store lock").is_empty());
         assert_eq!(
             store.attempts.load(Ordering::Relaxed),
-            2 * (u64::try_from(STORAGE_WRITE_BACKOFF.len()).expect("len fits u64") + 1)
+            u64::try_from(STORAGE_WRITE_BACKOFF.len()).expect("len fits u64") + 1
         );
         assert!(sink.lines().is_empty(), "no row, no line");
     }
@@ -4786,7 +4685,7 @@ mod tests {
         let store = CapturingStore::default();
         let sink = Arc::new(CapturingDiagnosticsSink::default());
         let metrics = noop_metrics();
-        let mut writer = diagnostics_writer(&sink, false);
+        let mut writer = diagnostics_writer(&sink);
         let mut partials = HashMap::new();
         let started = |event_id: &EventId| LifecycleEvent::RequestStarted {
             event_id: event_id.clone(),
@@ -4910,7 +4809,11 @@ mod tests {
             assert_eq!(line["event_id"], serde_json::json!(row.event_id));
             assert_eq!(line["seq"], seq, "line {index} carries its row's cursor");
             assert_eq!(line["status"], row.status);
-            assert_eq!(line_diagnostic_values(line), diagnostic_values(row));
+            assert!(row.cache_breakpoints.is_empty());
+            assert!(row.cache_control_message_indices.is_empty());
+            assert!(row.routing_trace.is_none());
+            assert!(row.iterations.is_none());
+            assert!(row.internal_errors.is_empty());
         }
     }
 
@@ -4919,7 +4822,7 @@ mod tests {
         let store = ConflictingStore::default();
         let sink = Arc::new(CapturingDiagnosticsSink::default());
         let metrics = noop_metrics();
-        let mut writer = diagnostics_writer(&sink, false);
+        let mut writer = diagnostics_writer(&sink);
         let mut partials = HashMap::new();
         let event_id = eid("diag-late-terminal");
         let mut partial = partial_with_diagnostics(&event_id);
@@ -4962,7 +4865,11 @@ mod tests {
         // First line per event_id wins, and it is the one that matches the DB row.
         assert_eq!(lines[0]["ts_ms"], serde_json::json!(row.ts_ms));
         assert_eq!(lines[0]["status"], row.status);
-        assert_eq!(line_diagnostic_values(&lines[0]), diagnostic_values(row));
+        assert!(row.cache_breakpoints.is_empty());
+        assert!(row.cache_control_message_indices.is_empty());
+        assert!(row.routing_trace.is_none());
+        assert!(row.iterations.is_none());
+        assert!(row.internal_errors.is_empty());
         assert_ne!(row.ts_ms, Some(0));
         assert_eq!(
             lines[1]["ts_ms"], 0,
@@ -4983,7 +4890,6 @@ mod tests {
             noop_metrics(),
             RequestDiagnosticsOptions {
                 sink: Some(Arc::clone(&sink) as Arc<dyn RequestDiagnosticsSink>),
-                strip_payload: true,
             },
         );
 

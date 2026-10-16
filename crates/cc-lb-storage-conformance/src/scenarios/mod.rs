@@ -11,7 +11,6 @@ pub mod price_catalog;
 pub mod principal_store;
 pub mod prompt_cache_observation_store;
 pub mod request_event_list;
-pub mod request_event_operator;
 pub mod request_event_principal_costs;
 pub mod revisioning_meta;
 pub mod runtime_change_notifier;

@@ -124,4 +124,15 @@ pub trait PoolQuotaHistoryStore: Send + Sync {
         until_unix_secs: i64,
         bucket_secs: Option<i64>,
     ) -> StorageResult<Vec<PoolQuotaChartPointRecord>>;
+
+    /// Removes at most `batch_size` old snapshots, preserving the latest
+    /// snapshot at or before the cutoff for each quota window.
+    async fn prune_pool_quota_history_before(
+        &self,
+        cutoff_unix_secs: i64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = (cutoff_unix_secs, batch_size);
+        Ok(0)
+    }
 }

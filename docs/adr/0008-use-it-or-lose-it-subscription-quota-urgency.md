@@ -122,7 +122,7 @@ The existing non-Fable subscription-preference salt and trace version remain byt
 
 ## Trace and storage decision
 
-The full all-candidate routing trace already lives in `RequestEvent.routing_trace` payload JSON. Since the request diagnostics log amendment below, it stays in the stored payload only while `request_event_strip_diagnostics` is off:
+The full all-candidate routing trace lives in `RequestEvent.routing_trace` in memory and is emitted to the `cc_lb.request_diagnostics.v1` stdout log when `observability.request_diagnostics_log = true`:
 
 ```text
 routing_trace.stages[*].subscription_preference.candidates[]
@@ -165,9 +165,9 @@ Add SQLite migration `0048_request_events_quota_urgency.sql` with nullable `REAL
 
 ## Amendment: routing trace storage
 
-`routing_trace` is one of the five request-event diagnostic fields, with `cache_breakpoints`, `cache_control_message_indices`, `iterations`, and `internal_errors`. With `observability.request_diagnostics_log = true`, each stored row also produces a `cc_lb.request_diagnostics.v1` stdout line that carries the full trace. The exception is cache-keepalive renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped; they get no line, and their diagnostic fields, including the trace, are always empty (`docs/consistency-contract.md`, "Request events and dashboards"). With `request_event_strip_diagnostics = true`, which requires the log, new rows are stored without the trace, and `cc-lb request-events strip-diagnostics` removes it from older rows. The all-candidate trace is then available only in the diagnostics log.
+`routing_trace` is one of the five request-event diagnostic fields, with `cache_breakpoints`, `cache_control_message_indices`, `iterations`, and `internal_errors`. `request_events_v1` stores only typed relational columns (`payload` is dropped), so those five diagnostic fields are not persisted in the database. With `observability.request_diagnostics_log = true`, each stored row produces a `cc_lb.request_diagnostics.v1` stdout line that carries the full trace alongside outcome and session-correlation scalars. The exception is cache-keepalive renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped; they get no line (`docs/consistency-contract.md`, "Request events and dashboards").
 
-These stay in the database in every mode: the four chosen-upstream columns (`quota_weight_factor`, `quota_cache_multiplier`, `quota_effective_weight`, `quota_uniform_fallback`) and the top-level `quota_urgency_5h`, `quota_urgency_7d`, `quota_urgency_combined`, and `quota_warning_multiplier` payload keys. Aggregate queries over the chosen upstream are unaffected. Candidate-level debugging reads the diagnostics log when the strip is on.
+Candidate-level quota urgency values (`quota_urgency_5h`, `quota_urgency_7d`, `quota_urgency_combined`, `warning_multiplier`, `formula_winner_upstream_id`, `kept_upstream_id`) live in `routing_trace.stages[*].subscription_preference` on the diagnostics log line rather than as duplicate top-level request-event columns.
 
 ## Consequences
 
@@ -178,7 +178,7 @@ These stay in the database in every mode: the four chosen-upstream columns (`quo
 - Capacity no longer overrides quota urgency or creates a feedback loop where larger plans receive traffic merely because they are larger.
 - Cache-positive and on-pace candidates remain selectable because WRH uses `1 + pressure`, not raw pressure.
 - Warning signals stay independent from the pressure formula and remain observable without penalizing base-tier candidates; the Overage penalty remains unchanged.
-- Chosen-upstream columns support cheap aggregate queries, while the all-candidate trace keeps full candidate-level debugging: in the payload JSON while `request_event_strip_diagnostics` is off, and in the request diagnostics log otherwise.
+- The all-candidate trace in the request diagnostics log keeps full candidate-level debugging without bloating `request_events_v1`.
 
 ### Negative
 
@@ -221,7 +221,7 @@ Implementation must include local regression tests for:
 - All-on-pace base buckets using a neutral warning multiplier of `1.0`.
 - Allowed-to-warning and surpassed-threshold transitions preserving `KnownBase` and `PartialBase` winners, including zero-pressure ties, while warning-positive `Overage` selection retains the `0.20` multiplier.
 - Two otherwise-equal Fable candidates receiving different pressure, effective weights, and routing distribution from scoped weekly pressure.
-- All-candidate payload trace carrying U5/U7/combined/factor fields (with `request_event_strip_diagnostics` off; with it on, the same trace is carried by the diagnostics log line).
+- All-candidate routing trace carrying U5/U7/combined/factor fields in the diagnostics log line.
 - Historical v10 payload JSON deserializing with the documented compatibility defaults.
 - Winner and losing candidates carrying distinct per-candidate trace values.
 - Overage-tier scoring remaining identical to v10, including non-uniform urgency differentiation and uniform fallback.

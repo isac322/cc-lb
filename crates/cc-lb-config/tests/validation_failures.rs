@@ -175,33 +175,16 @@ header = "Cf Access Jwt"
 }
 
 #[test]
-fn request_diagnostics_keys_default_to_false_when_omitted() {
+fn request_diagnostics_log_defaults_to_false_when_omitted() {
     let (_dir, path) = crate::common::temp_config("[listener]\n");
 
     let config = Config::load(&path).unwrap();
 
-    assert!(!config.request_event_strip_diagnostics);
     assert!(!config.observability.request_diagnostics_log);
 }
 
 #[test]
-fn request_diagnostics_keys_load_from_toml() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"request_event_strip_diagnostics = true
-
-[observability]
-request_diagnostics_log = true
-"#,
-    );
-
-    let config = Config::load(&path).unwrap();
-
-    assert!(config.request_event_strip_diagnostics);
-    assert!(config.observability.request_diagnostics_log);
-}
-
-#[test]
-fn request_diagnostics_log_alone_is_accepted() {
+fn request_diagnostics_log_loads_from_toml() {
     let (_dir, path) = crate::common::temp_config(
         r#"[observability]
 request_diagnostics_log = true
@@ -210,46 +193,14 @@ request_diagnostics_log = true
 
     let config = Config::load(&path).unwrap();
 
-    assert!(!config.request_event_strip_diagnostics);
     assert!(config.observability.request_diagnostics_log);
 }
-
 #[test]
-fn strip_diagnostics_without_diagnostics_log_fails_with_field_path() {
-    let (_dir, path) = crate::common::temp_config(
-        r#"request_event_strip_diagnostics = true
-
-[observability]
-request_diagnostics_log = false
-"#,
-    );
+fn misspelled_request_diagnostics_key_is_rejected() {
+    let (_dir, path) =
+        crate::common::temp_config("[observability]\nrequest_diagnostic_log = true\n");
 
     let error = Config::load(&path).unwrap_err().to_string();
 
-    assert!(
-        error.contains(
-            "request_event_strip_diagnostics: request_event_strip_diagnostics requires observability.request_diagnostics_log = true; otherwise diagnostic fields are discarded"
-        ),
-        "{error}"
-    );
-}
-
-#[test]
-fn misspelled_request_diagnostics_keys_are_rejected() {
-    for (contents, misspelled) in [
-        (
-            "request_event_strip_diagnostic = true\n",
-            "request_event_strip_diagnostic",
-        ),
-        (
-            "[observability]\nrequest_diagnostic_log = true\n",
-            "request_diagnostic_log",
-        ),
-    ] {
-        let (_dir, path) = crate::common::temp_config(contents);
-
-        let error = Config::load(&path).unwrap_err().to_string();
-
-        assert!(error.contains(misspelled), "{error}");
-    }
+    assert!(error.contains("request_diagnostic_log"), "{error}");
 }

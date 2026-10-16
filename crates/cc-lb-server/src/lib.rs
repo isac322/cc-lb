@@ -24,7 +24,6 @@ pub mod prompt_cache_observation_sink;
 pub mod reconcile;
 pub mod refresh;
 pub mod replica;
-pub mod request_events_cli;
 pub(crate) mod revision_hash;
 pub(crate) mod scheduler_dispatch;
 pub mod scheduler_factory;

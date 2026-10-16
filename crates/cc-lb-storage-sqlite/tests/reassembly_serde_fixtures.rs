@@ -5,16 +5,14 @@ use cc_lb_domain::{
     SubscriptionPreferenceTrace, SubscriptionTier, TerminalDecision, TerminalStrategy,
 };
 use cc_lb_storage_api::{KeyStatus, MetaStore, PluginSlotKind, RequestEvent, RequestEventStore};
-use sqlx::Row;
 use uuid::Uuid;
 
 const FIXTURE_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/reassembly"
 );
-const FIXTURE_NAMES: [&str; 4] = [
+const FIXTURE_NAMES: [&str; 3] = [
     "request_event.json",
-    "request_events_v1_payload.json",
     "plugin_slots.json",
     "key_statuses.json",
 ];
@@ -63,15 +61,6 @@ async fn golden_serde_bytes_match_current_types_and_storage_path() {
     );
     assert!(trace.terminal_decision.is_some());
     assert!(!request.internal_errors.is_empty());
-
-    let stored_bytes = fs::read(Path::new(FIXTURE_ROOT).join("request_events_v1_payload.json"))
-        .expect("read stored payload fixture");
-    let stored: RequestEvent =
-        serde_json::from_slice(&stored_bytes).expect("deserialize stored payload fixture");
-    assert_eq!(
-        serde_json::to_vec(&stored).expect("re-serialize stored payload fixture"),
-        stored_bytes
-    );
 
     let plugin_slot_bytes = fs::read(Path::new(FIXTURE_ROOT).join("plugin_slots.json"))
         .expect("read plugin slot fixture");
@@ -187,15 +176,16 @@ async fn generate_fixtures(output_dir: &Path) {
         .append_request_event(&request)
         .await
         .expect("append request event through storage path");
-    let row = sqlx::query("SELECT payload FROM request_events_v1 WHERE event_id = ?")
-        .bind(request.event_id.as_deref())
-        .fetch_one(storage.pool())
+    let stored = storage
+        .get_request_event(request.event_id.as_deref().expect("fixture event id"))
         .await
-        .expect("read stored request event payload");
-    let stored_payload: String = row.get("payload");
-    fs::write(
-        output_dir.join("request_events_v1_payload.json"),
-        stored_payload.as_bytes(),
-    )
-    .expect("write stored payload fixture");
+        .expect("read relational request event")
+        .expect("stored fixture event");
+    let mut expected = request;
+    expected.cache_control_message_indices.clear();
+    expected.cache_breakpoints.clear();
+    expected.routing_trace = None;
+    expected.iterations = None;
+    expected.internal_errors.clear();
+    assert_eq!(stored, expected);
 }

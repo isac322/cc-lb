@@ -94,8 +94,8 @@ pub fn scenario_applies_to_backend(kind: BackendKind, allowed: &[BackendKind]) -
 }
 
 /// Reads every stored request event (all source kinds) oldest first: the
-/// list view enumerates the rows, and the detail API returns each full
-/// payload byte-identically. Every row must carry an `event_id`.
+/// list view enumerates the rows, and the detail API reconstructs the
+/// relational event. Every row must carry an `event_id`.
 pub async fn stored_request_events<S>(storage: &S) -> Result<Vec<RequestEvent>>
 where
     S: RequestEventStore + ?Sized,

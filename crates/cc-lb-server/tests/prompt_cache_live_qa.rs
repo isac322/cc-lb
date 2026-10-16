@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fake_anthropic::{AppConfig, MessageScript, ScriptedMessageResponse};
 use serde_json::{Value, json};
 
+const DIAGNOSTICS_CONFIG: &str = "[observability]\nrequest_diagnostics_log = true";
 const MODEL: &str = "claude-sonnet-4-5-20250929";
 const TOKEN_ESTIMATE_SOURCE: &str = "serialized_prefix_bytes_v1";
 const HASH_SCHEMA_VERSION: i64 = cc_lb_engine::lifecycle::HASH_SCHEMA_VERSION as i64;
@@ -41,7 +42,8 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscriptio
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
     assert!(server.sqlite_path.starts_with(server._config_dir.path()));
     let pool = support::open_sqlite_pool(&server).await;
     let upstream_rows = support::fetch_upstreams(&pool).await;
@@ -106,7 +108,7 @@ async fn full_proxy_write_then_non_breakpoint_lookback_hit_preserves_subscriptio
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
     assert_eq!(script.request_count(), 2);
 
-    let event = support::wait_for_lookback_event(&pool, MODEL).await;
+    let event = support::wait_for_lookback_event(&server, MODEL).await;
     assert_eq!(event.upstream_id, first_upstream_id);
     assert_eq!(event.lookback_distance, 1);
     assert_eq!(event.breakpoint_index, 2);
@@ -147,7 +149,8 @@ async fn top_level_cache_control_creates_a_breakpoint_and_holds_affinity() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     // No block-level `cache_control` anywhere: the only caching signal is the top-level field.
@@ -172,17 +175,11 @@ async fn top_level_cache_control_creates_a_breakpoint_and_holds_affinity() {
     .await
     .expect("send first automatic-caching request through cc-lb proxy");
     assert_message_response(&first, "cache_creation_input_tokens");
-    let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
-    assert!(
-        first_event.cache_prefix_hash.is_some(),
-        "top-level cache_control must yield a prefix hash; got {:?}",
-        first_event.cache_prefix_hash
-    );
-    assert_eq!(
-        first_event.cache_control_block_count,
-        Some(1),
-        "the synthesized automatic breakpoint must be counted exactly once"
-    );
+    let first_event = support::wait_for_settled_event(&server, MODEL, 0).await;
+    let first_message_hash = first_event
+        .breakpoint_prefix_hash("message")
+        .expect("top-level cache_control must yield a message breakpoint");
+    assert_eq!(first_event.breakpoint_count(), 1);
     // Request-event persistence and observation persistence have independent
     // writers. Establish the committed-cache precondition before the next turn.
     let (observations, _) = support::observation_stats(&pool, MODEL, Duration::from_secs(5)).await;
@@ -203,24 +200,19 @@ async fn top_level_cache_control_creates_a_breakpoint_and_holds_affinity() {
     assert_message_response(&second, "cache_read_input_tokens");
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
 
-    let second_event = support::wait_for_settled_event(&pool, MODEL, first_event.id).await;
+    let second_event = support::wait_for_settled_event(&server, MODEL, first_event.id).await;
     assert_eq!(
-        second_event.cache_prefix_hash, first_event.cache_prefix_hash,
+        second_event.breakpoint_prefix_hash("message"),
+        Some(first_message_hash),
         "a byte-identical request must hash to the same prefix"
     );
     assert_eq!(
         second_event.upstream_id, first_event.upstream_id,
         "cache affinity must hold the warm upstream for an automatic-caching request"
     );
-    assert!(
-        second_event.matched_v3_cache_key.is_some(),
-        "the second request must match the warm prefix written by the first"
-    );
-    assert!(
-        second_event.predicted_read_tokens.unwrap_or_default() > 0,
-        "a matched warm prefix must predict a cache read; got {:?}",
-        second_event.predicted_read_tokens
-    );
+    assert!(second_event.cache_read_input_tokens.unwrap_or_default() > 0);
+    assert!(second_event.matched_cache_key().is_some());
+    assert!(second_event.predicted_read_tokens().unwrap_or_default() > 0);
 }
 
 /// Base request for the invalidator-scope cases: a cached tools tier and a cached message tier,
@@ -262,7 +254,8 @@ async fn assert_message_scoped_invalidator(marker: &str, apply: impl FnOnce(&mut
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let base = scoped_invalidator_base(marker);
@@ -283,7 +276,7 @@ async fn assert_message_scoped_invalidator(marker: &str, apply: impl FnOnce(&mut
     .await
     .expect("send base request through cc-lb proxy");
     assert_eq!(first.status, 200);
-    let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
+    let first_event = support::wait_for_settled_event(&server, MODEL, 0).await;
     let first_message = first_event
         .breakpoint_prefix_hash("message")
         .expect("base request records a message breakpoint");
@@ -321,7 +314,7 @@ async fn assert_message_scoped_invalidator(marker: &str, apply: impl FnOnce(&mut
     .expect("send variant request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
-    let second_event = support::wait_for_settled_event(&pool, MODEL, first_event.id).await;
+    let second_event = support::wait_for_settled_event(&server, MODEL, first_event.id).await;
 
     let first_tools = first_event
         .breakpoint_prefix_hash("tools")
@@ -341,10 +334,8 @@ async fn assert_message_scoped_invalidator(marker: &str, apply: impl FnOnce(&mut
         first_message, second_message,
         "{marker}: message-tier prefix must change, or we predict a hit the provider misses"
     );
-    // Matching the tools-tier key would be correct — that prefix is byte-stable and the provider
-    // still serves it. The only forbidden outcome is reusing the invalidated message prefix.
     assert_ne!(
-        second_event.matched_v3_cache_key.as_deref(),
+        second_event.matched_cache_key(),
         Some(first_message.as_str()),
         "{marker}: must not reuse the invalidated message prefix"
     );
@@ -395,7 +386,8 @@ async fn opus_4_7_records_a_warm_entry_for_a_prefix_between_2048_and_4096_tokens
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
     let pool = support::open_sqlite_pool(&server).await;
 
     let request = json!({
@@ -447,8 +439,8 @@ async fn requested_fast_speed_is_hash_neutral_on_a_model_that_ignores_it() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
-    let pool = support::open_sqlite_pool(&server).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
 
     let base = json!({
         "model": IGNORES_FAST,
@@ -476,7 +468,7 @@ async fn requested_fast_speed_is_hash_neutral_on_a_model_that_ignores_it() {
     .await
     .expect("send standard-speed request through cc-lb proxy");
     assert_eq!(first.status, 200);
-    let first_event = support::wait_for_settled_event(&pool, IGNORES_FAST, 0).await;
+    let first_event = support::wait_for_settled_event(&server, IGNORES_FAST, 0).await;
 
     let second = common::http_post(
         server.proxy_addr,
@@ -489,14 +481,15 @@ async fn requested_fast_speed_is_hash_neutral_on_a_model_that_ignores_it() {
     .expect("send fast-speed request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
-    let second_event = support::wait_for_settled_event(&pool, IGNORES_FAST, first_event.id).await;
+    let second_event = support::wait_for_settled_event(&server, IGNORES_FAST, first_event.id).await;
 
     assert!(
-        first_event.cache_prefix_hash.is_some(),
-        "the standard-speed request must produce a prefix hash to compare against"
+        first_event.breakpoint_prefix_hash("system").is_some(),
+        "the standard-speed request must produce a system prefix to compare against"
     );
     assert_eq!(
-        second_event.cache_prefix_hash, first_event.cache_prefix_hash,
+        second_event.breakpoint_prefix_hash("system"),
+        first_event.breakpoint_prefix_hash("system"),
         "Opus 4.6 ignores a fast-speed request, so it must not split the prefix population"
     );
 }
@@ -525,8 +518,8 @@ async fn a_replayed_thinking_block_changes_the_following_breakpoint_prefix() {
         message_script: Some(script.clone()),
         ..AppConfig::default()
     };
-    let server = common::spawn_test_server_with_two_upstreams("", fake_config).await;
-    let pool = support::open_sqlite_pool(&server).await;
+    let server =
+        common::spawn_test_server_with_two_upstreams(DIAGNOSTICS_CONFIG, fake_config).await;
 
     let base = json!({
         "model": MODEL,
@@ -575,7 +568,7 @@ async fn a_replayed_thinking_block_changes_the_following_breakpoint_prefix() {
     .await
     .expect("send base request through cc-lb proxy");
     assert_eq!(first.status, 200);
-    let first_event = support::wait_for_settled_event(&pool, MODEL, 0).await;
+    let first_event = support::wait_for_settled_event(&server, MODEL, 0).await;
 
     let second = common::http_post(
         server.proxy_addr,
@@ -588,7 +581,7 @@ async fn a_replayed_thinking_block_changes_the_following_breakpoint_prefix() {
     .expect("send thinking-block request through cc-lb proxy");
     assert_eq!(second.status, 200);
     assert!(script.wait_for_requests(2, Duration::from_secs(2)).await);
-    let second_event = support::wait_for_settled_event(&pool, MODEL, first_event.id).await;
+    let second_event = support::wait_for_settled_event(&server, MODEL, first_event.id).await;
 
     let first_tools = first_event
         .breakpoint_prefix_hash("tools")

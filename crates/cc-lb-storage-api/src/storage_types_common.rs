@@ -48,16 +48,6 @@ pub struct RequestEventExportPage {
     pub limit: usize,
 }
 
-/// One batch of the operator payload scan: raw stored payloads for
-/// `after_seq < seq <= until_seq` in ascending storage-cursor order, at most
-/// `limit` rows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestEventPayloadScan {
-    pub after_seq: u64,
-    pub until_seq: u64,
-    pub limit: usize,
-}
-
 /// Shared body of `MetaStore::verify_schema_current`.
 ///
 /// `expected` is every migration embedded in the binary as

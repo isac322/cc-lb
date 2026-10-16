@@ -70,9 +70,12 @@ async fn lqa_5a_drop_all_filter_returns_503_and_logs_routing_trace()
         event.error_code.as_deref(),
         Some("route_no_upstream_after_filter")
     );
-    let trace = event.routing_trace.as_ref().expect("routing trace logged");
+    let diag_records = test_bus.diagnostics_records();
+    assert_eq!(diag_records.len(), 1);
+    let diag = &diag_records[0];
+    let trace = diag.routing_trace.as_ref().expect("routing trace logged");
     assert_eq!(trace.stages[0].stage_name, "drop-all");
-    assert!(event.internal_errors.iter().any(|error| {
+    assert!(diag.internal_errors.iter().any(|error| {
         error.stage == InternalErrorStage::RouterFilter
             && error.kind == InternalErrorKind::Unavailable
             && error.message.as_deref()

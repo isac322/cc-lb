@@ -61,9 +61,9 @@ const BASE_MS: u64 = 1_790_000_000_000;
 /// - `source_kind`: proxy ≈ 98%, renewal ≈ 1%, warmup ≈ 1%.
 const SEED_SQL: &str = "\
 INSERT INTO request_events_v1 \
-    (ts, event_id, list_ts_ms, list_event_key, list_status, model, source_kind, principal_id, payload) \
+    (ts, event_id, list_ts_ms, list_event_key, list_status, model, source_kind, principal_id) \
 SELECT to_timestamp(t.ts_ms / 1000.0), 'gate-' || g, t.ts_ms, 'gate-' || lpad(g::text, 7, '0'), \
-       200, m.model, s.kind, 'gate-principal-' || (g % 50), convert_to('{}', 'UTF8') \
+       200, m.model, s.kind, 'gate-principal-' || (g % 50) \
 FROM generate_series($4::bigint, $5::bigint) AS g \
 CROSS JOIN LATERAL (SELECT $2::bigint + (g * $3::bigint / $1::bigint) AS ts_ms) AS t \
 CROSS JOIN LATERAL (SELECT CASE \

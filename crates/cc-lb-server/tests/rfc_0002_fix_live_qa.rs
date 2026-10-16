@@ -24,6 +24,7 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+const DIAGNOSTICS_CONFIG: &str = "[observability]\nrequest_diagnostics_log = true";
 const HAPPY_MODEL: &str = "claude-sonnet-4-5-20250929";
 const HAPPY_BODY: &str = r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#;
 const STREAM_BODY: &str = r#"{"model":"claude-sonnet-4-5-20250929","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}"#;
@@ -105,16 +106,64 @@ async fn fetch_metric_scrape(metrics_addr: std::net::SocketAddr) -> String {
     response.body
 }
 
-async fn fetch_payload_json(pool: &SqlitePool, where_clause: &str) -> serde_json::Value {
+async fn fetch_event_columns(pool: &SqlitePool, where_clause: &str) -> Value {
     let sql = format!(
-        "SELECT payload FROM request_events_v1 WHERE {where_clause} ORDER BY id DESC LIMIT 1"
+        "SELECT json_object(
+            'event_id', event_id,
+            'status', list_status,
+            'principal_kind', principal_kind,
+            'input_tokens', input_tokens,
+            'output_tokens', output_tokens,
+            'cache_read_input_tokens', cache_read_input_tokens,
+            'cache_creation_input_tokens', cache_creation_input_tokens,
+            'cost_usd_micros', list_cost_usd_micros,
+            'cost_input_micros', list_cost_input_micros,
+            'cost_output_micros', list_cost_output_micros,
+            'auth_ms', list_auth_ms,
+            'route_ms', list_route_ms,
+            'proxy_setup_ms', list_proxy_setup_ms,
+            'shape_ms', list_shape_ms,
+            'sign_ms', list_sign_ms,
+            'upstream_ttfb_ms', list_upstream_ttfb_ms,
+            'upstream_body_ms', list_upstream_body_ms,
+            'body_bytes', body_bytes,
+            'body_chunk_count', body_chunk_count,
+            'stream_message_start_ms', stream_message_start_ms,
+            'stream_total_ms', stream_total_ms,
+            'sse_event_count', sse_event_count,
+            'error_code', error_code,
+            'upstream_error_type', upstream_error_type,
+            'upstream_error_message', upstream_error_message
+         ) FROM request_events_v1 WHERE {where_clause} ORDER BY id DESC LIMIT 1"
     );
-    let row = sqlx::query(AssertSqlSafe(sql))
+    let columns: String = sqlx::query_scalar(AssertSqlSafe(sql))
         .fetch_one(pool)
         .await
-        .expect("payload row fetch");
-    let payload: String = row.try_get("payload").expect("payload column");
-    serde_json::from_str(&payload).expect("payload json parse")
+        .expect("relational event row");
+    serde_json::from_str(&columns).expect("relational columns JSON")
+}
+
+async fn fetch_request_diagnostics(server: &common::TestServer, event: &Value) -> Value {
+    let event_id = event["event_id"].as_str().expect("persisted event id");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut interval = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        interval.tick().await;
+        if let Some(line) = server
+            ._process
+            .stdout_snapshot()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.starts_with(br#"{"schema":"cc_lb.request_diagnostics.v1","#))
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find(|line| line["event_id"].as_str() == Some(event_id))
+        {
+            return line;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for diagnostic stdout for event {event_id}"
+        );
+    }
 }
 
 async fn fetch_i64(pool: &SqlitePool, sql: &str) -> i64 {
@@ -148,7 +197,7 @@ fn json_str<'a>(json: &'a serde_json::Value, field: &str) -> &'a str {
 fn assert_json_field_populated(json: &serde_json::Value, field: &str) {
     assert!(
         json.get(field).is_some_and(|value| !value.is_null()),
-        "payload missing populated field {field}: {}",
+        "relational row missing populated field {field}: {}",
         serde_json::to_string_pretty(json).unwrap_or_default()
     );
 }
@@ -240,7 +289,7 @@ fn assert_assembler_field_populated(row: &serde_json::Value, field: &str, ctx: &
     let value = row.get(field);
     assert!(
         value.is_some_and(|v| !v.is_null()),
-        "[{ctx}] assembler row missing {field} — indicates an assembler ordering bug (event dropped after RequestTerminated). value={value:?}\nfull payload:\n{}",
+        "[{ctx}] assembler row missing {field} — indicates an assembler ordering bug (event dropped after RequestTerminated). value={value:?}\nfull row:\n{}",
         serde_json::to_string_pretty(row).unwrap_or_default()
     );
 }
@@ -319,7 +368,7 @@ async fn live_qa_2_oauth_usage_writes_one_classified_row() {
         newest_unclassified, 1,
         "oauth usage row must have NULL error_code"
     );
-    let payload = fetch_payload_json(&pool, "id = (SELECT MAX(id) FROM request_events_v1)").await;
+    let payload = fetch_event_columns(&pool, "id = (SELECT MAX(id) FROM request_events_v1)").await;
     assert_eq!(json_i64(&payload, "status"), 200);
 
     let dropped = count_request_events(&pool, "error_code = 'terminal_dropped'").await;
@@ -405,7 +454,7 @@ async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let assembler_payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
+    let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 
     let ctx = "non-stream happy path";
     assert_assembler_field_populated(&assembler_payload, "input_tokens", ctx);
@@ -413,7 +462,7 @@ async fn live_qa_6b_assembler_populates_cost_cache_usage_fields() {
     assert_assembler_field_populated(&assembler_payload, "cost_usd_micros", ctx);
     assert_assembler_field_populated(&assembler_payload, "cost_input_micros", ctx);
     assert_assembler_field_populated(&assembler_payload, "cost_output_micros", ctx);
-    assert_assembler_field_populated(&assembler_payload, "cache_state", ctx);
+    assert_assembler_field_populated(&assembler_payload, "cache_read_input_tokens", ctx);
     assert_assembler_field_populated(&assembler_payload, "auth_ms", ctx);
     assert_assembler_field_populated(&assembler_payload, "route_ms", ctx);
     assert_assembler_field_populated(&assembler_payload, "upstream_ttfb_ms", ctx);
@@ -441,7 +490,7 @@ async fn live_qa_6c_assembler_populates_stream_fields() {
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     sleep(Duration::from_millis(500)).await;
 
-    let assembler_payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
+    let assembler_payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
 
     let ctx = "streaming happy path";
     assert_assembler_field_populated(&assembler_payload, "body_bytes", ctx);
@@ -472,7 +521,7 @@ async fn lqa_1a_proxy_path_non_stream_returns_message_and_assembler_row() {
 }
 
 #[tokio::test]
-async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
+async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_columns() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
@@ -492,7 +541,7 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
     assert!(response.body.contains("event: message_delta"));
     assert!(response.body.contains("event: message_stop"));
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
+    let payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
     for field in [
         "sse_event_count",
         "stream_message_start_ms",
@@ -505,7 +554,7 @@ async fn lqa_1b_proxy_path_streaming_returns_sse_and_stream_payload_fields() {
 }
 
 #[tokio::test]
-async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
+async fn lqa_2a_event_emission_happy_row_has_relational_columns() {
     let server = common::spawn_test_server().await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
@@ -525,9 +574,9 @@ async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
     assert!(fetch_i64(&pool, "SELECT input_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
     assert!(fetch_i64(&pool, "SELECT output_tokens FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await > 0);
     assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND error_code IS NULL").await > 0);
-    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND json_extract(payload, '$.cache_state') IS NOT NULL").await > 0);
+    assert!(fetch_i64(&pool, "SELECT COUNT(*) FROM request_events_v1 WHERE event_id IS NOT NULL AND cache_read_input_tokens IS NOT NULL").await > 0);
 
-    let payload = fetch_payload_json(&pool, where_clause).await;
+    let payload = fetch_event_columns(&pool, where_clause).await;
     assert_eq!(json_i64(&payload, "status"), 200);
     assert_eq!(json_str(&payload, "principal_kind"), "machine");
     for field in [
@@ -550,7 +599,7 @@ async fn lqa_2a_event_emission_happy_row_has_columns_and_payload() {
 
 #[tokio::test]
 async fn lqa_2b_lifecycle_metrics_increment_for_happy_non_stream() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_test_server_with_extra_config(DIAGNOSTICS_CONFIG).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "event_id IS NOT NULL").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
@@ -669,8 +718,12 @@ async fn lqa_4a_admin_sse_stream_emits_final_request_event_update() {
 
 #[tokio::test]
 async fn lqa_5b_api_key_auth_invalid_key_returns_401_metrics_and_row() {
-    let server =
-        common::spawn_test_server_with_principal_limits("", Vec::new(), AppConfig::default()).await;
+    let server = common::spawn_test_server_with_principal_limits(
+        DIAGNOSTICS_CONFIG,
+        Vec::new(),
+        AppConfig::default(),
+    )
+    .await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
@@ -694,12 +747,12 @@ async fn lqa_5b_api_key_auth_invalid_key_returns_401_metrics_and_row() {
             .contains("authentication")
     );
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "error_code = 'authentication_failed'").await;
+    let payload = fetch_event_columns(&pool, "error_code = 'authentication_failed'").await;
     assert_eq!(json_i64(&payload, "status"), 401);
-    // #849: the persisted row must carry the typed authn diagnostic with the
-    // exact BuiltinAuthError reason — "not-a-cclb-key" fails secret parsing.
+    let diagnostics = fetch_request_diagnostics(&server, &payload).await;
+    // #849: diagnostic stdout carries the exact typed authentication reason.
     assert_eq!(
-        payload["internal_errors"],
+        diagnostics["internal_errors"],
         serde_json::json!([{
             "stage": "authn",
             "kind": "invalid_input",
@@ -801,8 +854,7 @@ async fn lqa_5c_concurrent_limit_rejects_second_request_and_audits() {
     .await;
     assert_eq!(audit_count, 1);
 
-    let rejected_payload =
-        fetch_payload_json(&pool, "json_extract(payload, '$.status') = 429").await;
+    let rejected_payload = fetch_event_columns(&pool, "list_status = 429").await;
     assert!(
         rejected_payload
             .get("proxy_setup_ms")
@@ -871,7 +923,7 @@ async fn lqa_5e_assembler_row_populates_identity_upstream_and_latency_stages() {
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 1).await;
     assert_eq!(fetch_text(&pool, "SELECT upstream_name FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await, "fake_anthropic");
     assert!(fetch_text(&pool, "SELECT upstream_id FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 1").await.parse::<Uuid>().is_ok());
-    let payload = fetch_payload_json(&pool, "event_id IS NOT NULL").await;
+    let payload = fetch_event_columns(&pool, "event_id IS NOT NULL").await;
     assert_eq!(json_str(&payload, "principal_kind"), "machine");
     for field in [
         "auth_ms",
@@ -963,22 +1015,22 @@ async fn lqa_6b_non_stream_and_stream_rows_have_cache_and_cost_fields() {
     assert_eq!(stream.status, 200);
     wait_for_row_count(&pool, "event_id IS NOT NULL", baseline + 2).await;
     let rows = sqlx::query(
-        "SELECT payload FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 2",
+        "SELECT cache_read_input_tokens, list_cost_usd_micros,
+             list_cost_input_micros, list_cost_output_micros
+         FROM request_events_v1 WHERE event_id IS NOT NULL ORDER BY id DESC LIMIT 2",
     )
     .fetch_all(&pool)
     .await
-    .expect("payload rows");
+    .expect("relational event rows");
     assert_eq!(rows.len(), 2);
     for row in rows {
-        let raw: String = row.try_get("payload").expect("payload column");
-        let payload: Value = serde_json::from_str(&raw).expect("payload json");
-        for field in [
-            "cache_state",
-            "cost_usd_micros",
-            "cost_input_micros",
-            "cost_output_micros",
+        for column in [
+            "cache_read_input_tokens",
+            "list_cost_usd_micros",
+            "list_cost_input_micros",
+            "list_cost_output_micros",
         ] {
-            assert_json_field_populated(&payload, field);
+            assert!(row.try_get::<i64, _>(column).is_ok(), "populated {column}");
         }
     }
 }
@@ -992,7 +1044,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_typed_upstream_error() {
         "Test rate-limited",
     ));
     let server = common::spawn_test_server_with_fake_config(
-        "",
+        DIAGNOSTICS_CONFIG,
         AppConfig {
             message_script: Some(script),
             ..AppConfig::default()
@@ -1006,7 +1058,7 @@ async fn lqa_6c_upstream_rate_limit_error_records_typed_upstream_error() {
 
     assert_eq!(response.status, 429);
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "1=1").await;
+    let payload = fetch_event_columns(&pool, "1=1").await;
     assert_eq!(json_i64(&payload, "status"), 429);
     let error_code = json_str(&payload, "error_code");
     assert_eq!(error_code, "upstream_4xx");
@@ -1022,11 +1074,12 @@ async fn lqa_6c_upstream_rate_limit_error_records_typed_upstream_error() {
         "Test rate-limited"
     );
     // Upstream failures are not cc-lb internal failures.
+    let diagnostics = fetch_request_diagnostics(&server, &payload).await;
     assert!(
-        payload["internal_errors"]
+        diagnostics["internal_errors"]
             .as_array()
-            .is_none_or(|errors| errors.is_empty()),
-        "upstream 4xx must not record internal_errors: {payload}"
+            .is_some_and(|errors| errors.is_empty()),
+        "upstream 4xx must not record internal_errors: {diagnostics}"
     );
 }
 
@@ -1073,7 +1126,7 @@ async fn lqa_6e_admin_sse_keeps_up_with_fifty_final_frames_without_lag() {
 
 #[tokio::test]
 async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_test_server_with_extra_config(DIAGNOSTICS_CONFIG).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
     let pre = fetch_metric_scrape(server.metrics_addr).await;
@@ -1094,14 +1147,13 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
     // from a credentialed caller is an attributable post-auth failure: it
     // records one classified row and stops before routing.
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "1=1").await;
+    let payload = fetch_event_columns(&pool, "1=1").await;
     assert_eq!(json_i64(&payload, "status"), 400);
     assert_json_field_populated(&payload, "error_code");
-    // #849: the persisted row must carry the typed ingress diagnostic —
-    // "request body must be valid JSON" was previously discarded.
     assert_eq!(json_str(&payload, "error_code"), "invalid_json");
+    let diagnostics = fetch_request_diagnostics(&server, &payload).await;
     assert_eq!(
-        payload["internal_errors"],
+        diagnostics["internal_errors"],
         serde_json::json!([{
             "stage": "ingress",
             "kind": "invalid_input",
@@ -1136,7 +1188,7 @@ async fn lqa_6f_invalid_json_records_400_and_stops_before_routing() {
 
 #[tokio::test]
 async fn lqa_6g_truncated_body_records_typed_ingress_reason() {
-    let server = common::spawn_test_server().await;
+    let server = common::spawn_test_server_with_extra_config(DIAGNOSTICS_CONFIG).await;
     let pool = open_sqlite_pool(&server.sqlite_path).await;
     let baseline = settled_row_count(&pool, "1=1").await;
 
@@ -1168,11 +1220,10 @@ async fn lqa_6g_truncated_body_records_typed_ingress_reason() {
     );
 
     wait_for_row_count(&pool, "1=1", baseline + 1).await;
-    let payload = fetch_payload_json(&pool, "error_code = 'body_read_failed'").await;
+    let payload = fetch_event_columns(&pool, "error_code = 'body_read_failed'").await;
     assert_eq!(json_i64(&payload, "status"), 400);
-    // #849: the transport read failure is the persisted reason — previously
-    // this row carried only the coarse error_code.
-    let errors = payload["internal_errors"]
+    let diagnostics = fetch_request_diagnostics(&server, &payload).await;
+    let errors = diagnostics["internal_errors"]
         .as_array()
         .cloned()
         .unwrap_or_default();

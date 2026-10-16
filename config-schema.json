@@ -102,10 +102,6 @@
       "default": 90,
       "minimum": 0
     },
-    "request_event_strip_diagnostics": {
-      "type": "boolean",
-      "default": false
-    },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
@@ -227,7 +223,7 @@
     "upstream_affinity": {
       "$ref": "#/$defs/UpstreamAffinityConfig",
       "default": {
-        "ttl_days": 90
+        "ttl_days": 7
       }
     }
   },
@@ -989,7 +985,7 @@
         "ttl_days": {
           "type": "integer",
           "format": "uint32",
-          "default": 90,
+          "default": 7,
           "minimum": 1
         }
       },

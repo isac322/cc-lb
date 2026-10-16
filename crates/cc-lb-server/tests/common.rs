@@ -445,13 +445,41 @@ fn write_config_with_extra(
     let data_dir = path.parent().expect("config path has parent");
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
-    // Extra TOML goes at the top so bare top-level keys attach to the root
-    // table instead of whichever section is declared last below.
-    let extra_prefix = if extra_toml.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n\n", extra_toml.trim())
-    };
+    // Keep root-level extras before the fixture's tables, but merge observability
+    // options into its existing table rather than declaring the table twice.
+    let mut extra_prefix = String::new();
+    let mut observability_extra = String::new();
+    let mut in_observability = false;
+    for line in extra_toml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_observability = trimmed == "[observability]";
+            if in_observability {
+                continue;
+            }
+        }
+        let target = if in_observability {
+            &mut observability_extra
+        } else {
+            &mut extra_prefix
+        };
+        target.push_str(line);
+        target.push('\n');
+    }
+    let mut observability = String::new();
+    for (key, value) in [
+        ("tracing_level", "\"info\""),
+        ("log_redaction", "true"),
+        ("user_prompt_redaction", "false"),
+    ] {
+        if !observability_extra.lines().any(|line| {
+            line.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == key)
+        }) {
+            observability.push_str(&format!("{key} = {value}\n"));
+        }
+    }
+    observability.push_str(&observability_extra);
     let config = format!(
         r#"{extra_prefix}
 [listener]
@@ -478,9 +506,7 @@ path = "{storage_path}"
 key_env = "CC_LB_MASTER_KEY"
 
 [observability]
-tracing_level = "info"
-log_redaction = true
-user_prompt_redaction = false
+{observability}
 
 [[admin.auth.providers]]
 kind = "static_token"
@@ -499,6 +525,33 @@ semaphore_per_upstream = 100
 "#
     );
     std::fs::write(path, config).expect("write config");
+}
+
+#[test]
+fn extra_observability_options_merge_with_fixture_defaults() {
+    let dir = tempfile::tempdir().expect("config fixture directory");
+    let path = dir.path().join("cc-lb.toml");
+    let addr = "127.0.0.1:0".parse().expect("fixture address");
+    write_config_with_extra(
+        &path,
+        addr,
+        addr,
+        addr,
+        "request_event_retention_days = 30\n\
+         [observability]\n\
+         request_diagnostics_log = true\n\
+         tracing_level = \"debug\"\n\
+         [upstream_affinity]\n\
+         ttl_days = 2\n",
+        256,
+    );
+    let config = cc_lb_config::Config::load(&path).expect("merged fixture config parses");
+    assert!(config.observability.request_diagnostics_log);
+    assert_eq!(config.observability.tracing_level, "debug");
+    assert!(config.observability.log_redaction);
+    assert!(!config.observability.user_prompt_redaction);
+    assert_eq!(config.request_event_retention_days, 30);
+    assert_eq!(config.upstream_affinity.ttl_days, 2);
 }
 
 async fn seed_storage(

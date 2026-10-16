@@ -45,16 +45,16 @@ Use a local synthetic upstream and the real proxy lifecycle; no paid provider/pr
 
 ## Retention cost and operational observation
 
-The initial performance improvement deferred deletion because an arbitrary TTL would turn old replays into 503s. The user later approved the TTL configuration feature with a 90-day default. Accordingly, expiry and physical cleanup of old mappings are added as a retention policy. This is not a capacity limit guaranteeing a bound on inbound volume itself; mappings within the current policy scope continue to be retained.
+The initial performance improvement deferred deletion because an arbitrary TTL would turn old replays into 503s. The TTL configuration feature now defaults to 7 days (lowered from the original 90-day default to match multi-turn web-search session lifetimes). Accordingly, expiry and physical cleanup of old mappings are added as a retention policy. This is not a capacity limit guaranteeing a bound on inbound volume itself; mappings within the current policy scope continue to be retained.
 
 ### Approved TTL implementation contract
 
 ```toml
 [upstream_affinity]
-ttl_days = 90
+ttl_days = 7
 ```
 
-- The default is 90 days. Specify a positive number of days; 0 is not allowed.
+- The default is 7 days. Specify a positive number of days; 0 is not allowed. Ordinary replay reads do not refresh `observed_at_unix_secs`, so bindings older than 7 days fail closed with a local 503 immediately after upgrade unless `ttl_days` is explicitly configured higher.
 - The environment variable is `CC_LB_UPSTREAM_AFFINITY__TTL_DAYS`.
 - Changes apply after a server restart. The engine's lookup policy and the background scheduler's cleanup policy use the same startup configuration.
 - The TTL basis is the last successful binding's `observed_at_unix_secs`. It is not a sliding TTL that adds a write on every lookup.

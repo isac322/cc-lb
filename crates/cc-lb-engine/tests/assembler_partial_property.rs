@@ -352,12 +352,6 @@ fn assert_row_fields_match_profile(row: &RequestEvent, profile: Profile) {
     if let Some(output_tokens) = row.output_tokens {
         assert_eq!(output_tokens, profile.token_base() + 10);
     }
-    if let Some(cache_prefix_hash) = row.cache_prefix_hash.as_deref() {
-        assert_eq!(cache_prefix_hash, profile.cache_prefix_hash());
-    }
-    if let Some(cache_blocks) = row.cache_control_block_count {
-        assert_eq!(cache_blocks, profile.token_base());
-    }
     if row.cost_usd_micros.is_some() {
         assert_eq!(row.input_tokens, Some(profile.token_base()));
         assert_eq!(row.output_tokens, Some(profile.token_base() + 10));
@@ -370,9 +364,7 @@ struct PartialPresence {
     upstream_id: bool,
     upstream_response_status: bool,
     input_tokens: bool,
-    cache_prefix_hash: bool,
     route_ms: bool,
-    first_body_chunk_ms: bool,
     cost_usd_micros: bool,
 }
 
@@ -386,9 +378,7 @@ impl PartialPresence {
             upstream_id: partial.upstream_id.is_some(),
             upstream_response_status: partial.upstream_response_status.is_some(),
             input_tokens: partial.input_tokens.is_some(),
-            cache_prefix_hash: partial.cache_prefix_hash.is_some(),
             route_ms: partial.route_ms.is_some(),
-            first_body_chunk_ms: partial.first_body_chunk_ms.is_some(),
             cost_usd_micros: partial.cost_usd_micros.is_some(),
         })
     }
@@ -398,9 +388,7 @@ impl PartialPresence {
         assert!(!previous.upstream_id || self.upstream_id);
         assert!(!previous.upstream_response_status || self.upstream_response_status);
         assert!(!previous.input_tokens || self.input_tokens);
-        assert!(!previous.cache_prefix_hash || self.cache_prefix_hash);
         assert!(!previous.route_ms || self.route_ms);
-        assert!(!previous.first_body_chunk_ms || self.first_body_chunk_ms);
         assert!(!previous.cost_usd_micros || self.cost_usd_micros);
     }
 }

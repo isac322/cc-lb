@@ -491,14 +491,13 @@ describe('resolved editor model', () => {
     );
 
     expect(CONFIG_EDITOR_CATEGORIES).toHaveLength(7);
-    expect(new Set(roots).size).toBe(21);
+    expect(new Set(roots).size).toBe(20);
     expect(roots).toEqual(
       expect.arrayContaining([
         'listener',
         'body',
         'timeouts',
         'request_event_retention_days',
-        'request_event_strip_diagnostics',
         'price_catalog',
         'storage',
         'scheduler',
@@ -519,17 +518,7 @@ describe('resolved editor model', () => {
     );
   });
 
-  it('places the diagnostics strip switch in storage retention with its impact', () => {
-    expect(
-      classifyConfigLeaf('request_event_strip_diagnostics', 'boolean'),
-    ).toMatchObject({
-      categoryId: 'data',
-      sectionId: 'retention',
-      advanced: false,
-      dangerous: true,
-      dangerImpact:
-        'Stops storing diagnostic fields in the database; they then exist only in the stdout diagnostics log.',
-    });
+  it('places the request diagnostics log switch in runtime observability', () => {
     expect(
       classifyConfigLeaf('observability.request_diagnostics_log', 'boolean'),
     ).toMatchObject({
@@ -782,32 +771,21 @@ describe('config field guidance', () => {
     expect(guidance.disabled).toBeTruthy();
   });
 
-  it('resolves boolean guidance for the request diagnostics switches', () => {
-    for (const path of [
-      'request_event_strip_diagnostics',
+  it('resolves boolean guidance for the request diagnostics log switch', () => {
+    const guidance = resolveConfigFieldGuidance(
       'observability.request_diagnostics_log',
-    ]) {
-      const guidance = resolveConfigFieldGuidance(path, undefined, 'boolean');
-      expect(guidance.description, path).toContain('diagnostic');
-      expect(guidance.enabled, path).toBeTruthy();
-      expect(guidance.disabled, path).toBeTruthy();
-    }
-    expect(
-      resolveConfigFieldGuidance(
-        'request_event_strip_diagnostics',
-        undefined,
-        'boolean',
-      ).description,
-    ).toContain('observability.request_diagnostics_log');
+      undefined,
+      'boolean',
+    );
+    expect(guidance.description).toContain('diagnostic');
+    expect(guidance.enabled).toBeTruthy();
+    expect(guidance.disabled).toContain('Log-only diagnostics are discarded');
   });
 
-  it('expands both request diagnostics switches from the committed schema', () => {
+  it('expands the request diagnostics log switch from the committed schema', () => {
     const paths = expandConfigSchema(realSchema).map((leaf) => leaf.pathString);
     expect(paths).toEqual(
-      expect.arrayContaining([
-        'request_event_strip_diagnostics',
-        'observability.request_diagnostics_log',
-      ]),
+      expect.arrayContaining(['observability.request_diagnostics_log']),
     );
   });
 

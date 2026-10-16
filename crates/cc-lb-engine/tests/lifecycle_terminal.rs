@@ -107,9 +107,10 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         &["second".to_owned()]
     );
     let events = wait_for_events(storage.as_ref(), 1).await?;
-    let trace = events
+    let diag_records = test_bus.diagnostics_records();
+    let trace = diag_records
         .first()
-        .and_then(|event| event.routing_trace.as_ref())
+        .and_then(|record| record.routing_trace.as_ref())
         .expect("routing trace is recorded");
     assert_eq!(trace.stages.len(), 1);
     assert_eq!(trace.stages[0].stage_name, "keep-terminal-candidates");

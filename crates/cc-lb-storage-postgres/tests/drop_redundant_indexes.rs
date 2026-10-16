@@ -1,10 +1,5 @@
-//! Migrations 0134–0135 and 0138: the redundant `request_events_v1_thread_ts`
-//! and the checkpoint `range_idx`/`anchor_idx` duplicates are gone and the
-//! queries they used to serve still avoid a sequential scan. After every
-//! migration (0136 sets `STORAGE MAIN`, 0138 restores it),
-//! `request_events_v1.payload` is on the default `EXTENDED` storage; the
-//! operator step `SET STORAGE MAIN` (docs/runbook/request-diagnostics.md,
-//! step 4) keeps mid-sized payloads inline once applied.
+//! Redundant indexes remain removed after the relational request-event cutover.
+//! Request events have no JSON payload column; diagnostics remain out of SQL.
 
 use std::{collections::BTreeSet, str::FromStr, sync::Arc};
 
@@ -21,7 +16,7 @@ fn postgres_url() -> Option<String> {
 }
 
 #[test]
-fn redundant_indexes_are_dropped_and_payload_storage_main_is_operator_step() {
+fn redundant_indexes_are_dropped_and_request_events_are_relational() {
     let Some(url) = postgres_url() else {
         eprintln!(
             "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
@@ -40,7 +35,7 @@ fn redundant_indexes_are_dropped_and_payload_storage_main_is_operator_step() {
                 .context("drop isolated redundant-index schema")?;
             result
         })
-        .expect("postgres redundant-index and payload storage regression");
+        .expect("postgres redundant-index and relational schema regression");
 }
 
 async fn run(pool: &PgPool) -> Result<()> {
@@ -49,7 +44,7 @@ async fn run(pool: &PgPool) -> Result<()> {
 
     assert_index_set(pool).await?;
     assert_checkpoint_queries_avoid_seq_scan(pool).await?;
-    assert_payload_storage_operator_step(pool, &storage).await?;
+    assert_relational_schema(pool, &storage).await?;
     Ok(())
 }
 
@@ -99,6 +94,19 @@ async fn assert_index_set(pool: &PgPool) -> Result<()> {
         ensure!(
             checkpoint_indexes.contains(kept),
             "{kept} must remain: {checkpoint_indexes:?}"
+        );
+    }
+    for (table, dropped) in [
+        (
+            "usage_rollups_v2",
+            "usage_rollups_v2_interval_tokens_cover_idx",
+        ),
+        ("audit_log_v1", "audit_log_v1_actor_subject"),
+    ] {
+        let indexes = indexes_on(pool, table).await?;
+        ensure!(
+            !indexes.contains(dropped),
+            "0140 must drop {dropped}: {indexes:?}"
         );
     }
     Ok(())
@@ -181,137 +189,40 @@ async fn assert_checkpoint_queries_avoid_seq_scan(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Deterministic, pglz-incompressible ASCII: a 64-symbol alphabet driven by
-/// xorshift leaves pglz no 25% saving, so the value is stored uncompressed.
-fn incompressible_ascii(len: usize, mut state: u64) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(len);
-    for _ in 0..len {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let symbol = ALPHABET.get((state % 64) as usize).copied().unwrap_or(b'A');
-        out.push(char::from(symbol));
-    }
-    out
-}
-
-async fn append_with_blob(
-    storage: &PostgresStorage,
-    event_id: &str,
-    offset_ms: u64,
-    blob: String,
-) -> Result<()> {
-    let ts_ms = 1_800_000_000_000 + offset_ms;
-    storage
-        .append_request_event(&RequestEvent {
-            ts: ts_ms / 1_000,
-            ts_ms: Some(ts_ms),
-            request_id: format!("{event_id}-request"),
-            event_id: Some(event_id.to_owned()),
-            status: 200,
-            // `iterations` lives only in `payload`, so the blob grows exactly
-            // the column under test.
-            iterations: Some(serde_json::json!({ "blob": blob })),
-            ..Default::default()
-        })
-        .await?;
-    Ok(())
-}
-
-async fn payload_storage(pool: &PgPool, event_id: &str) -> Result<(i32, bool)> {
-    let (bytes, inline) = sqlx::query_as::<_, (i32, bool)>(
-        "SELECT octet_length(payload), pg_column_toast_chunk_id(payload) IS NULL \
-         FROM request_events_v1 WHERE event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_one(pool)
-    .await?;
-    Ok((bytes, inline))
-}
-
-async fn payload_attstorage(pool: &PgPool) -> Result<String> {
-    Ok(sqlx::query_scalar::<_, String>(
-        "SELECT attstorage::text FROM pg_attribute \
-         WHERE attrelid = 'request_events_v1'::regclass AND attname = 'payload'",
+async fn assert_relational_schema(pool: &PgPool, storage: &PostgresStorage) -> Result<()> {
+    let has_payload = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'request_events_v1'
+           AND column_name = 'payload')",
     )
     .fetch_one(pool)
-    .await?)
-}
-
-/// QA 21: after every migration (0138 reverts 0136), `payload` is on
-/// `EXTENDED`, because `STORAGE MAIN` while the strip is off keeps full 2–8 KB
-/// payloads inline and bloats the heap. A ~5 KB incompressible payload is
-/// moved to TOAST under `EXTENDED`.
-/// After the runbook's operator step `SET STORAGE MAIN`, a ~2 KB payload and a
-/// ~5 KB incompressible payload stay in the heap, while a 20 KB incompressible
-/// payload that cannot fit a heap page is still externalized.
-async fn assert_payload_storage_operator_step(
-    pool: &PgPool,
-    storage: &PostgresStorage,
-) -> Result<()> {
-    let attstorage = payload_attstorage(pool).await?;
-    ensure!(
-        attstorage == "x",
-        "0138 must leave request_events_v1.payload on STORAGE EXTENDED, \
-         got attstorage={attstorage}"
-    );
-    append_with_blob(
-        storage,
-        "toast-5kb-extended",
-        0,
-        incompressible_ascii(5_000, 0x0136),
-    )
     .await?;
-    let (extended_bytes, extended_inline) = payload_storage(pool, "toast-5kb-extended").await?;
     ensure!(
-        extended_bytes >= 5_000,
-        "5 KB payload is {extended_bytes} bytes"
+        !has_payload,
+        "0139 must remove the request event JSON column"
     );
+    let event = RequestEvent {
+        ts: 1_800_000_000,
+        ts_ms: Some(1_800_000_000_123),
+        request_id: "relational-request".to_owned(),
+        event_id: Some("relational-event".to_owned()),
+        status: 200,
+        duration_ms: 42,
+        iterations: Some(serde_json::json!({ "large": "x".repeat(20_000) })),
+        internal_errors: Vec::new(),
+        ..Default::default()
+    };
+    storage.append_request_event(&event).await?;
+    let restored = storage
+        .get_request_event("relational-event")
+        .await?
+        .context("relational event was not stored")?;
+    ensure!(restored.request_id == event.request_id && restored.duration_ms == 42);
+    ensure!(restored.iterations.is_none() && restored.routing_trace.is_none());
     ensure!(
-        !extended_inline,
-        "a ~5 KB incompressible payload must move to TOAST under STORAGE EXTENDED"
-    );
-
-    // The operator step from docs/runbook/request-diagnostics.md.
-    sqlx::query("ALTER TABLE request_events_v1 ALTER COLUMN payload SET STORAGE MAIN")
-        .execute(pool)
-        .await?;
-    let attstorage = payload_attstorage(pool).await?;
-    ensure!(
-        attstorage == "m",
-        "the operator step must set STORAGE MAIN, got attstorage={attstorage}"
-    );
-
-    append_with_blob(storage, "toast-2kb", 1, "x".repeat(1_800)).await?;
-    append_with_blob(storage, "toast-5kb", 2, incompressible_ascii(5_000, 0x0135)).await?;
-    append_with_blob(
-        storage,
-        "toast-20kb",
-        3,
-        incompressible_ascii(20_000, 0x2135),
-    )
-    .await?;
-
-    let (small_bytes, small_inline) = payload_storage(pool, "toast-2kb").await?;
-    ensure!(small_bytes >= 1_800, "2 KB payload is {small_bytes} bytes");
-    ensure!(small_inline, "a ~2 KB payload must stay inline");
-
-    let (mid_bytes, mid_inline) = payload_storage(pool, "toast-5kb").await?;
-    ensure!(mid_bytes >= 5_000, "5 KB payload is {mid_bytes} bytes");
-    ensure!(
-        mid_inline,
-        "a ~5 KB incompressible payload must stay inline under STORAGE MAIN"
-    );
-
-    let (large_bytes, large_inline) = payload_storage(pool, "toast-20kb").await?;
-    ensure!(
-        large_bytes >= 20_000,
-        "20 KB payload is {large_bytes} bytes"
-    );
-    ensure!(
-        !large_inline,
-        "a 20 KB incompressible payload exceeds a heap page and must still be externalized"
+        restored.cache_breakpoints.is_empty()
+            && restored.cache_control_message_indices.is_empty()
+            && restored.internal_errors.is_empty()
     );
     Ok(())
 }

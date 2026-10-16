@@ -454,13 +454,25 @@ pub trait UpstreamSubscriptionQuotaStore: Send + Sync {
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaSample>>;
 
-    /// Inserts semantic checkpoints, skipping a row when the latest persisted
-    /// checkpoint for `(upstream_id, window, source)` has the same semantic
-    /// fingerprint. Returns the number of rows inserted.
+    /// Inserts semantic checkpoints, skipping an identical fingerprint or a
+    /// utilization-only change below 0.001 while the checkpoint's status,
+    /// reset, overage, fallback, disabled, and extra-usage flags are unchanged.
+    /// Returns the number of rows inserted.
     async fn put_subscription_quota_checkpoints(
         &self,
         records: &[SubscriptionQuotaCheckpointRecord],
     ) -> StorageResult<usize>;
+
+    /// Removes at most `batch_size` old checkpoints, preserving the latest
+    /// checkpoint at or before the cutoff for each upstream/window/source key.
+    async fn prune_subscription_quota_checkpoints_before(
+        &self,
+        cutoff_unix_millis: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = (cutoff_unix_millis, batch_size);
+        Ok(0)
+    }
 }
 
 #[async_trait]

@@ -11,8 +11,8 @@ use cc_lb_config::Config;
 use cc_lb_control::{InMemoryBus, RequestEventBus};
 use cc_lb_domain::{InternalError, RoutingTrace};
 use cc_lb_request_log::{
-    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-    RequestDiagnostics, RequestEventKind, RequestEventPartial, RequestEventUpdate,
+    RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestDiagnostics, RequestEventKind,
+    RequestEventPartial, RequestEventUpdate,
 };
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{TOKEN, app, authed_bytes, temp_storage, test_state};
@@ -419,7 +419,7 @@ async fn events_stream_reconnect_with_last_event_id_still_requires_auth() {
 }
 
 #[tokio::test]
-async fn events_stream_serves_stripped_backfill_and_live_finals_without_diagnostic_keys() {
+async fn events_stream_serves_rows_without_diagnostic_keys_and_matching_live_finals() {
     let (_dir, storage) = temp_storage().await;
     let full = with_diagnostics(request_event(1));
     let stripped_row = stripped(request_event(2));
@@ -442,7 +442,6 @@ async fn events_stream_serves_stripped_backfill_and_live_finals_without_diagnost
             text.push_str(std::str::from_utf8(&data).unwrap());
         }
     }
-    // Strip-on live final: the assembler publishes the same stripped row it stored.
     bus.publish(RequestEventUpdate::final_(stripped(request_event(3)), 3));
     while message_events(&text).len() < 3 {
         let frame = timeout(Duration::from_secs(2), body.frame())
@@ -461,16 +460,20 @@ async fn events_stream_serves_stripped_backfill_and_live_finals_without_diagnost
         .map(|event| event["request_id"].clone())
         .collect();
     assert_eq!(request_ids, ["req-1", "req-2", "req-3"]);
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-        assert!(events[0].get(key).is_some(), "full backfill row lost {key}");
-        for event in &events[1..] {
+    for event in &events {
+        for key in [
+            "cache_breakpoints",
+            "cache_control_message_indices",
+            "routing_trace",
+            "iterations",
+            "internal_errors",
+        ] {
             assert!(
                 event.get(key).is_none(),
-                "stripped row still exposes {key}: {event}"
+                "streamed event exposes diagnostic key {key}: {event}"
             );
         }
     }
-    // The backfilled stripped row and the live stripped final are the same shape.
     let normalize = |event: &Value| {
         let mut event = event.as_object().unwrap().clone();
         for key in ["request_id", "event_id", "ts", "ts_ms"] {
@@ -478,12 +481,8 @@ async fn events_stream_serves_stripped_backfill_and_live_finals_without_diagnost
         }
         event
     };
+    assert_eq!(normalize(&events[0]), normalize(&events[1]));
     assert_eq!(normalize(&events[1]), normalize(&events[2]));
-    let mut full_without_diagnostics = normalize(&events[0]);
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-        full_without_diagnostics.remove(key);
-    }
-    assert_eq!(full_without_diagnostics, normalize(&events[1]));
 }
 
 fn message_events(text: &str) -> Vec<Value> {
@@ -520,7 +519,7 @@ fn with_diagnostics(mut event: RequestEvent) -> RequestEvent {
     event
 }
 
-/// The row exactly as the assembler persists and publishes it with strip on.
+/// The row exactly as the assembler persists and publishes it, without log-only diagnostics.
 fn stripped(event: RequestEvent) -> RequestEvent {
     let mut event = with_diagnostics(event);
     let taken = RequestDiagnostics::take_from(&mut event);
