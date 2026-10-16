@@ -253,6 +253,138 @@ async fn subscription_quota_pool_history_caps_chart_points_and_preserves_peak() 
 }
 
 #[tokio::test]
+async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_checkpoint_deadbanded()
+{
+    let server = admin_test_common::spawn_admin_server_with_clock(test_clock()).await;
+    let upstream_id = create_oauth_upstream(&server, "deadband-latest-refresh").await;
+    let mut first_sample = quota_observation(
+        upstream_id,
+        CHECKPOINT_TEST_NOW_UNIX_SECS - 600,
+        1,
+        SubscriptionQuotaSource::Api,
+        0.0,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    first_sample.window = SubscriptionQuotaWindow::SevenDayFable;
+    let mut refreshed_unchanged = first_sample.clone();
+    refreshed_unchanged.sample_id = Uuid::from_u128(2);
+    refreshed_unchanged.observed_at_unix_millis = (CHECKPOINT_TEST_NOW_UNIX_SECS - 10) * 1_000;
+    refreshed_unchanged.ingested_at_unix_millis = (CHECKPOINT_TEST_NOW_UNIX_SECS - 10) * 1_000;
+    server
+        .storage
+        .record_subscription_quota_samples(&[first_sample, refreshed_unchanged])
+        .await
+        .unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=7d_fable&source=api&max_staleness_secs=1800"
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let window = &body["windows"][0];
+    assert_eq!(window["missing_capacity_upstreams"], 0);
+    assert_eq!(window["stale_upstreams"], 0);
+    assert_eq!(
+        window["provider_lots"][0]["observed_at_unix_millis"],
+        (CHECKPOINT_TEST_NOW_UNIX_SECS - 10) * 1_000
+    );
+
+    let (status, _, zero_stale_body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=7d_fable&source=api&max_staleness_secs=0"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(zero_stale_body["windows"][0]["stale_upstreams"], 1);
+    assert_eq!(
+        zero_stale_body["windows"][0]["provider_lots"][0]["state"],
+        "stale"
+    );
+
+    let initial_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Some(vec![upstream_id]),
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ],
+        cc_lb_storage_api::SubscriptionQuotaSourceMerge::Api,
+        1_800,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &initial_aggregate,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+
+    let mut moved_five_hour = quota_observation(
+        upstream_id,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 60,
+        3,
+        SubscriptionQuotaSource::Api,
+        0.25,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    moved_five_hour.window = SubscriptionQuotaWindow::FiveHour;
+    server
+        .storage
+        .record_subscription_quota_samples(&[moved_five_hour])
+        .await
+        .unwrap();
+    let second_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Some(vec![upstream_id]),
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ],
+        cc_lb_storage_api::SubscriptionQuotaSourceMerge::Api,
+        1_800,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 60),
+    )
+    .await
+    .unwrap();
+    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &second_aggregate,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 60),
+    )
+    .await
+    .unwrap();
+
+    let (status, _, history_body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/pool-history?windows=5h,7d,7d_fable&since_unix_secs={}&until_unix_secs={}&series_projection=chart",
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+            CHECKPOINT_TEST_NOW_UNIX_SECS + 60
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    for idx in 0..3 {
+        let series = history_body["windows"][idx]["series"].as_array().unwrap();
+        assert_eq!(
+            series.len(),
+            2,
+            "every pooled window must be recorded atomically at both ticks"
+        );
+    }
+}
+
+#[tokio::test]
 async fn subscription_quota_checkpoint_series_returns_steps_without_fabricated_leading_zeroes() {
     let server = admin_test_common::spawn_admin_server().await;
     let upstream_id = create_oauth_upstream(&server, "checkpoint-series").await;

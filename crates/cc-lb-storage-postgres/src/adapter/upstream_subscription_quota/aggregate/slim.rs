@@ -28,16 +28,22 @@ pub(in super::super) async fn list_slim_checkpoints(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "WITH anchors AS ( \
-             SELECT DISTINCT ON (upstream_id, \"window\", source) \
-                    upstream_id, \"window\", source, changed_at_unix_millis, sample_id, \
-                    utilization, status, resets_at_unix_secs \
-             FROM upstream_subscription_quota_checkpoints_v1 \
-             WHERE upstream_id = ANY($1::uuid[]) \
-               AND \"window\" = ANY($2::text[]) \
-               AND source = ANY($3::text[]) \
-               AND changed_at_unix_millis < $4 \
-             ORDER BY upstream_id ASC, \"window\" ASC, source ASC, \
-                      changed_at_unix_millis DESC, sample_id DESC \
+             SELECT c.upstream_id, c.\"window\", c.source, c.changed_at_unix_millis, c.sample_id, \
+                    c.utilization, c.status, c.resets_at_unix_secs \
+             FROM UNNEST($1::uuid[]) AS u(upstream_id) \
+             CROSS JOIN UNNEST($2::text[]) AS w(\"window\") \
+             CROSS JOIN UNNEST($3::text[]) AS s(source) \
+             CROSS JOIN LATERAL ( \
+                 SELECT upstream_id, \"window\", source, changed_at_unix_millis, sample_id, \
+                        utilization, status, resets_at_unix_secs \
+                 FROM upstream_subscription_quota_checkpoints_v1 \
+                 WHERE upstream_id = u.upstream_id \
+                   AND \"window\" = w.\"window\" \
+                   AND source = s.source \
+                   AND changed_at_unix_millis < $4 \
+                 ORDER BY changed_at_unix_millis DESC, sample_id DESC \
+                 LIMIT 1 \
+             ) c \
          ), ranged AS ( \
              SELECT upstream_id, \"window\", source, changed_at_unix_millis, sample_id, \
                     utilization, status, resets_at_unix_secs \
