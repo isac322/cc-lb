@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-10-16
+
 ### Fixed
 
 - Pool quota history snapshots now record all pooled windows (`5h`, `7d`, `7d_fable`) atomically at the same `snapshot_at_unix_secs` whenever any pooled window crosses the `0.001` utilization deadband or 1-hour heartbeat, so slower-moving windows (`7d`, `7d_fable`) remain timestamp-aligned with `5h` without false `null` dropouts on the Overview pool quota chart.
@@ -461,7 +463,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.2...HEAD
+[2.0.2]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...cc-lb-v2.0.2
 [2.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...cc-lb-v2.0.1
 [2.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.1...cc-lb-v2.0.0
 [1.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...cc-lb-v1.0.1
