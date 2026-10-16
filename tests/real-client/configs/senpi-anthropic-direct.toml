@@ -22,7 +22,7 @@ key_env = "CC_LB_MASTER_KEY"
 tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
-
+request_diagnostics_log = true
 [[admin.auth.providers]]
 kind = "static_token"
 id = "test"

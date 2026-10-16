@@ -23,6 +23,7 @@ impl PriceCatalogCache for PostgresStorage {
         let payload_hash = sha256_hex(json_bytes);
         let fetched_at_ms = u64_to_i64(fetched_at_ms, "price catalog fetched_at_ms")?;
 
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         sqlx::query(
             "INSERT INTO price_catalog_snapshots_v1 (payload, payload_hash, fetched_at_ms) \
              VALUES ($1, $2, $3) \
@@ -31,10 +32,21 @@ impl PriceCatalogCache for PostgresStorage {
         .bind(payload)
         .bind(&payload_hash)
         .bind(fetched_at_ms)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
 
+        sqlx::query(
+            "DELETE FROM price_catalog_snapshots_v1
+             WHERE id NOT IN (
+                 SELECT id FROM price_catalog_snapshots_v1
+                 ORDER BY fetched_at_ms DESC, id DESC LIMIT 3
+             )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 

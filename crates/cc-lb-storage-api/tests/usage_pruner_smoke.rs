@@ -2,8 +2,12 @@ use cc_lb_clock::{Clock, ClockHandle, SystemClock, TestClock, unix_millis, unix_
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamStore};
 use cc_lb_storage_api::{
     ApiKeyUsagePollOutcome, ApiUsageAttribution, AuditEntry, AuditQueryScope, AuditStore,
-    MetaStore, RequestEvent, RequestEventStore, RequestEventStreamFilters, UpstreamApiKeyStore,
-    UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketWrite,
+    MetaStore, PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, RequestEvent, RequestEventStore,
+    RequestEventStreamFilters, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaSample,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaWindow,
+    UpstreamApiKeyStore, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketWrite,
+    UpstreamSubscriptionQuotaAggregateStore, UpstreamSubscriptionQuotaStore, UsageRollupResolution,
+    UsageRollupStore,
     usage_pruner::{PruneResult, UsagePruner, utc_month_start_unix_secs},
 };
 use cc_lb_storage_sqlite::SqliteStorage;
@@ -75,6 +79,212 @@ async fn prune_old_audit_log() -> Result<(), Box<dyn std::error::Error>> {
         .query_recent_audit(AuditQueryScope::All, 0, u64::MAX, 100, false)
         .await?;
     assert_eq!(remaining.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auxiliary_rollups_follow_resolution_horizons() -> Result<(), Box<dyn std::error::Error>> {
+    for retention_days in [90, 7, 0] {
+        let (_dir, storage) = new_storage().await?;
+        let clock = test_clock();
+        let now = now_unix_secs(&*clock);
+        for age_days in [1, 15, 91] {
+            let ts = now.saturating_sub(age_days * DAY_SECS);
+            storage
+                .append_request_event(&RequestEvent {
+                    event_id: Some(format!("rollup-retention-{age_days}")),
+                    request_id: format!("rollup-retention-{age_days}"),
+                    ts,
+                    ts_ms: Some(ts * 1_000),
+                    status: 401,
+                    duration_ms: 25,
+                    input_tokens: Some(10),
+                    ..Default::default()
+                })
+                .await?;
+        }
+        assert_eq!(storage.rollup_usage_once().await?.processed_events, 3);
+        UsagePruner::new(Arc::clone(&storage), retention_days, Arc::clone(&clock))
+            .prune_once()
+            .await;
+        for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
+            let expected_count = match (retention_days, resolution) {
+                (0, _) => 3,
+                (90, UsageRollupResolution::Hour) => 2,
+                _ => 1,
+            };
+            let rollups = storage
+                .query_usage_rollups_in_range(resolution, 0, now + 1)
+                .await?;
+            assert_eq!(
+                rollups.len(),
+                expected_count,
+                "retention={retention_days}, resolution={resolution:?}"
+            );
+            let excluded = storage
+                .query_overview_excluded_error_buckets_in_range(resolution, 0, now + 1)
+                .await?;
+            assert_eq!(
+                excluded.len(),
+                expected_count,
+                "excluded retention={retention_days}, resolution={resolution:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn auxiliary_rollups_prune_until_all_batches_complete()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, storage) = new_storage().await?;
+    let clock = test_clock();
+    let now = now_unix_secs(&*clock);
+    for index in 0..1_001 {
+        let ts = now.saturating_sub(15 * DAY_SECS) + index * 60;
+        storage
+            .append_request_event(&RequestEvent {
+                event_id: Some(format!("rollup-batch-{index}")),
+                request_id: format!("rollup-batch-{index}"),
+                principal_id: Some(format!("principal-{index}")),
+                ts,
+                ts_ms: Some(ts * 1_000),
+                status: 401,
+                duration_ms: 25,
+                ..Default::default()
+            })
+            .await?;
+    }
+    assert_eq!(storage.rollup_usage_once().await?.processed_events, 1_001);
+    UsagePruner::new(Arc::clone(&storage), 90, Arc::clone(&clock))
+        .prune_once()
+        .await;
+    assert!(
+        storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Minute, 0, now + 1)
+            .await?
+            .is_empty()
+    );
+    assert!(
+        storage
+            .query_overview_excluded_error_buckets_in_range(
+                UsageRollupResolution::Minute,
+                0,
+                now + 1,
+            )
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .query_usage_rollups_in_range(UsageRollupResolution::Hour, 0, now + 1)
+            .await?
+            .len(),
+        1_001
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn auxiliary_quota_history_keeps_cutoff_anchors() -> Result<(), Box<dyn std::error::Error>> {
+    for retention_days in [90, 7, 0] {
+        let (_dir, storage) = new_storage().await?;
+        let clock = test_clock();
+        let now = now_unix_secs(&*clock);
+        let upstream_id = seed_usage_buckets(storage.as_ref(), &[]).await?;
+        for (index, age_days) in [95, 50, 31, 29, 1].into_iter().enumerate() {
+            let ts = now.saturating_sub(age_days * DAY_SECS);
+            let utilization = Some((index as f64 + 1.0) / 10.0);
+            storage
+                .record_subscription_quota_samples(&[SubscriptionQuotaSample {
+                    upstream_id,
+                    window: SubscriptionQuotaWindow::FiveHour,
+                    source: SubscriptionQuotaSource::Api,
+                    sample_kind: SubscriptionQuotaSampleKind::Sample,
+                    observed_at_unix_millis: ts * 1_000,
+                    sample_id: Uuid::new_v4(),
+                    utilization,
+                    status: None,
+                    resets_at_unix_secs: None,
+                    surpassed_threshold: None,
+                    representative_claim: None,
+                    fallback_percentage: None,
+                    fallback_available: None,
+                    overage_in_use: None,
+                    overage_period_monthly_utilization: None,
+                    upgrade_paths: None,
+                    disabled_reason: None,
+                    extra_usage_enabled: None,
+                    extra_usage_monthly_limit: None,
+                    extra_usage_used_credits: None,
+                    ingested_at_unix_millis: ts * 1_000,
+                }])
+                .await?;
+            storage
+                .record_pool_quota_snapshots(&[PoolQuotaSnapshotRecord {
+                    snapshot_at_unix_secs: i64::try_from(ts)?,
+                    window: SubscriptionQuotaWindow::FiveHour,
+                    utilization,
+                    weighted_utilization_sum: index as f64 + 1.0,
+                    capacity_ratio_sum: 10.0,
+                    eligible_upstreams: 1,
+                    contributing_upstreams: 1,
+                    stale_upstreams: 0,
+                    missing_observation_upstreams: 0,
+                    missing_metadata_upstreams: 0,
+                    header_contributing_upstreams: 0,
+                    api_contributing_upstreams: 1,
+                    max_observed_at_unix_millis: Some(i64::try_from(ts * 1_000)?),
+                    computed_at_unix_millis: i64::try_from(ts * 1_000)?,
+                    policy_version: 1,
+                }])
+                .await?;
+        }
+        UsagePruner::new(Arc::clone(&storage), retention_days, Arc::clone(&clock))
+            .prune_once()
+            .await;
+        let expected_ages: &[u64] = match retention_days {
+            0 => &[95, 50, 31, 29, 1],
+            7 => &[29, 1],
+            _ => &[31, 29, 1],
+        };
+        let expected_times: Vec<u64> = expected_ages
+            .iter()
+            .map(|age| now - age * DAY_SECS)
+            .collect();
+        let checkpoints = storage
+            .list_subscription_quota_slim_checkpoints(SubscriptionQuotaCheckpointRangeQuery {
+                upstream_ids: vec![upstream_id],
+                windows: vec![SubscriptionQuotaWindow::FiveHour],
+                sources: vec![SubscriptionQuotaSource::Api],
+                since_unix_millis: 0,
+                until_unix_millis: now * 1_000,
+            })
+            .await?;
+        assert_eq!(
+            checkpoints
+                .iter()
+                .map(|row| row.changed_at_unix_millis / 1_000)
+                .collect::<Vec<_>>(),
+            expected_times,
+            "checkpoint retention={retention_days}"
+        );
+        let snapshots = storage
+            .list_pool_quota_snapshot_summaries_in_range(
+                &[SubscriptionQuotaWindow::FiveHour],
+                0,
+                i64::try_from(now)?,
+            )
+            .await?;
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|row| u64::try_from(row.snapshot_at_unix_secs))
+                .collect::<Result<Vec<_>, _>>()?,
+            expected_times,
+            "pool retention={retention_days}"
+        );
+    }
     Ok(())
 }
 

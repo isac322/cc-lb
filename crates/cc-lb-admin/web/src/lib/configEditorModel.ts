@@ -38,13 +38,7 @@ export const CONFIG_EDITOR_CATEGORIES = [
     id: 'data',
     label: 'Storage & data',
     description: 'Primary storage, encryption, event transport, and retention.',
-    roots: [
-      'storage',
-      'aead',
-      'event_bus',
-      'request_event_retention_days',
-      'request_event_strip_diagnostics',
-    ],
+    roots: ['storage', 'aead', 'event_bus', 'request_event_retention_days'],
   },
   {
     id: 'scheduling',
@@ -233,18 +227,11 @@ export const CONFIG_EDITOR_SECTIONS = [
       'How long request events and partial records are kept, and which request event fields are stored.',
     paths: [
       'request_event_retention_days',
-      'request_event_strip_diagnostics',
       'event_bus.partial_retention_ttl_secs',
       'event_bus.partial_retention_max_entries',
     ],
     advancedPaths: [],
-    danger: [
-      {
-        path: 'request_event_strip_diagnostics',
-        impact:
-          'Stops storing diagnostic fields in the database; they then exist only in the stdout diagnostics log.',
-      },
-    ],
+    danger: [],
   },
   {
     id: 'recurring-jobs',
@@ -1331,7 +1318,7 @@ const CONFIG_FIELD_GUIDANCE: readonly {
       enabled:
         'Diagnostics reach your log pipeline for analysis; stdout volume grows by roughly 2–25 KiB per request.',
       disabled:
-        'No diagnostics lines are written; the fields stay only in stored request events.',
+        'No diagnostics lines are written. Log-only diagnostics are discarded; request outcomes and timings remain in the database.',
       impactDimensions: ['observability', 'cost'],
     },
   },
@@ -1396,18 +1383,6 @@ const CONFIG_FIELD_GUIDANCE: readonly {
         'Deletes history sooner, saving storage but shortening the audit window.',
       higher: 'Keeps a longer audit trail at steadily growing storage cost.',
       impactDimensions: ['storage', 'durability'],
-    },
-  },
-  {
-    pattern: 'request_event_strip_diagnostics',
-    guidance: {
-      description:
-        'Drop cache breakpoints, cache-control indices, routing trace, iterations, and internal errors from stored request events. Requires observability.request_diagnostics_log.',
-      enabled:
-        'Stored rows shrink substantially; the diagnostic fields exist only in the stdout diagnostics log.',
-      disabled:
-        'Stored rows keep the diagnostic fields alongside the stdout log, at higher database storage cost.',
-      impactDimensions: ['storage', 'observability'],
     },
   },
   {

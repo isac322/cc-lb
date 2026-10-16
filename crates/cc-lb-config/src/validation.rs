@@ -33,7 +33,6 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
-    validate_request_diagnostics(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -46,7 +45,6 @@ pub fn validate_config_without_filesystem(config: &Config) -> Result<(), ConfigE
     validate_oauth(config)?;
     validate_upstream_affinity(config)?;
     validate_api_key_usage_poll(config)?;
-    validate_request_diagnostics(config)?;
     wasmtime::validate_wasmtime_runtime(config)?;
     Ok(())
 }
@@ -302,18 +300,6 @@ fn validate_oauth(config: &Config) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Stripping diagnostic fields from stored rows is only lossless when the
-/// stdout diagnostics log carries them instead.
-fn validate_request_diagnostics(config: &Config) -> Result<(), ValidationError> {
-    if config.request_event_strip_diagnostics && !config.observability.request_diagnostics_log {
-        return Err(ValidationError::new(
-            "request_event_strip_diagnostics",
-            "request_event_strip_diagnostics requires observability.request_diagnostics_log = true; otherwise diagnostic fields are discarded",
-        ));
-    }
-    Ok(())
-}
-
 pub fn validate_postgres_url(url: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(url).map_err(|_| ConfigError::InvalidPostgresUrl {
         message: "invalid URL syntax".to_owned(),
@@ -348,68 +334,5 @@ fn ensure_existing_file(field: &str, path: &Path) -> Result<(), ValidationError>
             field,
             format!("not a file: {}", path.display()),
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config_with(strip: bool, log: bool) -> Config {
-        let mut config = Config {
-            request_event_strip_diagnostics: strip,
-            ..Config::default()
-        };
-        config.observability.request_diagnostics_log = log;
-        config
-    }
-
-    #[test]
-    fn request_diagnostics_defaults_are_off_and_valid() {
-        let config = Config::default();
-        assert!(!config.request_event_strip_diagnostics);
-        assert!(!config.observability.request_diagnostics_log);
-        assert_eq!(validate_request_diagnostics(&config), Ok(()));
-    }
-
-    #[test]
-    fn strip_without_diagnostics_log_is_rejected() {
-        let config = config_with(true, false);
-        let expected = Err(ValidationError::new(
-            "request_event_strip_diagnostics",
-            "request_event_strip_diagnostics requires observability.request_diagnostics_log = true; otherwise diagnostic fields are discarded",
-        ));
-        assert_eq!(validate_request_diagnostics(&config), expected);
-
-        let entry_points = [
-            ("validate_config", validate_config(&config)),
-            (
-                "validate_config_without_filesystem",
-                validate_config_without_filesystem(&config),
-            ),
-        ];
-        for (name, result) in entry_points {
-            let error = match result {
-                Ok(()) => panic!("{name} accepted strip without diagnostics log"),
-                Err(error) => error.to_string(),
-            };
-            assert!(
-                error.starts_with("request_event_strip_diagnostics: "),
-                "{name} returned an unexpected error: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_other_combination_is_accepted() {
-        for (strip, log) in [(false, false), (false, true), (true, true)] {
-            let config = config_with(strip, log);
-            let label = format!("strip={strip} log={log}");
-            assert_eq!(validate_request_diagnostics(&config), Ok(()), "{label}");
-            assert!(
-                validate_config_without_filesystem(&config).is_ok(),
-                "{label}"
-            );
-        }
     }
 }

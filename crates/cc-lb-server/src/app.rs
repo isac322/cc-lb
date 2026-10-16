@@ -1270,10 +1270,8 @@ async fn build_app_with_storage_inner(
                 cc_lb_engine::StdoutRequestDiagnosticsSink::new()
                     .map_err(BuildError::RequestDiagnosticsSink)?,
             )),
-            strip_payload: config.request_event_strip_diagnostics,
         }
     } else {
-        // Validation rejects strip without the log, so strip stays off here.
         cc_lb_engine::RequestDiagnosticsOptions::default()
     };
     let lifecycle_event_assembler_handle =

@@ -11,7 +11,7 @@ use cc_lb_control::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore, RequestEvent,
+    Limit as KeyLimit, LimitKind as KeyLimitKind, MetaStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
@@ -488,20 +488,19 @@ async fn wait_for_usage(
             .max_connections(1)
             .connect(&database_url)
             .await?;
-        let rows = sqlx::query("SELECT payload FROM request_events_v1")
-            .fetch_all(&pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT list_cost_usd_micros FROM request_events_v1 WHERE key_id = ?")
+                .bind(key_id)
+                .fetch_all(&pool)
+                .await?;
         pool.close().await;
 
         let mut request_count = 0_u64;
         let mut cost_usd_micros = 0_i64;
         for row in rows {
-            let payload: String = row.try_get("payload")?;
-            let event: RequestEvent = serde_json::from_str(&payload)?;
-            if event.key_id.as_deref() == Some(key_id) {
-                request_count += 1;
-                cost_usd_micros += event.cost_usd_micros.unwrap_or(0);
-            }
+            request_count += 1;
+            let cost: Option<i64> = row.try_get("list_cost_usd_micros")?;
+            cost_usd_micros += cost.unwrap_or(0);
         }
         if request_count >= 1 {
             return Ok((request_count, cost_usd_micros));

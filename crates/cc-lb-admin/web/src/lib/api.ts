@@ -496,22 +496,13 @@ export const RequestEventPartialSchema = z.looseObject({
   thinking_tokens: z.number().nullable().optional(),
   thinking_budget_tokens: z.number().nullable().optional(),
   reasoning_effort: z.string().nullable().optional(),
-  web_search_requests: z.number().nullable().optional(),
-  web_fetch_requests: z.number().nullable().optional(),
   service_tier: z.string().nullable().optional(),
-  inference_geo: z.string().nullable().optional(),
   cost_usd_micros: z.number().nullable().optional(),
   cost_input_micros: z.number().nullable().optional(),
   cost_output_micros: z.number().nullable().optional(),
   cost_cache_creation_5m_micros: z.number().nullable().optional(),
   cost_cache_creation_1h_micros: z.number().nullable().optional(),
   cost_cache_read_micros: z.number().nullable().optional(),
-  cache_control_block_count: z.number().nullable().optional(),
-  cache_prefix_hash: z.string().nullable().optional(),
-  quota_urgency_5h: z.number().nullable().optional(),
-  quota_urgency_7d: z.number().nullable().optional(),
-  quota_urgency_combined: z.number().nullable().optional(),
-  quota_warning_multiplier: z.number().nullable().optional(),
   auth_ms: z.number().nullable().optional(),
   route_ms: z.number().nullable().optional(),
   limit_reserve_ms: z.number().nullable().optional(),
@@ -526,7 +517,6 @@ export const RequestEventPartialSchema = z.looseObject({
   sign_ms: z.number().nullable().optional(),
   upstream_ttfb_ms: z.number().nullable().optional(),
   upstream_body_ms: z.number().nullable().optional(),
-  first_body_chunk_ms: z.number().nullable().optional(),
   stream_message_start_ms: z.number().nullable().optional(),
   stream_content_block_start_ms: z.number().nullable().optional(),
   stream_first_content_delta_ms: z.number().nullable().optional(),
@@ -596,20 +586,13 @@ export interface RequestEvent {
   thinking_tokens?: number;
   thinking_budget_tokens?: number;
   reasoning_effort?: string;
-  web_search_requests?: number;
-  web_fetch_requests?: number;
   service_tier?: string;
-  inference_geo?: string;
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_creation_input_tokens_5m?: number;
   cache_creation_input_tokens_1h?: number;
   cache_read_input_tokens?: number;
-  readonly quota_urgency_5h?: number | null;
-  readonly quota_urgency_7d?: number | null;
-  readonly quota_urgency_combined?: number | null;
-  readonly quota_warning_multiplier?: number | null;
   cost_usd_micros?: number;
   cost_input_micros?: number;
   cost_output_micros?: number;
@@ -650,7 +633,6 @@ export interface RequestEvent {
   dns_ms?: number;
   connect_ms?: number;
   connection_reused?: boolean;
-  first_body_chunk_ms?: number;
   body_chunk_count?: number;
   body_bytes?: number;
   stream_message_start_ms?: number;

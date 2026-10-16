@@ -3,11 +3,12 @@ use std::{str::FromStr, sync::Arc};
 use anyhow::Result;
 use cc_lb_clock::SystemClock;
 use cc_lb_storage_api::{
-    MetaStore, SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
+    CacheKeepaliveSessionStore, MetaStore, PoolQuotaHistoryStore, PriceCatalogCache,
+    SubscriptionQuotaCheckpointRangeQuery, SubscriptionQuotaCheckpointRecord,
     SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSample, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamSubscriptionQuotaAggregateStore,
-    UpstreamSubscriptionQuotaStore, UsageTokenInterval, UsageTokenIntervalStore,
+    UpstreamSubscriptionQuotaStore, UsageRollupStore, UsageTokenInterval, UsageTokenIntervalStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -112,14 +113,192 @@ async fn quota_aggregates_preserve_anchor_ties_and_inclusive_token_boundaries() 
     fixture.drop_schema().await
 }
 
-fn checkpoint(
+#[tokio::test]
+async fn quota_deadband_keeps_exact_latest_and_pruning_preserves_each_anchor() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let upstream = Uuid::from_u128(700);
+        storage
+            .record_subscription_quota_samples(&[sample(upstream, 10, 1, 0.2, 1000)])
+            .await?;
+        storage
+            .record_subscription_quota_samples(&[sample(upstream, 20, 2, 0.2005, 1000)])
+            .await?;
+        let latest = storage
+            .list_latest_subscription_quota_for_upstreams(&[upstream])
+            .await?;
+        assert_eq!(latest[0].utilization, Some(0.2005));
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM upstream_subscription_quota_checkpoints_v1")
+                .fetch_one(&fixture.pool)
+                .await?;
+        assert_eq!(
+            count, 1,
+            "deadband must skip only the checkpoint, never the exact latest sample"
+        );
+        storage
+            .record_subscription_quota_samples(&[sample(upstream, 30, 3, 0.202, 1000)])
+            .await?;
+        let mut changed = sample(upstream, 40, 4, 0.2025, 1000);
+        changed.status = Some(SubscriptionQuotaStatus::Rejected);
+        storage
+            .record_subscription_quota_samples(&[changed])
+            .await?;
+        let mut threshold_changed = sample(upstream, 45, 8, 0.2026, 1000);
+        threshold_changed.status = Some(SubscriptionQuotaStatus::Rejected);
+        threshold_changed.surpassed_threshold = Some(0.95);
+        storage
+            .record_subscription_quota_samples(&[threshold_changed])
+            .await?;
+        storage
+            .put_subscription_quota_checkpoints(&[
+                checkpoint(upstream, 50, 5, 0.4, 1000),
+                checkpoint(upstream, 50, 6, 0.5, 1000),
+                checkpoint(Uuid::from_u128(701), 5, 7, 0.4, 1000),
+            ])
+            .await?;
+        assert_eq!(
+            storage
+                .prune_subscription_quota_checkpoints_before(60, 0)
+                .await?,
+            0
+        );
+        assert_eq!(
+            storage
+                .prune_subscription_quota_checkpoints_before(60, 2)
+                .await?,
+            2
+        );
+        assert_eq!(
+            storage
+                .prune_subscription_quota_checkpoints_before(60, 100)
+                .await?,
+            3
+        );
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT sample_id FROM upstream_subscription_quota_checkpoints_v1 ORDER BY sample_id",
+        )
+        .fetch_all(&fixture.pool)
+        .await?;
+        assert_eq!(ids, vec![Uuid::from_u128(6), Uuid::from_u128(7)]);
+        assert_eq!(
+            storage
+                .prune_subscription_quota_checkpoints_before(60, 100)
+                .await?,
+            0
+        );
+        Ok(())
+    }
+    .await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn auxiliary_pruners_share_batch_budget_and_pool_ranges_keep_left_anchors() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        let upstream = Uuid::from_u128(800);
+        insert_rollup(&fixture.pool, upstream, 10, [1;4]).await?;
+        insert_rollup(&fixture.pool, upstream, 20, [1;4]).await?;
+        sqlx::query("INSERT INTO overview_excluded_error_rollups_v1 (resolution, bucket_start_unix_secs, error_count, updated_at) VALUES ('minute', 10, 1, NOW()), ('hour', 10, 1, NOW())")
+            .execute(&fixture.pool).await?;
+        assert_eq!(storage.prune_usage_rollups_before(15, 5, 0).await?, 0);
+        assert_eq!(storage.prune_usage_rollups_before(15, 5, 1).await?, 1);
+        assert_eq!(storage.prune_usage_rollups_before(15, 5, 1).await?, 1);
+        assert_eq!(storage.prune_usage_rollups_before(15, 5, 1).await?, 0);
+        assert_eq!(storage.prune_usage_rollups_before(15, 15, 10).await?, 1);
+        sqlx::query("INSERT INTO cache_keepalive_decisions (source_ref_id, decision, reason, generation, ts, last_message_at_ms) VALUES ('old-1', 'skip', 'test', 1, 10, 10000), ('old-2', 'skip', 'test', 1, 10, 10000), ('boundary', 'skip', 'test', 1, 20, 20000)")
+            .execute(&fixture.pool).await?;
+        sqlx::query("INSERT INTO cache_keepalive_turns (source_ref_id, session_key_hash, principal_id, upstream_id, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, cost_micros, hit_miss, ts) VALUES ('old-turn', 'session', 'principal', $1, 'model', 0,0,0,0,0,0,0,'hit',10)")
+            .bind(upstream).execute(&fixture.pool).await?;
+        assert_eq!(storage.prune_cache_keepalive_history_before(20, 0).await?, 0);
+        assert_eq!(storage.prune_cache_keepalive_history_before(20, 2).await?, 2);
+        assert_eq!(storage.prune_cache_keepalive_history_before(20, 2).await?, 1);
+        assert_eq!(storage.prune_cache_keepalive_history_before(20, 2).await?, 0);
+        let decisions: Vec<String> = sqlx::query_scalar("SELECT source_ref_id FROM cache_keepalive_decisions")
+            .fetch_all(&fixture.pool).await?;
+        assert_eq!(decisions, vec!["boundary"]);
+        sqlx::query("INSERT INTO pool_subscription_quota_history_v1 (snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, computed_at_unix_millis) SELECT t, w, t::double precision / 100, 0,0,0,0,0,0,0,0,0,0 FROM UNNEST(ARRAY[10::bigint,20,30]) t CROSS JOIN UNNEST(ARRAY['5h','7d']) w")
+            .execute(&fixture.pool).await?;
+        assert_eq!(storage.prune_pool_quota_history_before(25, 0).await?, 0);
+        assert_eq!(storage.prune_pool_quota_history_before(25, 1).await?, 1);
+        assert_eq!(storage.prune_pool_quota_history_before(25, 10).await?, 1);
+        let windows = [SubscriptionQuotaWindow::FiveHour, SubscriptionQuotaWindow::SevenDay];
+        let summaries = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 25, 35).await?;
+        assert_eq!(summaries.len(), 4);
+        let idle = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 25, 29).await?;
+        assert_eq!(idle.len(), 2);
+        assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == 25 && row.utilization == Some(0.2)));
+        let exact = storage.list_pool_quota_snapshot_summaries_in_range(&windows, 30, 35).await?;
+        assert_eq!(exact.len(), 2, "exact summary boundary suppresses synthetic anchors");
+        assert!(exact.iter().all(|row| row.snapshot_at_unix_secs == 30 && row.utilization == Some(0.3)));
+        for window in windows {
+            let points: Vec<_> = summaries.iter().filter(|row| row.window == window).collect();
+            assert_eq!(points[0].snapshot_at_unix_secs, 25);
+            assert_eq!(points[0].utilization, Some(0.2));
+            assert_eq!(points[1].snapshot_at_unix_secs, 30);
+        }
+        for (bucket, expected_start) in [(None, 25), (Some(10), 20)] {
+            let points = storage.list_pool_quota_chart_points_in_range(&windows, 25, 35, bucket).await?;
+            assert_eq!(points.len(), 4);
+            assert_eq!(points.iter().filter(|row| row.snapshot_at_unix_secs == expected_start).count(), 2);
+            let idle = storage.list_pool_quota_chart_points_in_range(&windows, 25, 29, bucket).await?;
+            assert_eq!(idle.len(), 2);
+            assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == expected_start && row.utilization == Some(0.2)));
+            let exact = storage.list_pool_quota_chart_points_in_range(&windows, 30, 35, bucket).await?;
+            assert_eq!(exact.len(), 2, "exact boundary suppresses synthetic anchors");
+            assert!(exact.iter().all(|row| row.utilization == Some(0.3)));
+        }
+        Ok(())
+    }.await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+#[tokio::test]
+async fn price_snapshots_retain_three_newest_distinct_payloads() -> Result<()> {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        return Ok(());
+    };
+    let fixture = Fixture::create(&url).await?;
+    let storage = PostgresStorage::new(fixture.pool.clone(), Arc::new(SystemClock));
+    storage.initialize().await?;
+    let result: Result<()> = async {
+        for (bytes, ts) in [(br#"{"a":1}"#.as_slice(),10), (br#"{"b":2}"#.as_slice(),20),
+            (br#"{"c":3}"#.as_slice(),30), (br#"{"a":1}"#.as_slice(),40), (br#"{"d":4}"#.as_slice(),30)] {
+            storage.put_price_snapshot(bytes, ts).await?;
+        }
+        let rows: Vec<(String,i64)> = sqlx::query_as("SELECT payload, fetched_at_ms FROM price_catalog_snapshots_v1 ORDER BY fetched_at_ms DESC, id DESC")
+            .fetch_all(&fixture.pool).await?;
+        assert_eq!(rows, vec![(r#"{"a":1}"#.to_owned(),40),(r#"{"d":4}"#.to_owned(),30),(r#"{"c":3}"#.to_owned(),30)]);
+        Ok(())
+    }.await;
+    let teardown = fixture.drop_schema().await;
+    result?;
+    teardown
+}
+
+fn sample(
     upstream_id: Uuid,
     observed_at_unix_millis: u64,
     sample_id: u128,
     utilization: f64,
     resets_at_unix_secs: u64,
-) -> SubscriptionQuotaCheckpointRecord {
-    SubscriptionQuotaCheckpointRecord::from(&SubscriptionQuotaSample {
+) -> SubscriptionQuotaSample {
+    SubscriptionQuotaSample {
         upstream_id,
         window: SubscriptionQuotaWindow::FiveHour,
         source: SubscriptionQuotaSource::Header,
@@ -141,7 +320,23 @@ fn checkpoint(
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
         ingested_at_unix_millis: observed_at_unix_millis,
-    })
+    }
+}
+
+fn checkpoint(
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+    sample_id: u128,
+    utilization: f64,
+    resets_at_unix_secs: u64,
+) -> SubscriptionQuotaCheckpointRecord {
+    SubscriptionQuotaCheckpointRecord::from(&sample(
+        upstream_id,
+        observed_at_unix_millis,
+        sample_id,
+        utilization,
+        resets_at_unix_secs,
+    ))
 }
 
 async fn insert_rollup(

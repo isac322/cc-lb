@@ -18,7 +18,7 @@ pub const DEFAULT_STORAGE_TAIL_POLL_INTERVAL_MS: u64 = 250;
 pub const DEFAULT_PG_NOTIFY_CHANNEL: &str = "cc_lb_events_partial";
 pub const DEFAULT_PARTIAL_RETENTION_TTL_SECS: u64 = 300;
 pub const DEFAULT_PARTIAL_RETENTION_MAX_ENTRIES: usize = 10_000;
-pub const DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS: u32 = 90;
+pub const DEFAULT_UPSTREAM_AFFINITY_TTL_DAYS: u32 = 7;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -28,8 +28,6 @@ pub struct Config {
     pub timeouts: TimeoutsConfig,
     #[serde(default = "default_request_event_retention_days")]
     pub request_event_retention_days: u64,
-    #[serde(default)]
-    pub request_event_strip_diagnostics: bool,
     pub price_catalog: PriceCatalogConfig,
     pub storage: StorageConfig,
     #[serde(default)]
@@ -61,7 +59,6 @@ impl Default for Config {
             body: BodyConfig::default(),
             timeouts: TimeoutsConfig::default(),
             request_event_retention_days: default_request_event_retention_days(),
-            request_event_strip_diagnostics: false,
             price_catalog: PriceCatalogConfig::default(),
             storage: StorageConfig::default(),
             scheduler: SchedulerConfig::default(),

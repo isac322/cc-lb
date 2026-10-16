@@ -3,13 +3,13 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventExportPage, RequestEventHistogramBucket, RequestEventHistogramQuery,
     RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem,
-    RequestEventListQuery, RequestEventPayloadScan, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
-    model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventListQuery, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery,
+    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
+    StorageResult, model_filter_like_patterns, model_filter_matches,
+    normalize_usage_rollup_dimension,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{AssertSqlSafe, Postgres, QueryBuilder};
+use sqlx::{AssertSqlSafe, Postgres, QueryBuilder, Row};
 use std::{collections::BTreeMap, time::Duration};
 
 use super::request_event_list_sql::{self, parse_event_kind, status_class_range};
@@ -20,6 +20,9 @@ use crate::{
     },
     error_map::map_sqlx_error,
 };
+
+#[path = "request_event_row.rs"]
+pub(super) mod row;
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 
@@ -144,30 +147,24 @@ impl RequestEventStore for PostgresStorage {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query_as::<
-            _,
-            (i64, Option<String>, Option<String>, Option<String>, Vec<u8>),
-        >(
-            "SELECT seq, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
-                 WHERE seq > $1 AND seq <= $2 \
-                   AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
-                 ORDER BY seq ASC LIMIT $3",
-        )
-        .bind(u64_to_i64(after, "request event cursor after")?)
-        .bind(u64_to_i64(until, "request event cursor until")?)
-        .bind(u64_to_i64(
-            limit.min(500) as u64,
-            "request event cursor limit",
-        )?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        let rows = sqlx::query(row::CURSOR_SQL)
+            .bind(u64_to_i64(after, "request event cursor after")?)
+            .bind(u64_to_i64(until, "request event cursor until")?)
+            .bind(u64_to_i64(
+                limit.min(500) as u64,
+                "request event cursor limit",
+            )?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(seq, source_kind, source_ref_id, event_kind, payload)| {
-                let cursor = i64_to_u64(seq, "request event cursor")?;
-                let event =
-                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
+            .map(|row| {
+                let cursor = i64_to_u64(
+                    row.try_get("seq").map_err(map_sqlx_error)?,
+                    "request event cursor",
+                )?;
+                let event = row::from_row(&row)?;
                 Ok((cursor, event))
             })
             .filter(|result| match result {
@@ -306,38 +303,30 @@ impl RequestEventStore for PostgresStorage {
         if page.limit == 0 || page.until_seq <= page.after_seq {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query_as::<
-            _,
-            (i64, Option<String>, Option<String>, Option<String>, Vec<u8>),
-        >(
-            "SELECT seq, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
-             WHERE seq > $1 AND seq <= $2 \
-               AND ($3::bigint IS NULL OR list_ts_ms >= $3) \
-               AND ($4::bigint IS NULL OR list_ts_ms < $4) \
-               AND tx_id < pg_snapshot_xmin(pg_current_snapshot()) \
-             ORDER BY seq ASC LIMIT $5",
-        )
-        .bind(u64_to_i64(
-            page.after_seq,
-            "request event export after_seq",
-        )?)
-        .bind(u64_to_i64_saturating(page.until_seq))
-        .bind(
-            page.from_ts_ms
-                .map(|value| u64_to_i64(value, "request event export from_ts_ms"))
-                .transpose()?,
-        )
-        .bind(page.to_ts_ms.map(u64_to_i64_saturating))
-        .bind(u64_to_i64(page.limit as u64, "request event export limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
+        let rows = sqlx::query(row::EXPORT_SQL)
+            .bind(u64_to_i64(
+                page.after_seq,
+                "request event export after_seq",
+            )?)
+            .bind(u64_to_i64_saturating(page.until_seq))
+            .bind(
+                page.from_ts_ms
+                    .map(|value| u64_to_i64(value, "request event export from_ts_ms"))
+                    .transpose()?,
+            )
+            .bind(page.to_ts_ms.map(u64_to_i64_saturating))
+            .bind(u64_to_i64(page.limit as u64, "request event export limit")?)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(seq, source_kind, source_ref_id, event_kind, payload)| {
-                let cursor = i64_to_u64(seq, "request event cursor")?;
-                let event =
-                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
+            .map(|row| {
+                let cursor = i64_to_u64(
+                    row.try_get("seq").map_err(map_sqlx_error)?,
+                    "request event cursor",
+                )?;
+                let event = row::from_row(&row)?;
                 Ok((cursor, event))
             })
             .collect()
@@ -369,55 +358,6 @@ impl RequestEventStore for PostgresStorage {
                 ))
             })
             .collect()
-    }
-
-    async fn scan_request_event_payloads(
-        &self,
-        scan: &RequestEventPayloadScan,
-    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
-        if scan.limit == 0 || scan.until_seq <= scan.after_seq {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query_as::<_, (i64, Vec<u8>)>(
-            "SELECT seq, payload FROM request_events_v1 \
-             WHERE seq > $1 AND seq <= $2 ORDER BY seq ASC LIMIT $3",
-        )
-        .bind(u64_to_i64(scan.after_seq, "request event scan after_seq")?)
-        .bind(u64_to_i64_saturating(scan.until_seq))
-        .bind(u64_to_i64(scan.limit as u64, "request event scan limit")?)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter()
-            .map(|(seq, payload)| Ok((i64_to_u64(seq, "request event cursor")?, payload)))
-            .collect()
-    }
-
-    /// One autocommit statement per batch. Only `payload` is assigned, so
-    /// `seq` and the insert-time `tx_id` stay put and no cursor moves.
-    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        let seqs = rows
-            .iter()
-            .map(|(seq, _)| u64_to_i64(*seq, "request event rewrite seq"))
-            .collect::<StorageResult<Vec<i64>>>()?;
-        let payloads = rows
-            .iter()
-            .map(|(_, payload)| payload.as_slice())
-            .collect::<Vec<&[u8]>>();
-        let result = sqlx::query(
-            "UPDATE request_events_v1 AS r SET payload = v.payload \
-             FROM UNNEST($1::bigint[], $2::bytea[]) AS v(seq, payload) \
-             WHERE r.seq = v.seq",
-        )
-        .bind(seqs)
-        .bind(payloads)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected())
     }
 }
 
@@ -898,25 +838,6 @@ pub async fn explain_request_event_list(
         .map_err(map_sqlx_error)
 }
 
-fn request_event_from_storage(
-    payload: &[u8],
-    source_kind: Option<String>,
-    source_ref_id: Option<String>,
-    event_kind: Option<String>,
-) -> StorageResult<RequestEvent> {
-    let mut event = serde_json::from_slice::<RequestEvent>(payload)?;
-    if source_kind.is_some() {
-        event.source_kind = source_kind;
-    }
-    if source_ref_id.is_some() {
-        event.source_ref_id = source_ref_id;
-    }
-    if let Some(event_kind) = event_kind {
-        event.event_kind = Some(parse_event_kind(&event_kind)?);
-    }
-    Ok(event)
-}
-
 async fn insert_request_event_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     event: &RequestEvent,
@@ -926,7 +847,6 @@ async fn insert_request_event_in_tx(
         field: "request_event.ts_ms".to_owned(),
         reason: "must be present".to_owned(),
     })?;
-    let payload = serde_json::to_vec(event)?;
     // Assign this transaction's xid BEFORE the INSERT runs `nextval()` for
     // `seq`. Inside the INSERT itself `seq` (column 1) would be allocated
     // before the `tx_id` default calls `pg_current_xact_id()`, so a snapshot
@@ -942,108 +862,111 @@ async fn insert_request_event_in_tx(
         .await
         .map_err(map_sqlx_error)?;
     sqlx::query_scalar::<_, i64>(
-            "INSERT INTO request_events_v1 \
-              (ts, source_kind, source_ref_id, principal_id, upstream_id, key_id, model, upstream_name, thread_id, \
-                input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
-                 event_id, error_code, upstream_error_type, upstream_error_message, \
-                 thinking_tokens, service_tier, \
-                  cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, \
-                   token_estimate_source, \
-                   thinking_budget_tokens, reasoning_effort, \
-                   observed_session_id, request_kind, \
-                   list_ts_ms, list_event_key, list_status, \
-                   list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, \
-                   list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, \
-                   payload, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, event_kind, created_at) \
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,NOW()) \
-               ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING \
-               RETURNING seq",
-        )
-        .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
-        .bind(event.source_kind.as_deref())
-        .bind(event.source_ref_id.as_deref())
-        .bind(event.principal_id.as_deref())
-        .bind(event.upstream_id)
-        .bind(event.key_id.as_deref())
-        .bind(event.model.as_deref())
-        .bind(event.upstream_name.as_deref())
-        .bind(event.thread_id.as_deref())
-        .bind(
-            event
-                .input_tokens
-                .map(|value| u64_to_i64(value, "request event input_tokens"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .output_tokens
-                .map(|value| u64_to_i64(value, "request event output_tokens"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .cache_creation_input_tokens
-                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .cache_read_input_tokens
-                .map(|value| u64_to_i64(value, "request event cache_read_input_tokens"))
-                .transpose()?,
-        )
-        .bind(event_id)
-        .bind(event.error_code.as_deref())
-        .bind(event.upstream_error_type.as_deref())
-        .bind(event.upstream_error_message.as_deref())
-        .bind(
-            event
-                .thinking_tokens
-                .map(|value| u64_to_i64(value, "request event thinking_tokens"))
-                .transpose()?,
-        )
-        .bind(event.service_tier.as_deref())
-        .bind(
-            event
-                .cache_creation_input_tokens_5m
-                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_5m"))
-                .transpose()?,
-        )
-        .bind(
-            event
-                .cache_creation_input_tokens_1h
-                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h"))
-                .transpose()?,
-        )
-        .bind(event.token_estimate_source.as_deref())
-        .bind(
-            event
-                .thinking_budget_tokens
-                .map(|value| u64_to_i64(value, "request event thinking_budget_tokens"))
-                .transpose()?,
-        )
-        .bind(event.reasoning_effort.as_deref())
-        .bind(event.observed_session_id.as_deref())
-        .bind(event.request_kind.as_deref())
-        .bind(u64_to_i64(ts_ms, "request event list_ts_ms")?)
-        .bind(event_id)
-        .bind(i32::from(event.status))
-        .bind(event.cost_usd_micros)
-        .bind(event.cost_input_micros)
-        .bind(event.cost_output_micros)
-        .bind(event.cost_cache_creation_5m_micros)
-        .bind(event.cost_cache_creation_1h_micros)
-        .bind(event.cost_cache_read_micros)
-        .bind(payload)
-        .bind(event.claude_agent_id.as_deref())
-        .bind(event.claude_parent_agent_id.as_deref())
-        .bind(event.parent_session_id.as_deref())
-        .bind(event.client_app.as_deref())
-        .bind(event.session_id_source.as_deref())
-        .bind(event.event_kind.map(|kind| kind.as_str()))
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)
+        "INSERT INTO request_events_v1 (ts, request_id, source_kind, source_ref_id, event_kind, list_ts_ms, principal_id, key_id, principal_kind, upstream_id, upstream_name, model, list_status, input_tokens, output_tokens, cache_creation_input_tokens, cache_creation_input_tokens_5m, cache_creation_input_tokens_1h, cache_read_input_tokens, thread_id, observed_session_id, request_kind, claude_agent_id, claude_parent_agent_id, parent_session_id, client_app, session_id_source, thinking_budget_tokens, reasoning_effort, token_estimate_source, list_cost_usd_micros, list_cost_input_micros, list_cost_output_micros, list_cost_cache_creation_5m_micros, list_cost_cache_creation_1h_micros, list_cost_cache_read_micros, auth_ms, route_ms, limit_reserve_ms, json_parse_ms, cache_structure_ms, cache_token_key_ms, cache_count_lookup_ms, cache_tokenizer_queue_ms, cache_serialize_ms, cache_tokenize_ms, prepare_signer_ms, bulkhead_wait_ms, dns_ms, connect_ms, connection_reused, request_body_read_ms, request_body_first_chunk_ms, request_body_receive_ms, request_body_wait_ms, request_body_process_ms, request_body_chunk_count, request_body_bytes, duration_ms, proxy_setup_ms, shape_ms, sign_ms, upstream_ttfb_ms, upstream_body_ms, response_body_wait_ms, response_body_process_ms, response_body_downstream_poll_gap_ms, retry_overhead_ms, finalize_ms, body_chunk_count, body_bytes, stream_message_start_ms, stream_content_block_start_ms, stream_first_content_delta_ms, stream_last_content_delta_ms, stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, sse_event_count, content_delta_count, ping_count, inter_token_avg_ms, error_code, event_id, thinking_tokens, service_tier, upstream_error_type, upstream_error_message, upstream_http_version, upstream_request_id, upstream_content_encoding, upstream_content_length, upstream_body_bytes, upstream_body_end, upstream_body_error_cause, upstream_body_error_io_kind, upstream_body_error_h2_reason, upstream_stream_warning_type, upstream_stream_warning_message, list_event_key, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, NOW()) ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING RETURNING seq",
+    )
+    .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
+    .bind(event.request_id.as_str())
+    .bind(event.source_kind.as_deref())
+    .bind(event.source_ref_id.as_deref())
+    .bind(event.event_kind.map(|kind| kind.as_str()))
+    .bind(u64_to_i64(ts_ms, "request event ts_ms")?)
+    .bind(event.principal_id.as_deref())
+    .bind(event.key_id.as_deref())
+    .bind(event.principal_kind.as_deref())
+    .bind(event.upstream_id)
+    .bind(event.upstream_name.as_deref())
+    .bind(event.model.as_deref())
+    .bind(i32::from(event.status))
+    .bind(event.input_tokens.map(|value| u64_to_i64(value, "request event input_tokens")).transpose()?)
+    .bind(event.output_tokens.map(|value| u64_to_i64(value, "request event output_tokens")).transpose()?)
+    .bind(event.cache_creation_input_tokens.map(|value| u64_to_i64(value, "request event cache_creation_input_tokens")).transpose()?)
+    .bind(event.cache_creation_input_tokens_5m.map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_5m")).transpose()?)
+    .bind(event.cache_creation_input_tokens_1h.map(|value| u64_to_i64(value, "request event cache_creation_input_tokens_1h")).transpose()?)
+    .bind(event.cache_read_input_tokens.map(|value| u64_to_i64(value, "request event cache_read_input_tokens")).transpose()?)
+    .bind(event.thread_id.as_deref())
+    .bind(event.observed_session_id.as_deref())
+    .bind(event.request_kind.as_deref())
+    .bind(event.claude_agent_id.as_deref())
+    .bind(event.claude_parent_agent_id.as_deref())
+    .bind(event.parent_session_id.as_deref())
+    .bind(event.client_app.as_deref())
+    .bind(event.session_id_source.as_deref())
+    .bind(event.thinking_budget_tokens.map(|value| u64_to_i64(value, "request event thinking_budget_tokens")).transpose()?)
+    .bind(event.reasoning_effort.as_deref())
+    .bind(event.token_estimate_source.as_deref())
+    .bind(event.cost_usd_micros)
+    .bind(event.cost_input_micros)
+    .bind(event.cost_output_micros)
+    .bind(event.cost_cache_creation_5m_micros)
+    .bind(event.cost_cache_creation_1h_micros)
+    .bind(event.cost_cache_read_micros)
+    .bind(event.auth_ms.map(|value| u64_to_i64(value, "request event auth_ms")).transpose()?)
+    .bind(event.route_ms.map(|value| u64_to_i64(value, "request event route_ms")).transpose()?)
+    .bind(event.limit_reserve_ms.map(|value| u64_to_i64(value, "request event limit_reserve_ms")).transpose()?)
+    .bind(event.json_parse_ms)
+    .bind(event.cache_structure_ms)
+    .bind(event.cache_token_key_ms)
+    .bind(event.cache_count_lookup_ms)
+    .bind(event.cache_tokenizer_queue_ms)
+    .bind(event.cache_serialize_ms)
+    .bind(event.cache_tokenize_ms)
+    .bind(event.prepare_signer_ms)
+    .bind(event.bulkhead_wait_ms.map(|value| u64_to_i64(value, "request event bulkhead_wait_ms")).transpose()?)
+    .bind(event.dns_ms.map(|value| u64_to_i64(value, "request event dns_ms")).transpose()?)
+    .bind(event.connect_ms.map(|value| u64_to_i64(value, "request event connect_ms")).transpose()?)
+    .bind(event.connection_reused)
+    .bind(event.request_body_read_ms.map(|value| u64_to_i64(value, "request event request_body_read_ms")).transpose()?)
+    .bind(event.request_body_first_chunk_ms)
+    .bind(event.request_body_receive_ms)
+    .bind(event.request_body_wait_ms)
+    .bind(event.request_body_process_ms)
+    .bind(event.request_body_chunk_count.map(|value| u64_to_i64(value, "request event request_body_chunk_count")).transpose()?)
+    .bind(event.request_body_bytes.map(|value| u64_to_i64(value, "request event request_body_bytes")).transpose()?)
+    .bind(u64_to_i64(event.duration_ms, "request event duration_ms")?)
+    .bind(event.proxy_setup_ms.map(|value| u64_to_i64(value, "request event proxy_setup_ms")).transpose()?)
+    .bind(event.shape_ms.map(|value| u64_to_i64(value, "request event shape_ms")).transpose()?)
+    .bind(event.sign_ms.map(|value| u64_to_i64(value, "request event sign_ms")).transpose()?)
+    .bind(event.upstream_ttfb_ms.map(|value| u64_to_i64(value, "request event upstream_ttfb_ms")).transpose()?)
+    .bind(event.upstream_body_ms.map(|value| u64_to_i64(value, "request event upstream_body_ms")).transpose()?)
+    .bind(event.response_body_wait_ms)
+    .bind(event.response_body_process_ms)
+    .bind(event.response_body_downstream_poll_gap_ms)
+    .bind(event.retry_overhead_ms)
+    .bind(event.finalize_ms.map(|value| u64_to_i64(value, "request event finalize_ms")).transpose()?)
+    .bind(event.body_chunk_count.map(|value| u64_to_i64(value, "request event body_chunk_count")).transpose()?)
+    .bind(event.body_bytes.map(|value| u64_to_i64(value, "request event body_bytes")).transpose()?)
+    .bind(event.stream_message_start_ms.map(|value| u64_to_i64(value, "request event stream_message_start_ms")).transpose()?)
+    .bind(event.stream_content_block_start_ms.map(|value| u64_to_i64(value, "request event stream_content_block_start_ms")).transpose()?)
+    .bind(event.stream_first_content_delta_ms.map(|value| u64_to_i64(value, "request event stream_first_content_delta_ms")).transpose()?)
+    .bind(event.stream_last_content_delta_ms.map(|value| u64_to_i64(value, "request event stream_last_content_delta_ms")).transpose()?)
+    .bind(event.stream_message_stop_ms.map(|value| u64_to_i64(value, "request event stream_message_stop_ms")).transpose()?)
+    .bind(event.stream_last_chunk_ms.map(|value| u64_to_i64(value, "request event stream_last_chunk_ms")).transpose()?)
+    .bind(event.stream_total_ms.map(|value| u64_to_i64(value, "request event stream_total_ms")).transpose()?)
+    .bind(event.sse_event_count.map(|value| u64_to_i64(value, "request event sse_event_count")).transpose()?)
+    .bind(event.content_delta_count.map(|value| u64_to_i64(value, "request event content_delta_count")).transpose()?)
+    .bind(event.ping_count.map(|value| u64_to_i64(value, "request event ping_count")).transpose()?)
+    .bind(event.inter_token_avg_ms.map(|value| u64_to_i64(value, "request event inter_token_avg_ms")).transpose()?)
+    .bind(event.error_code.as_deref())
+    .bind(event_id)
+    .bind(event.thinking_tokens.map(|value| u64_to_i64(value, "request event thinking_tokens")).transpose()?)
+    .bind(event.service_tier.as_deref())
+    .bind(event.upstream_error_type.as_deref())
+    .bind(event.upstream_error_message.as_deref())
+    .bind(event.upstream_http_version.as_deref())
+    .bind(event.upstream_request_id.as_deref())
+    .bind(event.upstream_content_encoding.as_deref())
+    .bind(event.upstream_content_length.map(|value| u64_to_i64(value, "request event upstream_content_length")).transpose()?)
+    .bind(event.upstream_body_bytes.map(|value| u64_to_i64(value, "request event upstream_body_bytes")).transpose()?)
+    .bind(event.upstream_body_end.as_deref())
+    .bind(event.upstream_body_error_cause.as_deref())
+    .bind(event.upstream_body_error_io_kind.as_deref())
+    .bind(event.upstream_body_error_h2_reason.as_deref())
+    .bind(event.upstream_stream_warning_type.as_deref())
+    .bind(event.upstream_stream_warning_message.as_deref())
+    .bind(event_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)
 }
 
 async fn select_existing_event_id_in_tx(

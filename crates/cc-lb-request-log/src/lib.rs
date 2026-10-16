@@ -17,9 +17,8 @@ pub use cache::{
 pub use event_kind::{ParseRequestEventKindError, RequestEventKind};
 pub use header_snapshot::{CostBreakdown, HeaderSnapshot};
 pub use request_diagnostics::{
-    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, REQUEST_DIAGNOSTICS_SCHEMA, RequestDiagnostics,
-    RequestDiagnosticsRecord, RequestDiagnosticsSource, render_request_diagnostics_line,
-    strip_payload_diagnostics,
+    REQUEST_DIAGNOSTICS_SCHEMA, RequestDiagnostics, RequestDiagnosticsRecord,
+    RequestDiagnosticsSource, render_request_diagnostics_line,
 };
 pub use request_event::RequestEvent;
 pub use request_event_update::{

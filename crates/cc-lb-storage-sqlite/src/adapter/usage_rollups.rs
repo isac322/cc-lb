@@ -108,6 +108,56 @@ struct UpstreamIdentity {
 
 #[async_trait]
 impl UsageRollupStore for SqliteStorage {
+    async fn prune_usage_rollups_before(
+        &self,
+        minute_cutoff_unix_secs: u64,
+        hour_cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let minute_cutoff = u64_to_i64(minute_cutoff_unix_secs, "rollup minute cutoff")?;
+        let hour_cutoff = u64_to_i64(hour_cutoff_unix_secs, "rollup hour cutoff")?;
+        let limit = super::request_events::usize_to_i64(batch_size, "rollup prune batch size")?;
+        let mut tx = self.begin_immediate().await?;
+        let removed = sqlx::query(
+            "DELETE FROM usage_rollups_v2 WHERE rowid IN ( \
+             SELECT rowid FROM usage_rollups_v2 \
+             WHERE (resolution = 'minute' AND bucket_start_unix_secs < ?) \
+                OR (resolution = 'hour' AND bucket_start_unix_secs < ?) \
+             ORDER BY bucket_start_unix_secs, rowid LIMIT ?)",
+        )
+        .bind(minute_cutoff)
+        .bind(hour_cutoff)
+        .bind(limit)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        let remaining = limit - removed as i64;
+        let excluded_removed = if remaining > 0 {
+            sqlx::query(
+                "DELETE FROM overview_excluded_error_rollups_v1 WHERE rowid IN ( \
+                 SELECT rowid FROM overview_excluded_error_rollups_v1 \
+                 WHERE (resolution = 'minute' AND bucket_start_unix_secs < ?) \
+                    OR (resolution = 'hour' AND bucket_start_unix_secs < ?) \
+                 ORDER BY bucket_start_unix_secs, rowid LIMIT ?)",
+            )
+            .bind(minute_cutoff)
+            .bind(hour_cutoff)
+            .bind(remaining)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        } else {
+            0
+        };
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(removed + excluded_removed)
+    }
+
     async fn rollup_usage_once(&self) -> StorageResult<UsageRollupRun> {
         rollup_usage_once_inner(self).await
     }
@@ -261,11 +311,16 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     // request events, and the upstream identities WITHOUT holding the write
     // lock. Each run processes a fixed id range (previous_checkpoint, max_id],
     // so aggregation needs no write lock; only the additive upserts in Phase B
-    // do. This keeps the write lock off the JSON-parse/aggregate hot path.
+    // do. This keeps the write lock off the relational read/aggregate hot path.
     let pool = storage.pool();
     let previous_checkpoint = read_checkpoint(pool).await?.unwrap_or(0);
     let rows = sqlx::query(
-        "SELECT id, payload, upstream_id FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
+        "SELECT id, ts, list_ts_ms, source_kind, event_kind, principal_id, upstream_id, \
+         upstream_name, model, list_status, error_code, input_tokens, output_tokens, \
+         cache_creation_input_tokens, cache_read_input_tokens, list_cost_usd_micros, \
+         list_duration_ms, list_proxy_setup_ms, list_shape_ms, list_sign_ms, \
+         list_upstream_ttfb_ms, list_upstream_body_ms \
+         FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
     )
     .bind(u64_to_i64(previous_checkpoint, "usage rollup checkpoint")?)
     .bind(ROLLUP_BATCH_LIMIT)
@@ -291,15 +346,14 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             row.try_get("id").map_err(map_sqlx_error)?,
             "request event id",
         )?;
-        let payload: String = row.try_get("payload").map_err(map_sqlx_error)?;
         let table_upstream_id = row
             .try_get::<Option<String>, _>("upstream_id")
             .map_err(map_sqlx_error)?
             .as_deref()
             .map(|value| parse_uuid(value, "request event upstream_id"))
             .transpose()?;
-        let event: RequestEvent = serde_json::from_str(&payload)?;
-        let upstream = resolve_upstream_identity(&event, table_upstream_id, &upstreams);
+        let event = rollup_event_from_row(row, table_upstream_id)?;
+        let upstream = resolve_upstream_identity(&event, &upstreams);
 
         max_id = max_id.max(id);
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
@@ -474,6 +528,61 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
     })
 }
 
+fn rollup_event_from_row(
+    row: &SqliteRow,
+    upstream_id: Option<Uuid>,
+) -> StorageResult<RequestEvent> {
+    let optional_u64 = |column: &str| -> StorageResult<Option<u64>> {
+        row.try_get::<Option<i64>, _>(column)
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, column))
+            .transpose()
+    };
+    Ok(RequestEvent {
+        ts: i64_to_u64(
+            row.try_get("ts").map_err(map_sqlx_error)?,
+            "request event ts",
+        )?,
+        ts_ms: optional_u64("list_ts_ms")?,
+        source_kind: row.try_get("source_kind").map_err(map_sqlx_error)?,
+        event_kind: row
+            .try_get::<Option<String>, _>("event_kind")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                value.parse().map_err(|_| StorageError::Corrupted {
+                    message: format!("request event unknown event_kind value: {value}"),
+                })
+            })
+            .transpose()?,
+        principal_id: row.try_get("principal_id").map_err(map_sqlx_error)?,
+        upstream_id,
+        upstream_name: row.try_get("upstream_name").map_err(map_sqlx_error)?,
+        model: row.try_get("model").map_err(map_sqlx_error)?,
+        status: u16::try_from(
+            row.try_get::<i64, _>("list_status")
+                .map_err(map_sqlx_error)?,
+        )
+        .map_err(|_| StorageError::Corrupted {
+            message: "request event rollup status out of range".to_owned(),
+        })?,
+        error_code: row.try_get("error_code").map_err(map_sqlx_error)?,
+        input_tokens: optional_u64("input_tokens")?,
+        output_tokens: optional_u64("output_tokens")?,
+        cache_creation_input_tokens: optional_u64("cache_creation_input_tokens")?,
+        cache_read_input_tokens: optional_u64("cache_read_input_tokens")?,
+        cost_usd_micros: row
+            .try_get("list_cost_usd_micros")
+            .map_err(map_sqlx_error)?,
+        duration_ms: optional_u64("list_duration_ms")?.unwrap_or(0),
+        proxy_setup_ms: optional_u64("list_proxy_setup_ms")?,
+        shape_ms: optional_u64("list_shape_ms")?,
+        sign_ms: optional_u64("list_sign_ms")?,
+        upstream_ttfb_ms: optional_u64("list_upstream_ttfb_ms")?,
+        upstream_body_ms: optional_u64("list_upstream_body_ms")?,
+        ..RequestEvent::default()
+    })
+}
+
 fn is_overview_excluded_status(status: u16) -> bool {
     matches!(status, 401 | 403 | 404)
 }
@@ -537,10 +646,9 @@ where
 
 fn resolve_upstream_identity(
     event: &RequestEvent,
-    table_upstream_id: Option<Uuid>,
     upstreams: &HashMap<String, UpstreamIdentity>,
 ) -> UpstreamIdentity {
-    if let Some(upstream_id) = event.upstream_id.or(table_upstream_id) {
+    if let Some(upstream_id) = event.upstream_id {
         if let Some(name) = event.upstream_name.clone() {
             return UpstreamIdentity {
                 id: upstream_id,

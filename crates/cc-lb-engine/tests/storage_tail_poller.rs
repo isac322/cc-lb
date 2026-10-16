@@ -15,8 +15,7 @@ use cc_lb_engine::{
 use cc_lb_lifecycle::{LifecycleEvent, TerminationReason};
 use cc_lb_observability::NoopMetricsHook;
 use cc_lb_request_log::{
-    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, RequestDiagnosticsRecord, RequestEventUpdate,
-    render_request_diagnostics_line,
+    RequestDiagnosticsRecord, RequestEventUpdate, render_request_diagnostics_line,
 };
 use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, RequestEventStreamFilters, StorageResult,
@@ -207,7 +206,7 @@ impl RequestDiagnosticsSink for RecordingDiagnosticsSink {
 }
 
 #[tokio::test]
-async fn strip_on_local_final_and_cross_replica_tail_carry_the_same_stripped_row() {
+async fn local_final_and_cross_replica_tail_carry_the_same_relational_row() {
     let storage = TestStorage::new();
     // Another replica observes this pod's rows only through the storage tail.
     let (tail_tx, mut tail_rx) = tokio::sync::broadcast::channel(16);
@@ -230,7 +229,6 @@ async fn strip_on_local_final_and_cross_replica_tail_carry_the_same_stripped_row
         Arc::new(NoopMetricsHook),
         RequestDiagnosticsOptions {
             sink: Some(sink.clone() as Arc<dyn RequestDiagnosticsSink>),
-            strip_payload: true,
         },
     );
 
@@ -280,7 +278,13 @@ async fn strip_on_local_final_and_cross_replica_tail_carry_the_same_stripped_row
         "local SSE final and cross-replica tail see the same row"
     );
     let payload = serde_json::to_value(&tail.event).expect("row serializes");
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+    for key in [
+        "cache_breakpoints",
+        "cache_control_message_indices",
+        "routing_trace",
+        "iterations",
+        "internal_errors",
+    ] {
         assert!(
             payload.get(key).is_none(),
             "tail row still has {key}: {payload}"

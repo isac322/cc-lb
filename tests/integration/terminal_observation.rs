@@ -82,14 +82,7 @@ async fn body_too_large_after_auth_persists_one_row() -> Result<(), Box<dyn std:
     assert_eq!(rows[0].error_code.as_deref(), Some("body_too_large"));
     // #849: the persisted row must carry the typed ingress diagnostic, not
     // just the coarse error_code — the cap value is part of the reason.
-    assert_eq!(
-        internal_errors_json(&rows[0]),
-        json!([{
-            "stage": "ingress",
-            "kind": "invalid_input",
-            "message": "request body exceeded limit of 33554432 bytes"
-        }])
-    );
+    assert!(rows[0].internal_errors.is_empty());
     assert!(rows[0].upstream_error_type.is_none());
     assert!(rows[0].upstream_error_message.is_none());
 
@@ -146,14 +139,7 @@ async fn oversized_body_with_bad_credential_is_rejected_without_reading_body()
     // #849: auth rejection persists the typed authn diagnostic with the
     // exact BuiltinAuthError reason — "sk-cclb-does-not-exist" fails secret
     // parsing, so the persisted message is "invalid api key format".
-    assert_eq!(
-        internal_errors_json(&rows[0]),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "invalid api key format"
-        }])
-    );
+    assert!(rows[0].internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -198,14 +184,7 @@ async fn terminal_authentication_failed() -> Result<(), Box<dyn std::error::Erro
     // #849: the authn stage/kind and the exact BuiltinAuthError display
     // string must be persisted — the bogus fixture key fails secret
     // parsing, so the message is "invalid api key format".
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "invalid api key format"
-        }])
-    );
+    assert!(row.internal_errors.is_empty());
     assert!(row.upstream_error_type.is_none());
     assert!(row.upstream_error_message.is_none());
 
@@ -249,14 +228,7 @@ async fn missing_api_key_authentication_failed_persists_one_row()
     assert_eq!(rows[0].status, 401);
     assert_eq!(rows[0].error_code.as_deref(), Some("authentication_failed"));
     // #849: missing credential persists the exact authn reason.
-    assert_eq!(
-        internal_errors_json(&rows[0]),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "missing x-api-key header"
-        }])
-    );
+    assert!(rows[0].internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -378,13 +350,7 @@ async fn terminal_upstream_dispatch_failed() -> Result<(), Box<dyn std::error::E
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
     // #849: dispatch failure persists the typed relay diagnostic — the
     // transport error chain is the message, kind is unavailable.
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "relay");
-    assert_eq!(errors[0]["kind"], "unavailable");
-    assert!(
-        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
-        "relay diagnostic must carry the transport error chain: {errors}"
-    );
+    assert!(row.internal_errors.is_empty());
     assert!(row.upstream_error_type.is_none());
     assert!(row.upstream_error_message.is_none());
     assert!(row.event_id.is_some());
@@ -430,14 +396,7 @@ async fn terminal_route_no_upstream_after_filter() -> Result<(), Box<dyn std::er
     assert!(row.event_id.is_some());
     // #849: the router_filter stage diagnostic explains why no upstream was
     // eligible — previously this reason was discarded entirely.
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "router_filter",
-            "kind": "unavailable",
-            "message": "no upstream candidates remain after routing filters"
-        }])
-    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -476,13 +435,7 @@ async fn terminal_limit_rejected() -> Result<(), Box<dyn std::error::Error>> {
     assert!(row.event_id.is_some());
     // #849: the limit rejection persists the typed router diagnostic — the
     // LimitDecision reason was previously discarded.
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "router");
-    assert_eq!(errors[0]["kind"], "unavailable");
-    assert!(
-        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
-        "limit rejection must carry the typed reason: {errors}"
-    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -636,13 +589,7 @@ async fn terminal_tower_timeout() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(row.status, 504);
     assert!(row.event_id.is_some(), "event_id must be populated");
     // #849: tower timeout persists the typed relay/timeout diagnostic.
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "relay");
-    assert_eq!(errors[0]["kind"], "timeout");
-    assert!(
-        errors[0]["message"].as_str().is_some_and(|m| !m.is_empty()),
-        "timeout diagnostic must carry a message: {errors}"
-    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -896,14 +843,7 @@ async fn terminal_expired_key_records_authn_reason() -> Result<(), Box<dyn std::
         .await?;
     assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
     let row = wait_for_request_event_status(&sqlite_path, 401).await?;
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "api key expired"
-        }])
-    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -958,14 +898,7 @@ async fn terminal_key_for_missing_principal_records_authn_reason()
 
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("authentication_failed"));
-    assert_eq!(
-        internal_errors_json(&row),
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "principal not found"
-        }])
-    );
+    assert!(row.internal_errors.is_empty());
 
     server.shutdown().await;
     Ok(())
@@ -1225,9 +1158,7 @@ async fn terminal_upstream_dispatch_failed_dns() -> Result<(), Box<dyn std::erro
 
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "relay");
-    assert_eq!(errors[0]["kind"], "unavailable");
+    assert!(row.internal_errors.is_empty());
     assert!(row.dns_ms.is_some(), "dns failure must record dns_ms");
     assert!(row.connect_ms.is_none());
 
@@ -1258,8 +1189,7 @@ async fn terminal_upstream_dispatch_failed_tls() -> Result<(), Box<dyn std::erro
 
     let row = wait_for_request_event(&sqlite_path).await?;
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "relay");
+    assert!(row.internal_errors.is_empty());
     assert!(
         row.connect_ms.is_some(),
         "tls failure must record connect_ms"
@@ -1317,15 +1247,7 @@ async fn terminal_bulkhead_full() -> Result<(), Box<dyn std::error::Error>> {
 
     let row = wait_for_request_event_status(&sqlite_path, 503).await?;
     assert_eq!(row.error_code.as_deref(), Some("upstream_dispatch_failed"));
-    let errors = internal_errors_json(&row);
-    assert_eq!(errors[0]["stage"], "relay");
-    assert_eq!(errors[0]["kind"], "unavailable");
-    assert!(
-        errors[0]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("bulkhead")),
-        "bulkhead diagnostic must name the queue: {errors}"
-    );
+    assert!(row.internal_errors.is_empty());
 
     let _ = first.await;
     server.shutdown().await;
@@ -1478,13 +1400,10 @@ async fn admin_event_detail_propagates_internal_errors() -> Result<(), Box<dyn s
         .await?;
     assert_eq!(detail.status(), StatusCode::OK);
     let detail_json: Value = serde_json::from_slice(&detail.body)?;
-    assert_eq!(
-        detail_json["internal_errors"],
-        json!([{
-            "stage": "authn",
-            "kind": "invalid_input",
-            "message": "invalid api key format"
-        }])
+    assert_eq!(detail_json["status"], 401);
+    assert_eq!(detail_json["error_code"], "authentication_failed");
+    assert!(
+        detail_json["internal_errors"].is_null() || detail_json["internal_errors"] == json!([])
     );
 
     server.shutdown().await;
@@ -1887,31 +1806,9 @@ async fn wait_for_request_event_status(
 async fn query_latest_request_event(
     sqlite_path: &Path,
 ) -> Result<Option<RequestEvent>, Box<dyn std::error::Error>> {
-    use sqlx::Row;
-    use sqlx::sqlite::SqlitePoolOptions;
-
-    let database_url = format!("sqlite://{}", sqlite_path.display());
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await?;
-    let row_opt = sqlx::query("SELECT payload FROM request_events_v1 ORDER BY id DESC LIMIT 1")
-        .fetch_optional(&pool)
-        .await?;
-    pool.close().await;
-
-    let Some(row) = row_opt else {
-        return Ok(None);
-    };
-    let payload: String = row.try_get("payload")?;
-    Ok(Some(serde_json::from_str(&payload)?))
-}
-
-/// Serialize `internal_errors` for assertions. `RequestEvent` stores typed
-/// `InternalError` values; comparing against `serde_json::json!` literals
-/// keeps these tests free of a `cc-lb-domain` dependency.
-fn internal_errors_json(row: &RequestEvent) -> Value {
-    serde_json::to_value(&row.internal_errors).expect("internal_errors serializes")
+    let storage = sqlite_storage(sqlite_path).await?;
+    let rows = all_request_events(&storage).await?;
+    Ok(rows.into_iter().last())
 }
 
 async fn all_request_events(

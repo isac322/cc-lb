@@ -92,13 +92,7 @@ pub struct RequestEventPartial {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_search_requests: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_fetch_requests: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_geo: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
@@ -114,23 +108,9 @@ pub struct RequestEventPartial {
     pub cost_cache_read_micros: Option<i64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_block_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_prefix_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_v3_cache_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_5h: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_7d: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_combined: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_warning_multiplier: Option<f64>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body_read_ms: Option<u64>,
@@ -195,8 +175,6 @@ pub struct RequestEventPartial {
     pub retry_overhead_ms: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_body_chunk_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

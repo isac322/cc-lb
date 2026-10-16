@@ -20,14 +20,10 @@ fn committed_config_schema_matches_generated_schema() {
 }
 
 #[test]
-fn request_diagnostics_keys_are_boolean_schema_properties_defaulting_false() {
+fn request_diagnostics_log_key_is_boolean_schema_property_defaulting_false() {
     let schema = serde_json::to_value(Config::json_schema()).expect("serialize config schema");
     let expected = serde_json::json!({ "type": "boolean", "default": false });
 
-    assert_eq!(
-        schema["properties"]["request_event_strip_diagnostics"],
-        expected
-    );
     assert_eq!(
         schema["$defs"]["ObservabilityConfig"]["properties"]["request_diagnostics_log"],
         expected

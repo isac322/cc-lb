@@ -1,15 +1,15 @@
 //! STO-01 / STO-02: upgrading a populated database from SQLite 0095 /
-//! Postgres 0132 to 0096 / 0133 through the actual `sqlx` migration runner.
-//! Existing spec, secret, token, request-event, and rollup rows survive
-//! byte-for-byte, `spec_revision` is not bumped, every upstream reads with
-//! `workspace_id = None` and no details or usage rows, and restarting (running
-//! the migrator again) is a no-op. The Postgres half needs `CI_POSTGRES_URL`.
+//! Postgres 0132 through the actual `sqlx` migration runner.
+//! Existing spec, secret, token, request-event relational values, and rollup rows survive,
+//! `spec_revision` is not bumped, every upstream reads with `workspace_id = None`
+//! and no details or usage rows, and restarting is a no-op. Historical request
+//! payloads are seeded as raw SQL, then removed by the relational-schema migration.
+//! The Postgres half needs `CI_POSTGRES_URL`.
 
 use std::{path::Path, str::FromStr, sync::Arc};
 
 use cc_lb_storage_api::{
-    MetaStore, RequestEvent, RequestEventStore, UpstreamApiKeyStore, UpstreamRecord, UpstreamStore,
-    UsageRollupStore,
+    MetaStore, RequestEventStore, UpstreamApiKeyStore, UpstreamRecord, UpstreamStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_sqlite::open_sqlite;
@@ -102,18 +102,19 @@ async fn sto02_sqlite_upgrade_preserves_rows_and_is_idempotent() {
     seed_sqlite(&mut connection).await;
     connection.close().await.expect("close seed connection");
 
-    // Request events and rollups are written by the current storage code,
-    // which only touches tables 0096 leaves alone.
+    // Seed the historical schema directly: the current adapter requires the
+    // relational columns installed during initialize().
     let storage = open_sqlite(&url, Arc::new(cc_lb_clock::SystemClock))
         .await
         .expect("open sqlite at 0095");
-    append_events(&storage).await;
-    storage.rollup_usage_once().await.expect("rollup at 0095");
     let before = sqlite_snapshot(storage.pool()).await;
     assert!(before.rollup_rows > 0, "seeded rollups");
 
     // App boot runs the migrator; a restart runs it again.
-    storage.initialize().await.expect("upgrade to 0096");
+    storage
+        .initialize()
+        .await
+        .expect("upgrade to current schema");
     drop(storage);
     let storage = open_sqlite(&url, Arc::new(cc_lb_clock::SystemClock))
         .await
@@ -139,6 +140,13 @@ async fn sto02_sqlite_upgrade_preserves_rows_and_is_idempotent() {
     .await
     .expect("new-table counts");
     assert_eq!(counts, (0, 0, 0), "no workspace, details, or usage rows");
+    let payload_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('request_events_v1') WHERE name = 'payload'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .expect("sqlite request-event columns");
+    assert_eq!(payload_columns, 0, "historical payload column is removed");
 
     assert_upgraded_reads(&storage).await;
 }
@@ -171,11 +179,14 @@ async fn postgres_upgrade(pool: &PgPool) {
     }
     seed_postgres(pool).await;
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
-    append_events(&storage).await;
+    // Request-event rows were inserted by seed_postgres using the 0132 schema.
     let before = postgres_snapshot(pool).await;
     assert!(before.rollup_rows > 0, "seeded rollups");
 
-    storage.initialize().await.expect("upgrade to 0133");
+    storage
+        .initialize()
+        .await
+        .expect("upgrade to current schema");
     let restarted = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     restarted.initialize().await.expect("restart is a no-op");
     // The DDL itself is idempotent: re-running 0133 by hand succeeds.
@@ -209,6 +220,15 @@ async fn postgres_upgrade(pool: &PgPool) {
     .await
     .expect("new-table counts");
     assert_eq!(counts, (0, 0, 0), "no workspace, details, or usage rows");
+    let payload_columns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'request_events_v1'
+           AND column_name = 'payload'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("postgres request-event columns");
+    assert_eq!(payload_columns, 0, "historical payload column is removed");
 
     assert_upgraded_reads(&restarted).await;
 }
@@ -217,7 +237,7 @@ async fn postgres_upgrade(pool: &PgPool) {
 /// upgraded rows.
 async fn assert_upgraded_reads<S>(storage: &S)
 where
-    S: UpstreamStore + UpstreamApiKeyStore,
+    S: UpstreamStore + UpstreamApiKeyStore + RequestEventStore,
 {
     let live: Vec<UpstreamRecord> = UpstreamStore::list(storage, None, 100)
         .await
@@ -278,39 +298,27 @@ where
         Some("billing_error")
     );
     assert_eq!(outcome.observed_at_unix_ms, 1_700_000_200_000);
-}
-
-async fn append_events<S>(storage: &S)
-where
-    S: RequestEventStore,
-{
-    for (index, (status, ts_ms, error_type)) in [
-        (200_u16, 1_700_000_100_000_u64, None),
-        (402, 1_700_000_200_000, Some("billing_error")),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let event = RequestEvent {
-            ts: ts_ms / 1_000,
-            ts_ms: Some(ts_ms),
-            request_id: format!("req-upgrade-{index}"),
-            event_id: Some(format!("evt-upgrade-{index}")),
-            principal_id: Some("principal-upgrade".to_owned()),
-            upstream_id: Some(API_KEY_ID),
-            upstream_name: Some("legacy-api-key".to_owned()),
-            model: Some("claude-sonnet-4-5".to_owned()),
-            status,
-            input_tokens: Some(10),
-            output_tokens: Some(5),
-            upstream_error_type: error_type.map(str::to_owned),
-            upstream_error_message: error_type.map(|_| "credit balance is too low".to_owned()),
-            ..RequestEvent::default()
-        };
-        storage
-            .append_request_event(&event)
+    for (index, status) in [200, 402].into_iter().enumerate() {
+        let event = storage
+            .get_request_event(&format!("evt-upgrade-{index}"))
             .await
-            .expect("append request event");
+            .expect("read upgraded relational event")
+            .expect("historical event survives");
+        assert_eq!(event.status, status);
+        assert_eq!(event.upstream_id, Some(API_KEY_ID));
+        assert_eq!(event.principal_id.as_deref(), Some("principal-upgrade"));
+        assert_eq!(event.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(event.input_tokens, Some(10));
+        assert_eq!(event.output_tokens, Some(5));
+        assert_eq!(
+            event.upstream_error_type.as_deref(),
+            (status == 402).then_some("billing_error"),
+        );
+        assert!(event.cache_breakpoints.is_empty());
+        assert!(event.cache_control_message_indices.is_empty());
+        assert!(event.routing_trace.is_none());
+        assert!(event.iterations.is_none());
+        assert!(event.internal_errors.is_empty());
     }
 }
 
@@ -321,6 +329,29 @@ struct Snapshot {
     tokens: Vec<String>,
     request_events: i64,
     rollup_rows: i64,
+}
+
+fn legacy_event_payload(index: usize, status: i64, ts_ms: i64) -> String {
+    serde_json::json!({
+        "ts": ts_ms / 1_000,
+        "ts_ms": ts_ms,
+        "request_id": format!("req-upgrade-{index}"),
+        "event_id": format!("evt-upgrade-{index}"),
+        "principal_id": "principal-upgrade",
+        "upstream_id": API_KEY_ID,
+        "upstream_name": "legacy-api-key",
+        "model": "claude-sonnet-4-5",
+        "status": status,
+        "duration_ms": 12,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_state": "miss",
+        "cache_breakpoints": [],
+        "internal_errors": [],
+        "upstream_error_type": (status == 402).then_some("billing_error"),
+        "upstream_error_message": (status == 402).then_some("credit balance is too low"),
+    })
+    .to_string()
 }
 
 async fn seed_sqlite(connection: &mut SqliteConnection) {
@@ -387,6 +418,42 @@ async fn seed_sqlite(connection: &mut SqliteConnection) {
     .execute(&mut *connection)
     .await
     .expect("seed oauth token");
+    for (index, (status, ts_ms)) in [(200_i64, 1_700_000_100_000_i64), (402, 1_700_000_200_000)]
+        .into_iter()
+        .enumerate()
+    {
+        sqlx::query(
+            "INSERT INTO request_events_v1 (request_id, ts, event_id, principal_id,
+                 upstream_id, upstream_name, model, input_tokens, output_tokens,
+                 upstream_error_type, upstream_error_message, payload,
+                 list_ts_ms, list_event_key, list_status, list_duration_ms)
+             VALUES (?, ?, ?, 'principal-upgrade', ?, 'legacy-api-key',
+                 'claude-sonnet-4-5', 10, 5, ?, ?, ?, ?, ?, ?, 12)",
+        )
+        .bind(format!("req-upgrade-{index}"))
+        .bind(ts_ms / 1_000)
+        .bind(format!("evt-upgrade-{index}"))
+        .bind(API_KEY_ID.to_string())
+        .bind((status == 402).then_some("billing_error"))
+        .bind((status == 402).then_some("credit balance is too low"))
+        .bind(legacy_event_payload(index, status, ts_ms))
+        .bind(ts_ms)
+        .bind(format!("evt-upgrade-{index}"))
+        .bind(status)
+        .execute(&mut *connection)
+        .await
+        .expect("seed historical sqlite request event");
+    }
+    sqlx::query(
+        "INSERT INTO usage_rollups_v2 (resolution, bucket_start_unix_secs, principal_id,
+             upstream_id, upstream_name, model, request_count, input_tokens, updated_at)
+         VALUES ('hour', 1699999200, 'principal-upgrade', ?, 'legacy-api-key',
+             'claude-sonnet-4-5', 2, 20, 1700000300)",
+    )
+    .bind(API_KEY_ID.to_string())
+    .execute(&mut *connection)
+    .await
+    .expect("seed rollup");
 }
 
 async fn sqlite_snapshot(pool: &sqlx::SqlitePool) -> Snapshot {
@@ -490,6 +557,29 @@ async fn seed_postgres(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed oauth token");
+    for (index, (status, ts_ms)) in [(200_i64, 1_700_000_100_000_i64), (402, 1_700_000_200_000)]
+        .into_iter()
+        .enumerate()
+    {
+        sqlx::query(
+            "INSERT INTO request_events_v1 (ts, event_id, principal_id, upstream_id,
+                 upstream_name, model, input_tokens, output_tokens, upstream_error_type,
+                 upstream_error_message, payload, list_ts_ms, list_event_key, list_status)
+             VALUES (to_timestamp($1::double precision), $2, 'principal-upgrade', $3,
+                 'legacy-api-key', 'claude-sonnet-4-5', 10, 5, $4, $5, $6, $7, $2, $8)",
+        )
+        .bind((ts_ms / 1_000) as f64)
+        .bind(format!("evt-upgrade-{index}"))
+        .bind(API_KEY_ID)
+        .bind((status == 402).then_some("billing_error"))
+        .bind((status == 402).then_some("credit balance is too low"))
+        .bind(legacy_event_payload(index, status, ts_ms).into_bytes())
+        .bind(ts_ms)
+        .bind(status as i32)
+        .execute(pool)
+        .await
+        .expect("seed historical postgres request event");
+    }
     sqlx::query(
         "INSERT INTO usage_rollups_v2 (resolution, bucket_start_unix_secs, principal_id,
              upstream_id, upstream_name, model, request_count, input_tokens, updated_at)

@@ -38,8 +38,8 @@ fn classified_event(
     }
 }
 
-/// Inserts a row the way a pre-migration writer did: every column the list
-/// query needs, but no `event_kind`, so the materialized column stays NULL.
+/// Inserts a migrated historical row without a classification so `event_kind`
+/// stays NULL. Current-schema rows no longer have a payload column.
 async fn insert_legacy_row(
     storage: &cc_lb_storage_sqlite::SqliteStorage,
     index: usize,
@@ -49,16 +49,13 @@ async fn insert_legacy_row(
     let event_id = format!("0193a7b8-1234-7e2f-9012-legacy{index:06}");
     sqlx::query(
         "INSERT INTO request_events_v1 \
-            (request_id, ts, source_kind, payload, event_id, \
+            (request_id, ts, source_kind, event_id, \
              list_ts_ms, list_event_key, list_status, list_duration_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 200, 10)",
+         VALUES (?, ?, ?, ?, ?, ?, 200, 10)",
     )
     .bind(format!("req-legacy-{index}"))
     .bind(ts as i64)
     .bind(source_kind)
-    .bind(format!(
-        "{{\"ts\":{ts},\"request_id\":\"req-legacy-{index}\",\"status\":200,\"duration_ms\":10}}"
-    ))
     .bind(&event_id)
     .bind((ts * 1_000) as i64)
     .bind(&event_id)

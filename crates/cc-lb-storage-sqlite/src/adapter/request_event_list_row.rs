@@ -50,7 +50,7 @@ pub(super) fn list_row_to_item(row: ListRow) -> StorageResult<RequestEventListIt
             })?,
             None => {
                 return Err(StorageError::Corrupted {
-                    message: "request event list status missing from payload".to_owned(),
+                    message: "request event list status missing from relational row".to_owned(),
                 });
             }
         },

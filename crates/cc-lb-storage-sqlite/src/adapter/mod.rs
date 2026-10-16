@@ -21,6 +21,7 @@ pub mod principals;
 pub mod prompt_cache_observation;
 mod request_event_list_row;
 mod request_event_list_sql;
+mod request_event_row;
 pub mod request_events;
 pub mod upstream_affinity;
 pub mod upstream_api_key;

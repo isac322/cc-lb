@@ -3,28 +3,17 @@
 //! The five diagnostic fields of [`RequestEvent`] (`cache_breakpoints`,
 //! `cache_control_message_indices`, `routing_trace`, `iterations`,
 //! `internal_errors`) are emitted as one `cc_lb.request_diagnostics.v1` line
-//! per persisted row. Live emission and the backfill CLI share
-//! [`render_request_diagnostics_line`], so both produce byte-identical lines
-//! for the same row except for the `source` value.
+//! per persisted row, together with session correlation and request outcomes.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
-use serde_json::{Map, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::{RequestCacheBreakpoint, RequestEvent, RequestEventKind};
 
 /// Value of the leading `schema` key; log shippers route on the line prefix.
 pub const REQUEST_DIAGNOSTICS_SCHEMA: &str = "cc_lb.request_diagnostics.v1";
-
-/// Payload keys removed by strip-on-write and by the strip CLI.
-pub const REQUEST_DIAGNOSTIC_PAYLOAD_KEYS: [&str; 5] = [
-    "cache_breakpoints",
-    "cache_control_message_indices",
-    "routing_trace",
-    "iterations",
-    "internal_errors",
-];
 
 /// The five diagnostic fields of a [`RequestEvent`], owned.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -34,29 +23,46 @@ pub struct RequestDiagnostics {
     pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
     pub iterations: Option<JsonValue>,
     pub internal_errors: Vec<cc_lb_domain::InternalError>,
+    pub matched_v3_cache_key: Option<String>,
+    pub breakpoint_content_block_index: Option<u64>,
+    pub matched_content_block_index: Option<u64>,
+    pub lookback_distance: Option<u64>,
+    pub predicted_cache_read_tokens: Option<u64>,
+    pub predicted_cache_creation_tokens_5m: Option<u64>,
+    pub predicted_cache_creation_tokens_1h: Option<u64>,
 }
 
 impl RequestDiagnostics {
     /// Moves the five fields out of `event`, leaving their empty defaults so
     /// the row serializes without them.
     pub fn take_from(event: &mut RequestEvent) -> Self {
+        let mut cache_breakpoints = std::mem::take(&mut event.cache_breakpoints);
+        for breakpoint in &mut cache_breakpoints {
+            breakpoint.lookback_prefixes.clear();
+        }
         Self {
-            cache_breakpoints: std::mem::take(&mut event.cache_breakpoints),
+            cache_breakpoints,
             cache_control_message_indices: std::mem::take(&mut event.cache_control_message_indices),
             routing_trace: event.routing_trace.take(),
             iterations: event.iterations.take(),
             internal_errors: std::mem::take(&mut event.internal_errors),
+            ..Self::default()
         }
     }
 
     /// Copies the five fields out of `event`, leaving the row untouched.
     pub fn cloned_from(event: &RequestEvent) -> Self {
+        let mut cache_breakpoints = event.cache_breakpoints.clone();
+        for breakpoint in &mut cache_breakpoints {
+            breakpoint.lookback_prefixes.clear();
+        }
         Self {
-            cache_breakpoints: event.cache_breakpoints.clone(),
+            cache_breakpoints,
             cache_control_message_indices: event.cache_control_message_indices.clone(),
             routing_trace: event.routing_trace.clone(),
             iterations: event.iterations.clone(),
             internal_errors: event.internal_errors.clone(),
+            ..Self::default()
         }
     }
 }
@@ -67,8 +73,6 @@ impl RequestDiagnostics {
 pub enum RequestDiagnosticsSource {
     /// Written by the request-event assembler right after the row insert.
     Live,
-    /// Re-exported from stored rows by the operator CLI.
-    Backfill,
 }
 
 /// One `cc_lb.request_diagnostics.v1` line.
@@ -94,6 +98,28 @@ pub struct RequestDiagnosticsRecord {
     pub error_code: Option<String>,
     pub event_kind: Option<RequestEventKind>,
     pub source_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub observed_session_id: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub duration_ms: u64,
+    pub upstream_ttfb_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_v3_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakpoint_content_block_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_content_block_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_distance: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_cache_creation_tokens_1h: Option<u64>,
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     pub cache_control_message_indices: Vec<u64>,
     pub routing_trace: Option<cc_lb_domain::RoutingTrace>,
@@ -134,6 +160,21 @@ impl RequestDiagnosticsRecord {
             error_code: event.error_code.clone(),
             event_kind: event.event_kind,
             source_kind: event.source_kind.clone(),
+            thread_id: event.thread_id.clone(),
+            observed_session_id: event.observed_session_id.clone(),
+            input_tokens: event.input_tokens,
+            output_tokens: event.output_tokens,
+            cache_read_input_tokens: event.cache_read_input_tokens,
+            cache_creation_input_tokens: event.cache_creation_input_tokens,
+            duration_ms: event.duration_ms,
+            upstream_ttfb_ms: event.upstream_ttfb_ms,
+            matched_v3_cache_key: diagnostics.matched_v3_cache_key,
+            breakpoint_content_block_index: diagnostics.breakpoint_content_block_index,
+            matched_content_block_index: diagnostics.matched_content_block_index,
+            lookback_distance: diagnostics.lookback_distance,
+            predicted_cache_read_tokens: diagnostics.predicted_cache_read_tokens,
+            predicted_cache_creation_tokens_5m: diagnostics.predicted_cache_creation_tokens_5m,
+            predicted_cache_creation_tokens_1h: diagnostics.predicted_cache_creation_tokens_1h,
             cache_breakpoints: diagnostics.cache_breakpoints,
             cache_control_message_indices: diagnostics.cache_control_message_indices,
             routing_trace: diagnostics.routing_trace,
@@ -156,7 +197,7 @@ fn format_ts_ms(ts_ms: u64) -> String {
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// The single renderer for live and backfill: `serde_json::to_vec(record)`
+/// Renders a live diagnostics record: `serde_json::to_vec(record)`
 /// followed by `\n`. No redaction pass runs over the rendered line; producers
 /// already redact the values, and line-level patterns would corrupt compact
 /// JSON.
@@ -168,31 +209,10 @@ pub fn render_request_diagnostics_line(
     Ok(line)
 }
 
-/// Strip-CLI payload transform.
-///
-/// Parses the raw stored payload as a JSON object (not [`RequestEvent`], so
-/// unknown or legacy keys and float values are preserved). Returns `Ok(None)`
-/// when none of [`REQUEST_DIAGNOSTIC_PAYLOAD_KEYS`] is present, meaning no
-/// write is needed. Otherwise removes those keys and returns the re-encoded
-/// object. Without serde_json's `preserve_order` the output keys are sorted,
-/// which is acceptable for cold rows. A payload that is not a JSON object is
-/// an error.
-pub fn strip_payload_diagnostics(payload: &[u8]) -> Result<Option<Vec<u8>>, serde_json::Error> {
-    let mut map: Map<String, JsonValue> = serde_json::from_slice(payload)?;
-    let mut removed = false;
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-        removed |= map.remove(key).is_some();
-    }
-    if !removed {
-        return Ok(None);
-    }
-    serde_json::to_vec(&map).map(Some)
-}
-
 #[cfg(test)]
 mod tests {
     use cc_lb_domain::{InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace};
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     use super::*;
     use crate::{RequestCacheBreakpointSource, RequestCacheLookbackPrefix};
@@ -200,6 +220,13 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     const PREFIX: &str = "{\"schema\":\"cc_lb.request_diagnostics.v1\",";
+    const DIAGNOSTIC_KEYS: [&str; 5] = [
+        "cache_breakpoints",
+        "cache_control_message_indices",
+        "routing_trace",
+        "iterations",
+        "internal_errors",
+    ];
 
     fn sample_breakpoint() -> RequestCacheBreakpoint {
         RequestCacheBreakpoint {
@@ -230,6 +257,7 @@ mod tests {
                 kind: InternalErrorKind::Timeout,
                 message: Some("slow".to_owned()),
             }],
+            ..RequestDiagnostics::default()
         }
     }
 
@@ -247,6 +275,14 @@ mod tests {
             error_code: Some("upstream_timeout".to_owned()),
             event_kind: Some(RequestEventKind::Messages),
             source_kind: Some("proxy".to_owned()),
+            thread_id: Some("thread-1".to_owned()),
+            observed_session_id: Some("session-1".to_owned()),
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            cache_read_input_tokens: Some(80),
+            cache_creation_input_tokens: Some(10),
+            duration_ms: 500,
+            upstream_ttfb_ms: Some(120),
             event_id: Some("evt-1".to_owned()),
             ..RequestEvent::default()
         }
@@ -258,12 +294,18 @@ mod tests {
 
     #[test]
     fn populated_line_has_exact_key_order_and_values() -> TestResult {
+        let mut event = sample_event();
+        let diagnostics = sample_diagnostics();
+        event.cache_breakpoints = diagnostics.cache_breakpoints;
+        event.cache_control_message_indices = diagnostics.cache_control_message_indices;
+        event.iterations = diagnostics.iterations;
+        event.internal_errors = diagnostics.internal_errors;
         let record = RequestDiagnosticsRecord::new(
             RequestDiagnosticsSource::Live,
             42,
             "evt-1".to_owned(),
-            &sample_event(),
-            sample_diagnostics(),
+            &event,
+            RequestDiagnostics::cloned_from(&event),
         );
         let expected = concat!(
             "{\"schema\":\"cc_lb.request_diagnostics.v1\",\"source\":\"live\",",
@@ -274,11 +316,13 @@ mod tests {
             "\"upstream_name\":\"primary\",\"model\":\"claude-sonnet-4-5\",\"status\":200,",
             "\"error_code\":\"upstream_timeout\",\"event_kind\":\"messages\",",
             "\"source_kind\":\"proxy\",",
+            "\"thread_id\":\"thread-1\",\"observed_session_id\":\"session-1\",",
+            "\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":80,",
+            "\"cache_creation_input_tokens\":10,\"duration_ms\":500,\"upstream_ttfb_ms\":120,",
             "\"cache_breakpoints\":[{\"block_index\":3,\"source\":\"message\",",
             "\"path\":\"messages[1].content[0]\",\"message_index\":1,\"ttl\":\"5m\",",
             "\"prefix_hash\":\"abc\",\"prefix_token_count\":120,",
-            "\"lookback_prefixes\":[{\"prefix_hash\":\"def\",\"content_block_index\":2,",
-            "\"lookback_distance\":1}],\"token_estimate_source\":\"bytes\"}],",
+            "\"token_estimate_source\":\"bytes\"}],",
             "\"cache_control_message_indices\":[1,4],\"routing_trace\":null,",
             "\"iterations\":[{\"input_tokens\":5}],",
             "\"internal_errors\":[{\"stage\":\"router\",\"kind\":\"timeout\",\"message\":\"slow\"}]}\n",
@@ -292,25 +336,29 @@ mod tests {
     #[test]
     fn empty_row_still_renders_every_key() -> TestResult {
         let record = RequestDiagnosticsRecord::new(
-            RequestDiagnosticsSource::Backfill,
+            RequestDiagnosticsSource::Live,
             7,
             "evt-0".to_owned(),
             &RequestEvent::default(),
             RequestDiagnostics::default(),
         );
         let expected = concat!(
-            "{\"schema\":\"cc_lb.request_diagnostics.v1\",\"source\":\"backfill\",",
+            "{\"schema\":\"cc_lb.request_diagnostics.v1\",\"source\":\"live\",",
             "\"event_id\":\"evt-0\",\"seq\":7,\"ts\":\"1970-01-01T00:00:00.000Z\",\"ts_ms\":0,",
             "\"request_id\":\"\",\"principal_id\":null,\"key_id\":null,\"upstream_id\":null,",
             "\"upstream_name\":null,\"model\":null,\"status\":0,\"error_code\":null,",
-            "\"event_kind\":null,\"source_kind\":null,\"cache_breakpoints\":[],",
+            "\"event_kind\":null,\"source_kind\":null,",
+            "\"thread_id\":null,\"observed_session_id\":null,",
+            "\"input_tokens\":null,\"output_tokens\":null,\"cache_read_input_tokens\":null,",
+            "\"cache_creation_input_tokens\":null,\"duration_ms\":0,\"upstream_ttfb_ms\":null,",
+            "\"cache_breakpoints\":[],",
             "\"cache_control_message_indices\":[],\"routing_trace\":null,",
             "\"iterations\":null,\"internal_errors\":[]}\n",
         );
         let line = render(&record)?;
         assert_eq!(line, expected);
         let parsed: Map<String, JsonValue> = serde_json::from_str(&line)?;
-        assert_eq!(parsed.len(), 21);
+        assert_eq!(parsed.len(), 29);
         Ok(())
     }
 
@@ -322,7 +370,7 @@ mod tests {
             ..RequestEvent::default()
         };
         let record = RequestDiagnosticsRecord::new(
-            RequestDiagnosticsSource::Backfill,
+            RequestDiagnosticsSource::Live,
             1,
             "evt-legacy".to_owned(),
             &event,
@@ -378,9 +426,10 @@ mod tests {
         assert_eq!(line["cache_control_message_indices"], json!([9]));
         assert_eq!(line["routing_trace"], serde_json::to_value(&routing_trace)?);
         assert_eq!(line["iterations"], json!({ "n": 2 }));
-        assert_eq!(
-            line["cache_breakpoints"][0]["lookback_prefixes"][0]["prefix_hash"],
-            json!("def")
+        assert!(
+            line["cache_breakpoints"][0]
+                .get("lookback_prefixes")
+                .is_none()
         );
         assert_eq!(line["internal_errors"].as_array().map(Vec::len), Some(1));
         Ok(())
@@ -389,7 +438,7 @@ mod tests {
     #[test]
     fn take_from_removes_the_five_keys_from_row_serialization() -> TestResult {
         let mut event = sample_event();
-        let expected = sample_diagnostics();
+        let mut expected = sample_diagnostics();
         event.cache_breakpoints = expected.cache_breakpoints.clone();
         event.cache_control_message_indices = expected.cache_control_message_indices.clone();
         event.routing_trace = Some(RoutingTrace::default());
@@ -397,8 +446,12 @@ mod tests {
         event.internal_errors = expected.internal_errors.clone();
 
         let cloned = RequestDiagnostics::cloned_from(&event);
+        assert!(!event.cache_breakpoints[0].lookback_prefixes.is_empty());
+        for breakpoint in &mut expected.cache_breakpoints {
+            breakpoint.lookback_prefixes.clear();
+        }
         let before: Map<String, JsonValue> = serde_json::from_value(serde_json::to_value(&event)?)?;
-        for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        for key in DIAGNOSTIC_KEYS {
             assert!(
                 before.contains_key(key),
                 "row should carry {key} before take"
@@ -411,7 +464,7 @@ mod tests {
         assert_eq!(taken.routing_trace, Some(RoutingTrace::default()));
 
         let after: Map<String, JsonValue> = serde_json::from_value(serde_json::to_value(&event)?)?;
-        for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
+        for key in DIAGNOSTIC_KEYS {
             assert!(!after.contains_key(key), "row still serializes {key}");
         }
         assert_eq!(after.get("request_id"), Some(&json!("req-1")));
@@ -439,7 +492,7 @@ mod tests {
         let bytes = render_request_diagnostics_line(&record)?;
         assert_eq!(bytes.last(), Some(&b'\n'));
         let parsed: Map<String, JsonValue> = serde_json::from_slice(&bytes)?;
-        assert_eq!(parsed.len(), 21);
+        assert_eq!(parsed.len(), 29);
         assert_eq!(
             parsed
                 .get("internal_errors")
@@ -449,70 +502,5 @@ mod tests {
         );
         assert_eq!(parsed.get("event_id"), Some(&json!("evt-1")));
         Ok(())
-    }
-
-    #[test]
-    fn strip_is_noop_without_diagnostic_keys() -> TestResult {
-        let payload = br#"{"request_id":"req-1","status":200,"legacy_x":1}"#;
-        assert_eq!(strip_payload_diagnostics(payload)?, None);
-        Ok(())
-    }
-
-    #[test]
-    fn strip_removes_keys_and_is_idempotent() -> TestResult {
-        let mut event = sample_event();
-        let diagnostics = sample_diagnostics();
-        event.cache_breakpoints = diagnostics.cache_breakpoints;
-        event.cache_control_message_indices = diagnostics.cache_control_message_indices;
-        event.routing_trace = Some(RoutingTrace::default());
-        event.iterations = diagnostics.iterations;
-        event.internal_errors = diagnostics.internal_errors;
-        let payload = serde_json::to_vec(&event)?;
-
-        let stripped = strip_payload_diagnostics(&payload)?.ok_or("expected a rewrite")?;
-        let map: Map<String, JsonValue> = serde_json::from_slice(&stripped)?;
-        for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-            assert!(!map.contains_key(key), "{key} survived strip");
-        }
-        // Nested lookback prefixes leave with their parent breakpoint list.
-        assert!(!String::from_utf8(stripped.clone())?.contains("lookback_prefixes"));
-
-        // The stripped payload still decodes as a row with the other fields intact.
-        let decoded: RequestEvent = serde_json::from_slice(&stripped)?;
-        assert_eq!(decoded.request_id, "req-1");
-        assert_eq!(decoded.event_id.as_deref(), Some("evt-1"));
-        assert!(decoded.cache_breakpoints.is_empty());
-
-        assert_eq!(strip_payload_diagnostics(&stripped)?, None);
-        Ok(())
-    }
-
-    #[test]
-    fn strip_preserves_unknown_keys_and_float_bits() -> TestResult {
-        let float = 0.1_f64 + 0.2_f64;
-        let payload = serde_json::to_vec(&json!({
-            "request_id": "req-1",
-            "legacy_x": 1,
-            "quota_urgency_5h": float,
-            "routing_trace": { "stages": [] },
-        }))?;
-        let stripped = strip_payload_diagnostics(&payload)?.ok_or("expected a rewrite")?;
-        let map: Map<String, JsonValue> = serde_json::from_slice(&stripped)?;
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.get("legacy_x"), Some(&json!(1)));
-        assert_eq!(map.get("request_id"), Some(&json!("req-1")));
-        let restored = map
-            .get("quota_urgency_5h")
-            .and_then(JsonValue::as_f64)
-            .ok_or("float missing")?;
-        assert_eq!(restored.to_bits(), float.to_bits());
-        Ok(())
-    }
-
-    #[test]
-    fn strip_rejects_non_object_payloads() {
-        assert!(strip_payload_diagnostics(b"[1,2,3]").is_err());
-        assert!(strip_payload_diagnostics(b"\"cache_breakpoints\"").is_err());
-        assert!(strip_payload_diagnostics(b"not json").is_err());
     }
 }

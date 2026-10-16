@@ -5,7 +5,6 @@ use cc_lb_storage_api::{
     RequestEvent, RequestEventListItem, RequestEventListQuery, RequestEventStore,
     RequestEventStreamFilters, StatusClass,
 };
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -17,9 +16,7 @@ pub async fn request_event_list_projects_rows_and_preserves_detail<B: Conformanc
         let upstream_id = Uuid::from_u128(7);
         let other_upstream_id = Uuid::from_u128(8);
 
-        let mut matching =
-            request_event("event-b", "req-b", 2_000, 200, "principal-a", upstream_id);
-        matching.iterations = Some(json!({"not_in_list_projection": "x".repeat(1_000_000)}));
+        let matching = request_event("event-b", "req-b", 2_000, 200, "principal-a", upstream_id);
 
         let legacy = RequestEvent {
             ts: 2,
@@ -566,6 +563,5 @@ fn decoy(event: &RequestEvent, event_id: &str, ts_ms: u64) -> RequestEvent {
     event.ts_ms = Some(ts_ms);
     event.request_id = format!("{event_id}-request");
     event.event_id = Some(event_id.to_owned());
-    event.iterations = None;
     event
 }

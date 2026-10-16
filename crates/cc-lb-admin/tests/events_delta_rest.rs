@@ -3,10 +3,7 @@ use crate::config_admin_common;
 use axum::http::StatusCode;
 use cc_lb_config::Config;
 use cc_lb_domain::{InternalError, RoutingTrace};
-use cc_lb_request_log::{
-    REQUEST_DIAGNOSTIC_PAYLOAD_KEYS, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-    RequestDiagnostics,
-};
+use cc_lb_request_log::{RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestDiagnostics};
 use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::Value;
@@ -76,7 +73,7 @@ async fn events_delta_returns_rows_next_cursor_and_exhaustion() {
 }
 
 #[tokio::test]
-async fn stripped_rows_are_served_identically_without_the_five_diagnostic_keys() {
+async fn stored_rows_carry_no_diagnostics_and_live_finals_match() {
     let (_dir, storage) = temp_storage().await;
     let full = with_diagnostics(request_event(1));
     let mut stripped = with_diagnostics(request_event(2));
@@ -99,6 +96,20 @@ async fn stripped_rows_are_served_identically_without_the_five_diagnostic_keys()
     assert_eq!(status, StatusCode::OK);
     let events = page["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
+    for event in events {
+        for key in [
+            "cache_breakpoints",
+            "cache_control_message_indices",
+            "routing_trace",
+            "iterations",
+            "internal_errors",
+        ] {
+            assert!(
+                event.get(key).is_none(),
+                "stored row exposes diagnostic key {key}: {event}"
+            );
+        }
+    }
     assert_same_row_without_diagnostics(&events[0], &events[1]);
 
     let mut details = Vec::new();
@@ -116,32 +127,27 @@ async fn stripped_rows_are_served_identically_without_the_five_diagnostic_keys()
     assert_same_row_without_diagnostics(&details[0], &details[1]);
 }
 
-/// `stripped` must equal `full` minus exactly the five diagnostic keys (ids aside).
+/// Both storage reads omit diagnostics and preserve the same operational fields (ids aside).
 fn assert_same_row_without_diagnostics(full: &Value, stripped: &Value) {
     let full = full.as_object().unwrap();
     let stripped = stripped.as_object().unwrap();
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-        assert!(full.contains_key(key), "full row lost {key}: {full:?}");
-        assert!(
-            !stripped.contains_key(key),
-            "stripped row still exposes {key}: {stripped:?}"
-        );
-    }
-    let mut expected = full.clone();
-    for key in REQUEST_DIAGNOSTIC_PAYLOAD_KEYS {
-        expected.remove(key);
+    for key in [
+        "cache_breakpoints",
+        "cache_control_message_indices",
+        "routing_trace",
+        "iterations",
+        "internal_errors",
+    ] {
+        assert!(!full.contains_key(key));
+        assert!(!stripped.contains_key(key));
     }
     for (key, value) in stripped {
         if matches!(key.as_str(), "request_id" | "event_id" | "ts" | "ts_ms") {
             continue;
         }
-        assert_eq!(expected.get(key), Some(value), "field {key} differs");
+        assert_eq!(full.get(key), Some(value), "field {key} differs");
     }
-    assert_eq!(
-        expected.len(),
-        stripped.len(),
-        "same key set apart from the five"
-    );
+    assert_eq!(full.len(), stripped.len());
 }
 
 fn with_diagnostics(mut event: RequestEvent) -> RequestEvent {

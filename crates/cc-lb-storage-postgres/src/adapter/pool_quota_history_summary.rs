@@ -6,6 +6,28 @@ use sqlx::Row;
 
 use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 
+// The left anchor carries the last observation into an otherwise idle range.
+macro_rules! range_points {
+    () => { r#"WITH anchors AS (
+    SELECT DISTINCT ON (h."quota_window") h.*
+    FROM pool_subscription_quota_history_v1 h
+    WHERE h."quota_window" = ANY($1) AND h.snapshot_at_unix_secs < $2
+      AND NOT EXISTS (
+          SELECT 1 FROM pool_subscription_quota_history_v1 boundary
+          WHERE boundary."quota_window" = h."quota_window"
+            AND boundary.snapshot_at_unix_secs = $2
+      )
+    ORDER BY h."quota_window", h.snapshot_at_unix_secs DESC
+), points AS (
+    SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+    FROM pool_subscription_quota_history_v1
+    WHERE "quota_window" = ANY($1) AND snapshot_at_unix_secs BETWEEN $2 AND $3
+    UNION ALL
+    SELECT $2 AS snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
+    FROM anchors
+) "# };
+}
+
 pub(super) async fn list_latest(
     storage: &PostgresStorage,
     windows: &[SubscriptionQuotaWindow],
@@ -48,17 +70,10 @@ pub(super) async fn list_range(
         .iter()
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
-    let rows = sqlx::query(
-        r#"SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                  capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                  stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                  header_contributing_upstreams, api_contributing_upstreams,
-                  max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-           FROM pool_subscription_quota_history_v1
-          WHERE "quota_window" = ANY($1)
-            AND snapshot_at_unix_secs BETWEEN $2 AND $3
-       ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
-    )
+    let rows = sqlx::query(concat!(
+        range_points!(),
+        "SELECT * FROM points ORDER BY \"quota_window\" DESC, snapshot_at_unix_secs ASC",
+    ))
     .bind(&windows)
     .bind(since_unix_secs)
     .bind(until_unix_secs)
@@ -88,45 +103,22 @@ pub(super) async fn list_chart_range(
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
     let rows = match bucket_secs {
-        Some(bucket_secs) => sqlx::query(
-            r#"SELECT bucket_start AS snapshot_at_unix_secs,
-                          "quota_window",
-                          MAX(utilization) AS utilization
-                   FROM (
-                       SELECT snapshot_at_unix_secs
-                                  - MOD(
-                                      MOD(snapshot_at_unix_secs, $4) + $4,
-                                      $4
-                                  ) AS bucket_start,
-                              "quota_window",
-                              utilization
-                       FROM pool_subscription_quota_history_v1
-                       WHERE "quota_window" = ANY($1)
-                         AND snapshot_at_unix_secs BETWEEN $2 AND $3
-                   ) chart_points
-                   GROUP BY "quota_window", bucket_start
-                   ORDER BY "quota_window" DESC, bucket_start ASC"#,
-        )
-        .bind(&windows)
-        .bind(since_unix_secs)
-        .bind(until_unix_secs)
-        .bind(bucket_secs)
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?,
-        None => sqlx::query(
-            r#"SELECT snapshot_at_unix_secs, "quota_window", utilization
-               FROM pool_subscription_quota_history_v1
-               WHERE "quota_window" = ANY($1)
-                 AND snapshot_at_unix_secs BETWEEN $2 AND $3
+        Some(bucket_secs) => sqlx::query(concat!(range_points!(),
+            r#"
+               SELECT snapshot_at_unix_secs - MOD(MOD(snapshot_at_unix_secs, $4) + $4, $4) AS snapshot_at_unix_secs,
+                      "quota_window", MAX(utilization) AS utilization
+               FROM points
+               GROUP BY "quota_window", 1
                ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
-        )
-        .bind(&windows)
-        .bind(since_unix_secs)
-        .bind(until_unix_secs)
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?,
+        ))
+        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs).bind(bucket_secs)
+        .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
+        None => sqlx::query(concat!(range_points!(),
+            r#" SELECT snapshot_at_unix_secs, "quota_window", utilization
+               FROM points ORDER BY "quota_window" DESC, snapshot_at_unix_secs ASC"#,
+        ))
+        .bind(&windows).bind(since_unix_secs).bind(until_unix_secs)
+        .fetch_all(storage.pool()).await.map_err(map_sqlx_error)?,
     };
     rows.into_iter().map(row_to_chart_point).collect()
 }

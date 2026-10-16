@@ -1,8 +1,4 @@
 # Top-level keys must precede the first [table].
-# Stop persisting request diagnostic fields (cache_breakpoints,
-# cache_control_message_indices, routing_trace, iterations, internal_errors)
-# in stored request events. Requires observability.request_diagnostics_log = true.
-# request_event_strip_diagnostics = false
 
 # Listener addresses for the proxy, admin stub, and Prometheus metrics listener.
 [listener]
@@ -30,13 +26,9 @@ drain_secs = 60
 [storage]
 kind = "sqlite"
 path = "./data/cc-lb.sqlite"
-
-[aead]
-key_env = "CC_LB_MASTER_KEY"
-
-# Retain learned upstream affinity bindings for 90 days from their last successful binding.
+# Retain learned upstream affinity bindings for 7 days from their last successful binding.
 [upstream_affinity]
-ttl_days = 90
+ttl_days = 7
 
 # Tracing and metrics. The server binds Prometheus to listener.metrics_addr at startup.
 # Set otlp_endpoint to export traces to an OTLP gRPC collector such as the

@@ -21,6 +21,44 @@ mod aggregate;
 
 #[async_trait]
 impl UpstreamSubscriptionQuotaStore for PostgresStorage {
+    async fn prune_subscription_quota_checkpoints_before(
+        &self,
+        cutoff_unix_millis: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            r#"DELETE FROM upstream_subscription_quota_checkpoints_v1
+               WHERE ctid IN (
+                   SELECT old.ctid FROM upstream_subscription_quota_checkpoints_v1 old
+                   WHERE old.changed_at_unix_millis < $1
+                     AND EXISTS (
+                         SELECT 1 FROM upstream_subscription_quota_checkpoints_v1 newer
+                         WHERE newer.upstream_id = old.upstream_id
+                           AND newer."window" = old."window" AND newer.source = old.source
+                           AND newer.changed_at_unix_millis <= $1
+                           AND (newer.changed_at_unix_millis, newer.sample_id)
+                               > (old.changed_at_unix_millis, old.sample_id)
+                     )
+                   ORDER BY old.changed_at_unix_millis, old.sample_id LIMIT $2
+               )"#,
+        )
+        .bind(u64_to_i64(
+            cutoff_unix_millis,
+            "quota checkpoint prune cutoff",
+        )?)
+        .bind(u64_to_i64(
+            batch_size as u64,
+            "quota checkpoint prune batch size",
+        )?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
     async fn record_subscription_quota_samples(
         &self,
         records: &[SubscriptionQuotaSample],
@@ -112,24 +150,61 @@ async fn insert_checkpoint_if_changed(
     conn: &mut PgConnection,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
-    let latest_fingerprint = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT semantic_fingerprint FROM upstream_subscription_quota_checkpoints_v1 \
-         WHERE upstream_id = $1 AND \"window\" = $2 AND source = $3 \
-         ORDER BY changed_at_unix_millis DESC, sample_id DESC \
-         LIMIT 1",
+    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
+    let latest = sqlx::query_as::<_, (Vec<u8>, bool)>(
+        r#"SELECT semantic_fingerprint,
+                  status IS NOT DISTINCT FROM $4::text
+                  AND resets_at_unix_secs IS NOT DISTINCT FROM $5::bigint
+                  AND surpassed_threshold IS NOT DISTINCT FROM $6::double precision
+                  AND fallback_percentage IS NOT DISTINCT FROM $7::double precision
+                  AND fallback_available IS NOT DISTINCT FROM $8::boolean
+                  AND overage_in_use IS NOT DISTINCT FROM $9::boolean
+                  AND overage_period_monthly_utilization IS NOT DISTINCT FROM $10::double precision
+                  AND upgrade_paths IS NOT DISTINCT FROM $11::text
+                  AND disabled_reason IS NOT DISTINCT FROM $12::text
+                  AND extra_usage_enabled IS NOT DISTINCT FROM $13::boolean
+                  AND extra_usage_monthly_limit IS NOT DISTINCT FROM $14::double precision
+                  AND extra_usage_used_credits IS NOT DISTINCT FROM $15::double precision
+                  AND utilization IS NOT NULL AND $16::double precision IS NOT NULL
+                  AND ABS(utilization - $16) < 0.001 AS within_deadband
+           FROM upstream_subscription_quota_checkpoints_v1
+           WHERE upstream_id = $1 AND "window" = $2 AND source = $3
+           ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1"#,
     )
     .bind(record.upstream_id)
     .bind(record.window.as_str())
     .bind(record.source.as_str())
+    .bind(record.status.map(SubscriptionQuotaStatus::as_str))
+    .bind(
+        record
+            .resets_at_unix_secs
+            .map(|value| u64_to_i64(value, "quota reset timestamp"))
+            .transpose()?,
+    )
+    .bind(record.surpassed_threshold)
+    .bind(record.fallback_percentage)
+    .bind(record.fallback_available)
+    .bind(record.overage_in_use)
+    .bind(record.overage_period_monthly_utilization)
+    .bind(upgrade_paths_json.as_deref())
+    .bind(record.disabled_reason.as_deref())
+    .bind(record.extra_usage_enabled)
+    .bind(record.extra_usage_monthly_limit)
+    .bind(record.extra_usage_used_credits)
+    .bind(record.utilization)
     .fetch_optional(&mut *conn)
     .await
     .map_err(map_sqlx_error)?;
 
-    if latest_fingerprint.as_deref() == Some(&record.semantic_fingerprint.as_bytes()[..]) {
+    if latest
+        .as_ref()
+        .is_some_and(|(fingerprint, within_deadband)| {
+            fingerprint.as_slice() == &record.semantic_fingerprint.as_bytes()[..]
+                || *within_deadband
+        })
+    {
         return Ok(false);
     }
-
-    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let result = sqlx::query(
         "INSERT INTO upstream_subscription_quota_checkpoints_v1 \
          (upstream_id, \"window\", source, changed_at_unix_millis, sample_id, semantic_fingerprint, \

@@ -14,6 +14,37 @@ use crate::{
 
 #[async_trait]
 impl CacheKeepaliveSessionStore for PostgresStorage {
+    async fn prune_cache_keepalive_history_before(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
+        let limit = u64_to_i64(batch_size as u64, "keepalive history prune batch size")?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let mut removed = 0u64;
+        for sql in [
+            "DELETE FROM cache_keepalive_decisions WHERE ctid IN (SELECT ctid FROM cache_keepalive_decisions WHERE ts < $1 ORDER BY ts LIMIT $2)",
+            "DELETE FROM cache_keepalive_turns WHERE ctid IN (SELECT ctid FROM cache_keepalive_turns WHERE ts < $1 ORDER BY ts LIMIT $2)",
+        ] {
+            if removed == limit as u64 {
+                break;
+            }
+            removed += sqlx::query(sql)
+                .bind(cutoff)
+                .bind(limit - removed as i64)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?
+                .rows_affected();
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(removed)
+    }
+
     async fn replace_from_real_request(
         &self,
         request: &CacheKeepaliveReplaceRequest,

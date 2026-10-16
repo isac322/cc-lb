@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
-use crate::{RequestCacheBreakpoint, RequestCacheState, RequestEventKind, cache::is_zero};
+use crate::{RequestCacheBreakpoint, RequestEventKind, cache::is_zero};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RequestEvent {
@@ -43,8 +43,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_state: Option<RequestCacheState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_session_id: Option<String>,
@@ -61,14 +59,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_control_block_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -77,43 +67,7 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_prefix_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_v3_cache_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub breakpoint_content_block_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_content_block_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lookback_distance: Option<u64>,
-    /// Token estimate derived from serialized prefix bytes (see
-    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub predicted_cache_read_tokens: Option<u64>,
-    /// Token estimate derived from serialized prefix bytes (see
-    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub predicted_cache_creation_tokens_5m: Option<u64>,
-    /// Token estimate derived from serialized prefix bytes (see
-    /// `PrefixBytes::as_token_estimate`); not a provider-reported token count.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub predicted_cache_creation_tokens_1h: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_estimate_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_value_micros: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub formula_winner_upstream_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kept_upstream_id: Option<Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_5h: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_7d: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_urgency_combined: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quota_warning_multiplier: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,8 +148,6 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalize_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub first_body_chunk_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_chunk_count: Option<u64>,
     /// Response body bytes relayed to the client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,13 +184,7 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_search_requests: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub web_fetch_requests: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_geo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_error_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

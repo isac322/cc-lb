@@ -32,26 +32,28 @@ Use SQLite for local or bounded single-node operation. Use Postgres when multipl
 
 After changing scheduler or affinity retention settings, restart the server so all workers use the same startup policy.
 
+## Upstream affinity
+
+Learned upstream affinity bindings are retained for 7 days from their last successful binding by default. Ordinary replay reads do not refresh the timestamp, so bindings older than `ttl_days` fail closed with `503` and are purged.
+
+```toml
+[upstream_affinity]
+ttl_days = 7
+```
+
 ## Request diagnostics
 
-Two startup settings control where the request-event diagnostic fields live: `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. Both default to `false`, and changes take effect only after a restart.
+Request events store all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so event reads have zero TOAST overhead. The five deep diagnostic fields are `cache_breakpoints` (with `lookback_prefixes` omitted from diagnostics lines), `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`.
+
+The optional startup setting below emits one `cc_lb.request_diagnostics.v1` JSON line to stdout after each stored request event commits. The line also carries `thread_id`, `observed_session_id`, `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `duration_ms`, and `upstream_ttfb_ms`.
 
 | Key | Default | Environment variable | Effect |
 | --- | --- | --- | --- |
-| `observability.request_diagnostics_log` | `false` | `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG` | Writes one `cc_lb.request_diagnostics.v1` JSON line to stdout for each stored request event. |
-| `request_event_strip_diagnostics` (top level) | `false` | `CC_LB_REQUEST_EVENT_STRIP_DIAGNOSTICS` | Stores new request events without the five fields. The stdout line is then their only copy. |
+| `observability.request_diagnostics_log` | `false` | `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG` | Writes one diagnostics JSON line to stdout for each stored request event. |
 
 ```toml
-request_event_strip_diagnostics = false
-
 [observability]
 request_diagnostics_log = true
 ```
 
-Validation rejects `request_event_strip_diagnostics = true` unless `observability.request_diagnostics_log = true`, because the fields would otherwise be discarded. With the strip on, admin API event reads omit the five fields; see the [admin API reference](/docs/reference/admin-api/#request-event-diagnostic-fields).
-
-`observability.log_redaction` and `observability.user_prompt_redaction` do not apply to diagnostics lines. Those lines bypass the tracing writer, and the values in them are redacted where they are produced: internal error messages and routing traces are capped and redacted before they reach the row.
-
-With the Helm chart, set `config.requestEventStripDiagnostics` for the strip. The chart has no value for the log key. Set it in `config.extraToml` under an `[observability]` table, or with the `CC_LB_OBSERVABILITY__REQUEST_DIAGNOSTICS_LOG` environment variable in `env`. Never put a bare top-level key in `config.extraToml`: the chart appends it after its generated tables, so it would land inside the last table and fail to load.
-
-The [observability guide](/docs/operations/observability/#request-diagnostics-log) describes the line format and delivery, and the [request diagnostics runbook](https://github.com/isac322/cc-lb/blob/master/docs/runbook/request-diagnostics.md) covers backfill, reconciliation, and stripping existing rows.
+The setting is fixed at startup. `observability.log_redaction` and `observability.user_prompt_redaction` do not apply to diagnostics lines; producers redact internal error text and cap routing traces before persistence. See the [observability guide](/docs/operations/observability/#request-diagnostics-log) and the [request diagnostics runbook](https://github.com/isac322/cc-lb/blob/master/docs/runbook/request-diagnostics.md) for delivery and reconciliation boundaries.

@@ -14,7 +14,49 @@ use super::request_event_list_row::list_row_to_item;
 const LIST_REQUEST_EVENTS_SELECT: &str = "\
 SELECT \
     EXTRACT(EPOCH FROM r.ts)::bigint AS ts_secs, \
-    r.payload, \
+    r.request_id AS request_id, \
+    r.duration_ms AS duration_ms, \
+    r.request_body_read_ms AS request_body_read_ms, \
+    r.request_body_bytes AS request_body_bytes, \
+    r.request_body_first_chunk_ms AS request_body_first_chunk_ms, \
+    r.request_body_receive_ms AS request_body_receive_ms, \
+    r.request_body_wait_ms AS request_body_wait_ms, \
+    r.request_body_process_ms AS request_body_process_ms, \
+    r.request_body_chunk_count AS request_body_chunk_count, \
+    r.response_body_wait_ms AS response_body_wait_ms, \
+    r.response_body_process_ms AS response_body_process_ms, \
+    r.response_body_downstream_poll_gap_ms AS response_body_downstream_poll_gap_ms, \
+    r.retry_overhead_ms AS retry_overhead_ms, \
+    r.auth_ms AS auth_ms, \
+    r.route_ms AS route_ms, \
+    r.limit_reserve_ms AS limit_reserve_ms, \
+    r.json_parse_ms AS json_parse_ms, \
+    r.cache_structure_ms AS cache_structure_ms, \
+    r.cache_token_key_ms AS cache_token_key_ms, \
+    r.cache_count_lookup_ms AS cache_count_lookup_ms, \
+    r.cache_tokenizer_queue_ms AS cache_tokenizer_queue_ms, \
+    r.cache_serialize_ms AS cache_serialize_ms, \
+    r.cache_tokenize_ms AS cache_tokenize_ms, \
+    r.prepare_signer_ms AS prepare_signer_ms, \
+    r.bulkhead_wait_ms AS bulkhead_wait_ms, \
+    r.dns_ms AS dns_ms, \
+    r.connect_ms AS connect_ms, \
+    r.connection_reused AS connection_reused, \
+    r.finalize_ms AS finalize_ms, \
+    r.proxy_setup_ms AS proxy_setup_ms, \
+    r.shape_ms AS shape_ms, \
+    r.sign_ms AS sign_ms, \
+    r.upstream_ttfb_ms AS upstream_ttfb_ms, \
+    r.upstream_body_ms AS upstream_body_ms, \
+    r.stream_first_content_delta_ms AS stream_first_content_delta_ms, \
+    r.stream_last_content_delta_ms AS stream_last_content_delta_ms, \
+    r.inter_token_avg_ms AS inter_token_avg_ms, \
+    r.list_cost_usd_micros AS cost_usd_micros, \
+    r.list_cost_input_micros AS cost_input_micros, \
+    r.list_cost_output_micros AS cost_output_micros, \
+    r.list_cost_cache_creation_5m_micros AS cost_cache_creation_5m_micros, \
+    r.list_cost_cache_creation_1h_micros AS cost_cache_creation_1h_micros, \
+    r.list_cost_cache_read_micros AS cost_cache_read_micros, \
     r.list_ts_ms AS ts_ms, \
     r.event_id, \
     r.source_kind, \
@@ -51,7 +93,49 @@ WHERE r.ts >= ";
 #[derive(FromRow)]
 pub(super) struct ListRow {
     pub(super) ts_secs: i64,
-    pub(super) payload: Option<Vec<u8>>,
+    pub(super) request_id: Option<String>,
+    pub(super) duration_ms: Option<i64>,
+    pub(super) request_body_read_ms: Option<i64>,
+    pub(super) request_body_bytes: Option<i64>,
+    pub(super) request_body_first_chunk_ms: Option<f64>,
+    pub(super) request_body_receive_ms: Option<f64>,
+    pub(super) request_body_wait_ms: Option<f64>,
+    pub(super) request_body_process_ms: Option<f64>,
+    pub(super) request_body_chunk_count: Option<i64>,
+    pub(super) response_body_wait_ms: Option<f64>,
+    pub(super) response_body_process_ms: Option<f64>,
+    pub(super) response_body_downstream_poll_gap_ms: Option<f64>,
+    pub(super) retry_overhead_ms: Option<f64>,
+    pub(super) auth_ms: Option<i64>,
+    pub(super) route_ms: Option<i64>,
+    pub(super) limit_reserve_ms: Option<i64>,
+    pub(super) json_parse_ms: Option<f64>,
+    pub(super) cache_structure_ms: Option<f64>,
+    pub(super) cache_token_key_ms: Option<f64>,
+    pub(super) cache_count_lookup_ms: Option<f64>,
+    pub(super) cache_tokenizer_queue_ms: Option<f64>,
+    pub(super) cache_serialize_ms: Option<f64>,
+    pub(super) cache_tokenize_ms: Option<f64>,
+    pub(super) prepare_signer_ms: Option<f64>,
+    pub(super) bulkhead_wait_ms: Option<i64>,
+    pub(super) dns_ms: Option<i64>,
+    pub(super) connect_ms: Option<i64>,
+    pub(super) connection_reused: Option<bool>,
+    pub(super) finalize_ms: Option<i64>,
+    pub(super) proxy_setup_ms: Option<i64>,
+    pub(super) shape_ms: Option<i64>,
+    pub(super) sign_ms: Option<i64>,
+    pub(super) upstream_ttfb_ms: Option<i64>,
+    pub(super) upstream_body_ms: Option<i64>,
+    pub(super) stream_first_content_delta_ms: Option<i64>,
+    pub(super) stream_last_content_delta_ms: Option<i64>,
+    pub(super) inter_token_avg_ms: Option<i64>,
+    pub(super) cost_usd_micros: Option<i64>,
+    pub(super) cost_input_micros: Option<i64>,
+    pub(super) cost_output_micros: Option<i64>,
+    pub(super) cost_cache_creation_5m_micros: Option<i64>,
+    pub(super) cost_cache_creation_1h_micros: Option<i64>,
+    pub(super) cost_cache_read_micros: Option<i64>,
     pub(super) ts_ms: Option<i64>,
     pub(super) event_id: Option<String>,
     pub(super) source_kind: Option<String>,
@@ -206,16 +290,12 @@ pub(super) async fn get_request_event(
     storage: &PostgresStorage,
     event_id: &str,
 ) -> StorageResult<Option<RequestEvent>> {
-    let payload = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT payload FROM request_events_v1 WHERE event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_optional(&storage.pool)
-    .await
-    .map_err(map_sqlx_error)?;
-
-    payload
-        .map(|payload| serde_json::from_slice(&payload).map_err(Into::into))
+    let rows = sqlx::query(super::request_events::row::GET_SQL)
+        .bind(event_id)
+        .fetch_optional(&storage.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+    rows.map(|row| super::request_events::row::from_row(&row))
         .transpose()
 }
 

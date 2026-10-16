@@ -9,6 +9,39 @@ use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 
 #[async_trait]
 impl PoolQuotaHistoryStore for PostgresStorage {
+    async fn prune_pool_quota_history_before(
+        &self,
+        cutoff_unix_secs: i64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            r#"DELETE FROM pool_subscription_quota_history_v1
+               WHERE ctid IN (
+                   SELECT old.ctid FROM pool_subscription_quota_history_v1 old
+                   WHERE old.snapshot_at_unix_secs < $1
+                     AND EXISTS (
+                         SELECT 1 FROM pool_subscription_quota_history_v1 newer
+                         WHERE newer."quota_window" = old."quota_window"
+                           AND newer.snapshot_at_unix_secs <= $1
+                           AND newer.snapshot_at_unix_secs > old.snapshot_at_unix_secs
+                     )
+                   ORDER BY old.snapshot_at_unix_secs LIMIT $2
+               )"#,
+        )
+        .bind(cutoff_unix_secs)
+        .bind(crate::adapter::u64_to_i64(
+            batch_size as u64,
+            "pool history prune batch size",
+        )?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
     async fn record_pool_quota_snapshots(
         &self,
         records: &[PoolQuotaSnapshotRecord],

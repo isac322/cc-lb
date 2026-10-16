@@ -45,6 +45,49 @@ mod sqlite {
     }
 
     #[tokio::test]
+    async fn retains_two_day_old_failed_jobs_for_thirty_day_dlq_retention()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = SqlitePool::connect(":memory:").await?;
+        SqliteStorage::setup(&pool).await?;
+        let old_done_at = i64::try_from(NOW_SECS - (2 * DAY_SECS))?;
+        for (id, status) in [
+            ("two-day-old-done", "Done"),
+            ("two-day-old-failed", "Failed"),
+        ] {
+            sqlx::query(
+                "INSERT INTO Jobs (job, id, job_type, status, run_at, done_at)
+                 VALUES (?1, ?2, 'housekeeping', ?3, ?4, ?5)",
+            )
+            .bind(Vec::<u8>::new())
+            .bind(id)
+            .bind(status)
+            .bind(i64::try_from(NOW_SECS)?)
+            .bind(old_done_at)
+            .execute(&pool)
+            .await?;
+        }
+
+        let result =
+            ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(30))
+                .handle(ApalisHousekeepingJob::default(), NOW_SECS)
+                .await;
+        assert!(matches!(
+            result,
+            ApalisHousekeepingJobResult::Done {
+                jobs_removed: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT id FROM Jobs ORDER BY id")
+                .fetch_all(&pool)
+                .await?,
+            vec!["two-day-old-failed"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn remains_successful_across_repeated_runs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;

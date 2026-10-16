@@ -3,16 +3,17 @@ use cc_lb_storage_api::{
     CacheKeepaliveDecisionRow, CacheKeepaliveProjectionStore, CacheKeepaliveTurnRow, RequestEvent,
     RequestEventExportPage, RequestEventHistogramBucket, RequestEventHistogramQuery,
     RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery, RequestEventKind, RequestEventListItem,
-    RequestEventListQuery, RequestEventPayloadScan, RequestEventPrincipalCostBucket,
-    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStore,
-    RequestEventStreamFilters, StorageError, StorageResult, model_filter_like_patterns,
-    model_filter_matches, normalize_usage_rollup_dimension,
+    RequestEventListQuery, RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery,
+    RequestEventProjections, RequestEventStore, RequestEventStreamFilters, StorageError,
+    StorageResult, model_filter_like_patterns, model_filter_matches,
+    normalize_usage_rollup_dimension,
 };
-use sqlx::AssertSqlSafe;
+use sqlx::{AssertSqlSafe, Row};
 use std::{collections::BTreeMap, time::Instant};
 use uuid::Uuid;
 
 use super::request_event_list_sql;
+use super::request_event_row::{REQUEST_EVENT_COLUMNS, row_to_request_event};
 use crate::{SqliteStorage, map_sqlx_error};
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
@@ -117,12 +118,13 @@ impl RequestEventStore for SqliteStorage {
             return Ok(Vec::new());
         }
 
-        let rows =
-            sqlx::query_as::<_, (i64, Option<String>, Option<String>, Option<String>, String)>(
-                "SELECT id, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
-             WHERE id > ? AND id <= ? \
-             ORDER BY id ASC LIMIT ?",
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "SELECT {REQUEST_EVENT_COLUMNS} FROM request_events_v1 \
+                     WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?"
             )
+        });
+        let rows = sqlx::query(SQL.as_str())
             .bind(u64_to_i64(after, "request event cursor after")?)
             .bind(u64_to_i64(until, "request event cursor until")?)
             .bind(usize_to_i64(limit.min(500), "request event cursor limit")?)
@@ -131,11 +133,12 @@ impl RequestEventStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(id, source_kind, source_ref_id, event_kind, payload)| {
-                let cursor = i64_to_u64(id, "request event cursor")?;
-                let event =
-                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
-                Ok((cursor, event))
+            .map(|row| {
+                let cursor = i64_to_u64(
+                    row.try_get("id").map_err(map_sqlx_error)?,
+                    "request event cursor",
+                )?;
+                Ok((cursor, row_to_request_event(&row)?))
             })
             .filter(|result| match result {
                 Ok((_, event)) => request_event_matches_filters(event, filters),
@@ -235,14 +238,16 @@ impl RequestEventStore for SqliteStorage {
         if page.limit == 0 || page.until_seq <= page.after_seq {
             return Ok(Vec::new());
         }
-        let rows =
-            sqlx::query_as::<_, (i64, Option<String>, Option<String>, Option<String>, String)>(
-                "SELECT id, source_kind, source_ref_id, event_kind, payload FROM request_events_v1 \
-                 WHERE id > ? AND id <= ? \
-                   AND (? IS NULL OR list_ts_ms >= ?) \
-                   AND (? IS NULL OR list_ts_ms < ?) \
-                 ORDER BY id ASC LIMIT ?",
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "SELECT {REQUEST_EVENT_COLUMNS} FROM request_events_v1 \
+                     WHERE id > ? AND id <= ? \
+                       AND (? IS NULL OR list_ts_ms >= ?) \
+                       AND (? IS NULL OR list_ts_ms < ?) \
+                     ORDER BY id ASC LIMIT ?"
             )
+        });
+        let rows = sqlx::query(SQL.as_str())
             .bind(u64_to_i64(
                 page.after_seq,
                 "request event export after_seq",
@@ -264,11 +269,12 @@ impl RequestEventStore for SqliteStorage {
             .map_err(map_sqlx_error)?;
 
         rows.into_iter()
-            .map(|(id, source_kind, source_ref_id, event_kind, payload)| {
-                let cursor = i64_to_u64(id, "request event cursor")?;
-                let event =
-                    request_event_from_storage(&payload, source_kind, source_ref_id, event_kind)?;
-                Ok((cursor, event))
+            .map(|row| {
+                let cursor = i64_to_u64(
+                    row.try_get("id").map_err(map_sqlx_error)?,
+                    "request event cursor",
+                )?;
+                Ok((cursor, row_to_request_event(&row)?))
             })
             .collect()
     }
@@ -299,63 +305,6 @@ impl RequestEventStore for SqliteStorage {
                 ))
             })
             .collect()
-    }
-
-    async fn scan_request_event_payloads(
-        &self,
-        scan: &RequestEventPayloadScan,
-    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
-        if scan.limit == 0 || scan.until_seq <= scan.after_seq {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query_as::<_, (i64, String)>(
-            "SELECT id, payload FROM request_events_v1 \
-             WHERE id > ? AND id <= ? ORDER BY id ASC LIMIT ?",
-        )
-        .bind(u64_to_i64(scan.after_seq, "request event scan after_seq")?)
-        .bind(u64_to_i64_upper(scan.until_seq))
-        .bind(usize_to_i64(scan.limit, "request event scan limit")?)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
-        rows.into_iter()
-            .map(|(id, payload)| {
-                Ok((
-                    i64_to_u64(id, "request event cursor")?,
-                    payload.into_bytes(),
-                ))
-            })
-            .collect()
-    }
-
-    /// One `BEGIN IMMEDIATE` transaction per batch. Only `payload` is
-    /// assigned, so `id` (the cursor) never moves.
-    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
-        if rows.is_empty() {
-            return Ok(0);
-        }
-        let mut decoded = Vec::with_capacity(rows.len());
-        for (seq, payload) in rows {
-            let id = u64_to_i64(*seq, "request event rewrite seq")?;
-            let payload =
-                std::str::from_utf8(payload).map_err(|error| StorageError::Corrupted {
-                    message: format!("request event {seq} rewrite payload is not UTF-8: {error}"),
-                })?;
-            decoded.push((id, payload));
-        }
-        let mut tx = self.begin_immediate().await?;
-        let mut rewritten = 0_u64;
-        for (id, payload) in decoded {
-            let result = sqlx::query("UPDATE request_events_v1 SET payload = ? WHERE id = ?")
-                .bind(payload)
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
-            rewritten = rewritten.saturating_add(result.rows_affected());
-        }
-        tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(rewritten)
     }
 }
 
@@ -917,7 +866,6 @@ async fn insert_request_event_in_tx(
 ) -> StorageResult<Option<i64>> {
     let ts_ms = storage_ts_ms(event)?;
     let ts_secs = ts_ms / 1_000;
-    let payload = serde_json::to_string(event)?;
     sqlx::query_scalar::<_, i64>(concat!(
         "INSERT INTO request_events_v1 (",
         "request_id, ts, source_kind, source_ref_id, upstream_id, principal_id, ",
@@ -926,7 +874,7 @@ async fn insert_request_event_in_tx(
         "event_id, error_code, upstream_error_type, upstream_error_message, ",
         "thinking_tokens, service_tier, cache_creation_input_tokens_5m, ",
         "cache_creation_input_tokens_1h, token_estimate_source, ",
-        "thinking_budget_tokens, reasoning_effort, payload, list_ts_ms, ",
+        "thinking_budget_tokens, reasoning_effort, list_ts_ms, ",
         "list_event_key, list_status, list_duration_ms, list_auth_ms, ",
         "list_route_ms, list_limit_reserve_ms, list_json_parse_ms, ",
         "list_cache_structure_ms, list_cache_token_key_ms, ",
@@ -947,7 +895,14 @@ async fn insert_request_event_in_tx(
         "list_request_body_process_ms, list_request_body_chunk_count, ",
         "list_response_body_wait_ms, list_response_body_process_ms, ",
         "list_response_body_downstream_poll_gap_ms, list_retry_overhead_ms, ",
-        "event_kind",
+        "event_kind, principal_kind, body_chunk_count, body_bytes, ",
+        "stream_message_start_ms, stream_content_block_start_ms, ",
+        "stream_message_stop_ms, stream_last_chunk_ms, stream_total_ms, ",
+        "sse_event_count, content_delta_count, ping_count, upstream_http_version, ",
+        "upstream_request_id, upstream_content_encoding, upstream_content_length, ",
+        "upstream_body_bytes, upstream_body_end, upstream_body_error_cause, ",
+        "upstream_body_error_io_kind, upstream_body_error_h2_reason, ",
+        "upstream_stream_warning_type, upstream_stream_warning_message",
         ") VALUES (",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
@@ -955,7 +910,9 @@ async fn insert_request_event_in_tx(
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
         "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
-        "?, ?, ?, ?, ?, ?, ?, ?",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ",
+        "?, ?, ?, ?, ?",
         ") ON CONFLICT(event_id) WHERE event_id IS NOT NULL DO NOTHING ",
         "RETURNING id",
     ))
@@ -1009,7 +966,6 @@ async fn insert_request_event_in_tx(
         "thinking_budget_tokens",
     )?)
     .bind(event.reasoning_effort.as_deref())
-    .bind(payload)
     .bind(u64_to_i64(ts_ms, "request event list_ts_ms")?)
     .bind(event_id)
     .bind(i64::from(event.status))
@@ -1120,6 +1076,64 @@ async fn insert_request_event_in_tx(
     .bind(event.response_body_downstream_poll_gap_ms)
     .bind(event.retry_overhead_ms)
     .bind(event.event_kind.map(|kind| kind.as_str()))
+    .bind(event.principal_kind.as_deref())
+    .bind(option_u64_to_i64(
+        event.body_chunk_count,
+        "request event body_chunk_count",
+    )?)
+    .bind(option_u64_to_i64(
+        event.body_bytes,
+        "request event body_bytes",
+    )?)
+    .bind(option_u64_to_i64(
+        event.stream_message_start_ms,
+        "request event stream_message_start_ms",
+    )?)
+    .bind(option_u64_to_i64(
+        event.stream_content_block_start_ms,
+        "request event stream_content_block_start_ms",
+    )?)
+    .bind(option_u64_to_i64(
+        event.stream_message_stop_ms,
+        "request event stream_message_stop_ms",
+    )?)
+    .bind(option_u64_to_i64(
+        event.stream_last_chunk_ms,
+        "request event stream_last_chunk_ms",
+    )?)
+    .bind(option_u64_to_i64(
+        event.stream_total_ms,
+        "request event stream_total_ms",
+    )?)
+    .bind(option_u64_to_i64(
+        event.sse_event_count,
+        "request event sse_event_count",
+    )?)
+    .bind(option_u64_to_i64(
+        event.content_delta_count,
+        "request event content_delta_count",
+    )?)
+    .bind(option_u64_to_i64(
+        event.ping_count,
+        "request event ping_count",
+    )?)
+    .bind(event.upstream_http_version.as_deref())
+    .bind(event.upstream_request_id.as_deref())
+    .bind(event.upstream_content_encoding.as_deref())
+    .bind(option_u64_to_i64(
+        event.upstream_content_length,
+        "request event upstream_content_length",
+    )?)
+    .bind(option_u64_to_i64(
+        event.upstream_body_bytes,
+        "request event upstream_body_bytes",
+    )?)
+    .bind(event.upstream_body_end.as_deref())
+    .bind(event.upstream_body_error_cause.as_deref())
+    .bind(event.upstream_body_error_io_kind.as_deref())
+    .bind(event.upstream_body_error_h2_reason.as_deref())
+    .bind(event.upstream_stream_warning_type.as_deref())
+    .bind(event.upstream_stream_warning_message.as_deref())
     .fetch_optional(&mut **tx)
     .await
     .map_err(map_sqlx_error)
@@ -1220,27 +1234,6 @@ fn cache_keepalive_ttl_to_db(ttl: cc_lb_storage_api::CacheTtl) -> &'static str {
         cc_lb_storage_api::CacheTtl::Ttl5m => "5m",
         cc_lb_storage_api::CacheTtl::Ttl1h => "1h",
     }
-}
-
-fn request_event_from_storage(
-    payload: &str,
-    source_kind: Option<String>,
-    source_ref_id: Option<String>,
-    event_kind: Option<String>,
-) -> StorageResult<RequestEvent> {
-    let mut event = serde_json::from_str::<RequestEvent>(payload)?;
-    if source_kind.is_some() {
-        event.source_kind = source_kind;
-    }
-    if source_ref_id.is_some() {
-        event.source_ref_id = source_ref_id;
-    }
-    if let Some(event_kind) = event_kind {
-        event.event_kind = Some(event_kind.parse().map_err(|_| StorageError::Corrupted {
-            message: format!("request event unknown event_kind value: {event_kind}"),
-        })?);
-    }
-    Ok(event)
 }
 
 fn storage_event_id(event: &RequestEvent) -> StorageResult<&str> {

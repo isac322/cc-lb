@@ -5,11 +5,10 @@ use crate::{
     ConfigDraftState, HistoryEntry, IssueParams, OverviewExcludedErrorBucket,
     PriceCatalogSnapshotFetch, RequestEvent, RequestEventExportPage, RequestEventHistogramBucket,
     RequestEventHistogramQuery, RequestEventKeyLastUsed, RequestEventKeyLastUsedQuery,
-    RequestEventListItem, RequestEventListQuery, RequestEventPayloadScan,
-    RequestEventPrincipalCostBucket, RequestEventPrincipalCostQuery, RequestEventProjections,
-    RequestEventStreamFilters, RuntimeChangeNotifier, StorageError, StorageResult,
-    StoredApiKeyRecord, UsageRollup, UsageRollupResolution, UsageRollupRun, UsageTokenInterval,
-    UsageTokenIntervalSum,
+    RequestEventListItem, RequestEventListQuery, RequestEventPrincipalCostBucket,
+    RequestEventPrincipalCostQuery, RequestEventProjections, RequestEventStreamFilters,
+    RuntimeChangeNotifier, StorageError, StorageResult, StoredApiKeyRecord, UsageRollup,
+    UsageRollupResolution, UsageRollupRun, UsageTokenInterval, UsageTokenIntervalSum,
     anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
     cache_keepalive_sessions::{CacheKeepaliveSessionReadStore, CacheKeepaliveSessionStore},
     oauth_pkce::OAuthPkceStore,
@@ -110,10 +109,9 @@ pub trait RequestEventStore: Send + Sync {
     }
 
     /// Returns a page of the request-event LIST view: cursor, limit, and
-    /// `query.filters` are all evaluated in SQL, and only the columns the
-    /// list view displays are selected and decoded (never the full
-    /// `payload`). See [`crate::RequestEventListQuery`] for the exact
-    /// ordering/cursor contract.
+    /// `query.filters` are evaluated in SQL, and only the relational columns
+    /// displayed in the list view are selected and decoded.
+    /// See [`crate::RequestEventListQuery`] for the ordering/cursor contract.
     async fn list_request_events(
         &self,
         query: &RequestEventListQuery,
@@ -154,9 +152,9 @@ pub trait RequestEventStore: Send + Sync {
         })
     }
 
-    /// Fetches the single full [`RequestEvent`] for the DETAIL view, byte-identical
-    /// to what `append_request_event` persisted. Returns `Ok(None)` when no row
-    /// with this `event_id` exists.
+    /// Fetches the persisted relational fields for the DETAIL view.
+    /// In-memory diagnostics are returned empty. Returns `Ok(None)` when no
+    /// row with this `event_id` exists.
     async fn get_request_event(&self, event_id: &str) -> StorageResult<Option<RequestEvent>> {
         let _ = event_id;
         Err(StorageError::Fatal {
@@ -224,31 +222,6 @@ pub trait RequestEventStore: Send + Sync {
                 .to_owned(),
         })
     }
-
-    /// Returns raw stored payload bytes `(seq, payload)` in ascending cursor
-    /// order (see [`RequestEventPayloadScan`]). No decoding and no xmin guard.
-    async fn scan_request_event_payloads(
-        &self,
-        scan: &RequestEventPayloadScan,
-    ) -> StorageResult<Vec<(u64, Vec<u8>)>> {
-        let _ = scan;
-        Err(StorageError::Fatal {
-            message: "scan_request_event_payloads is not implemented for this storage backend"
-                .to_owned(),
-        })
-    }
-
-    /// Replaces the stored payload of each `(seq, payload)` row and returns
-    /// the number of rows updated. A `seq` that no longer exists (for example
-    /// pruned concurrently) updates nothing and is not an error. Neither the
-    /// cursor nor any other column changes.
-    async fn rewrite_request_event_payloads(&self, rows: &[(u64, Vec<u8>)]) -> StorageResult<u64> {
-        let _ = rows;
-        Err(StorageError::Fatal {
-            message: "rewrite_request_event_payloads is not implemented for this storage backend"
-                .to_owned(),
-        })
-    }
 }
 
 #[async_trait]
@@ -262,6 +235,18 @@ pub trait CacheKeepaliveProjectionStore: Send + Sync {
 #[async_trait]
 pub trait UsageRollupStore: Send + Sync {
     async fn rollup_usage_once(&self) -> StorageResult<UsageRollupRun>;
+
+    /// Removes at most `batch_size` expired rows across usage and excluded-error
+    /// rollups. Minute and hour resolutions have independent retention horizons.
+    async fn prune_usage_rollups_before(
+        &self,
+        minute_cutoff_unix_secs: u64,
+        hour_cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = (minute_cutoff_unix_secs, hour_cutoff_unix_secs, batch_size);
+        Ok(0)
+    }
 
     /// CATEGORY-3: `UsageRollup.upstream_id` is the stable cross-table identity for quota joins;
     /// `upstream_name` is best-effort display data captured from the upstream's current name and

@@ -25,64 +25,56 @@ The stream latency breakdown worker uses a fixed queue. Queue overflow and shutd
 
 ## Request diagnostics log
 
-With `observability.request_diagnostics_log = true`, cc-lb writes one JSON line to stdout for each request event it stores. The exception is cache-keepalive renewal rows whose lifecycle events were dropped or that were finalized after the assembler stopped: they are stored but get no line, and their diagnostic fields are always empty (see the [consistency contract](/docs/reference/source/consistency-contract/#request-events-and-dashboards)). The line carries the event's diagnostic fields: `cache_breakpoints`, `cache_control_message_indices`, `routing_trace`, `iterations`, and `internal_errors`. With `request_event_strip_diagnostics = true`, the database stores events without those fields and the line is their only copy. See [Request diagnostics](/docs/reference/configuration/#request-diagnostics) for both settings.
+With `observability.request_diagnostics_log = true`, cc-lb writes one compact JSON line to stdout for each request event it stores. Request events are stored in `request_events_v1` with all 99 operational, latency-breakdown, and abnormal-stream-error scalar fields in typed relational columns. The `payload` column is dropped, so request-event reads have zero TOAST overhead.
 
-Each line is compact JSON followed by a newline, and every key is always present, in this order:
+The line carries five deep diagnostic fields:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `schema` | string | Always `cc_lb.request_diagnostics.v1`. |
-| `source` | string | `live` from the server, `backfill` from `cc-lb request-events export-diagnostics`. |
-| `event_id` | string | Request event ID. |
-| `seq` | integer | Storage cursor of the row. |
-| `ts` | string | Event time, RFC 3339 UTC with milliseconds, such as `2026-10-13T05:19:00.123Z`. |
-| `ts_ms` | integer | The same instant in Unix milliseconds. |
-| `request_id` | string | cc-lb request ID. |
-| `principal_id` | string or null | Principal ID. |
-| `key_id` | string or null | API key ID. |
-| `upstream_id` | string or null | Upstream UUID. |
-| `upstream_name` | string or null | Upstream name. |
-| `model` | string or null | Requested model. |
-| `status` | integer | HTTP status. |
-| `error_code` | string or null | cc-lb error code. |
-| `event_kind` | string or null | Request event kind. |
-| `source_kind` | string or null | Request source, such as `proxy` or `renewal`. |
-| `cache_breakpoints` | array | Prompt-cache breakpoints, including `lookback_prefixes`; may be empty. |
+| `cache_breakpoints` | array | Prompt-cache breakpoints; `lookback_prefixes` is omitted from the line. |
 | `cache_control_message_indices` | array | Message indices that carry `cache_control`; may be empty. |
 | `routing_trace` | object or null | All-candidate routing trace. |
-| `iterations` | any JSON or null | Recorded iterations. |
+| `iterations` | any JSON or null | Recorded routing iterations. |
 | `internal_errors` | array | Redacted internal errors; may be empty. |
 
-Live and backfill lines for the same row are identical except for `source`.
+It also carries eight self-contained outcome and session-correlation fields:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `thread_id` | string or null | Upstream or provider thread identifier. |
+| `observed_session_id` | string or null | Session identifier observed for the request. |
+| `input_tokens` | integer or null | Input token count. |
+| `output_tokens` | integer or null | Output token count. |
+| `cache_read_input_tokens` | integer or null | Cache-read input token count. |
+| `cache_creation_input_tokens` | integer or null | Cache-creation input token count. |
+| `duration_ms` | integer | Event duration in milliseconds. |
+| `upstream_ttfb_ms` | integer or null | Upstream time to first byte in milliseconds. |
+
+When routing produced a prompt-cache match prediction, the line also includes `matched_v3_cache_key`, `breakpoint_content_block_index`, `matched_content_block_index`, `lookback_distance`, `predicted_cache_read_tokens`, `predicted_cache_creation_tokens_5m`, and `predicted_cache_creation_tokens_1h`. Each line starts with `{"schema":"cc_lb.request_diagnostics.v1",` and includes event identifiers and routing context needed to correlate it with the relational row. Cache-keepalive renewal rows whose lifecycle events were dropped or finalized after the assembler stopped may have a stored row without a line.
 
 ### Collecting the lines
 
-- **Routing.** Every diagnostics line starts with `{"schema":"cc_lb.request_diagnostics.v1",`. Tracing JSON lines start with `{"timestamp":`. Route on the prefix.
-- **Long lines.** Lines are not truncated and are often 2 to 25 KiB. Container runtimes split lines over 16 KiB into partial records, so the log agent must reassemble them; with Fluent Bit, use `multiline.parser cri`.
-- **Redaction.** `observability.log_redaction` does not apply to these lines. Producers redact the values before they reach the row: internal error text is redacted, and routing traces are capped and redacted.
-- **Duplicates.** A request can produce a second, different line for the same `event_id`: a row persisted after its time-to-live expired is followed by a late terminal event that the database ignores. The first line matches the stored row. Consumers must keep the earliest-ingested line per `event_id` and discard later ones; analytics must use first-write semantics, never the last write. A backfill line always matches the stored row.
-- **Reconciliation.** Compare distinct `event_id` per UTC day of `ts_ms` with `cc-lb request-events export-diagnostics --count-only`, excluding `ts_ms = 0` on both sides.
+- **Routing.** Route records by the `cc_lb.request_diagnostics.v1` schema prefix. Reassemble container-runtime partial records; lines can exceed 16 KiB.
+- **Redaction.** `observability.log_redaction` does not apply to these lines. Producers redact internal error text and cap routing traces before persistence.
+- **Duplicates.** A late terminal lifecycle event can produce a second line for an `event_id` that the database already accepted. Keep the earliest-ingested line per `event_id`; analytics use first-write semantics.
+- **Reconciliation.** Compare distinct `event_id` values per UTC day with committed relational rows, excluding zero event timestamps on both sides.
 
 ### Delivery
 
-The line is queued after the row insert commits and before the admin event bus publishes the final update. A dedicated thread drains the queue, which holds 1,024 lines, and writes each line with one write call, so lines never interleave with tracing output in the process.
+The line is queued after the row insert commits and before the admin event bus publishes the final update. A dedicated thread drains a 1,024-line queue and writes each line with one write call, so lines do not interleave with tracing output in the process.
 
-- **Shared stdout.** Diagnostics lines share the stdout pipe and its in-process lock with tracing logs. While the writer thread is blocked on a full pipe, request-path tracing writes wait for the same lock, so a stalled log collector or pipe can delay requests. Keep the collector healthy, and watch the drop metrics below: a rising `request_diagnostics_strip_send_timeout`, `request_diagnostics_queue_full`, or `request_diagnostics_shutdown_timeout` count signals a stalled stdout.
-- **Strip off: best effort.** When the queue is full, the line is dropped and counted as `request_diagnostics_queue_full`. The database still holds the fields, so a backfill restores the line.
-- **Strip on: bounded wait.** The assembler waits up to 500 ms for queue space. On timeout, it drops the line as `request_diagnostics_strip_send_timeout` and stops waiting until the queue is at least half empty; lines dropped in that state count as `request_diagnostics_strip_queue_full`. These drops are permanent loss.
-- **Process death.** On graceful shutdown the queue is drained for up to 2 seconds. If stdout is still stalled at that deadline, shutdown continues without waiting, and every line the writer has not finished is counted as `request_diagnostics_shutdown_timeout` — the queued lines and the in-flight write. A timed-out in-flight line may still land once if its write returns before the process exits, but it stays counted as dropped, so counts are conservative. A SIGKILL or out-of-memory kill loses up to 1,024 queued lines. With the strip on, these losses are permanent.
-- **Shutdown ordering.** The process exits only after the proxy listener has drained and every shutdown hook, including the assembler's final row flush and this queue drain, has finished, up to 15 seconds after the listener stops. Past that bound it logs a warning and exits with the hooks still running.
+- **Shared stdout.** Diagnostics share the stdout pipe and its in-process lock with tracing logs. A stalled collector can delay request-path tracing writes.
+- **Best effort.** Queue overflow, encoding failures, write failures, worker failures, and shutdown deadlines are counted as bounded diagnostics outcomes. The committed relational row remains available when stdout delivery fails.
+- **Process death.** Graceful shutdown drains the queue for up to two seconds. A `SIGKILL` or OOM kill can lose queued lines; those lines are not a second source of the event fields.
 
 ### Metrics and alerts
 
 | Series | Labels |
 | --- | --- |
 | `cc_lb_request_diagnostics_lines_total` | `outcome`: `written`, `encode_error`, `write_error` |
-| `cc_lb_dropped_events_total` | `reason`: `request_diagnostics_queue_full`, `request_diagnostics_strip_queue_full`, `request_diagnostics_strip_send_timeout`, `request_diagnostics_queue_closed`, `request_diagnostics_job_panic`, `request_diagnostics_worker_panic`, `request_diagnostics_shutdown_timeout` |
+| `cc_lb_dropped_events_total` | `reason`: diagnostics queue, worker, and shutdown reasons |
 
-Alert on any increase of `cc_lb_dropped_events_total{reason=~"request_diagnostics_strip_.*|request_diagnostics_shutdown_timeout"}`, and on `encode_error` or `write_error` lines. `cc_lb_lifecycle_assembler_rows_total{outcome=~"written|written_orphan"}` should equal all `cc_lb_request_diagnostics_lines_total` outcomes plus the `request_diagnostics_*` drop reasons. Every line is counted exactly once — a timed-out in-flight write counts as dropped even when its bytes still land — so the identity is conservative: a pod that exits while a write is stalled counts the line as dropped whether or not it was delivered. Rows written by the keepalive renewal path after the assembler stopped have no line; their diagnostic fields are always empty.
-
-The `upstream_*` fields described under [Diagnostic payload fields](#diagnostic-payload-fields) stay in the request event payload and are not part of this line.
+Alert on increases in diagnostics drop reasons and on `encode_error` or `write_error`. The relational event row is the source of truth; the stdout line is an operational observation stream.
 
 ## Upstream stream failures
 

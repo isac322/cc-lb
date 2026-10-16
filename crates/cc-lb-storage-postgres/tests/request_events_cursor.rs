@@ -266,47 +266,35 @@ async fn run_regression(pool: &PgPool) -> Result<()> {
     assert_materialized_schema(pool).await?;
     let expected_keys = append_events_and_assert_columns(&storage).await?;
     assert_cursor_pages(&storage, &expected_keys).await?;
-    assert_raw_payload_list_semantics(&storage).await?;
+    assert_relational_list_semantics(&storage).await?;
     assert_order_index_is_usable(pool).await?;
     assert_histogram_matches_list(&storage).await?;
-    assert_payload_rewrite_keeps_cursor_columns(&storage).await?;
+    assert_idempotent_append_keeps_cursor_columns(&storage).await?;
 
     Ok(())
 }
 
-/// QA 15: the operator payload rewrite assigns only `payload`, so neither the
-/// tail cursor (`seq`) nor the usage-rollup cursor (`tx_id`, `seq`) moves and
-/// no consumer re-reads the row.
-async fn assert_payload_rewrite_keeps_cursor_columns(storage: &PostgresStorage) -> Result<()> {
+async fn assert_idempotent_append_keeps_cursor_columns(storage: &PostgresStorage) -> Result<()> {
     let event_id = "cursor-event-00";
-    let read_cursor_columns = move || async move {
-        sqlx::query_as::<_, (i64, String, Vec<u8>)>(
-            "SELECT seq, tx_id::text, payload FROM request_events_v1 WHERE event_id = $1",
-        )
-        .bind(event_id)
-        .fetch_one(storage.pool())
-        .await
-    };
-    let (seq, tx_id, payload) = read_cursor_columns().await?;
-
-    let mut map = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&payload)?;
-    map.insert("rewrite_marker".to_owned(), serde_json::Value::Bool(true));
-    let rewritten = serde_json::to_vec(&map)?;
-    let affected = storage
-        .rewrite_request_event_payloads(&[(u64::try_from(seq)?, rewritten.clone())])
-        .await?;
-    ensure!(affected == 1, "rewrite must update exactly the target row");
-
-    let (seq_after, tx_id_after, payload_after) = read_cursor_columns().await?;
-    ensure!(seq_after == seq, "rewrite moved seq {seq} -> {seq_after}");
-    ensure!(
-        tx_id_after == tx_id,
-        "rewrite moved tx_id {tx_id} -> {tx_id_after}"
-    );
-    ensure!(
-        payload_after == rewritten,
-        "rewrite must store the new payload"
-    );
+    let event = storage
+        .get_request_event(event_id)
+        .await?
+        .context("missing cursor event")?;
+    let before = sqlx::query_as::<_, (i64, String)>(
+        "SELECT seq, tx_id::text FROM request_events_v1 WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(storage.pool())
+    .await?;
+    let cursor = storage.append_request_event(&event).await?;
+    let after = sqlx::query_as::<_, (i64, String)>(
+        "SELECT seq, tx_id::text FROM request_events_v1 WHERE event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(storage.pool())
+    .await?;
+    ensure!(before == after, "idempotent append moved cursor columns");
+    ensure!(cursor == u64::try_from(before.0)?);
     Ok(())
 }
 
@@ -322,7 +310,15 @@ async fn assert_materialized_schema(pool: &PgPool) -> Result<()> {
     .map(|(name, data_type, nullable, default)| (name, (data_type, nullable, default)))
     .collect::<BTreeMap<_, _>>();
 
+    ensure!(
+        !columns.contains_key("payload"),
+        "request-event JSON column must be absent"
+    );
     let expected_columns = [
+        ("request_id", "text", "NO", true),
+        ("duration_ms", "bigint", "NO", true),
+        ("principal_kind", "text", "YES", false),
+        ("upstream_stream_warning_message", "text", "YES", false),
         ("list_ts_ms", "bigint", "NO", true),
         ("list_event_key", "text", "NO", true),
         ("list_status", "integer", "YES", false),
@@ -429,14 +425,14 @@ async fn append_events_and_assert_columns(storage: &PostgresStorage) -> Result<V
     Ok(tied_keys)
 }
 
-async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<()> {
-    let event_id = "raw-payload-list-event";
-    let principal_id = "raw-payload-list-principal";
+async fn assert_relational_list_semantics(storage: &PostgresStorage) -> Result<()> {
+    let event_id = "relational-list-event";
+    let principal_id = "relational-list-principal";
     storage
         .append_request_event(&RequestEvent {
             ts: TIED_TS_SECS + 10,
             ts_ms: Some((TIED_TS_SECS + 10) * 1_000 + 123),
-            request_id: "raw-payload-list-request".to_owned(),
+            request_id: "relational-list-request".to_owned(),
             event_id: Some(event_id.to_owned()),
             source_kind: Some("proxy".to_owned()),
             principal_id: Some(principal_id.to_owned()),
@@ -458,19 +454,7 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
         })
         .await?;
 
-    let payload = sqlx::query_scalar::<_, Vec<u8>>(
-        "SELECT payload FROM request_events_v1 WHERE event_id = $1",
-    )
-    .bind(event_id)
-    .fetch_one(storage.pool())
-    .await?;
-    let mut payload = serde_json::from_slice::<serde_json::Value>(&payload)?;
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .remove("request_id");
-    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
-        .bind(serde_json::to_vec(&payload)?)
+    sqlx::query("UPDATE request_events_v1 SET request_id = '' WHERE event_id = $1")
         .bind(event_id)
         .execute(storage.pool())
         .await?;
@@ -506,7 +490,7 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             && item.response_body_process_ms == Some(0.0)
             && item.response_body_downstream_poll_gap_ms == Some(0.75)
             && item.retry_overhead_ms == Some(1.25),
-        "raw payload list projection changed unexpectedly: {item:?}"
+        "relational list projection changed unexpectedly: {item:?}"
     );
     let detail = storage
         .get_request_event(event_id)
@@ -528,14 +512,9 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             && detail.response_body_downstream_poll_gap_ms
                 == item.response_body_downstream_poll_gap_ms
             && detail.retry_overhead_ms == item.retry_overhead_ms,
-        "list/detail payload projection diverged: item={item:?} detail={detail:?}"
+        "list/detail relational projection diverged: item={item:?} detail={detail:?}"
     );
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .remove("request_body_chunk_count");
-    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
-        .bind(serde_json::to_vec(&payload)?)
+    sqlx::query("UPDATE request_events_v1 SET request_body_chunk_count = NULL WHERE event_id = $1")
         .bind(event_id)
         .execute(storage.pool())
         .await?;
@@ -544,63 +523,42 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
         page.len() == 1
             && page[0].request_body_chunk_count.is_none()
             && page[0].request_body_wait_ms == Some(0.0),
-        "missing chunk count was fabricated or zero timing was lost: {page:?}"
+        "NULL count or zero timing lost: {page:?}"
     );
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .insert("request_body_chunk_count".to_owned(), serde_json::json!(-1));
-    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
-        .bind(serde_json::to_vec(&payload)?)
+    sqlx::query("UPDATE request_events_v1 SET request_body_chunk_count = -1 WHERE event_id = $1")
         .bind(event_id)
         .execute(storage.pool())
         .await?;
     ensure!(
         storage.list_request_events(&query()).await.is_err(),
-        "negative request body chunk count unexpectedly decoded"
+        "negative chunk count decoded"
     );
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .remove("request_body_chunk_count");
-
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .remove("duration_ms");
-    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
-        .bind(serde_json::to_vec(&payload)?)
-        .bind(event_id)
-        .execute(storage.pool())
-        .await?;
+    ensure!(
+        storage.get_request_event(event_id).await.is_err(),
+        "negative detail chunk count decoded"
+    );
+    sqlx::query("UPDATE request_events_v1 SET request_body_chunk_count = NULL, duration_ms = 0 WHERE event_id = $1")
+        .bind(event_id).execute(storage.pool()).await?;
     let page = storage.list_request_events(&query()).await?;
     ensure!(
         page.len() == 1 && page[0].duration_ms == 0,
-        "missing duration did not default to zero: {page:?}"
+        "zero duration was lost: {page:?}"
     );
-
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .insert("duration_ms".to_owned(), serde_json::json!(-1));
-    sqlx::query("UPDATE request_events_v1 SET payload = $1 WHERE event_id = $2")
-        .bind(serde_json::to_vec(&payload)?)
+    sqlx::query("UPDATE request_events_v1 SET duration_ms = -1 WHERE event_id = $1")
         .bind(event_id)
         .execute(storage.pool())
         .await?;
     ensure!(
         storage.list_request_events(&query()).await.is_err(),
-        "negative duration unexpectedly decoded"
+        "negative duration decoded"
     );
-
-    payload
-        .as_object_mut()
-        .context("request event payload must be an object")?
-        .insert("duration_ms".to_owned(), serde_json::json!(41));
+    ensure!(
+        storage.get_request_event(event_id).await.is_err(),
+        "negative detail duration decoded"
+    );
     sqlx::query(
-        "UPDATE request_events_v1 SET payload = $1, list_status = NULL WHERE event_id = $2",
+        "UPDATE request_events_v1 SET duration_ms = 41, list_status = NULL WHERE event_id = $1",
     )
-    .bind(serde_json::to_vec(&payload)?)
     .bind(event_id)
     .execute(storage.pool())
     .await?;
@@ -609,9 +567,8 @@ async fn assert_raw_payload_list_semantics(storage: &PostgresStorage) -> Result<
             storage.list_request_events(&query()).await,
             Err(cc_lb_storage_api::StorageError::Corrupted { .. })
         ),
-        "missing materialized status was not reported as corrupted"
+        "missing status must be corrupted"
     );
-
     Ok(())
 }
 
@@ -1103,7 +1060,7 @@ async fn assert_event_kind_filters(pool: &PgPool) -> Result<()> {
         .collect::<BTreeMap<_, _>>();
     ensure!(
         kinds.get("ek-messages") == Some(&Some(RequestEventKind::Messages)),
-        "payload read lost the stored event_kind: {kinds:?}"
+        "relational read lost the stored event_kind: {kinds:?}"
     );
     ensure!(
         kinds.get("ek-historical") == Some(&None),

@@ -12,6 +12,47 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 #[async_trait]
 impl CacheKeepaliveSessionStore for SqliteStorage {
+    async fn prune_cache_keepalive_history_before(
+        &self,
+        cutoff_unix_secs: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+        let cutoff = u64_to_i64(cutoff_unix_secs, "keepalive history prune cutoff")?;
+        let limit =
+            super::request_events::usize_to_i64(batch_size, "keepalive history prune batch size")?;
+        let decisions_removed = sqlx::query(
+            "DELETE FROM cache_keepalive_decisions WHERE rowid IN ( \
+             SELECT rowid FROM cache_keepalive_decisions WHERE ts < ? \
+             ORDER BY ts, source_ref_id LIMIT ?)",
+        )
+        .bind(cutoff)
+        .bind(limit)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .rows_affected();
+        let remaining = limit - decisions_removed as i64;
+        let turns_removed = if remaining > 0 {
+            sqlx::query(
+                "DELETE FROM cache_keepalive_turns WHERE rowid IN ( \
+                 SELECT rowid FROM cache_keepalive_turns WHERE ts < ? \
+                 ORDER BY ts, source_ref_id LIMIT ?)",
+            )
+            .bind(cutoff)
+            .bind(remaining)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?
+            .rows_affected()
+        } else {
+            0
+        };
+        Ok(decisions_removed + turns_removed)
+    }
+
     async fn replace_from_real_request(
         &self,
         request: &CacheKeepaliveReplaceRequest,

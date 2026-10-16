@@ -281,17 +281,7 @@ async fn request_event_cursor_api_returns_stable_duplicate_cursor_and_filters_ba
         thread_id: Some("thread-a".to_owned()),
         upstream_id: Some(upstream_id),
         model: Some("claude-sonnet-4-5".to_owned()),
-        matched_v3_cache_key: Some("v3-cache-key".to_owned()),
-        breakpoint_content_block_index: Some(12),
-        matched_content_block_index: Some(11),
-        lookback_distance: Some(1),
-        predicted_cache_read_tokens: Some(20_000),
-        predicted_cache_creation_tokens_5m: Some(1_000),
-        predicted_cache_creation_tokens_1h: Some(2_000),
         token_estimate_source: Some("local_tiktoken_v1".to_owned()),
-        cache_value_micros: Some(123_456),
-        formula_winner_upstream_id: Some(upstream_id),
-        kept_upstream_id: Some(upstream_id),
         status: 200,
         duration_ms: 10,
         ..Default::default()
@@ -487,16 +477,12 @@ async fn request_event_histogram_matches_list_and_uses_index() {
     // hint; turning that bound into a real filter drops the row and fails here.
     sqlx::query(
         "INSERT INTO request_events_v1 \
-            (request_id, ts, payload, event_id, principal_id, model, \
+            (request_id, ts, event_id, principal_id, model, \
              list_ts_ms, list_event_key, list_status, list_duration_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 200, 10)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, 200, 10)",
     )
     .bind("req-histogram-skewed")
     .bind(base as i64)
-    .bind(format!(
-        "{{\"ts_ms\":{},\"status\":200,\"duration_ms\":10}}",
-        base * 1_000 - 30_000
-    ))
     .bind("0193a7b8-1234-7e2f-9012-histskewed0")
     .bind("principal-histogram")
     .bind("claude-sonnet-4-5")
@@ -629,7 +615,7 @@ async fn request_event_histogram_matches_list_and_uses_index() {
 }
 
 #[tokio::test]
-async fn request_setup_timings_roundtrip_through_sqlite_payload() {
+async fn request_setup_timings_roundtrip_through_sqlite_columns() {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let database_url = format!(
         "sqlite://{}",
@@ -687,14 +673,11 @@ async fn request_setup_timings_roundtrip_through_sqlite_payload() {
         .append_request_event(&event)
         .await
         .expect("append request setup timings");
-    let payload: String =
-        sqlx::query_scalar("SELECT payload FROM request_events_v1 WHERE event_id = ?")
-            .bind(event.event_id.as_deref())
-            .fetch_one(storage.pool())
-            .await
-            .expect("read stored payload");
-    let restored: RequestEvent =
-        serde_json::from_str(&payload).expect("deserialize stored request event");
+    let restored = storage
+        .get_request_event(event.event_id.as_deref().expect("event id"))
+        .await
+        .expect("read stored request event")
+        .expect("stored timing event");
 
     assert_eq!(restored.json_parse_ms, Some(0.125));
     assert_eq!(restored.cache_structure_ms, Some(0.0));

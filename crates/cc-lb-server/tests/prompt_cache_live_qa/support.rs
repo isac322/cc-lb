@@ -110,72 +110,92 @@ pub async fn wait_for_initial_observations(pool: &SqlitePool, model: &str) -> St
     }
 }
 
-pub async fn wait_for_lookback_event(pool: &SqlitePool, model: &str) -> CacheEvent {
+pub async fn wait_for_lookback_event(server: &common::TestServer, model: &str) -> CacheEvent {
+    let pool = open_sqlite_pool(server).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut interval = tokio::time::interval(Duration::from_millis(20));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
         let row = sqlx::query(
-            "SELECT upstream_id, \
-             json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
-             json_extract(payload, '$.breakpoint_content_block_index') \
-             AS breakpoint_content_block_index, \
-             json_extract(payload, '$.matched_content_block_index') \
-             AS matched_content_block_index, \
-             json_extract(payload, '$.lookback_distance') AS lookback_distance, \
-             json_extract(payload, '$.predicted_cache_read_tokens') \
-             AS predicted_cache_read_tokens, \
-             json_extract(payload, '$.predicted_cache_creation_tokens_5m') \
-             AS predicted_cache_creation_tokens_5m, \
-             json_extract(payload, '$.predicted_cache_creation_tokens_1h') \
-             AS predicted_cache_creation_tokens_1h, \
-             json_extract(payload, '$.token_estimate_source') AS token_estimate_source \
+            "SELECT event_id, upstream_id, cache_read_input_tokens, token_estimate_source \
              FROM request_events_v1 \
              WHERE model = ? AND cache_read_input_tokens > 0 ORDER BY id DESC LIMIT 1",
         )
         .bind(model)
-        .fetch_optional(pool)
+        .fetch_optional(&pool)
         .await
         .expect("query lookback request event");
         if let Some(row) = row {
-            return CacheEvent {
-                upstream_id: row.get("upstream_id"),
-                matched_key: row.get("matched_v3_cache_key"),
-                breakpoint_index: row.get("breakpoint_content_block_index"),
-                matched_index: row.get("matched_content_block_index"),
-                lookback_distance: row.get("lookback_distance"),
-                predicted_read_tokens: row.get("predicted_cache_read_tokens"),
-                predicted_creation_tokens_5m: row.get("predicted_cache_creation_tokens_5m"),
-                predicted_creation_tokens_1h: row.get("predicted_cache_creation_tokens_1h"),
-                token_estimate_source: row.get("token_estimate_source"),
-            };
+            let event_id: String = row.get("event_id");
+            if let Some(diagnostics) = diagnostics_for_event(server, &event_id) {
+                let upstream_id: String = row.get("upstream_id");
+                let candidate =
+                    selected_cache_candidate(&diagnostics["routing_trace"], &upstream_id)
+                        .unwrap_or(&diagnostics);
+                return CacheEvent {
+                    upstream_id,
+                    matched_key: candidate["matched_v3_cache_key"]
+                        .as_str()
+                        .expect("matched cache key")
+                        .to_owned(),
+                    breakpoint_index: candidate["breakpoint_content_block_index"]
+                        .as_i64()
+                        .expect("breakpoint index"),
+                    matched_index: candidate["matched_content_block_index"]
+                        .as_i64()
+                        .expect("matched index"),
+                    lookback_distance: candidate["lookback_distance"]
+                        .as_i64()
+                        .expect("lookback distance"),
+                    predicted_read_tokens: candidate["predicted_cache_read_tokens"]
+                        .as_i64()
+                        .expect("predicted read tokens"),
+                    predicted_creation_tokens_5m: candidate["predicted_cache_creation_tokens_5m"]
+                        .as_i64()
+                        .expect("predicted 5m creation tokens"),
+                    predicted_creation_tokens_1h: candidate["predicted_cache_creation_tokens_1h"]
+                        .as_i64()
+                        .expect("predicted 1h creation tokens"),
+                    token_estimate_source: row
+                        .try_get::<Option<String>, _>("token_estimate_source")
+                        .ok()
+                        .flatten()
+                        .or_else(|| {
+                            candidate["token_estimate_source"]
+                                .as_str()
+                                .map(ToOwned::to_owned)
+                        })
+                        .expect("token estimate source"),
+                };
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            let latest = sqlx::query(
-                "SELECT id, upstream_id, cache_read_input_tokens, \
-                 json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
-                 json_extract(payload, '$.lookback_distance') AS lookback_distance \
-                 FROM request_events_v1 ORDER BY id DESC LIMIT 1",
-            )
-            .fetch_optional(pool)
-            .await
-            .expect("query request-event timeout diagnostic")
-            .map(|row| {
-                format!(
-                    "id={} upstream={:?} read={:?} key={:?} distance={:?}",
-                    row.get::<i64, _>("id"),
-                    row.try_get::<String, _>("upstream_id").ok(),
-                    row.try_get::<i64, _>("cache_read_input_tokens").ok(),
-                    row.try_get::<String, _>("matched_v3_cache_key").ok(),
-                    row.try_get::<i64, _>("lookback_distance").ok()
-                )
-            });
-            panic!(
-                "timed out waiting 10s for the cache-read request event with populated lookback telemetry; latest={latest:?}"
-            );
+            panic!("timed out waiting for the cache-read request event and diagnostics line");
         }
     }
+}
+
+fn diagnostics_for_event(server: &common::TestServer, event_id: &str) -> Option<serde_json::Value> {
+    server
+        ._process
+        .stdout_snapshot()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.starts_with(br#"{"schema":"cc_lb.request_diagnostics.v1","#))
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find(|line| line["event_id"].as_str() == Some(event_id))
+}
+
+fn selected_cache_candidate<'a>(
+    trace: &'a serde_json::Value,
+    upstream_id: &str,
+) -> Option<&'a serde_json::Value> {
+    trace["stages"]
+        .as_array()?
+        .iter()
+        .filter_map(|stage| stage["subscription_preference"]["candidates"].as_array())
+        .flatten()
+        .find(|candidate| candidate["upstream_id"].as_str() == Some(upstream_id))
 }
 
 pub async fn fetch_matched_observation(
@@ -204,81 +224,89 @@ pub async fn fetch_matched_observation(
     }
 }
 
-/// One settled `request_events_v1` row, with the cache-analysis fields the proxy recorded for it.
-///
-/// Precondition: the server under test runs with `request_event_strip_diagnostics = false`
-/// (the default). This reader takes `cache_breakpoints` from the stored payload, and strip-on-write
-/// removes that key from `request_events_v1.payload` (the field then exists only on the
-/// `cc_lb.request_diagnostics.v1` stdout line), so these live QA checks are invalid with strip on.
 #[derive(Debug)]
 pub struct SettledEvent {
     pub id: i64,
     pub upstream_id: String,
-    pub cache_prefix_hash: Option<String>,
-    pub cache_control_block_count: Option<i64>,
-    pub matched_v3_cache_key: Option<String>,
-    pub predicted_read_tokens: Option<i64>,
-    cache_breakpoints: String,
+    pub cache_read_input_tokens: Option<i64>,
+    cache_breakpoints: serde_json::Value,
+    diagnostics: serde_json::Value,
+    pub routing_trace: serde_json::Value,
 }
 
 impl SettledEvent {
-    /// `prefix_hash` of the breakpoint recorded against `source`, if the request had one.
-    ///
-    /// Used to prove salt scoping at the proxy path: a `tools`-source breakpoint must stay
-    /// byte-stable across request-level invalidator changes, or cache affinity fragments.
     pub fn breakpoint_prefix_hash(&self, source: &str) -> Option<String> {
-        let breakpoints: serde_json::Value = serde_json::from_str(&self.cache_breakpoints)
-            .expect("cache_breakpoints column holds JSON");
-        breakpoints
+        self.cache_breakpoints
             .as_array()?
             .iter()
             .find(|breakpoint| breakpoint["source"].as_str() == Some(source))
             .and_then(|breakpoint| breakpoint["prefix_hash"].as_str())
             .map(ToOwned::to_owned)
     }
+
+    pub fn breakpoint_count(&self) -> usize {
+        self.cache_breakpoints
+            .as_array()
+            .expect("cache breakpoints array")
+            .len()
+    }
+
+    pub fn matched_cache_key(&self) -> Option<&str> {
+        self.diagnostics["matched_v3_cache_key"]
+            .as_str()
+            .or_else(|| {
+                selected_cache_candidate(&self.routing_trace, &self.upstream_id)?["matched_v3_cache_key"]
+                    .as_str()
+            })
+    }
+
+    pub fn predicted_read_tokens(&self) -> Option<i64> {
+        self.diagnostics["predicted_cache_read_tokens"]
+            .as_i64()
+            .or_else(|| {
+                selected_cache_candidate(&self.routing_trace, &self.upstream_id)?["predicted_cache_read_tokens"]
+                    .as_i64()
+            })
+    }
 }
 
-/// Waits for the next settled proxy request event after `after_id`.
-///
-/// Settled means the terminal row: `upstream_id` is populated, so the request actually routed.
-pub async fn wait_for_settled_event(pool: &SqlitePool, model: &str, after_id: i64) -> SettledEvent {
+pub async fn wait_for_settled_event(
+    server: &common::TestServer,
+    model: &str,
+    after_id: i64,
+) -> SettledEvent {
+    let pool = open_sqlite_pool(server).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut interval = tokio::time::interval(Duration::from_millis(20));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
         let row = sqlx::query(
-            "SELECT id, upstream_id, \
-             json_extract(payload, '$.cache_prefix_hash') AS cache_prefix_hash, \
-             json_extract(payload, '$.cache_control_block_count') AS cache_control_block_count, \
-             json_extract(payload, '$.matched_v3_cache_key') AS matched_v3_cache_key, \
-             json_extract(payload, '$.predicted_cache_read_tokens') \
-             AS predicted_cache_read_tokens, \
-             json_extract(payload, '$.cache_breakpoints') AS cache_breakpoints \
+            "SELECT id, event_id, upstream_id, cache_read_input_tokens \
              FROM request_events_v1 \
              WHERE model = ? AND id > ? AND upstream_id IS NOT NULL \
              ORDER BY id ASC LIMIT 1",
         )
         .bind(model)
         .bind(after_id)
-        .fetch_optional(pool)
+        .fetch_optional(&pool)
         .await
         .expect("query settled request event");
         if let Some(row) = row {
-            return SettledEvent {
-                id: row.get("id"),
-                upstream_id: row.get("upstream_id"),
-                cache_prefix_hash: row.try_get("cache_prefix_hash").ok(),
-                cache_control_block_count: row.try_get("cache_control_block_count").ok(),
-                matched_v3_cache_key: row.try_get("matched_v3_cache_key").ok(),
-                predicted_read_tokens: row.try_get("predicted_cache_read_tokens").ok(),
-                cache_breakpoints: row
-                    .try_get::<String, _>("cache_breakpoints")
-                    .unwrap_or_else(|_| "[]".to_owned()),
-            };
+            let event_id: String = row.get("event_id");
+            if let Some(diagnostics) = diagnostics_for_event(server, &event_id) {
+                return SettledEvent {
+                    id: row.get("id"),
+                    upstream_id: row.get("upstream_id"),
+                    cache_read_input_tokens: row.try_get("cache_read_input_tokens").ok(),
+                    cache_breakpoints: diagnostics["cache_breakpoints"].clone(),
+                    routing_trace: diagnostics["routing_trace"].clone(),
+                    diagnostics,
+                };
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("timed out waiting 10s for a settled request event after id={after_id}");
+            panic!("timed out waiting 10s for a settled request event and diagnostics line");
         }
     }
 }

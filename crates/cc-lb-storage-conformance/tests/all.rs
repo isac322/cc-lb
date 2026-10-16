@@ -1,6 +1,3 @@
-#[path = "support/request_event_quota.rs"]
-mod request_event_quota_support;
-
 #[cfg(all(feature = "sqlite", feature = "postgres"))]
 #[path = "managed_keys_cross_backend.rs"]
 mod managed_keys_cross_backend;

@@ -6,6 +6,25 @@ use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
+const CHART_POINTS_CTE: &str = "\
+WITH points AS ( \
+    SELECT snapshot_at_unix_secs, quota_window, utilization \
+    FROM pool_subscription_quota_history_v1 \
+    WHERE quota_window = ?1 AND snapshot_at_unix_secs BETWEEN ?2 AND ?3 \
+    UNION ALL \
+    SELECT ?2 AS snapshot_at_unix_secs, quota_window, utilization \
+    FROM pool_subscription_quota_history_v1 \
+    WHERE quota_window = ?1 \
+      AND snapshot_at_unix_secs = ( \
+          SELECT MAX(snapshot_at_unix_secs) FROM pool_subscription_quota_history_v1 \
+          WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2 \
+      ) \
+      AND NOT EXISTS ( \
+          SELECT 1 FROM pool_subscription_quota_history_v1 \
+          WHERE quota_window = ?1 AND snapshot_at_unix_secs = ?2 \
+      ) \
+) ";
+
 pub(super) async fn list_latest(
     storage: &SqliteStorage,
     windows: &[SubscriptionQuotaWindow],
@@ -49,14 +68,29 @@ pub(super) async fn list_range(
     let mut out = Vec::new();
     for window in windows {
         let rows = sqlx::query(
-            r#"SELECT snapshot_at_unix_secs, quota_window, utilization, weighted_utilization_sum,
+            r#"SELECT CASE WHEN snapshot_at_unix_secs < ?2 THEN ?2
+                           ELSE snapshot_at_unix_secs END AS snapshot_at_unix_secs,
+                      quota_window, utilization, weighted_utilization_sum,
                       capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
                       stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
                       header_contributing_upstreams, api_contributing_upstreams,
                       max_observed_at_unix_millis, computed_at_unix_millis, policy_version
                FROM pool_subscription_quota_history_v1
-              WHERE quota_window = ?
-                AND snapshot_at_unix_secs BETWEEN ? AND ?
+              WHERE quota_window = ?1
+                AND (
+                    snapshot_at_unix_secs BETWEEN ?2 AND ?3
+                    OR (
+                        snapshot_at_unix_secs = (
+                            SELECT MAX(snapshot_at_unix_secs)
+                            FROM pool_subscription_quota_history_v1
+                            WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM pool_subscription_quota_history_v1
+                            WHERE quota_window = ?1 AND snapshot_at_unix_secs = ?2
+                        )
+                    )
+                )
            ORDER BY snapshot_at_unix_secs ASC"#,
         )
         .bind(window.as_str())
@@ -87,51 +121,43 @@ pub(super) async fn list_chart_range(
             message: "pool quota chart bucket_secs must be positive".to_owned(),
         });
     }
+    static SQL: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(|| {
+        (
+            format!(
+                "{CHART_POINTS_CTE} \
+                 SELECT snapshot_at_unix_secs \
+                     - ((snapshot_at_unix_secs % ?4 + ?4) % ?4) AS snapshot_at_unix_secs, \
+                     quota_window, MAX(utilization) AS utilization \
+                 FROM points \
+                 GROUP BY quota_window, snapshot_at_unix_secs \
+                     - ((snapshot_at_unix_secs % ?4 + ?4) % ?4) \
+                 ORDER BY snapshot_at_unix_secs ASC"
+            ),
+            format!(
+                "{CHART_POINTS_CTE} \
+                 SELECT snapshot_at_unix_secs, quota_window, utilization \
+                 FROM points ORDER BY snapshot_at_unix_secs ASC"
+            ),
+        )
+    });
     let mut out = Vec::new();
     for window in windows {
         let rows = match bucket_secs {
-            Some(bucket_secs) => sqlx::query(
-                r#"SELECT bucket_start AS snapshot_at_unix_secs,
-                              quota_window,
-                              MAX(utilization) AS utilization
-                       FROM (
-                           SELECT snapshot_at_unix_secs
-                                      - (
-                                          (
-                                              snapshot_at_unix_secs % ? + ?
-                                          ) % ?
-                                      ) AS bucket_start,
-                                  quota_window,
-                                  utilization
-                           FROM pool_subscription_quota_history_v1
-                           WHERE quota_window = ?
-                             AND snapshot_at_unix_secs BETWEEN ? AND ?
-                       ) chart_points
-                       GROUP BY quota_window, bucket_start
-                       ORDER BY bucket_start ASC"#,
-            )
-            .bind(bucket_secs)
-            .bind(bucket_secs)
-            .bind(bucket_secs)
-            .bind(window.as_str())
-            .bind(since_unix_secs)
-            .bind(until_unix_secs)
-            .fetch_all(storage.pool())
-            .await
-            .map_err(map_sqlx_error)?,
-            None => sqlx::query(
-                r#"SELECT snapshot_at_unix_secs, quota_window, utilization
-                   FROM pool_subscription_quota_history_v1
-                   WHERE quota_window = ?
-                     AND snapshot_at_unix_secs BETWEEN ? AND ?
-                   ORDER BY snapshot_at_unix_secs ASC"#,
-            )
-            .bind(window.as_str())
-            .bind(since_unix_secs)
-            .bind(until_unix_secs)
-            .fetch_all(storage.pool())
-            .await
-            .map_err(map_sqlx_error)?,
+            Some(bucket_secs) => sqlx::query(SQL.0.as_str())
+                .bind(window.as_str())
+                .bind(since_unix_secs)
+                .bind(until_unix_secs)
+                .bind(bucket_secs)
+                .fetch_all(storage.pool())
+                .await
+                .map_err(map_sqlx_error)?,
+            None => sqlx::query(SQL.1.as_str())
+                .bind(window.as_str())
+                .bind(since_unix_secs)
+                .bind(until_unix_secs)
+                .fetch_all(storage.pool())
+                .await
+                .map_err(map_sqlx_error)?,
         };
         for row in rows {
             out.push(row_to_chart_point(row)?);

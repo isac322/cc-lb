@@ -75,7 +75,10 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     assert_eq!(event.key_id.as_deref(), Some(managed_key_id()));
     assert_eq!(event.principal_kind.as_deref(), Some("admin"));
     assert_eq!(event.model.as_deref(), Some("claude-test"));
-    let trace = event.routing_trace.as_ref().expect("routing trace logged");
+    let diag_records = test_bus.diagnostics_records();
+    assert_eq!(diag_records.len(), 1);
+    let diag = &diag_records[0];
+    let trace = diag.routing_trace.as_ref().expect("routing trace logged");
     assert_eq!(trace.stages.len(), 1);
     assert_eq!(trace.stages[0].stage_name, "drop-all");
     assert_eq!(trace.stages[0].upstream_id, None);
@@ -86,7 +89,7 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
             .and_then(|decision| decision.upstream_id),
         None
     );
-    assert!(event.internal_errors.iter().any(|error| {
+    assert!(diag.internal_errors.iter().any(|error| {
         error.message.as_deref() == Some("no upstream candidates remain after routing filters")
     }));
     Ok(())

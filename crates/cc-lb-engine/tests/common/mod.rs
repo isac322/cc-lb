@@ -555,8 +555,30 @@ fn default_json_for_status(status: StatusCode) -> serde_json::Value {
     }
 }
 
+#[derive(Default)]
+struct RecordingDiagnosticsSink {
+    records: std::sync::Mutex<Vec<cc_lb_request_log::RequestDiagnosticsRecord>>,
+}
+
+#[async_trait::async_trait]
+impl cc_lb_engine::RequestDiagnosticsSink for RecordingDiagnosticsSink {
+    async fn offer(
+        &self,
+        record: cc_lb_request_log::RequestDiagnosticsRecord,
+        _delivery: cc_lb_engine::RequestDiagnosticsDelivery,
+    ) {
+        self.records
+            .lock()
+            .expect("diagnostics records lock")
+            .push(record);
+    }
+
+    async fn shutdown(&self) {}
+}
+
 pub struct TestLifecycleBus {
     pub bus: Arc<cc_lb_control::InMemoryBus>,
+    diagnostics: Arc<RecordingDiagnosticsSink>,
     _assembler: Option<cc_lb_engine::RequestEventAssemblerHandle>,
     _rate_limit_header: Option<cc_lb_engine::RateLimitHeaderSubscriberHandle>,
 }
@@ -565,6 +587,7 @@ impl TestLifecycleBus {
     pub fn new() -> Self {
         Self {
             bus: Arc::new(cc_lb_control::InMemoryBus::new()),
+            diagnostics: Arc::new(RecordingDiagnosticsSink::default()),
             _assembler: None,
             _rate_limit_header: None,
         }
@@ -575,13 +598,25 @@ impl TestLifecycleBus {
             cc_lb_control::event_bus::DEFAULT_LIFECYCLE_ASSEMBLER_CAPACITY,
         );
         let bus_arc: Arc<dyn cc_lb_control::RequestEventBus> = self.bus.clone();
-        self._assembler = Some(cc_lb_engine::spawn_request_event_assembler(
-            rx,
-            storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
-            Some(bus_arc),
-            Arc::new(cc_lb_observability::NoopMetricsHook),
-        ));
+        let sink: Arc<dyn cc_lb_engine::RequestDiagnosticsSink> = self.diagnostics.clone();
+        self._assembler = Some(
+            cc_lb_engine::spawn_request_event_assembler_with_diagnostics(
+                rx,
+                storage as Arc<dyn cc_lb_storage_api::RequestEventStore>,
+                Some(bus_arc),
+                Arc::new(cc_lb_observability::NoopMetricsHook),
+                cc_lb_engine::RequestDiagnosticsOptions { sink: Some(sink) },
+            ),
+        );
         self
+    }
+
+    pub fn diagnostics_records(&self) -> Vec<cc_lb_request_log::RequestDiagnosticsRecord> {
+        self.diagnostics
+            .records
+            .lock()
+            .expect("diagnostics records lock")
+            .clone()
     }
 
     pub fn with_rate_limit_header_subscriber(
