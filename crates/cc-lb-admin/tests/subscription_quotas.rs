@@ -305,67 +305,83 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
         "stale"
     );
 
+    let initial_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Some(vec![upstream_id]),
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ],
+        cc_lb_storage_api::SubscriptionQuotaSourceMerge::Api,
+        1_800,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &initial_aggregate,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS),
+    )
+    .await
+    .unwrap();
+
+    let mut moved_five_hour = quota_observation(
+        upstream_id,
+        CHECKPOINT_TEST_NOW_UNIX_SECS + 60,
+        3,
+        SubscriptionQuotaSource::Api,
+        0.25,
+        Some(SubscriptionQuotaStatus::Allowed),
+    );
+    moved_five_hour.window = SubscriptionQuotaWindow::FiveHour;
     server
         .storage
-        .record_pool_quota_snapshots(&[
-            PoolQuotaSnapshotRecord {
-                snapshot_at_unix_secs: 100,
-                window: SubscriptionQuotaWindow::SevenDay,
-                utilization: Some(0.50),
-                weighted_utilization_sum: 2.5,
-                capacity_ratio_sum: 5.0,
-                eligible_upstreams: 1,
-                contributing_upstreams: 1,
-                stale_upstreams: 0,
-                missing_observation_upstreams: 0,
-                missing_metadata_upstreams: 0,
-                header_contributing_upstreams: 0,
-                api_contributing_upstreams: 1,
-                max_observed_at_unix_millis: Some(100_000),
-                computed_at_unix_millis: 100_000,
-                policy_version: 1,
-            },
-            PoolQuotaSnapshotRecord {
-                snapshot_at_unix_secs: 10_300,
-                window: SubscriptionQuotaWindow::FiveHour,
-                utilization: Some(0.20),
-                weighted_utilization_sum: 1.0,
-                capacity_ratio_sum: 5.0,
-                eligible_upstreams: 1,
-                contributing_upstreams: 1,
-                stale_upstreams: 0,
-                missing_observation_upstreams: 0,
-                missing_metadata_upstreams: 0,
-                header_contributing_upstreams: 0,
-                api_contributing_upstreams: 1,
-                max_observed_at_unix_millis: Some(10_300_000),
-                computed_at_unix_millis: 10_300_000,
-                policy_version: 1,
-            },
-        ])
+        .record_subscription_quota_samples(&[moved_five_hour])
         .await
         .unwrap();
-    let (status, _, leading_gap_body) = server
+    let second_aggregate = cc_lb_admin::subscription_quotas::build_cc_lb_aggregate_response(
+        server.storage.as_ref(),
+        &server.dynamic_view,
+        Some(vec![upstream_id]),
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDayFable,
+        ],
+        cc_lb_storage_api::SubscriptionQuotaSourceMerge::Api,
+        1_800,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 60),
+    )
+    .await
+    .unwrap();
+    cc_lb_admin::subscription_quotas::record_pool_quota_snapshots_now(
+        server.storage.as_ref(),
+        &second_aggregate,
+        &TestClock::new_at_secs(CHECKPOINT_TEST_NOW_UNIX_SECS + 60),
+    )
+    .await
+    .unwrap();
+
+    let (status, _, history_body) = server
         .client
-        .get(
-            "/admin/v1/subscription-quotas/pool-history?windows=5h,7d&since_unix_secs=10000&until_unix_secs=11000&series_projection=chart",
-        )
+        .get(&format!(
+            "/admin/v1/subscription-quotas/pool-history?windows=5h,7d,7d_fable&since_unix_secs={}&until_unix_secs={}&series_projection=chart",
+            CHECKPOINT_TEST_NOW_UNIX_SECS,
+            CHECKPOINT_TEST_NOW_UNIX_SECS + 60
+        ))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        leading_gap_body["windows"][0]["series"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        leading_gap_body["windows"][1]["series"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "pre-window sample older than the 3600s heartbeat must not emit a synthetic range-start anchor"
-    );
+    for idx in 0..3 {
+        let series = history_body["windows"][idx]["series"].as_array().unwrap();
+        assert_eq!(
+            series.len(),
+            2,
+            "every pooled window must be recorded atomically at both ticks"
+        );
+    }
 }
 
 #[tokio::test]

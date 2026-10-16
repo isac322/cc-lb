@@ -16,7 +16,6 @@ macro_rules! range_points {
         FROM pool_subscription_quota_history_v1 h
         WHERE h."quota_window" = w."quota_window"
           AND h.snapshot_at_unix_secs < $2
-          AND h.snapshot_at_unix_secs >= $2 - 3600
         ORDER BY h.snapshot_at_unix_secs DESC
         LIMIT 1
     ) h

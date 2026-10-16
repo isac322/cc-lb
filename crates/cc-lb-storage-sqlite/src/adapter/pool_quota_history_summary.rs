@@ -17,7 +17,7 @@ WITH points AS ( \
     WHERE quota_window = ?1 \
       AND snapshot_at_unix_secs = ( \
           SELECT MAX(snapshot_at_unix_secs) FROM pool_subscription_quota_history_v1 \
-          WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2 AND snapshot_at_unix_secs >= ?2 - 3600 \
+          WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2 \
       ) \
       AND NOT EXISTS ( \
           SELECT 1 FROM pool_subscription_quota_history_v1 \
@@ -83,7 +83,7 @@ pub(super) async fn list_range(
                         snapshot_at_unix_secs = (
                             SELECT MAX(snapshot_at_unix_secs)
                             FROM pool_subscription_quota_history_v1
-                            WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2 AND snapshot_at_unix_secs >= ?2 - 3600
+                            WHERE quota_window = ?1 AND snapshot_at_unix_secs < ?2
                         )
                         AND NOT EXISTS (
                             SELECT 1 FROM pool_subscription_quota_history_v1
