@@ -19,9 +19,9 @@ use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaChartPointRecord,
     PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage,
     StorageError, SubscriptionQuotaBucket, SubscriptionQuotaProviderLot,
-    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
-    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
+    SubscriptionQuotaProviderLotQuery, SubscriptionQuotaSampleKind, SubscriptionQuotaSeriesQuery,
+    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, UsageTokenInterval, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -793,6 +793,68 @@ pub async fn build_cc_lb_aggregate_response(
         }
     }
 
+    let allowed_sources = sources_for_merge(source);
+    let durable_latest = if upstreams.is_empty() || duration_windows.is_empty() {
+        Vec::new()
+    } else {
+        let upstream_ids = upstreams
+            .iter()
+            .map(|upstream| upstream.id)
+            .collect::<Vec<_>>();
+        storage
+            .list_latest_subscription_quota_for_upstreams(&upstream_ids)
+            .await?
+    };
+    type FreshCandidate = (u64, SubscriptionQuotaDataState, Option<f64>, Option<u64>);
+    let mut freshest_observed: HashMap<(Uuid, SubscriptionQuotaWindow), Vec<FreshCandidate>> =
+        HashMap::new();
+    for (upstream_id, window, snapshot, _) in &latest_candidates {
+        let Some(observed_at) = snapshot.observed_at_unix_millis else {
+            continue;
+        };
+        if matches!(
+            snapshot.state,
+            SubscriptionQuotaDataState::Absent | SubscriptionQuotaDataState::Unobserved
+        ) {
+            continue;
+        }
+        freshest_observed
+            .entry((*upstream_id, *window))
+            .or_default()
+            .push((
+                observed_at,
+                snapshot.state,
+                snapshot.utilization,
+                snapshot.resets_at_unix_secs,
+            ));
+    }
+    for sample in durable_latest {
+        if sample.sample_kind != SubscriptionQuotaSampleKind::Sample
+            || !allowed_sources.contains(&sample.source)
+            || !duration_windows.contains(&sample.window)
+        {
+            continue;
+        }
+        let observed_at = sample.observed_at_unix_millis;
+        let state = if max_staleness_secs > 0
+            && now_unix_millis.saturating_sub(observed_at)
+                > max_staleness_secs.saturating_mul(1_000)
+        {
+            SubscriptionQuotaDataState::Stale
+        } else {
+            SubscriptionQuotaDataState::Fresh
+        };
+        freshest_observed
+            .entry((sample.upstream_id, sample.window))
+            .or_default()
+            .push((
+                observed_at,
+                state,
+                sample.utilization,
+                sample.resets_at_unix_secs,
+            ));
+    }
+
     let mut lot_inputs = provider_lots
         .iter()
         .filter_map(|lot| {
@@ -807,6 +869,47 @@ pub async fn build_cc_lb_aggregate_response(
             ))
         })
         .collect::<Vec<_>>();
+    let mut latest_lot_idx_by_key: HashMap<(Uuid, SubscriptionQuotaWindow), (u64, usize)> =
+        HashMap::new();
+    for (idx, input) in lot_inputs.iter().enumerate() {
+        let obs = input.observed_at_unix_millis.unwrap_or(0);
+        latest_lot_idx_by_key
+            .entry((input.upstream_id, input.window))
+            .and_modify(|(prev_obs, prev_idx)| {
+                if obs >= *prev_obs {
+                    *prev_obs = obs;
+                    *prev_idx = idx;
+                }
+            })
+            .or_insert((obs, idx));
+    }
+    for (key, (_, idx)) in latest_lot_idx_by_key {
+        let Some(candidates) = freshest_observed.get(&key) else {
+            continue;
+        };
+        let input = &mut lot_inputs[idx];
+        let current_obs = input.observed_at_unix_millis.unwrap_or(0);
+        if let Some(&(freshest_obs, freshest_state, _, _)) = candidates
+            .iter()
+            .filter(|&&(obs, _, util, reset)| {
+                let util_matches = match (util, input.utilization) {
+                    (Some(left), Some(right)) => (left - right).abs() < 0.001,
+                    (None, None) => true,
+                    _ => false,
+                };
+                let reset_matches = match (reset, input.provider_reset) {
+                    (Some(left), Some(right)) => left.abs_diff(right) <= 60,
+                    (None, None) => true,
+                    _ => false,
+                };
+                obs >= current_obs && util_matches && reset_matches
+            })
+            .max_by_key(|&&(obs, _, _, _)| obs)
+        {
+            input.observed_at_unix_millis = Some(freshest_obs);
+            input.state = freshest_state;
+        }
+    }
     let covered_by_provider_lots = lot_inputs
         .iter()
         .map(|input| (input.upstream_id, input.window))
@@ -1007,7 +1110,7 @@ pub async fn record_pool_quota_snapshots_now(
 ) -> Result<(), StorageError> {
     let computed_at_unix_millis = i64::try_from(now_unix_millis(clock)).unwrap_or(i64::MAX);
     let snapshot_at_unix_secs = computed_at_unix_millis / 1_000;
-    let mut records = pool_quota_snapshots_from_aggregate(
+    let records = pool_quota_snapshots_from_aggregate(
         aggregate,
         snapshot_at_unix_secs,
         computed_at_unix_millis,
@@ -1022,7 +1125,7 @@ pub async fn record_pool_quota_snapshots_now(
     let latest = storage
         .list_latest_pool_quota_snapshot_summaries(&windows)
         .await?;
-    records.retain(|record| {
+    let should_record = records.iter().any(|record| {
         should_record_pool_quota_snapshot(
             record,
             latest
@@ -1030,7 +1133,7 @@ pub async fn record_pool_quota_snapshots_now(
                 .find(|summary| summary.window == record.window),
         )
     });
-    if records.is_empty() {
+    if !should_record {
         return Ok(());
     }
     PoolQuotaHistoryStore::record_pool_quota_snapshots(storage, &records).await
@@ -1117,18 +1220,21 @@ fn build_aggregate_window_response(
 
     let utilization = plan_weighted_utilization.or(weighted_utilization);
 
-    let stale_upstreams = lots
+    let latest_lots = latest_lot_per_upstream(lots);
+    let stale_upstreams = latest_lots
         .iter()
         .filter(|lot| lot.state == "stale")
-        .map(|lot| lot.upstream_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
-    let missing_capacity_upstreams = lots
+        .count();
+    let missing_capacity_upstreams = latest_lots
         .iter()
-        .filter(|lot| lot.capacity_estimate_tokens.is_none())
-        .map(|lot| lot.upstream_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
+        .filter(|lot| {
+            if plan_weighted_utilization.is_some() {
+                lot.utilization.is_none()
+            } else {
+                lot.capacity_estimate_tokens.is_none()
+            }
+        })
+        .count();
     let contributing_upstreams = if plan_weighted_utilization.is_some() {
         latest_header_per_upstream.len()
     } else if weighted_utilization.is_some() {
@@ -1175,7 +1281,7 @@ fn build_aggregate_window_response(
         contributing_upstreams,
         stale_upstreams,
         missing_capacity_upstreams,
-        provider_lots: latest_lot_per_upstream(lots),
+        provider_lots: latest_lots,
         caveats,
     }
 }
@@ -2273,7 +2379,30 @@ mod tests {
         assert!((utilization - 0.20).abs() < f64::EPSILON);
         assert_eq!(response.confidence, "plan_weighted");
         assert_eq!(response.contributing_upstreams, 2);
+        assert_eq!(response.missing_capacity_upstreams, 1);
         assert!(response.caveats.iter().any(|c| c.contains("plan ratios")));
+    }
+
+    #[test]
+    fn aggregate_ignores_historical_idle_lots_for_missing_capacity_and_staleness() {
+        let mut historical_idle = lot("u-1", Some(0.0), Some(1_000), None, None);
+        historical_idle.state = "stale".to_owned();
+        let current_active = lot(
+            "u-1",
+            Some(0.50),
+            Some(2_000),
+            Some(1_000_000.0),
+            Some(500_000.0),
+        );
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &[historical_idle, current_active],
+            500_000,
+            now_unix_secs_test(),
+        );
+        assert_eq!(response.stale_upstreams, 0);
+        assert_eq!(response.missing_capacity_upstreams, 0);
+        assert_eq!(response.contributing_upstreams, 1);
     }
 
     #[test]

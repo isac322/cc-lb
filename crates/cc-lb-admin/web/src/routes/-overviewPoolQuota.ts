@@ -13,33 +13,77 @@ export type PoolQuotaChartRow = {
 export type PoolQuotaLatest = Omit<PoolQuotaChartRow, 'unix'>;
 
 /**
+ * Maximum seconds a recorded pool quota snapshot is step-held across
+ * intermediate timestamps emitted by faster-moving windows before a missing
+ * sample is treated as an unobserved gap. Matches the 3,600s heartbeat in
+ * `should_record_pool_quota_snapshot`.
+ */
+export const POOL_QUOTA_HEARTBEAT_SECS = 3_600;
+
+/**
  * Pool history as used percent: each bucket plots the pool utilization,
  * clamped to 0-100 so an over-limit reading pins to the top of the plot
- * instead of leaving it.
+ * instead of leaving it. Windows that suppressed redundant writes within the
+ * 3,600s heartbeat window carry forward their last observed value across
+ * intermediate timestamps emitted by other windows.
  */
 export function buildPoolQuotaChartData(
   windows: readonly PoolHistoryWindowResponse[] | undefined,
 ): PoolQuotaChartRow[] {
-  const buckets = new Map<number, Omit<PoolQuotaChartRow, 'unix'>>();
+  type RawRow = Record<PoolQuotaWindow, number | null | undefined>;
+  const buckets = new Map<number, RawRow>();
   for (const window of POOL_QUOTA_WINDOWS) {
     const series =
       windows?.find((entry) => entry.window === window)?.series ?? [];
     for (const point of series) {
       const row = buckets.get(point.snapshot_at_unix_secs) ?? {
-        '5h': null,
-        '7d': null,
-        '7d_fable': null,
+        '5h': undefined,
+        '7d': undefined,
+        '7d_fable': undefined,
       };
       const used = point.utilization_percent;
-      if (used != null && Number.isFinite(used)) {
-        row[window] = Math.min(100, Math.max(0, used));
-      }
+      row[window] =
+        used != null && Number.isFinite(used)
+          ? Math.min(100, Math.max(0, used))
+          : null;
       buckets.set(point.snapshot_at_unix_secs, row);
     }
   }
-  return Array.from(buckets, ([unix, row]) => ({ unix, ...row })).sort(
-    (left, right) => left.unix - right.unix,
+  const sorted = Array.from(buckets.entries()).sort(
+    ([left], [right]) => left - right,
   );
+  const lastSeen: Record<
+    PoolQuotaWindow,
+    { unix: number; value: number } | null
+  > = {
+    '5h': null,
+    '7d': null,
+    '7d_fable': null,
+  };
+  return sorted.map(([unix, raw]) => {
+    const row: PoolQuotaChartRow = {
+      unix,
+      '5h': null,
+      '7d': null,
+      '7d_fable': null,
+    };
+    for (const window of POOL_QUOTA_WINDOWS) {
+      const explicit = raw[window];
+      if (typeof explicit === 'number') {
+        row[window] = explicit;
+        lastSeen[window] = { unix, value: explicit };
+      } else if (explicit === null) {
+        row[window] = null;
+        lastSeen[window] = null;
+      } else {
+        const prev = lastSeen[window];
+        if (prev !== null && unix - prev.unix <= POOL_QUOTA_HEARTBEAT_SECS) {
+          row[window] = prev.value;
+        }
+      }
+    }
+    return row;
+  });
 }
 
 export function poolQuotaResponseLatest(

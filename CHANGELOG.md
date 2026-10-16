@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pool quota history snapshots now record all pooled windows atomically whenever any pooled window crosses the `0.001` utilization deadband or 1-hour heartbeat, and the Overview pool quota chart step-holds unchanged windows across intermediate timestamps within the 1-hour heartbeat window so slower-moving windows (`7d`, `7d_fable`) do not render false `null` dropouts when `5h` updates more frequently.
+- `/admin/v1/subscription-quotas/aggregate` now refreshes active provider lot observation timestamps and staleness states from `upstream_subscription_quota_latest_v1` and the in-memory quota cache when checkpoint inserts are suppressed by the `0.001` utilization deadband, and computes `missing_capacity_upstreams` and `stale_upstreams` over the latest lot per upstream rather than historical reset cycles.
+- PostgreSQL subscription quota checkpoint and pool quota history pre-window anchor queries now use `UNNEST` with `LATERAL (... ORDER BY ... DESC LIMIT 1)` backward index seeks instead of sorting all pre-cutoff rows under `DISTINCT ON`.
+
 ## [2.0.1] - 2026-10-16
 
 cc-lb 2.0.1 replaces the hybrid JSON `payload` column in `request_events_v1` with a pure relational schema (99 typed columns, zero TOAST overhead), removes the transitional `request_event_strip_diagnostics` setting and `cc-lb request-events` CLI, enriches `cc_lb.request_diagnostics.v1` lines with self-contained outcome and session-correlation fields while omitting `lookback_prefixes`, and adds bounded lifecycle pruning and deadband deduplication across auxiliary tables.

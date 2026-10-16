@@ -64,6 +64,34 @@ describe('Overview pooled quota history', () => {
       '7d_fable': null,
     });
   });
+
+  it('carries forward deadband-suppressed windows within the 1h heartbeat but preserves real gaps', () => {
+    const windows = [
+      historyWindow('5h', [
+        [1_000, 10],
+        [1_600, 15],
+        [4_600, 20],
+        [9_000, 25],
+      ]),
+      historyWindow('7d', [
+        [1_000, 40],
+        [4_600, 41],
+        [9_000, 42],
+      ]),
+      historyWindow('7d_fable', [
+        [1_000, 0],
+        [4_600, 0],
+      ]),
+    ];
+
+    expect(buildPoolQuotaChartData(windows)).toEqual([
+      { unix: 1_000, '5h': 10, '7d': 40, '7d_fable': 0 },
+      { unix: 1_600, '5h': 15, '7d': 40, '7d_fable': 0 },
+      { unix: 4_600, '5h': 20, '7d': 41, '7d_fable': 0 },
+      // 9_000 - 4_600 = 4_400 > 3_600s heartbeat -> not carried forward
+      { unix: 9_000, '5h': 25, '7d': 42, '7d_fable': null },
+    ]);
+  });
 });
 
 function lot(

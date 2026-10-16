@@ -9,15 +9,21 @@ use crate::{adapter::PostgresStorage, error_map::map_sqlx_error};
 // The left anchor carries the last observation into an otherwise idle range.
 macro_rules! range_points {
     () => { r#"WITH anchors AS (
-    SELECT DISTINCT ON (h."quota_window") h.*
-    FROM pool_subscription_quota_history_v1 h
-    WHERE h."quota_window" = ANY($1) AND h.snapshot_at_unix_secs < $2
-      AND NOT EXISTS (
-          SELECT 1 FROM pool_subscription_quota_history_v1 boundary
-          WHERE boundary."quota_window" = h."quota_window"
-            AND boundary.snapshot_at_unix_secs = $2
-      )
-    ORDER BY h."quota_window", h.snapshot_at_unix_secs DESC
+    SELECT h.*
+    FROM UNNEST($1::text[]) AS w("quota_window")
+    CROSS JOIN LATERAL (
+        SELECT *
+        FROM pool_subscription_quota_history_v1 h
+        WHERE h."quota_window" = w."quota_window"
+          AND h.snapshot_at_unix_secs < $2
+        ORDER BY h.snapshot_at_unix_secs DESC
+        LIMIT 1
+    ) h
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pool_subscription_quota_history_v1 boundary
+        WHERE boundary."quota_window" = h."quota_window"
+          AND boundary.snapshot_at_unix_secs = $2
+    )
 ), points AS (
     SELECT snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum, capacity_ratio_sum, eligible_upstreams, contributing_upstreams, stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams, header_contributing_upstreams, api_contributing_upstreams, max_observed_at_unix_millis, computed_at_unix_millis, policy_version
     FROM pool_subscription_quota_history_v1
@@ -40,15 +46,20 @@ pub(super) async fn list_latest(
         .map(|window| (*window).as_str())
         .collect::<Vec<_>>();
     let rows = sqlx::query(
-        r#"SELECT DISTINCT ON ("quota_window")
-                  snapshot_at_unix_secs, "quota_window", utilization, weighted_utilization_sum,
-                  capacity_ratio_sum, eligible_upstreams, contributing_upstreams,
-                  stale_upstreams, missing_observation_upstreams, missing_metadata_upstreams,
-                  header_contributing_upstreams, api_contributing_upstreams,
-                  max_observed_at_unix_millis, computed_at_unix_millis, policy_version
-           FROM pool_subscription_quota_history_v1
-          WHERE "quota_window" = ANY($1)
-       ORDER BY "quota_window", snapshot_at_unix_secs DESC"#,
+        r#"SELECT h.snapshot_at_unix_secs, h."quota_window", h.utilization, h.weighted_utilization_sum,
+                  h.capacity_ratio_sum, h.eligible_upstreams, h.contributing_upstreams,
+                  h.stale_upstreams, h.missing_observation_upstreams, h.missing_metadata_upstreams,
+                  h.header_contributing_upstreams, h.api_contributing_upstreams,
+                  h.max_observed_at_unix_millis, h.computed_at_unix_millis, h.policy_version
+           FROM UNNEST($1::text[]) AS w("quota_window")
+           CROSS JOIN LATERAL (
+               SELECT *
+               FROM pool_subscription_quota_history_v1
+               WHERE "quota_window" = w."quota_window"
+               ORDER BY snapshot_at_unix_secs DESC
+               LIMIT 1
+           ) h
+       ORDER BY h."quota_window""#,
     )
     .bind(&windows)
     .fetch_all(storage.pool())
