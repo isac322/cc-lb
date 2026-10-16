@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-10-16
+
+cc-lb 2.0.1 replaces the hybrid JSON `payload` column in `request_events_v1` with a pure relational schema (99 typed columns, zero TOAST overhead), removes the transitional `request_event_strip_diagnostics` setting and `cc-lb request-events` CLI, enriches `cc_lb.request_diagnostics.v1` lines with self-contained outcome and session-correlation fields while omitting `lookback_prefixes`, and adds bounded lifecycle pruning and deadband deduplication across auxiliary tables.
+
 ### Breaking
 
 - Removed top-level `request_event_strip_diagnostics` (`CC_LB_REQUEST_EVENT_STRIP_DIAGNOSTICS`, Helm `config.requestEventStripDiagnostics`) and the `cc-lb request-events` (`export-diagnostics`, `strip-diagnostics`) CLI subcommands. `Config` rejects unknown fields, so configurations and Helm charts (such as chart `0.1.1`) that still set `request_event_strip_diagnostics` must remove the key before starting this release.
@@ -451,7 +455,8 @@ Read the upgrade notes before upgrading: the migrations drop columns and tables,
 - Admin `/status` JSON response now includes a `principals` map showing active overrides with redacted configuration hashes.
 - Backward compatibility is fully preserved: zero-principal-plugin configurations remain unchanged, producing a byte-identical observe stream.
 
-[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...HEAD
+[Unreleased]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.1...HEAD
+[2.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v2.0.0...cc-lb-v2.0.1
 [2.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.1...cc-lb-v2.0.0
 [1.0.1]: https://github.com/isac322/cc-lb/compare/cc-lb-v1.0.0...cc-lb-v1.0.1
 [1.0.0]: https://github.com/isac322/cc-lb/compare/cc-lb-v0.8.1...cc-lb-v1.0.0
