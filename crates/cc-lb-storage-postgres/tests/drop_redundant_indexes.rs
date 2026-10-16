@@ -39,8 +39,97 @@ fn redundant_indexes_are_dropped_and_request_events_are_relational() {
 }
 
 async fn run(pool: &PgPool) -> Result<()> {
+    {
+        let mut conn = pool.acquire().await?;
+        sqlx::migrate!("./migrations")
+            .run_direct(Some(138), &mut *conn, false)
+            .await?;
+    }
+    let pre_payload = br#"{
+        "request_id": "pre-0139-req",
+        "principal_kind": "machine",
+        "duration_ms": 321,
+        "auth_ms": 2,
+        "route_ms": 3,
+        "limit_reserve_ms": 4,
+        "bulkhead_wait_ms": 5,
+        "dns_ms": 6,
+        "connect_ms": 7,
+        "connection_reused": true,
+        "proxy_setup_ms": 8,
+        "shape_ms": 9,
+        "sign_ms": 10,
+        "upstream_ttfb_ms": 11,
+        "upstream_body_ms": 12,
+        "finalize_ms": 13,
+        "json_parse_ms": 0.25,
+        "cache_structure_ms": 0.5,
+        "cache_token_key_ms": 0.75,
+        "cache_count_lookup_ms": 1.25,
+        "cache_tokenizer_queue_ms": 1.5,
+        "cache_serialize_ms": 1.75,
+        "cache_tokenize_ms": 2.25,
+        "prepare_signer_ms": 2.5,
+        "request_body_read_ms": 14,
+        "request_body_bytes": 512,
+        "request_body_first_chunk_ms": 0.125,
+        "request_body_receive_ms": 0.375,
+        "request_body_wait_ms": 0.625,
+        "request_body_process_ms": 0.875,
+        "request_body_chunk_count": 3,
+        "response_body_wait_ms": 3.25,
+        "response_body_process_ms": 3.5,
+        "response_body_downstream_poll_gap_ms": 3.75,
+        "retry_overhead_ms": 4.25,
+        "body_chunk_count": 9,
+        "body_bytes": 1024,
+        "stream_message_start_ms": 15,
+        "stream_content_block_start_ms": 16,
+        "stream_first_content_delta_ms": 17,
+        "stream_last_content_delta_ms": 18,
+        "stream_message_stop_ms": 19,
+        "stream_last_chunk_ms": 20,
+        "stream_total_ms": 21,
+        "sse_event_count": 22,
+        "content_delta_count": 23,
+        "ping_count": 24,
+        "inter_token_avg_ms": 25,
+        "upstream_http_version": "HTTP/2.0",
+        "upstream_request_id": "req_upstream_pre",
+        "upstream_content_encoding": "gzip",
+        "upstream_content_length": 2048,
+        "upstream_body_bytes": 1536,
+        "upstream_body_end": "transport_error",
+        "upstream_body_error_cause": "eof",
+        "upstream_body_error_io_kind": "unexpected_eof",
+        "upstream_body_error_h2_reason": "INTERNAL_ERROR",
+        "upstream_stream_warning_type": "warn_type",
+        "upstream_stream_warning_message": "warn_msg"
+    }"#
+    .as_slice();
+    sqlx::query(
+        "INSERT INTO request_events_v1 (ts, event_id, list_ts_ms, list_event_key, list_status, payload)
+         VALUES (to_timestamp(1700000000), 'pre-0139-event', 1700000000000, 'pre-0139-event', 200, $1),
+                (to_timestamp(1700000001), 'already-done-event', 1700000001000, 'already-done-event', 200, NULL)",
+    )
+    .bind(pre_payload)
+    .execute(pool)
+    .await?;
+
     let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
     storage.initialize().await?;
+    storage.initialize().await?;
+
+    let backfilled = storage
+        .get_request_event("pre-0139-event")
+        .await?
+        .context("pre-0139 row missing after 0139 backfill")?;
+    ensure!(backfilled.request_id == "pre-0139-req" && backfilled.duration_ms == 321);
+    ensure!(backfilled.principal_kind.as_deref() == Some("machine"));
+    ensure!(backfilled.json_parse_ms == Some(0.25) && backfilled.retry_overhead_ms == Some(4.25));
+    ensure!(backfilled.sse_event_count == Some(22) && backfilled.ping_count == Some(24));
+    ensure!(backfilled.upstream_request_id.as_deref() == Some("req_upstream_pre"));
+    ensure!(backfilled.upstream_body_error_h2_reason.as_deref() == Some("INTERNAL_ERROR"));
 
     assert_index_set(pool).await?;
     assert_checkpoint_queries_avoid_seq_scan(pool).await?;

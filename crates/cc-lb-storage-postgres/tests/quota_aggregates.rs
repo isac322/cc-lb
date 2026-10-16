@@ -149,6 +149,12 @@ async fn quota_deadband_keeps_exact_latest_and_pruning_preserves_each_anchor() -
         storage
             .record_subscription_quota_samples(&[changed])
             .await?;
+        let mut threshold_changed = sample(upstream, 45, 8, 0.2026, 1000);
+        threshold_changed.status = Some(SubscriptionQuotaStatus::Rejected);
+        threshold_changed.surpassed_threshold = Some(0.95);
+        storage
+            .record_subscription_quota_samples(&[threshold_changed])
+            .await?;
         storage
             .put_subscription_quota_checkpoints(&[
                 checkpoint(upstream, 50, 5, 0.4, 1000),
@@ -172,7 +178,7 @@ async fn quota_deadband_keeps_exact_latest_and_pruning_preserves_each_anchor() -
             storage
                 .prune_subscription_quota_checkpoints_before(60, 100)
                 .await?,
-            2
+            3
         );
         let ids: Vec<Uuid> = sqlx::query_scalar(
             "SELECT sample_id FROM upstream_subscription_quota_checkpoints_v1 ORDER BY sample_id",
@@ -244,13 +250,13 @@ async fn auxiliary_pruners_share_batch_budget_and_pool_ranges_keep_left_anchors(
             assert_eq!(points[0].utilization, Some(0.2));
             assert_eq!(points[1].snapshot_at_unix_secs, 30);
         }
-        for bucket in [None, Some(10)] {
+        for (bucket, expected_start) in [(None, 25), (Some(10), 20)] {
             let points = storage.list_pool_quota_chart_points_in_range(&windows, 25, 35, bucket).await?;
             assert_eq!(points.len(), 4);
-            assert_eq!(points.iter().filter(|row| row.snapshot_at_unix_secs == 25).count(), 2);
+            assert_eq!(points.iter().filter(|row| row.snapshot_at_unix_secs == expected_start).count(), 2);
             let idle = storage.list_pool_quota_chart_points_in_range(&windows, 25, 29, bucket).await?;
             assert_eq!(idle.len(), 2);
-            assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == 25 && row.utilization == Some(0.2)));
+            assert!(idle.iter().all(|row| row.snapshot_at_unix_secs == expected_start && row.utilization == Some(0.2)));
             let exact = storage.list_pool_quota_chart_points_in_range(&windows, 30, 35, bucket).await?;
             assert_eq!(exact.len(), 2, "exact boundary suppresses synthetic anchors");
             assert!(exact.iter().all(|row| row.utilization == Some(0.3)));

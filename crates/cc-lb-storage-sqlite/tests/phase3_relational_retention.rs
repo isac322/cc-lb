@@ -431,7 +431,7 @@ async fn relational_migration_preserves_existing_columns_and_cursor_high_water()
         "INSERT INTO request_events_v1 \
          (id, request_id, ts, event_id, payload, list_ts_ms, list_event_key, list_status, list_duration_ms) \
          VALUES (42, 'old-request', 1, 'old-event', \
-         '{\"principal_kind\":\"not-backfilled\",\"status\":201,\"duration_ms\":50}', \
+         '{\"principal_kind\":\"backfilled-machine\",\"sse_event_count\":12,\"upstream_request_id\":\"req_up_42\",\"status\":201,\"duration_ms\":50}', \
          1000, 'old-event', 201, 50)",
     ).execute(&mut connection).await.expect("seed pre-relational request");
     sqlx::query("UPDATE sqlite_sequence SET seq = 99 WHERE name = 'request_events_v1'")
@@ -443,7 +443,7 @@ async fn relational_migration_preserves_existing_columns_and_cursor_high_water()
         .await
         .expect("apply relational migration");
     let row = sqlx::query(
-        "SELECT id, request_id, list_status, list_duration_ms, principal_kind \
+        "SELECT id, request_id, list_status, list_duration_ms, principal_kind, sse_event_count, upstream_request_id \
          FROM request_events_v1 WHERE event_id = 'old-event'",
     )
     .fetch_one(&mut connection)
@@ -454,9 +454,14 @@ async fn relational_migration_preserves_existing_columns_and_cursor_high_water()
     assert_eq!(row.get::<i64, _>("list_status"), 201);
     assert_eq!(row.get::<i64, _>("list_duration_ms"), 50);
     assert_eq!(
-        row.get::<Option<String>, _>("principal_kind"),
-        None,
-        "no JSON backfill"
+        row.get::<Option<String>, _>("principal_kind").as_deref(),
+        Some("backfilled-machine"),
+    );
+    assert_eq!(row.get::<Option<i64>, _>("sse_event_count"), Some(12));
+    assert_eq!(
+        row.get::<Option<String>, _>("upstream_request_id")
+            .as_deref(),
+        Some("req_up_42"),
     );
     let high_water: i64 =
         sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'request_events_v1'")

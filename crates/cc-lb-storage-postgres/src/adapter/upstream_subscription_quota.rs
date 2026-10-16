@@ -150,16 +150,23 @@ async fn insert_checkpoint_if_changed(
     conn: &mut PgConnection,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
+    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let latest = sqlx::query_as::<_, (Vec<u8>, bool)>(
         r#"SELECT semantic_fingerprint,
                   status IS NOT DISTINCT FROM $4::text
                   AND resets_at_unix_secs IS NOT DISTINCT FROM $5::bigint
-                  AND overage_in_use IS NOT DISTINCT FROM $6::boolean
-                  AND fallback_available IS NOT DISTINCT FROM $7::boolean
-                  AND disabled_reason IS NOT DISTINCT FROM $8::text
-                  AND extra_usage_enabled IS NOT DISTINCT FROM $9::boolean
-                  AND utilization IS NOT NULL AND $10::double precision IS NOT NULL
-                  AND ABS(utilization - $10) < 0.001 AS within_deadband
+                  AND surpassed_threshold IS NOT DISTINCT FROM $6::double precision
+                  AND fallback_percentage IS NOT DISTINCT FROM $7::double precision
+                  AND fallback_available IS NOT DISTINCT FROM $8::boolean
+                  AND overage_in_use IS NOT DISTINCT FROM $9::boolean
+                  AND overage_period_monthly_utilization IS NOT DISTINCT FROM $10::double precision
+                  AND upgrade_paths IS NOT DISTINCT FROM $11::text
+                  AND disabled_reason IS NOT DISTINCT FROM $12::text
+                  AND extra_usage_enabled IS NOT DISTINCT FROM $13::boolean
+                  AND extra_usage_monthly_limit IS NOT DISTINCT FROM $14::double precision
+                  AND extra_usage_used_credits IS NOT DISTINCT FROM $15::double precision
+                  AND utilization IS NOT NULL AND $16::double precision IS NOT NULL
+                  AND ABS(utilization - $16) < 0.001 AS within_deadband
            FROM upstream_subscription_quota_checkpoints_v1
            WHERE upstream_id = $1 AND "window" = $2 AND source = $3
            ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1"#,
@@ -174,10 +181,16 @@ async fn insert_checkpoint_if_changed(
             .map(|value| u64_to_i64(value, "quota reset timestamp"))
             .transpose()?,
     )
-    .bind(record.overage_in_use)
+    .bind(record.surpassed_threshold)
+    .bind(record.fallback_percentage)
     .bind(record.fallback_available)
+    .bind(record.overage_in_use)
+    .bind(record.overage_period_monthly_utilization)
+    .bind(upgrade_paths_json.as_deref())
     .bind(record.disabled_reason.as_deref())
     .bind(record.extra_usage_enabled)
+    .bind(record.extra_usage_monthly_limit)
+    .bind(record.extra_usage_used_credits)
     .bind(record.utilization)
     .fetch_optional(&mut *conn)
     .await
@@ -192,8 +205,6 @@ async fn insert_checkpoint_if_changed(
     {
         return Ok(false);
     }
-
-    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let result = sqlx::query(
         "INSERT INTO upstream_subscription_quota_checkpoints_v1 \
          (upstream_id, \"window\", source, changed_at_unix_millis, sample_id, semantic_fingerprint, \

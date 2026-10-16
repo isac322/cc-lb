@@ -162,14 +162,18 @@ pub(super) async fn insert_checkpoint_if_changed(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     record: &SubscriptionQuotaCheckpointRecord,
 ) -> StorageResult<bool> {
+    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let unchanged = sqlx::query_scalar::<_, bool>(
         "SELECT semantic_fingerprint = ?1 OR ( \
-             status IS ?2 AND resets_at_unix_secs IS ?3 AND overage_in_use IS ?4 \
-             AND fallback_available IS ?5 AND disabled_reason IS ?6 \
-             AND extra_usage_enabled IS ?7 AND utilization IS NOT NULL \
-             AND ?8 IS NOT NULL AND ABS(utilization - ?8) < 0.001 \
+             status IS ?2 AND resets_at_unix_secs IS ?3 \
+             AND surpassed_threshold IS ?4 AND fallback_percentage IS ?5 \
+             AND fallback_available IS ?6 AND overage_in_use IS ?7 \
+             AND overage_period_monthly_utilization IS ?8 AND upgrade_paths IS ?9 \
+             AND disabled_reason IS ?10 AND extra_usage_enabled IS ?11 \
+             AND extra_usage_monthly_limit IS ?12 AND extra_usage_used_credits IS ?13 \
+             AND utilization IS NOT NULL AND ?14 IS NOT NULL AND ABS(utilization - ?14) < 0.001 \
          ) FROM upstream_subscription_quota_checkpoints_v1 \
-         WHERE upstream_id = ?9 AND window = ?10 AND source = ?11 \
+         WHERE upstream_id = ?15 AND window = ?16 AND source = ?17 \
          ORDER BY changed_at_unix_millis DESC, sample_id DESC LIMIT 1",
     )
     .bind(&record.semantic_fingerprint.as_bytes()[..])
@@ -180,10 +184,16 @@ pub(super) async fn insert_checkpoint_if_changed(
             .map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs"))
             .transpose()?,
     )
-    .bind(record.overage_in_use)
+    .bind(record.surpassed_threshold)
+    .bind(record.fallback_percentage)
     .bind(record.fallback_available)
+    .bind(record.overage_in_use)
+    .bind(record.overage_period_monthly_utilization)
+    .bind(upgrade_paths_json.as_deref())
     .bind(record.disabled_reason.as_deref())
     .bind(record.extra_usage_enabled)
+    .bind(record.extra_usage_monthly_limit)
+    .bind(record.extra_usage_used_credits)
     .bind(record.utilization)
     .bind(record.upstream_id.to_string())
     .bind(record.window.as_str())
@@ -195,8 +205,6 @@ pub(super) async fn insert_checkpoint_if_changed(
     if unchanged == Some(true) {
         return Ok(false);
     }
-
-    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     let result = sqlx::query(
         "INSERT INTO upstream_subscription_quota_checkpoints_v1 \
          (upstream_id, window, source, changed_at_unix_millis, sample_id, semantic_fingerprint, \
