@@ -836,9 +836,8 @@ pub async fn build_cc_lb_aggregate_response(
             continue;
         }
         let observed_at = sample.observed_at_unix_millis;
-        let state = if max_staleness_secs > 0
-            && now_unix_millis.saturating_sub(observed_at)
-                > max_staleness_secs.saturating_mul(1_000)
+        let state = if now_unix_millis.saturating_sub(observed_at)
+            > max_staleness_secs.saturating_mul(1_000)
         {
             SubscriptionQuotaDataState::Stale
         } else {

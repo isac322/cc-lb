@@ -279,7 +279,7 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
     let (status, _, body) = server
         .client
         .get(&format!(
-            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=7d_fable&source=api"
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=7d_fable&source=api&max_staleness_secs=1800"
         ))
         .await;
 
@@ -290,6 +290,81 @@ async fn subscription_quota_aggregate_refreshes_observed_at_from_latest_when_che
     assert_eq!(
         window["provider_lots"][0]["observed_at_unix_millis"],
         (CHECKPOINT_TEST_NOW_UNIX_SECS - 10) * 1_000
+    );
+
+    let (status, _, zero_stale_body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=7d_fable&source=api&max_staleness_secs=0"
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(zero_stale_body["windows"][0]["stale_upstreams"], 1);
+    assert_eq!(
+        zero_stale_body["windows"][0]["provider_lots"][0]["state"],
+        "stale"
+    );
+
+    server
+        .storage
+        .record_pool_quota_snapshots(&[
+            PoolQuotaSnapshotRecord {
+                snapshot_at_unix_secs: 100,
+                window: SubscriptionQuotaWindow::SevenDay,
+                utilization: Some(0.50),
+                weighted_utilization_sum: 2.5,
+                capacity_ratio_sum: 5.0,
+                eligible_upstreams: 1,
+                contributing_upstreams: 1,
+                stale_upstreams: 0,
+                missing_observation_upstreams: 0,
+                missing_metadata_upstreams: 0,
+                header_contributing_upstreams: 0,
+                api_contributing_upstreams: 1,
+                max_observed_at_unix_millis: Some(100_000),
+                computed_at_unix_millis: 100_000,
+                policy_version: 1,
+            },
+            PoolQuotaSnapshotRecord {
+                snapshot_at_unix_secs: 10_300,
+                window: SubscriptionQuotaWindow::FiveHour,
+                utilization: Some(0.20),
+                weighted_utilization_sum: 1.0,
+                capacity_ratio_sum: 5.0,
+                eligible_upstreams: 1,
+                contributing_upstreams: 1,
+                stale_upstreams: 0,
+                missing_observation_upstreams: 0,
+                missing_metadata_upstreams: 0,
+                header_contributing_upstreams: 0,
+                api_contributing_upstreams: 1,
+                max_observed_at_unix_millis: Some(10_300_000),
+                computed_at_unix_millis: 10_300_000,
+                policy_version: 1,
+            },
+        ])
+        .await
+        .unwrap();
+    let (status, _, leading_gap_body) = server
+        .client
+        .get(
+            "/admin/v1/subscription-quotas/pool-history?windows=5h,7d&since_unix_secs=10000&until_unix_secs=11000&series_projection=chart",
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        leading_gap_body["windows"][0]["series"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        leading_gap_body["windows"][1]["series"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "pre-window sample older than the 3600s heartbeat must not emit a synthetic range-start anchor"
     );
 }
 

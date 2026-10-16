@@ -325,6 +325,16 @@ async fn pool_history_retains_anchors_and_clamps_idle_and_bucket_starts() {
         .expect("other partition anchor");
     assert_eq!(other.len(), 1);
     assert_eq!(other[0].utilization, Some(0.5));
+    let expired_anchor = storage
+        .list_pool_quota_snapshot_summaries_in_range(&[window], 5_000, 5_100)
+        .await
+        .expect("expired pre-window anchor is suppressed");
+    assert!(expired_anchor.is_empty());
+    let expired_chart_anchor = storage
+        .list_pool_quota_chart_points_in_range(&[window], 5_000, 5_100, Some(60))
+        .await
+        .expect("expired pre-window chart anchor is suppressed");
+    assert!(expired_chart_anchor.is_empty());
 }
 
 #[tokio::test]
