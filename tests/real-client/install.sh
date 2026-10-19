@@ -145,13 +145,17 @@ from pathlib import Path
 
 root = Path(sys.argv[1]) / "node_modules" / "@code-yeongyu" / "senpi"
 preset_dir = root / "dist" / "core" / "extensions" / "builtin" / "prompt-preset"
+allowed_main_prefixes = (
+    "You are ${context.appName ?? APP_NAME},",
+    "You are ${context.appName ?? APP_NAME} on ",
+    "You are ${appName},",
+)
 builder_pattern = re.compile(r"function (build[A-Za-z0-9]+Core)\(")
-allowed_main_prefixes = ("You are ${APP_NAME},", "You are ${APP_NAME} on ")
 core_builders = []
 for path in sorted(preset_dir.glob("*.js")):
     text = path.read_text()
     for builder in builder_pattern.finditer(text):
-        return_prompt = re.search(r"\breturn\s+`([^`]*)", text[builder.end():builder.end() + 512], re.DOTALL)
+        return_prompt = re.search(r"\breturn\s+(?:\[\s*)?`([^`]*)", text[builder.end():builder.end() + 512], re.DOTALL)
         if return_prompt is None:
             print(
                 f"FAIL reason: senpi core prompt builder shape drifted in {path.name}: {builder.group(1)}",
@@ -172,7 +176,7 @@ if not core_builders:
 
 expected = {
     "dist/core/dynamic-prompt/identity.js": [
-        "You are ${APP_NAME}, a coding agent",
+        "You are ${appName}, a coding agent",
     ],
     "examples/extensions/subagent/index.ts": [
         "args.push(`Task: ${task}`);",
@@ -213,15 +217,15 @@ print("PASS senpi request-family markers match pinned package")
 PY
 }
 
-install_requested claude-code @anthropic-ai/claude-code 2.1.278 claude CLAUDE_CODE_BIN
-install_requested opencode opencode-ai 1.18.31 opencode OPENCODE_BIN
-# Pin the published 0.86.1 package set explicitly so the tested pi binary and
+install_requested claude-code @anthropic-ai/claude-code 2.1.303 claude CLAUDE_CODE_BIN
+install_requested opencode opencode-ai 1.19.3 opencode OPENCODE_BIN
+# Pin the published 1.3.0 package set explicitly so the tested pi binary and
 # its companion packages stay in lockstep.
-install_requested pi @earendil-works/pi-coding-agent 0.86.1 pi PI_BIN npm \
-  @earendil-works/pi-ai@0.86.1 \
-  @earendil-works/pi-agent-core@0.86.1 \
-  @earendil-works/pi-tui@0.86.1
-install_requested senpi @code-yeongyu/senpi 2026.9.21-2 senpi SENPI_BIN
+install_requested pi @earendil-works/pi-coding-agent 1.3.0 pi PI_BIN npm \
+  @earendil-works/pi-ai@1.3.0 \
+  @earendil-works/pi-agent-core@1.3.0 \
+  @earendil-works/pi-tui@1.3.0
+install_requested senpi @code-yeongyu/senpi 2026.10.18-1 senpi SENPI_BIN
 if [ -z "${REAL_CLIENT_ONLY:-}" ] || [ "$REAL_CLIENT_ONLY" = "senpi" ]; then
   verify_senpi_markers
 fi
