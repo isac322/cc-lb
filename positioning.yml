@@ -106,7 +106,7 @@ selling_points:
   - id: SP4
     headline: Extend the proxy with Wasmtime hooks
     benefit: Add custom request filtering and request/response/SSE shaping without editing the core proxy.
-    mechanism: Published PDK and runtime crates expose filter and shape slots over the versioned rkyv wire contract and run guests in Wasmtime 48.
+    mechanism: Published PDK and runtime crates expose filter and shape slots over the versioned rkyv wire contract and run guests in Wasmtime 49.
     evidence: ["Cargo.toml:41-48", "crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60"]
     proof_page: /docs/plugins/
     status: shipped

@@ -39,7 +39,7 @@ fn main() {
             return;
         }
         None => panic!(
-            "bun is required to build cc-lb-admin: install Bun >= 1.3.14, set \
+            "bun is required to build cc-lb-admin: install Bun >= 1.4.3, set \
              CC_LB_ADMIN_PREBUILT_SPA=1 with a built web/dist, or set \
              CC_LB_ADMIN_SKIP_SPA=1"
         ),
