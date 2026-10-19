@@ -47,7 +47,7 @@ cc-lb-plugin-conformance = { version = "0.3", path = "crates/cc-lb-plugin-confor
 wasmtime  = "49"
 rkyv      = { version = "0.8", default-features = false }
 blake3    = { version = "1", default-features = false }
-wasmparser = "0.259"
+wasmparser = "0.262"
 
 anyhow = "1"
 arc-swap = "1"
