@@ -6,7 +6,7 @@ To run cc-lb rather than change it, follow the [documentation site](https://cc-l
 
 ## Development setup
 
-- Use Rust 1.98.1 from `rust-toolchain.toml`.
+- Use Rust 1.99.1 from `rust-toolchain.toml`.
 - Install Bun 1.3.14 or newer; the workspace build compiles the admin SPA.
 - Install the Wasm fixture target:
 
