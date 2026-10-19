@@ -20,10 +20,10 @@
 #     --build-arg GIT_SHA=$(git rev-parse HEAD) -t <registry>/cc-lb:<tag> --push .
 
 # ---- xx cross-compilation helper scripts (shared across all target platforms) ----
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0 AS xx
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.10.0 AS xx
 
 # ---- Architecture-independent cc-lb-admin dashboard SPA build ----
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.2-alpine AS admin-spa
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.3-alpine AS admin-spa
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 ARG BUILDOS
@@ -53,7 +53,7 @@ RUN if [ "${SKIP_SPA}" != "1" ]; then \
     fi
 
 # ---- Builder: cross toolchain, source, and the compile ----
-FROM --platform=$BUILDPLATFORM rust:1.98.1-alpine AS builder
+FROM --platform=$BUILDPLATFORM rust:1.99.1-alpine AS builder
 SHELL ["/bin/ash", "-exuo", "pipefail", "-c"]
 
 # clang/lld: xx uses clang as the cross linker driver for every target

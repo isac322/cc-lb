@@ -75,7 +75,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.1
 
       - uses: ./.github/actions/setup-rust-cache
 
@@ -85,7 +85,7 @@ jobs:
 
       - name: Run release-plz release
         id: release-plz
-        uses: MarcoIeni/release-plz-action@v0.5.139
+        uses: MarcoIeni/release-plz-action@v0.5.142
         with:
           command: release
         env:
@@ -115,12 +115,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.1
 
       - uses: ./.github/actions/setup-rust-cache
 
       - name: Run release-plz release-pr
-        uses: MarcoIeni/release-plz-action@v0.5.139
+        uses: MarcoIeni/release-plz-action@v0.5.142
         with:
           command: release-pr
         env:

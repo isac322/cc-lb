@@ -1,7 +1,7 @@
 # Server-only release-plz config. The regular release-plz.toml remains limited
 # to crates.io packages and release PR generation.
 #
-# release-plz 0.3.160 filters manifest-private packages before its git-only
+# release-plz 0.3.172 filters manifest-private packages before its git-only
 # release path. The workflows temporarily remove cc-lb-server's publish=false
 # marker from the checkout; publish=false below still blocks registry uploads.
 

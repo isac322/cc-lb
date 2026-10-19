@@ -14,7 +14,7 @@ runs:
 
     - uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.98.1
+        toolchain: 1.99.1
 
     - uses: ./.github/actions/setup-rust-cache
       with:
@@ -23,7 +23,7 @@ runs:
     - name: Install cargo-semver-checks
       uses: taiki-e/install-action@v2
       with:
-        tool: cargo-semver-checks@0.50
+        tool: cargo-semver-checks@0.51.0
 
     - name: Check published crates
       shell: bash
