@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.9.0...cc-lb-plugin-wire-v0.9.1) - 2026-10-16
+
+### Fixed
+
+- *(engine)* type prompt-cache prefix sizes and reject other-estimator observations ([#925](https://github.com/isac322/cc-lb/pull/925))
+
 ## [0.9.0](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-wire-v0.8.0...cc-lb-plugin-wire-v0.9.0) - 2026-10-06
 
 ### Added
