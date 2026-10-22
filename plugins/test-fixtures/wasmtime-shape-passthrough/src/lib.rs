@@ -99,7 +99,9 @@ pub use passthrough::{shape, transform_response, transform_sse_event};
 
 fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
     match upstream {
-        ArchivedUpstream::AnthropicDirect { base_url } => base_url.as_ref().map(|b| {
+        ArchivedUpstream::AnthropicDirect { base_url }
+        | ArchivedUpstream::OpenaiDirect { base_url }
+        | ArchivedUpstream::GeminiDirect { base_url } => base_url.as_ref().map(|b| {
             let s: &str = b;
             s.to_string()
         }),

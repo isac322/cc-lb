@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use bytes::Bytes;
-use cc_lb_aead::OAuthTokenBundle;
+use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
 use cc_lb_clock::Clock;
 use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{RemediationErrorBody, RemediationErrorInner, WARMUP_MODEL};
@@ -23,6 +23,7 @@ use cc_lb_control::anthropic_metadata::make_metadata_http_client;
 use cc_lb_control::subscription_metadata_hook::{
     fetch_metadata_only, store_organization_metadata, store_subscription_metadata,
 };
+use cc_lb_oauth_protocol::account_id_from_access_token;
 use cc_lb_quota::{
     UnifiedQuotaObservation, build_subscription_quota_samples, parse_anthropic_unified_headers,
 };
@@ -31,11 +32,11 @@ use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, RemediationCode, Storage, StorageError, SubscriptionQuotaSample,
-    SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord, UpstreamApiKeyStore, UpstreamCreate,
-    UpstreamRecord, UpstreamStatusUpdate, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind, WarmupPermanentFailureReason,
-    WarmupSkipReason, WarmupTransientFailureReason,
+    OAuthTokensCreate, OrganizationMetadataRecord, RemediationCode, Storage, StorageError,
+    SubscriptionQuotaSample, SubscriptionQuotaWindow, UpstreamApiKeyDetailsRecord,
+    UpstreamApiKeyStore, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamUpdate, WarmupAttemptOutcome, WarmupDispatchKind,
+    WarmupPermanentFailureReason, WarmupSkipReason, WarmupTransientFailureReason,
 };
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -69,10 +70,143 @@ const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
+const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
 const WARMUP_MAX_TOKENS: u32 = 1;
 const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 
 type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
+
+fn prepare_imported_oauth_bundle(
+    kind: UpstreamKind,
+    bundle: Option<OAuthTokenBundle>,
+    request_project_id: Option<&str>,
+    now_unix_secs: u64,
+) -> Result<Option<OAuthTokenBundle>, UpstreamError> {
+    let Some(mut bundle) = bundle else {
+        if kind == UpstreamKind::GeminiOauth && request_project_id.is_some() {
+            return Err(UpstreamError::BadRequest {
+                error: "missing_oauth_tokens",
+                detail: "Gemini OAuth requires oauth_tokens".to_owned(),
+            });
+        }
+        if kind == UpstreamKind::OpenaiOauth && request_project_id.is_some() {
+            return Err(UpstreamError::BadRequest {
+                error: "unexpected_project_id",
+                detail: "OpenAI OAuth does not accept project_id".to_owned(),
+            });
+        }
+        if matches!(kind, UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth) {
+            return Err(UpstreamError::BadRequest {
+                error: "missing_oauth_tokens",
+                detail: if kind == UpstreamKind::OpenaiOauth {
+                    "OpenAI OAuth requires oauth_tokens".to_owned()
+                } else {
+                    "Gemini OAuth requires oauth_tokens".to_owned()
+                },
+            });
+        }
+        return Ok(None);
+    };
+
+    if bundle.access_token.trim().is_empty() {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_oauth_tokens",
+            detail: "access_token must be non-empty".to_owned(),
+        });
+    }
+    let access_only = matches!(kind, UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth)
+        && bundle.never_refresh;
+    if access_only {
+        if !bundle.refresh_token.is_empty() || bundle.refresh_token_expires_at_unix_secs.is_some() {
+            return Err(UpstreamError::BadRequest {
+                error: "invalid_oauth_tokens",
+                detail: "access-only OAuth imports must not include a refresh token or refresh-token expiry"
+                    .to_owned(),
+            });
+        }
+    } else {
+        if bundle.refresh_token.trim().is_empty() {
+            return Err(UpstreamError::BadRequest {
+                error: "invalid_oauth_tokens",
+                detail: "refresh_token must be non-empty".to_owned(),
+            });
+        }
+        if bundle
+            .refresh_token_expires_at_unix_secs
+            .is_some_and(|deadline| deadline <= now_unix_secs)
+        {
+            return Err(UpstreamError::BadRequest {
+                error: "refresh_token_expired",
+                detail: "refresh_token_expires_at_unix_secs must be in the future".to_owned(),
+            });
+        }
+    }
+
+    match kind {
+        UpstreamKind::OpenaiOauth => {
+            if request_project_id.is_some() || bundle.project_id.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_project_id",
+                    detail: "OpenAI OAuth does not accept project_id".to_owned(),
+                });
+            }
+            if bundle
+                .account_id
+                .as_deref()
+                .is_none_or(|account_id| account_id.trim().is_empty())
+            {
+                bundle.account_id = account_id_from_access_token(&bundle.access_token);
+            }
+        }
+        UpstreamKind::GeminiOauth => {
+            let request_project_id_was_present = request_project_id.is_some();
+            let request_project_id = request_project_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            if request_project_id_was_present && request_project_id.is_none() {
+                return Err(UpstreamError::BadRequest {
+                    error: "missing_project_id",
+                    detail: "Gemini OAuth project_id must be non-empty".to_owned(),
+                });
+            }
+            let bundle_project_id = bundle
+                .project_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            if bundle.project_id.is_some() && bundle_project_id.is_none() {
+                return Err(UpstreamError::BadRequest {
+                    error: "missing_project_id",
+                    detail: "Gemini OAuth project_id must be non-empty".to_owned(),
+                });
+            }
+            if let (Some(requested), Some(from_bundle)) = (request_project_id, bundle_project_id)
+                && requested != from_bundle
+            {
+                return Err(UpstreamError::BadRequest {
+                    error: "project_id_mismatch",
+                    detail: "request project_id does not match oauth_tokens.project_id".to_owned(),
+                });
+            }
+            let project_id = request_project_id.or(bundle_project_id).ok_or_else(|| {
+                UpstreamError::BadRequest {
+                    error: "missing_project_id",
+                    detail: "Gemini OAuth requires a non-empty project_id".to_owned(),
+                }
+            })?;
+            bundle.project_id = Some(project_id.to_owned());
+        }
+        _ => {
+            return Err(UpstreamError::BadRequest {
+                error: "unexpected_oauth_tokens",
+                detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(Some(bundle))
+}
 
 async fn write_warmup_status_after_success(
     storage: &dyn Storage,
@@ -158,9 +292,14 @@ struct UpstreamCreateBody {
     name: String,
     kind: UpstreamKind,
     #[serde(default)]
-    base_url: Option<Url>,
-    #[serde(default)]
     api_key_value: Option<String>,
+    base_url: Option<Url>,
+    /// OAuth token bundle for non-interactive credential import.
+    #[serde(default, alias = "oauth_tokens")]
+    oauth_token_bundle: Option<OAuthTokenBundle>,
+    /// Gemini Code Assist project used in the request envelope.
+    #[serde(default)]
+    project_id: Option<String>,
     #[serde(default)]
     warmup_enabled: Option<bool>,
     #[serde(default)]
@@ -180,14 +319,18 @@ struct UpstreamUpdateBody {
     name: Option<String>,
     /// Missing or explicit `null` preserves the override; a non-null
     /// value sets it. Clearing requires `clear_base_url`.
-    #[serde(default)]
     base_url: Option<Url>,
+    api_key_value: Option<String>,
     /// Explicitly clears the `base_url` override. Mutually exclusive
     /// with a non-null `base_url`.
     #[serde(default)]
     clear_base_url: bool,
+    /// OAuth token bundle for non-interactive credential replacement.
+    #[serde(default, alias = "oauth_tokens")]
+    oauth_token_bundle: Option<OAuthTokenBundle>,
+    /// Gemini Code Assist project used in the request envelope.
     #[serde(default)]
-    api_key_value: Option<String>,
+    project_id: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -217,6 +360,8 @@ impl std::fmt::Debug for UpstreamCreateBody {
             kind,
             base_url,
             api_key_value,
+            oauth_token_bundle,
+            project_id,
             warmup_enabled,
             warmup_dialect_plugin,
             workspace_id,
@@ -227,8 +372,13 @@ impl std::fmt::Debug for UpstreamCreateBody {
             .field("kind", kind)
             .field("base_url", base_url)
             .field("api_key_value", &redacted_presence(api_key_value))
-            .field("warmup_enabled", warmup_enabled)
+            .field(
+                "oauth_token_bundle",
+                &oauth_token_bundle.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("project_id", project_id)
             .field("warmup_dialect_plugin", warmup_dialect_plugin)
+            .field("warmup_enabled", warmup_enabled)
             .field("workspace_id", workspace_id)
             .field("skip_preflight", skip_preflight)
             .finish()
@@ -242,6 +392,8 @@ impl std::fmt::Debug for UpstreamUpdateBody {
             base_url,
             clear_base_url,
             api_key_value,
+            oauth_token_bundle,
+            project_id,
             enabled,
             warmup_enabled,
             warmup_dialect_plugin,
@@ -254,6 +406,11 @@ impl std::fmt::Debug for UpstreamUpdateBody {
             .field("base_url", base_url)
             .field("clear_base_url", clear_base_url)
             .field("api_key_value", &redacted_presence(api_key_value))
+            .field(
+                "oauth_token_bundle",
+                &oauth_token_bundle.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("project_id", project_id)
             .field("enabled", enabled)
             .field("warmup_enabled", warmup_enabled)
             .field("warmup_dialect_plugin", warmup_dialect_plugin)
@@ -655,8 +812,62 @@ async fn create_upstream(
     let id = Uuid::new_v4();
     let name = body.name.clone();
     let kind = body.kind;
+    let oauth_bundle = match kind {
+        UpstreamKind::GeminiOauth if body.oauth_token_bundle.is_none() => {
+            if body.api_key_value.is_some() || body.workspace_id.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "invalid_gemini_oauth_credential",
+                    detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
+                });
+            }
+            return Err(UpstreamError::BadRequest {
+                error: "missing_oauth_tokens",
+                detail: "Gemini OAuth requires oauth_tokens".to_owned(),
+            });
+        }
+        UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+            if body.api_key_value.is_some() {
+                if kind == UpstreamKind::GeminiOauth {
+                    return Err(UpstreamError::BadRequest {
+                        error: "invalid_gemini_oauth_credential",
+                        detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
+                    });
+                }
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_api_key",
+                    detail: format!("{} upstreams do not accept api_key_value", kind.as_str()),
+                });
+            }
+            if body.workspace_id.is_some() {
+                return Err(if kind == UpstreamKind::GeminiOauth {
+                    UpstreamError::BadRequest {
+                        error: "invalid_gemini_oauth_credential",
+                        detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
+                    }
+                } else {
+                    UpstreamError::NotApiKeyUpstream
+                });
+            }
+            prepare_imported_oauth_bundle(
+                kind,
+                body.oauth_token_bundle.clone(),
+                body.project_id.as_deref(),
+                cc_lb_clock::unix_secs(state.clock.now()),
+            )?
+        }
+        _ => {
+            if body.oauth_token_bundle.is_some() || body.project_id.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_oauth_tokens",
+                    detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
+                        .to_owned(),
+                });
+            }
+            None
+        }
+    };
     let api_key = match kind {
-        UpstreamKind::AnthropicApiKey => {
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
             // A taken name is refused before the key is probed.
             if let Some(existing) = UpstreamStore::get_by_name(storage, &name).await? {
                 return Err(UpstreamError::NameConflict {
@@ -667,6 +878,7 @@ async fn create_upstream(
             Some(
                 prepare_api_key_create(
                     &state,
+                    kind,
                     body.api_key_value.as_deref(),
                     body.base_url.as_ref(),
                     body.workspace_id.as_deref(),
@@ -675,11 +887,11 @@ async fn create_upstream(
                 .await?,
             )
         }
-        UpstreamKind::AnthropicOauth => {
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
             if body.api_key_value.is_some() {
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_api_key",
-                    detail: "anthropic_oauth upstreams do not accept api_key_value".to_owned(),
+                    detail: format!("{} upstreams do not accept api_key_value", kind.as_str()),
                 });
             }
             if body.workspace_id.is_some() {
@@ -698,6 +910,18 @@ async fn create_upstream(
         .as_ref()
         .map(|prepared| encrypt_plaintext_value(&state, prepared.key.as_str(), id.as_bytes()))
         .transpose()?;
+    let oauth_tokens = oauth_bundle
+        .as_ref()
+        .map(|bundle| {
+            AeadEncryptedField::<OAuthTokenBundle>::encrypt(&state.aead, bundle, id.as_bytes()).map(
+                |tokens| OAuthTokensCreate {
+                    tokens,
+                    never_refresh: bundle.never_refresh,
+                },
+            )
+        })
+        .transpose()
+        .map_err(|_| UpstreamError::CredentialDecrypt)?;
     let record = match UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -706,7 +930,7 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
-            oauth_tokens: None,
+            oauth_tokens,
             warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
             workspace_id: api_key
@@ -734,8 +958,16 @@ async fn create_upstream(
         Err(error) => return Err(error.into()),
     };
     let check = api_key.map(|prepared| prepared.check);
+    let imported_oauth = oauth_bundle.is_some();
     let storage = storage_arc(&state)?;
     complete_after_commit(async move {
+        if imported_oauth
+            && let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &record).await
+        {
+            super::oauth::rebuild_after_committed_failure(&state, "oauth import scheduler seeding")
+                .await;
+            return Err(UpstreamError::from(error));
+        }
         let payload = AuditPayload::UpstreamCreate {
             upstream_id: record.id.to_string(),
             kind: record.kind.as_str().to_owned(),
@@ -1587,20 +1819,38 @@ async fn record_warmup_attempt(
         .as_ref()
         .and_then(|ports| ports.warmup.as_deref())
         .ok_or(UpstreamError::WarmupUnavailable)?;
+
     Ok(warmup_port.record_attempt(input).await)
 }
 
 pub(super) fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
-    effective_base_url(upstream.base_url.as_ref())
+    if let Some(base_url) = upstream.base_url.as_ref() {
+        return Ok(base_url.clone());
+    }
+    let default = match upstream.kind {
+        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
+        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
+    };
+    Url::parse(default)
+        .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}")))
 }
 
-/// The configured `base_url` override, or the default Anthropic API host.
-pub(super) fn effective_base_url(base_url: Option<&Url>) -> Result<Url, UpstreamError> {
-    match base_url {
-        Some(base_url) => Ok(base_url.clone()),
-        None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL)
-            .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}"))),
+/// The configured `base_url` override for preflight requests, or the provider default host.
+pub(super) fn effective_base_url(
+    base_url: Option<&Url>,
+    kind: UpstreamKind,
+) -> Result<Url, UpstreamError> {
+    if let Some(base_url) = base_url {
+        return Ok(base_url.clone());
     }
+    let default = match kind {
+        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => DEFAULT_ANTHROPIC_BASE_URL,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => DEFAULT_OPENAI_BASE_URL,
+        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => DEFAULT_GEMINI_BASE_URL,
+    };
+    Url::parse(default)
+        .map_err(|error| invalid_warmup_state(&format!("invalid default preflight URL: {error}")))
 }
 
 fn warmup_http_client() -> WarmupHttpClient {
@@ -1660,28 +1910,15 @@ async fn update_upstream(
         });
     }
     let storage = storage(&state)?;
-    let target_base_url = if body.clear_base_url {
-        None
-    } else {
-        body.base_url.clone().or_else(|| current.base_url.clone())
-    };
-    let api_key = match current.kind {
-        UpstreamKind::AnthropicApiKey => {
-            prepare_api_key_update(
-                &state,
-                &current,
-                ApiKeyUpdateRequest {
-                    api_key_value: body.api_key_value.as_deref(),
-                    workspace_id: body.workspace_id.as_deref(),
-                    clear_workspace_id: body.clear_workspace_id,
-                    base_url: target_base_url.as_ref(),
-                    skip_preflight: body.skip_preflight,
-                },
-            )
-            .await?
-        }
-        UpstreamKind::AnthropicOauth => {
+    let imported_oauth_bundle = match current.kind {
+        UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
             if body.api_key_value.is_some() {
+                if current.kind == UpstreamKind::GeminiOauth {
+                    return Err(UpstreamError::BadRequest {
+                        error: "invalid_gemini_oauth_credential",
+                        detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
+                    });
+                }
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_api_key",
                     detail: format!(
@@ -1691,110 +1928,248 @@ async fn update_upstream(
                 });
             }
             if body.workspace_id.is_some() || body.clear_workspace_id {
-                return Err(UpstreamError::NotApiKeyUpstream);
-            }
-            Default::default()
-        }
-    };
-
-    let mut fields_changed = changed_fields(&body);
-    if api_key.workspace_id.is_some() && !fields_changed.contains(&"workspace_id") {
-        fields_changed.push("workspace_id");
-    }
-    let api_key_ciphertext = api_key
-        .new_key
-        .as_ref()
-        .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
-        .transpose()?;
-    let base_url_written = body.base_url.is_some() || body.clear_base_url;
-    let (old_host, new_host) = if base_url_written {
-        (
-            current.base_url.as_ref().map(audit_host),
-            target_base_url.as_ref().map(audit_host),
-        )
-    } else {
-        (None, None)
-    };
-    let check = api_key.check;
-    let result = UpstreamStore::update(
-        storage,
-        current.id,
-        expected_revision,
-        UpstreamUpdate {
-            name: body.name,
-            base_url: if body.clear_base_url {
-                Some(None)
-            } else {
-                body.base_url.map(Some)
-            },
-            api_key_ciphertext,
-            oauth_token_generation: None,
-            enabled: body.enabled,
-            warmup_enabled: body.warmup_enabled,
-            warmup_dialect_plugin: body.warmup_dialect_plugin,
-            workspace_id: api_key.workspace_id,
-            api_key_access: check.as_ref().map(|check| check.access.clone()),
-            reset_api_key_poll_state: api_key.reset_poll_state,
-        },
-    )
-    .await;
-    match result {
-        Ok(updated) => {
-            let storage = storage_arc(&state)?;
-            complete_after_commit(async move {
-                if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
-                    // The update is committed even though seeding failed;
-                    // keep routing in step before returning the seed error.
-                    if let Err(rebuild_error) =
-                        super::apply_dynamic_view_after_mutation(&state).await
-                    {
-                        tracing::error!(
-                            error = %rebuild_error,
-                            "admin v1 dynamic view rebind deferred after warmup seeding failure"
-                        );
+                return Err(if current.kind == UpstreamKind::GeminiOauth {
+                    UpstreamError::BadRequest {
+                        error: "invalid_gemini_oauth_credential",
+                        detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
                     }
-                    return Err(error);
-                }
-                let payload = AuditPayload::UpstreamUpdate {
-                    upstream_id: updated.id.to_string(),
-                    fields_changed,
-                    key_hint: check.as_ref().and_then(KeyCheck::key_hint),
-                    verdict: check.as_ref().and_then(KeyCheck::verdict_label),
-                    remediation: check
-                        .as_ref()
-                        .map(KeyCheck::remediation_labels)
-                        .unwrap_or_default(),
-                    old_host,
-                    new_host,
-                };
-                let route = format!("/admin/v1/upstreams/{}", updated.id);
-                if let Err(error) = audit_upstream_action(
+                } else {
+                    UpstreamError::NotApiKeyUpstream
+                });
+            }
+            prepare_imported_oauth_bundle(
+                current.kind,
+                body.oauth_token_bundle.clone(),
+                body.project_id.as_deref(),
+                cc_lb_clock::unix_secs(state.clock.now()),
+            )?
+        }
+        _ => {
+            if body.oauth_token_bundle.is_some() || body.project_id.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_oauth_tokens",
+                    detail: "OAuth token import is supported only for OpenAI and Gemini OAuth"
+                        .to_owned(),
+                });
+            }
+            None
+        }
+    };
+    if let Some(bundle) = imported_oauth_bundle {
+        let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+            &state.aead,
+            &bundle,
+            current.id.as_bytes(),
+        )
+        .map_err(|_| UpstreamError::CredentialDecrypt)?;
+        let updated = UpstreamStore::store_oauth_tokens(
+            storage,
+            current.id,
+            expected_revision,
+            encrypted,
+            bundle.never_refresh,
+        )
+        .await?;
+        let fields_changed = if current.kind == UpstreamKind::GeminiOauth {
+            vec!["oauth_tokens", "project_id"]
+        } else {
+            vec!["oauth_tokens"]
+        };
+        let payload = AuditPayload::UpstreamUpdate {
+            upstream_id: updated.id.to_string(),
+            fields_changed,
+            key_hint: None,
+            verdict: None,
+            remediation: Vec::new(),
+            old_host: None,
+            new_host: None,
+        };
+        let mut response = respond_with_etag(&updated, None);
+        add_dynamic_rebind_headers(&mut response, &state).await;
+        complete_after_commit(async move {
+            if let Err(error) = super::oauth::seed_oauth_bootstrap_tasks(&state, &updated).await {
+                super::oauth::rebuild_after_committed_failure(
                     &state,
-                    &identity,
-                    &payload,
-                    &route,
-                    Some(&updated.name),
-                    StatusCode::OK,
+                    "oauth import scheduler seeding",
                 )
-                .await
-                {
-                    rebuild_after_audit_failure(&state).await;
-                    return Err(error);
+                .await;
+                return Err(UpstreamError::from(error));
+            }
+            audit_upstream_action(
+                &state,
+                &identity,
+                &payload,
+                &format!("/admin/v1/upstreams/{}", updated.id),
+                Some(&updated.name),
+                StatusCode::OK,
+            )
+            .await?;
+            Ok(response)
+        })
+        .await?
+    } else {
+        let target_base_url = if body.clear_base_url {
+            None
+        } else {
+            body.base_url.clone().or_else(|| current.base_url.clone())
+        };
+        let api_key = match current.kind {
+            UpstreamKind::AnthropicApiKey
+            | UpstreamKind::OpenaiApiKey
+            | UpstreamKind::GeminiApiKey => {
+                prepare_api_key_update(
+                    &state,
+                    &current,
+                    ApiKeyUpdateRequest {
+                        api_key_value: body.api_key_value.as_deref(),
+                        workspace_id: body.workspace_id.as_deref(),
+                        clear_workspace_id: body.clear_workspace_id,
+                        base_url: target_base_url.as_ref(),
+                        skip_preflight: body.skip_preflight,
+                    },
+                )
+                .await?
+            }
+            UpstreamKind::AnthropicOauth => {
+                if body.api_key_value.is_some() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "unexpected_api_key",
+                        detail: format!(
+                            "{} upstreams do not accept api_key_value",
+                            current.kind.as_str()
+                        ),
+                    });
                 }
-                if let Some(checked_at) = check.as_ref().and_then(KeyCheck::usage_reported_at) {
-                    enqueue_usage_poll(&state, updated.id, updated.revision, checked_at).await;
+                if body.workspace_id.is_some() || body.clear_workspace_id {
+                    return Err(UpstreamError::NotApiKeyUpstream);
                 }
-                let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
-                let mut response = respond_with_etag(&updated, details.as_ref());
-                add_dynamic_rebind_headers(&mut response, &state).await;
-                Ok(key_handling_response(&updated, response))
-            })
-            .await?
+                Default::default()
+            }
+            UpstreamKind::OpenaiOauth => {
+                if body.api_key_value.is_some() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "unexpected_api_key",
+                        detail: format!(
+                            "{} upstreams do not accept api_key_value",
+                            current.kind.as_str()
+                        ),
+                    });
+                }
+                if body.workspace_id.is_some() || body.clear_workspace_id {
+                    return Err(UpstreamError::NotApiKeyUpstream);
+                }
+                Default::default()
+            }
+            UpstreamKind::GeminiOauth => {
+                if body.api_key_value.is_some() || body.workspace_id.is_some() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "invalid_gemini_oauth_credential",
+                        detail: "Gemini OAuth accepts only oauth_tokens and project_id".to_owned(),
+                    });
+                }
+                Default::default()
+            }
+        };
+
+        let mut fields_changed = changed_fields(&body);
+        if api_key.workspace_id.is_some() && !fields_changed.contains(&"workspace_id") {
+            fields_changed.push("workspace_id");
         }
-        Err(StorageError::Conflict { message }) => {
-            stale_or_conflict(&state, &id, expected_revision, message).await
+        let api_key_ciphertext = api_key
+            .new_key
+            .as_ref()
+            .map(|key| encrypt_plaintext_value(&state, key.as_str(), current.id.as_bytes()))
+            .transpose()?;
+        let base_url_written = body.base_url.is_some() || body.clear_base_url;
+        let (old_host, new_host) = if base_url_written {
+            (
+                current.base_url.as_ref().map(audit_host),
+                target_base_url.as_ref().map(audit_host),
+            )
+        } else {
+            (None, None)
+        };
+        let check = api_key.check;
+        let result = UpstreamStore::update(
+            storage,
+            current.id,
+            expected_revision,
+            UpstreamUpdate {
+                name: body.name,
+                base_url: if body.clear_base_url {
+                    Some(None)
+                } else {
+                    body.base_url.map(Some)
+                },
+                api_key_ciphertext,
+                oauth_token_generation: None,
+                enabled: body.enabled,
+                warmup_enabled: body.warmup_enabled,
+                warmup_dialect_plugin: body.warmup_dialect_plugin,
+                workspace_id: api_key.workspace_id,
+                api_key_access: check.as_ref().map(|check| check.access.clone()),
+                reset_api_key_poll_state: api_key.reset_poll_state,
+            },
+        )
+        .await;
+        match result {
+            Ok(updated) => {
+                let storage = storage_arc(&state)?;
+                complete_after_commit(async move {
+                    if let Err(error) = seed_warmup_if_toggled(&state, &current, &updated).await {
+                        // The update is committed even though seeding failed;
+                        // keep routing in step before returning the seed error.
+                        if let Err(rebuild_error) =
+                            super::apply_dynamic_view_after_mutation(&state).await
+                        {
+                            tracing::error!(
+                                error = %rebuild_error,
+                                "admin v1 dynamic view rebind deferred after warmup seeding failure"
+                            );
+                        }
+                        return Err(error);
+                    }
+                    let payload = AuditPayload::UpstreamUpdate {
+                        upstream_id: updated.id.to_string(),
+                        fields_changed,
+                        key_hint: check.as_ref().and_then(KeyCheck::key_hint),
+                        verdict: check.as_ref().and_then(KeyCheck::verdict_label),
+                        remediation: check
+                            .as_ref()
+                            .map(KeyCheck::remediation_labels)
+                            .unwrap_or_default(),
+                        old_host,
+                        new_host,
+                    };
+                    let route = format!("/admin/v1/upstreams/{}", updated.id);
+                    if let Err(error) = audit_upstream_action(
+                        &state,
+                        &identity,
+                        &payload,
+                        &route,
+                        Some(&updated.name),
+                        StatusCode::OK,
+                    )
+                    .await
+                    {
+                        rebuild_after_audit_failure(&state).await;
+                        return Err(error);
+                    }
+                    if let Some(checked_at) = check.as_ref().and_then(KeyCheck::usage_reported_at) {
+                        enqueue_usage_poll(&state, updated.id, updated.revision, checked_at).await;
+                    }
+                    let details = api_key_details_after_commit(storage.as_ref(), &updated).await;
+                    let mut response = respond_with_etag(&updated, details.as_ref());
+                    add_dynamic_rebind_headers(&mut response, &state).await;
+                    Ok(key_handling_response(&updated, response))
+                })
+                .await?
+            }
+            Err(StorageError::Conflict { message }) => {
+                stale_or_conflict(&state, &id, expected_revision, message).await
+            }
+            Err(error) => Err(error.into()),
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -2859,6 +3234,8 @@ mod tests {
             refresh_token: "test-refresh-token".to_owned(),
             expires_at_unix_secs: u64::MAX / 2,
             refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
             scopes: Vec::new(),
             never_refresh: false,
         };

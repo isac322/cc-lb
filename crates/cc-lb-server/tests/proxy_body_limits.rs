@@ -80,7 +80,7 @@ async fn body_exactly_at_messages_cap_reaches_the_real_upstream() -> TestResult<
 }
 
 #[tokio::test]
-async fn messages_and_files_paths_use_their_distinct_configured_caps() -> TestResult<()> {
+async fn messages_cap_is_enforced_and_files_path_is_rejected() -> TestResult<()> {
     // Given
     let server = common::spawn_test_server().await;
     let body = messages_body_with_len(MESSAGES_CAP_BYTES + 1);
@@ -94,6 +94,7 @@ async fn messages_and_files_paths_use_their_distinct_configured_caps() -> TestRe
         &[],
     )
     .await?;
+    // Account-bound /v1/files is rejected before body-cap handling.
     let files = common::http_post(
         server.proxy_addr,
         "/v1/files",
@@ -105,8 +106,8 @@ async fn messages_and_files_paths_use_their_distinct_configured_caps() -> TestRe
 
     // Then
     assert_eq!(messages.status, 413, "{}", messages.body);
-    assert_eq!(files.status, 200, "{}", files.body);
-    assert!(files.body.contains("file_abc123"));
+    assert_eq!(files.status, 404, "{}", files.body);
+    assert!(files.body.contains(r#""type":"operation_not_supported""#));
     Ok(())
 }
 

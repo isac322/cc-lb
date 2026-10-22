@@ -202,6 +202,8 @@ impl Fixture {
             &OAuthTokenBundle {
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
+                account_id: None,
+                project_id: None,
                 expires_at_unix_secs: expires_at,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
@@ -536,6 +538,8 @@ async fn long_lived_oauth_401_persists_reconnect_required_until_reconnect() {
         &OAuthTokenBundle {
             access_token: reconnected.access_token,
             refresh_token: reconnected.refresh_token,
+            account_id: None,
+            project_id: None,
             expires_at_unix_secs: expires_at,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["messages".to_owned()],
@@ -1090,6 +1094,8 @@ async fn refresh_tokens(
         &OAuthTokenBundle {
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token,
+            account_id: None,
+            project_id: None,
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
             scopes: refreshed.scopes,

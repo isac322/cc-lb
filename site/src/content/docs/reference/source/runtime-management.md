@@ -20,6 +20,71 @@ Administrative operations use the providers configured in `admin.auth.providers`
 
 The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the examples below. Proxy traffic uses a separate listener on port 8080 (`http://localhost:8080/v1/messages`).
 
+### Proxy capability boundary
+
+The proxy routes only consistency-safe generation operations: `POST /v1/messages` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent`. Other provider operations sent to the proxy are rejected with `404 operation_not_supported`, including files/uploads, model and account catalogs, `count_tokens`, stored-response and conversation management endpoints, and catch-all provider operations. These remain bounded because they are account-bound and cannot be served consistently across credentials.
+
+Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
+
+- Anthropic Messages: web-search `encrypted_content`, file ids in `file` / `container_upload` blocks, and container ids.
+- OpenAI HTTP Responses: response ids, observed from every successful response (including `store: false`, which stateless clients still chain through `previous_response_id`), and `conversation` ids. Streaming responses pin before `response.completed` is forwarded.
+- Gemini generateContent: `cachedContent` references. `thoughtSignature` is forwarded but is not treated as affinity state.
+
+A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
+
+Admin preflight is separate: `GET /v1/models` and `POST /v1/messages/count_tokens` are direct upstream probes, not proxied client operations.
+
+### Responses WebSocket gateway
+
+`GET /v1/responses` authenticates the proxy client before returning `101`.
+The provider connection opens lazily after a supported `response.create` has
+passed current client-key, principal, model, operation, owner-affinity, and quota
+checks. A revoked key or disabled principal can therefore block a later turn on
+an already-open client connection. Provider connection failures after `101`
+arrive as WebSocket errors or connection closure, not a new HTTP response.
+
+Ordinary `response.create` messages require an explicit, non-empty `model`.
+cc-lb does not infer a missing model from a stored prompt or an account default.
+Steering auto-successors inherit the parent turn's model. This is a bounded
+generation gateway; support for the upgrade does not imply support for every
+Responses operation or model-inheritance form.
+
+Independent full-history turns can select another eligible upstream.
+Continuations with connection-local response state stay on the exact provider
+connection that owns that state; a failed connection is not replaced on another
+account. Stored response and conversation references retain their durable
+upstream affinity. Work is FIFO within each lane, while independent lanes can
+run in parallel. Existing request-body caps and the WebSocket bulkhead bound
+buffered work and provider connections.
+
+Response identity is bound before forwarding `response.queued`,
+`response.created`, or `response.in_progress`. WebSocket response ids from
+`store: false` turns remain connection-local instead of creating new durable
+response-id bindings. Conversation ownership remains durable independently of
+that flag. The HTTP response-id behavior described above is unchanged.
+
+The gateway parses control messages once and forwards ordinary deltas unchanged,
+without rewriting them as SSE or reserializing the client request body. Closing
+or disconnecting cancels active turns; cc-lb does not add a `response.cancel`
+wire operation. A terminal turn releases its concurrent slot immediately.
+Measured usage, including a reported numeric zero, is reconciled once by the
+background accounting worker even on an unsuccessful turn. Without measured
+usage, the reservation is refunded once; `null` or an empty usage object alone
+does not count as measured usage. Existing request and trace identifiers
+correlate turn events without new database fields.
+
+### Generation usage accounting
+
+Gemini's normalized output count is `candidatesTokenCount + thoughtsTokenCount`.
+The reasoning count remains available as a subset of that normalized output;
+cost and limit accounting must not add it again. Repeated cumulative usage
+snapshots replace the previous counts instead of accumulating them. Missing or
+`null` fields retain the last reported component.
+
+The existing cache-input subtraction is unchanged: reported cache-read tokens
+are counted separately from uncached input. OpenAI and Anthropic output already
+includes reasoning or thinking tokens, so their output counts are unchanged.
+
 The [Admin consistency contract](https://github.com/isac322/cc-lb/blob/master/docs/consistency-contract.md) lists what each admin response guarantees about persistence, audit records, the routing-view rebuild, and convergence across replicas.
 
 ### Local proxy key files
@@ -268,3 +333,136 @@ remove the entry or change its position among other router plugins.
 | GET | `/admin/v1/export` | Bearer | None | ExportResponse | `storage_unavailable` |
 
 The proxy listener's `/readyz` returns `200` once the server has started, at least one principal is active, and at least one upstream is usable: enabled, applied, and, for OAuth, holding decryptable credentials that do not need a reconnect. Otherwise it returns `503` with `reason` set to `draining`, `startup_not_ready`, `no_ready_principal`, or `no_ready_upstream`. A broken OAuth upstream does not take a ready instance out of rotation: routing skips it, and `/readyz` stays `200` with `reason: "oauth_credentials_not_decryptable"` while any enabled OAuth upstream has credentials that cannot be decrypted. API-key preflight results, capability snapshots, and usage-poll failures are not part of readiness.
+
+### CLI/API OAuth bundle import
+
+The authenticated Admin v1 upstream create and update endpoints also accept a
+non-interactive OAuth token bundle for `openai_oauth` and `gemini_oauth`.
+`oauth_tokens` is the canonical request field; `oauth_token_bundle` is accepted
+as an alias. This path is additive: it does not change the Admin Web flow or
+the Anthropic PKCE flow documented below.
+
+The CLI sends the same request body through the Admin v1 API. It reads the
+Bearer token from `CC_LB_ADMIN_TOKEN`, never from the JSON input:
+
+```bash
+# Supply CC_LB_ADMIN_TOKEN through a secret manager or process environment.
+cc-lb admin --base-url http://[::1]:9090 \
+  upstreams credential --input ./openai-oauth.json
+```
+
+Omit `--id` to create an upstream (`POST /admin/v1/upstreams`). To replace
+credentials on an existing upstream, pass `--id <UPSTREAM_ID>` and
+`--revision <SPEC_REVISION>`; the CLI sends `PUT
+/admin/v1/upstreams/<UPSTREAM_ID>` with `If-Match`.
+
+#### OpenAI OAuth
+
+Use `kind: "openai_oauth"`:
+
+```json
+{
+  "name": "openai-cli",
+  "kind": "openai_oauth",
+  "oauth_tokens": {
+    "access_token": "<ACCESS_TOKEN>",
+    "refresh_token": "<REFRESH_TOKEN>",
+    "expires_at_unix_secs": 1760000000,
+    "refresh_token_expires_at_unix_secs": 1770000000,
+    "account_id": "<OPTIONAL_ACCOUNT_ID>",
+    "scopes": ["openid"],
+    "never_refresh": false
+  }
+}
+```
+
+In refreshing mode (`never_refresh: false`), `access_token` and `refresh_token`
+must be non-empty. The access-token expiry may already have passed; the
+refresh-token expiry, when supplied, must still be in the future.
+`account_id` is optional. When it is absent, cc-lb attempts to derive it from the
+OpenAI account claim in the access-token JWT. OpenAI imports must not include
+`project_id`.
+
+OpenAI OAuth Responses traffic uses
+`https://chatgpt.com/backend-api/codex` as its default base and appends
+`/responses`: HTTPS for HTTP requests and WSS for WebSocket connections. A custom
+base retains its path prefix before `/responses`. The downstream query is
+preserved on the signed request. Other provider URL construction is unchanged.
+
+#### Gemini OAuth
+
+Use `kind: "gemini_oauth"` and provide a trimmed, non-empty Gemini Code Assist
+`project_id`. The project may be supplied at the top level or inside
+`oauth_tokens`; if both are supplied, they must match:
+
+```json
+{
+  "name": "gemini-cli",
+  "kind": "gemini_oauth",
+  "project_id": "my-gemini-project",
+  "oauth_tokens": {
+    "access_token": "<ACCESS_TOKEN>",
+    "refresh_token": "<REFRESH_TOKEN>",
+    "expires_at_unix_secs": 1760000000,
+    "refresh_token_expires_at_unix_secs": 1770000000,
+    "scopes": ["openid"],
+    "never_refresh": false
+  }
+}
+```
+
+The same refreshing-mode token and expiry rules apply. A project-id mismatch is
+rejected, and a blank project id cannot be imported.
+
+#### Access-only OAuth
+
+For either `openai_oauth` or `gemini_oauth`, set `never_refresh: true` to import
+an access token without granting cc-lb refresh access. Use the same `oauth_tokens`
+body on create and update:
+
+```json
+{
+  "access_token": "<ACCESS_TOKEN>",
+  "refresh_token": "",
+  "expires_at_unix_secs": 1760000000,
+  "scopes": [],
+  "never_refresh": true
+}
+```
+
+`access_token` must be non-empty. `refresh_token`, `expires_at_unix_secs`, and
+`scopes` remain required fields; `refresh_token` must be the empty string.
+Omit `refresh_token_expires_at_unix_secs` or set it to `null`. Any non-empty
+refresh token, including whitespace, or any non-null refresh-token expiry is
+rejected before storage. Gemini still requires the project id described above;
+OpenAI still rejects a project id and permits an optional account id.
+
+Updating `oauth_tokens` replaces the complete stored bundle atomically,
+including `never_refresh`; it does not retain a previous refresh token.
+Import does not require an access-token expiry in the future. Before each new
+HTTP signing operation or upstream WebSocket handshake, cc-lb rejects an
+access-only token whose expiry is at or before the current clock, before adding
+provider authentication headers or wrapping a Gemini body. An already-open
+provider WebSocket is not reauthenticated or closed merely because that token
+expires. Proxy client-key authorization is a separate check.
+
+`never_refresh` prevents token refresh calls across the direct, scheduled, and
+bootstrap refresh paths. It does not disable generation, quota checks, or other
+provider network operations. Replace an expired access token through this API
+using a token supplied by its external owner. Do not copy or refresh a shared
+OAuth grant. Existing refreshing credentials and Anthropic's long-lived
+credentials, including their retained but unused refresh token, are unchanged.
+
+On successful create or update, cc-lb encrypts the bundle with AEAD storage
+and seeds an `OAuthRefreshJob`. The response never contains the access token,
+refresh token, or full bundle; inspect only the returned upstream metadata.
+Imported credentials are supported only for OpenAI and Gemini OAuth. An
+Anthropic OAuth upstream continues to use the Admin Web/PKCE connect and
+reconnect flow below, and API-key upstreams continue to use API-key fields and
+preflight.
+
+Treat the JSON input as a secret-bearing file. Prefer stdin or a temporary
+file with mode `0600`, keep it out of shell history and source control, do not
+log its contents, and remove or securely expire the file after the import.
+Never place access or refresh tokens in the upstream name, query string, or
+diagnostic output. The server does not return imported token values.

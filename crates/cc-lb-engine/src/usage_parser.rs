@@ -35,6 +35,9 @@ pub(crate) struct UsageCounts {
     pub(crate) cache_creation_input_tokens_1h: u64,
     pub(crate) cache_read_input_tokens: u64,
     pub(crate) thinking_tokens: u64,
+    /// Last Gemini candidates snapshot, kept separately from billable output
+    /// so partial updates can retain it without adding cumulative counts.
+    pub(crate) last_candidates_tokens: u64,
     pub(crate) web_search_requests: u64,
     pub(crate) web_fetch_requests: u64,
     pub(crate) service_tier: Option<String>,
@@ -362,12 +365,25 @@ fn accumulate_sse_usage_value(
             usage.estimated_thinking_progress.saturating_add(estimated);
         usage.present = true;
     }
-    let reported = value.get("usage").or_else(|| {
-        value
-            .get("message")
-            .and_then(|message| message.get("usage"))
-    });
-    let Some(reported) = reported else {
+    let Some(reported) = value
+        .get("usage")
+        .or_else(|| value.get("usageMetadata"))
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usage"))
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usageMetadata"))
+        })
+        .or_else(|| {
+            value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+        })
+    else {
         return;
     };
     if event_type == Some("message_start") {
@@ -393,7 +409,20 @@ pub(crate) fn observe_non_stream_json_value(value: &Value) -> NonStreamObservati
 }
 
 fn usage_from_value(value: &Value) -> UsageCounts {
-    let Some(usage_value) = value.get("usage") else {
+    let Some(usage_value) = value
+        .get("usage")
+        .or_else(|| value.get("usageMetadata"))
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usage"))
+        })
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("usageMetadata"))
+        })
+    else {
         return UsageCounts::default();
     };
     let mut usage = UsageCounts {
@@ -404,7 +433,113 @@ fn usage_from_value(value: &Value) -> UsageCounts {
     usage
 }
 
+fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
+    let prompt_token_count = reported.get("promptTokenCount").and_then(Value::as_u64);
+    if let Some(input_tokens) = reported
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .or(prompt_token_count)
+    {
+        usage.input_tokens = input_tokens;
+    }
+    if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
+        usage.output_tokens = output_tokens;
+    }
+    if let Some(cached_tokens) = reported
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+    {
+        usage.input_tokens = usage.input_tokens.saturating_sub(cached_tokens);
+        usage.cache_read_input_tokens = cached_tokens;
+    } else if let Some(cached_tokens) = reported
+        .get("cachedContentTokenCount")
+        .and_then(Value::as_u64)
+    {
+        if prompt_token_count.is_some() {
+            usage.input_tokens = usage.input_tokens.saturating_sub(cached_tokens);
+        }
+        usage.cache_read_input_tokens = cached_tokens;
+    }
+    if let Some(reasoning_tokens) = reported
+        .get("output_tokens_details")
+        .and_then(|details| details.get("reasoning_tokens"))
+        .or_else(|| reported.get("thoughtsTokenCount"))
+        .and_then(Value::as_u64)
+    {
+        usage.thinking_tokens = reasoning_tokens;
+    }
+    if reported.get("output_tokens").is_none() {
+        let candidates_tokens = reported.get("candidatesTokenCount").and_then(Value::as_u64);
+        if let Some(candidates_tokens) = candidates_tokens {
+            usage.last_candidates_tokens = candidates_tokens;
+        }
+        if candidates_tokens.is_some()
+            || reported
+                .get("thoughtsTokenCount")
+                .and_then(Value::as_u64)
+                .is_some()
+        {
+            // Gemini candidates exclude thoughts; other providers already
+            // include their reasoning/thinking subset in output_tokens.
+            usage.output_tokens = usage
+                .last_candidates_tokens
+                .saturating_add(usage.thinking_tokens);
+        }
+    }
+    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
+    if cc_total > 0
+        || reported.get("cache_creation").is_some()
+        || reported.get("cache_creation_input_tokens").is_some()
+    {
+        usage.cache_creation_input_tokens = cc_total;
+        usage.cache_creation_input_tokens_5m = cc_5m;
+        usage.cache_creation_input_tokens_1h = cc_1h;
+    }
+    if let Some(cache_read) = reported
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        usage.cache_read_input_tokens = cache_read;
+    }
+    if let Some(thinking) = reported
+        .get("output_tokens_details")
+        .and_then(|v| v.get("thinking_tokens"))
+        .and_then(Value::as_u64)
+    {
+        usage.thinking_tokens = thinking;
+    }
+    if let Some(server_tool_use) = reported.get("server_tool_use") {
+        if let Some(ws) = server_tool_use
+            .get("web_search_requests")
+            .and_then(Value::as_u64)
+        {
+            usage.web_search_requests = ws;
+        }
+        if let Some(wf) = server_tool_use
+            .get("web_fetch_requests")
+            .and_then(Value::as_u64)
+        {
+            usage.web_fetch_requests = wf;
+        }
+    }
+    if let Some(tier) = reported.get("service_tier").and_then(Value::as_str) {
+        usage.service_tier = Some(tier.to_owned());
+    }
+    if let Some(geo) = reported.get("inference_geo").and_then(Value::as_str) {
+        usage.inference_geo = Some(geo.to_owned());
+    }
+    if let Some(iterations) = reported.get("iterations").filter(|v| !v.is_null()) {
+        usage.iterations = Some(iterations.clone());
+    }
+}
+
 fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstreamError> {
+    let is_native_failed_response = value.get("object").and_then(Value::as_str) == Some("response")
+        && value.get("status").and_then(Value::as_str) == Some("failed");
+    if is_native_failed_response {
+        return observe_http_error_value(value);
+    }
     if value.get("type").and_then(Value::as_str) != Some("error") {
         return None;
     }
@@ -433,11 +568,27 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
 /// caller keeps its bounded raw-body fallback.
 pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstreamError> {
     let error_obj = value.get("error")?;
-    let error_type = ["type", "code"]
+    let error_type = ["type", "code", "status"]
         .iter()
         .filter_map(|key| error_obj.get(*key).and_then(Value::as_str))
         .filter(|candidate| !candidate.is_empty())
-        .find_map(BoundedErrorType::parse);
+        .find_map(BoundedErrorType::parse)
+        .or_else(|| {
+            error_obj
+                .get("code")
+                .and_then(Value::as_u64)
+                .and_then(|code| match code {
+                    400 => Some("INVALID_ARGUMENT"),
+                    401 => Some("UNAUTHENTICATED"),
+                    403 => Some("PERMISSION_DENIED"),
+                    404 => Some("NOT_FOUND"),
+                    429 => Some("RESOURCE_EXHAUSTED"),
+                    500 => Some("INTERNAL"),
+                    503 => Some("UNAVAILABLE"),
+                    _ => None,
+                })
+                .and_then(BoundedErrorType::parse)
+        });
     let error_message = error_obj
         .get("message")
         .and_then(Value::as_str)
@@ -476,10 +627,18 @@ fn detect_mid_stream_error_with(
 ) -> Option<UpstreamStreamError> {
     let value = event.value().ok().flatten()?;
     let type_str = value.get("type").and_then(Value::as_str);
-    if !event.named_error && type_str != Some("error") {
+    if !event.named_error && type_str != Some("error") && value.get("error").is_none() {
         return None;
     }
-    let (error_type, error_message) = bounded_upstream_error(value);
+    let (mut error_type, error_message) = bounded_upstream_error(value);
+    if error_type.is_none() {
+        let error_obj = value.get("error").unwrap_or(value);
+        error_type = error_obj
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|candidate| !candidate.is_empty())
+            .and_then(BoundedErrorType::parse);
+    }
     Some(UpstreamStreamError {
         error_type: error_type.map(|error_type| scrub_string(signer, error_type.into_string())),
         error_message: error_message.map(|message| message.finish(signer)),
@@ -534,71 +693,17 @@ fn abnormal_stop_from_fields(
 fn bounded_upstream_error(
     value: &Value,
 ) -> (Option<BoundedErrorType>, Option<BoundedErrorMessage>) {
-    let error_obj = value.get("error");
+    let error_obj = value.get("error").unwrap_or(value);
     (
         error_obj
-            .and_then(|error| error.get("type"))
+            .get("type")
             .and_then(Value::as_str)
             .and_then(BoundedErrorType::parse),
         error_obj
-            .and_then(|error| error.get("message"))
+            .get("message")
             .and_then(Value::as_str)
             .map(BoundedErrorMessage::parse),
     )
-}
-
-fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
-    if let Some(input_tokens) = reported.get("input_tokens").and_then(Value::as_u64) {
-        usage.input_tokens = input_tokens;
-    }
-    if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
-        usage.output_tokens = output_tokens;
-    }
-    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
-    if cc_total > 0
-        || reported.get("cache_creation").is_some()
-        || reported.get("cache_creation_input_tokens").is_some()
-    {
-        usage.cache_creation_input_tokens = cc_total;
-        usage.cache_creation_input_tokens_5m = cc_5m;
-        usage.cache_creation_input_tokens_1h = cc_1h;
-    }
-    if let Some(cache_read) = reported
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-    {
-        usage.cache_read_input_tokens = cache_read;
-    }
-    if let Some(thinking) = reported
-        .get("output_tokens_details")
-        .and_then(|v| v.get("thinking_tokens"))
-        .and_then(Value::as_u64)
-    {
-        usage.thinking_tokens = thinking;
-    }
-    if let Some(server_tool_use) = reported.get("server_tool_use") {
-        if let Some(ws) = server_tool_use
-            .get("web_search_requests")
-            .and_then(Value::as_u64)
-        {
-            usage.web_search_requests = ws;
-        }
-        if let Some(wf) = server_tool_use
-            .get("web_fetch_requests")
-            .and_then(Value::as_u64)
-        {
-            usage.web_fetch_requests = wf;
-        }
-    }
-    if let Some(tier) = reported.get("service_tier").and_then(Value::as_str) {
-        usage.service_tier = Some(tier.to_owned());
-    }
-    if let Some(geo) = reported.get("inference_geo").and_then(Value::as_str) {
-        usage.inference_geo = Some(geo.to_owned());
-    }
-    if let Some(iterations) = reported.get("iterations").filter(|v| !v.is_null()) {
-        usage.iterations = Some(iterations.clone());
-    }
 }
 
 /// Splits `cache_creation` into `(total, 5m, 1h)`.
@@ -1283,5 +1388,324 @@ mod tests {
         assert_eq!(usage.thinking_tokens, 8);
         assert_eq!(usage.web_search_requests, 2);
         assert_eq!(usage.service_tier.as_deref(), Some("standard"));
+    }
+    #[test]
+    fn oa_use_01_responses_usage_maps_nested_details() {
+        let body = serde_json::json!({
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 48,
+                "input_tokens_details": { "cached_tokens": 17 },
+                "output_tokens_details": { "reasoning_tokens": 12 }
+            }
+        });
+
+        let usage = observe_non_stream_json_value(&body).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 103);
+        assert_eq!(usage.output_tokens, 48);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+        assert!(usage.thinking_tokens <= usage.output_tokens);
+    }
+
+    #[test]
+    fn gm_use_01_generate_content_usage_metadata_maps_usage() {
+        let body = serde_json::json!({
+            "usageMetadata": {
+                "promptTokenCount": 120,
+                "candidatesTokenCount": 48,
+                "cachedContentTokenCount": 17,
+                "thoughtsTokenCount": 12
+            }
+        });
+
+        let usage = observe_non_stream_json_value(&body).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 103);
+        assert_eq!(usage.output_tokens, 60);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+    }
+
+    #[test]
+    fn gm_use_02_code_assist_response_envelope_usage_metadata_maps_usage() {
+        let body = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "hello"}]
+                    }
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 120,
+                    "candidatesTokenCount": 48,
+                    "cachedContentTokenCount": 17,
+                    "thoughtsTokenCount": 12
+                }
+            }
+        });
+
+        let usage = observe_non_stream_json_value(&body).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 103);
+        assert_eq!(usage.output_tokens, 60);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+    }
+
+    #[test]
+    fn gm_use_03_raw_usage_metadata_oracle_includes_thoughts() {
+        let body = br#"{"usageMetadata":{"promptTokenCount":20384,"candidatesTokenCount":387,"thoughtsTokenCount":1046,"totalTokenCount":21817}}"#;
+
+        let usage = observe_non_stream_json_body(body).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 20_384);
+        assert_eq!(usage.output_tokens, 1_433);
+        assert_eq!(usage.thinking_tokens, 1_046);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.estimated_thinking_progress, 0);
+    }
+
+    #[test]
+    fn gm_use_04_output_sum_saturates_without_losing_components() {
+        let body = br#"{"usageMetadata":{"candidatesTokenCount":18446744073709551610,"thoughtsTokenCount":12}}"#;
+
+        let usage = observe_non_stream_json_body(body).usage;
+
+        assert!(usage.present);
+        assert_eq!(usage.output_tokens, u64::MAX);
+        assert_eq!(usage.thinking_tokens, 12);
+        assert_eq!(usage.input_tokens, 0);
+
+        let mut streamed = UsageCounts::default();
+        accumulate_raw_sse_usage(
+            b"data: {\"usageMetadata\":{\"candidatesTokenCount\":18446744073709551610,\"thoughtsTokenCount\":12}}\n\n",
+            &mut streamed,
+        );
+        assert_eq!(streamed.output_tokens, u64::MAX);
+        assert_eq!(streamed.thinking_tokens, 12);
+
+        accumulate_raw_sse_usage(
+            b"data: {\"usageMetadata\":{\"thoughtsTokenCount\":0}}\n\n",
+            &mut streamed,
+        );
+        assert_eq!(streamed.output_tokens, u64::MAX - 5);
+        assert_eq!(streamed.thinking_tokens, 0);
+    }
+
+    #[test]
+    fn oa_err_01_openai_error_type_precedes_code() {
+        let body =
+            br#"{"error":{"type":"invalid_request_error","code":"invalid_prompt","message":"bad request"}}"#;
+
+        let error = observe_http_error_body(body).expect("upstream error extracted");
+
+        assert_eq!(
+            error.into_parts_with(None),
+            (
+                Some("invalid_request_error".to_owned()),
+                Some("bad request".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn oa_err_02_native_failed_response_maps_error_type_and_message() {
+        let body = serde_json::json!({
+            "id": "resp_failed",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "code": "server_error",
+                "message": "the model failed before completion"
+            }
+        });
+
+        let error = observe_non_stream_json_value(&body)
+            .canonical_error
+            .expect("native failed response error extracted");
+
+        assert_eq!(
+            error.into_parts_with(None),
+            (
+                Some("server_error".to_owned()),
+                Some("the model failed before completion".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn gm_err_01_numeric_code_uses_status_and_keeps_message() {
+        let body =
+            br#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}"#;
+
+        let error = observe_http_error_body(body).expect("upstream error extracted");
+
+        assert_eq!(
+            error.into_parts_with(None),
+            (
+                Some("RESOURCE_EXHAUSTED".to_owned()),
+                Some("quota exceeded".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn gm_sse_01_stream_generate_content_reports_terminal_usage() {
+        let first =
+            b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n";
+        let terminal = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":48,\"cachedContentTokenCount\":17,\"thoughtsTokenCount\":12}}\n\n";
+        let mut usage = UsageCounts::default();
+
+        let first_update = accumulate_raw_sse_usage(first, &mut usage);
+
+        assert!(!first_update.message_stop);
+        assert!(!usage.present);
+        assert_eq!(usage, UsageCounts::default());
+
+        let terminal_update = accumulate_raw_sse_usage(terminal, &mut usage);
+
+        assert!(!terminal_update.message_stop);
+        assert!(usage.present);
+        assert_eq!(usage.input_tokens, 103);
+        assert_eq!(usage.output_tokens, 60);
+        assert_eq!(usage.cache_read_input_tokens, 17);
+        assert_eq!(usage.thinking_tokens, 12);
+        assert!(usage.thinking_tokens < usage.output_tokens);
+    }
+
+    #[test]
+    fn gm_sse_02_error_only_chunk_observes_status_and_message() {
+        let raw =
+            b"event: error\ndata: {\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"quota exceeded\"}}\n\n";
+
+        let error = detect_raw_mid_stream_error(raw).expect("Gemini SSE error detected");
+
+        assert_eq!(error.error_type.as_deref(), Some("RESOURCE_EXHAUSTED"));
+        assert_eq!(error.error_message.as_deref(), Some("quota exceeded"));
+    }
+
+    #[test]
+    fn gm_sse_03_cumulative_snapshots_replace_instead_of_accumulating() {
+        let mut usage = UsageCounts::default();
+        let snapshots = [
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":17,"candidatesTokenCount":5,"thoughtsTokenCount":7}}"#,
+                12,
+                7,
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":17,"candidatesTokenCount":5,"thoughtsTokenCount":7}}"#,
+                12,
+                7,
+            ),
+            (
+                r#"{"response":{"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":17,"candidatesTokenCount":9,"thoughtsTokenCount":11}}}"#,
+                20,
+                11,
+            ),
+            (
+                r#"{"usageMetadata":{"promptTokenCount":120,"cachedContentTokenCount":17,"candidatesTokenCount":3,"thoughtsTokenCount":4}}"#,
+                7,
+                4,
+            ),
+        ];
+
+        for (payload, expected_output, expected_thinking) in snapshots {
+            let frame = format!("data: {payload}\n\n");
+            let update = accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+
+            assert!(usage.present);
+            assert!(!update.message_start_usage);
+            assert!(!update.message_stop);
+            assert_eq!(usage.input_tokens, 103);
+            assert_eq!(usage.cache_read_input_tokens, 17);
+            assert_eq!(usage.output_tokens, expected_output, "{payload}");
+            assert_eq!(usage.thinking_tokens, expected_thinking, "{payload}");
+        }
+    }
+
+    #[test]
+    fn gm_sse_04_partial_snapshots_preserve_missing_and_null_components() {
+        let mut usage = UsageCounts::default();
+        let snapshots = [
+            (
+                r#"{"usageMetadata":{"thoughtsTokenCount":1046}}"#,
+                1_046,
+                1_046,
+            ),
+            (
+                r#"{"usageMetadata":{"candidatesTokenCount":null,"thoughtsTokenCount":null}}"#,
+                1_046,
+                1_046,
+            ),
+            (
+                r#"{"usageMetadata":{"candidatesTokenCount":387}}"#,
+                1_433,
+                1_046,
+            ),
+            (r#"{"usageMetadata":{"thoughtsTokenCount":500}}"#, 887, 500),
+            (r#"{"usageMetadata":{"candidatesTokenCount":0}}"#, 500, 500),
+            (r#"{"usageMetadata":{"thoughtsTokenCount":0}}"#, 0, 0),
+            (
+                r#"{"usageMetadata":{"candidatesTokenCount":10,"thoughtsTokenCount":12}}"#,
+                22,
+                12,
+            ),
+            (r#"{"usageMetadata":{"promptTokenCount":50}}"#, 22, 12),
+            (
+                r#"{"usageMetadata":{"candidatesTokenCount":null,"thoughtsTokenCount":null}}"#,
+                22,
+                12,
+            ),
+            (r#"{"usageMetadata":{"candidatesTokenCount":5}}"#, 17, 12),
+            (
+                r#"{"usageMetadata":{"candidatesTokenCount":3,"thoughtsTokenCount":null}}"#,
+                15,
+                12,
+            ),
+            (r#"{"usageMetadata":{"thoughtsTokenCount":0}}"#, 3, 0),
+        ];
+
+        for (payload, expected_output, expected_thinking) in snapshots {
+            let frame = format!("data: {payload}\n\n");
+            accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+
+            assert!(usage.present);
+            assert_eq!(usage.output_tokens, expected_output, "{payload}");
+            assert_eq!(usage.thinking_tokens, expected_thinking, "{payload}");
+        }
+
+        let mut next_turn = UsageCounts::default();
+        accumulate_raw_sse_usage(
+            b"data: {\"usageMetadata\":{\"candidatesTokenCount\":3}}\n\n",
+            &mut next_turn,
+        );
+        assert_eq!(next_turn.output_tokens, 3);
+        assert_eq!(next_turn.thinking_tokens, 0);
+    }
+
+    #[test]
+    fn gm_sse_05_other_provider_thinking_remains_an_output_subset() {
+        for payload in [
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":120,"output_tokens":48,"output_tokens_details":{"reasoning_tokens":12}}}}"#,
+            r#"{"type":"message_delta","usage":{"input_tokens":120,"output_tokens":48,"output_tokens_details":{"thinking_tokens":12}}}"#,
+        ] {
+            let mut usage = UsageCounts::default();
+            let frame = format!("data: {payload}\n\n");
+
+            accumulate_raw_sse_usage(frame.as_bytes(), &mut usage);
+
+            assert!(usage.present);
+            assert_eq!(usage.input_tokens, 120);
+            assert_eq!(usage.output_tokens, 48, "{payload}");
+            assert_eq!(usage.thinking_tokens, 12, "{payload}");
+            assert_eq!(usage.estimated_thinking_progress, 0);
+        }
     }
 }

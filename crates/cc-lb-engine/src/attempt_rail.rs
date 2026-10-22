@@ -115,7 +115,9 @@ impl Signed<'_> {
     }
 }
 
-/// Owns the reservation until buffered or streaming response finalization decides its outcome.
+/// Owns the reservation until buffered or streaming response finalization hands it off.
+///
+/// Dropping the guard before handoff (client cancel, pre-commit failure) refunds in full.
 pub struct ResponseAccountingGuard {
     reservation: Option<Reservation>,
 }
@@ -127,7 +129,10 @@ impl ResponseAccountingGuard {
             .map(|reservation| reservation.id())
     }
 
-    /// Suppresses the RAII refund after a successful response is handed to reconciliation.
+    /// Hands a committed response's reservation to the reconcile subscriber.
+    ///
+    /// Called whatever the response outcome: the subscriber settles it exactly once on
+    /// `RequestTerminated`, reconciling measured success and refunding every other outcome.
     pub fn forget(self) {
         if let Some(reservation) = self.reservation {
             reservation.forget();

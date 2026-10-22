@@ -3,7 +3,16 @@ import { dirname, normalize, posix, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '..', '..');
 const siteRoot = resolve(import.meta.dir, '..');
-const blockedTerms = /Bedrock|Vertex|OpenAI|Gemini|official|endorsed|\/Users\/|\/data\/|\.omo\/|~\/\.config\/|production-grade|enterprise-grade|battle-tested|highly available|99\.999%|\bSLA\b|\bD-(?:arch|cut|ido|meta)-\d+\b/i;
+const blockedTerms = /Bedrock|Vertex|official|endorsed|\/Users\/|\/data\/|\.omo\/|~\/\.config\/|production-grade|enterprise-grade|battle-tested|highly available|99\.999%|\bSLA\b|\bD-(?:arch|cut|ido|meta)-\d+\b|\buniversal multi-provider(?: LLM)? gateway\b|\b(?:full|complete) (?:(?:OpenAI|Gemini|provider) )?API (?:support|compatibility)\b/i;
+const providerTerms = /OpenAI|Gemini/i;
+
+export function findBlockedTerm(content: string, sourcePath: string): string | undefined {
+  const blocked = content.match(blockedTerms)?.[0];
+  if (blocked) return blocked;
+  // The runtime reference documents implemented provider operations, not site-wide positioning.
+  if (sourcePath !== 'docs/runtime-management.md') return content.match(providerTerms)?.[0];
+  return undefined;
+}
 
 const sources = [
   {
@@ -71,8 +80,8 @@ function takeSections(source: string, wanted: string[]): string {
       const name = sectionName(line);
       const level = heading[1].length;
       if (name && wanted.includes(name)) {
+        if (!active || level <= depth) depth = level;
         active = true;
-        depth = level;
         sections.push(line);
         continue;
       }
@@ -125,23 +134,30 @@ function sanitizeSource(source: string, entry: (typeof sources)[number]): string
     );
 }
 
-for (const entry of sources) {
-  const sourcePath = resolve(root, entry.source);
-  const targetPath = resolve(siteRoot, entry.target);
-  const source = sanitizeSource(await readFile(sourcePath, 'utf8'), entry);
-  const selected = takeSections(source, entry.sections);
-  const blockedMatch = selected.match(blockedTerms);
+export function renderSourceNotes(source: string, sourcePath: string): string {
+  const entry = sources.find((candidate) => candidate.source === sourcePath);
+  if (!entry) throw new Error(`Unknown documentation source: ${sourcePath}`);
+  const selected = takeSections(sanitizeSource(source, entry), entry.sections);
+  const blockedMatch = findBlockedTerm(selected, entry.source);
   if (!selected || blockedMatch) {
     throw new Error(
-      `Sync filter rejected selected content from ${entry.source}${blockedMatch ? `: ${blockedMatch[0]}` : ''}`,
+      `Sync filter rejected selected content from ${entry.source}${blockedMatch ? `: ${blockedMatch}` : ''}`,
     );
   }
   const body = rewriteLinks(selected, entry.source);
-  if (!body || blockedTerms.test(body)) {
+  if (!body || findBlockedTerm(body, entry.source)) {
     throw new Error(`Sync filter rejected ${entry.source}`);
   }
   const slug = `docs/${entry.target.replace(/^src\/content\/docs\//, '').replace(/\.md$/, '')}`;
-  const output = `---\ntitle: ${JSON.stringify(entry.title)}\ndescription: ${JSON.stringify(entry.description)}\nslug: ${slug}\n---\n\n${body}\n`;
-  await mkdir(dirname(targetPath), { recursive: true });
-  await writeFile(targetPath, output, 'utf8');
+  return `---\ntitle: ${JSON.stringify(entry.title)}\ndescription: ${JSON.stringify(entry.description)}\nslug: ${slug}\n---\n\n${body}\n`;
+}
+
+if (import.meta.main) {
+  for (const entry of sources) {
+    const sourcePath = resolve(root, entry.source);
+    const targetPath = resolve(siteRoot, entry.target);
+    const output = renderSourceNotes(await readFile(sourcePath, 'utf8'), entry.source);
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, output, 'utf8');
+  }
 }

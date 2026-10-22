@@ -399,6 +399,8 @@ async fn stale_terminal_provider_response_cannot_poison_reconnected_credential()
         refresh_token: "reconnected-refresh".to_owned(),
         expires_at_unix_secs: cc_lb_clock::unix_secs(fixture.clock.now()) + 3600,
         refresh_token_expires_at_unix_secs: None,
+        account_id: None,
+        project_id: None,
         scopes: vec!["messages".to_owned()],
         never_refresh: false,
     };
@@ -591,6 +593,7 @@ async fn refresh_failure_status_does_not_wait_for_unfinished_provider_body() {
             crate::scheduler_dispatch::http::request_refresh(
                 &client,
                 &config,
+                cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth,
                 &cancel,
                 "refresh-token",
             ),

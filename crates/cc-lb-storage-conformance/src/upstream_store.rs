@@ -393,6 +393,8 @@ fn tokens(label: &str) -> EncryptedOAuthTokens {
         &aead,
         &OAuthTokenBundle {
             access_token: format!("access-{label}"),
+            account_id: None,
+            project_id: None,
             refresh_token: format!("refresh-{label}"),
             expires_at_unix_secs: 1234,
             refresh_token_expires_at_unix_secs: None,

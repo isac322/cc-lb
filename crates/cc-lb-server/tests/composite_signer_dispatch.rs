@@ -591,6 +591,8 @@ impl Fixture {
                     &OAuthTokenBundle {
                         access_token: tokens.access_token,
                         refresh_token: tokens.refresh_token,
+                        account_id: None,
+                        project_id: None,
                         expires_at_unix_secs: expires_at,
                         refresh_token_expires_at_unix_secs: None,
                         scopes: vec!["messages".to_owned()],

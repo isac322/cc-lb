@@ -167,8 +167,10 @@ where
 }
 
 fn is_refreshable(upstream: &UpstreamRecord) -> bool {
-    upstream.kind == UpstreamKind::AnthropicOauth
-        && upstream.deleted_at_unix_secs.is_none()
+    matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
         && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
 }

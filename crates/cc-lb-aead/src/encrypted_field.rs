@@ -133,6 +133,10 @@ pub struct OAuthTokenBundle {
     pub expires_at_unix_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token_expires_at_unix_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub scopes: Vec<String>,
     /// `true` for long-lived (365-day) Anthropic credentials that must never be
     /// refreshed. Rotating such a grant makes Anthropic revoke the 365-day
@@ -161,6 +165,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string(), "scope2".to_string()],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
         let aad = b"upstream-id-001";
@@ -187,6 +193,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
 
@@ -206,6 +214,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
         let aad = b"upstream-001";
@@ -230,6 +240,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
         let aad = b"upstream-001";
@@ -263,6 +275,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec!["scope1".to_string()],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
         let aad = b"upstream-001";
@@ -290,6 +304,8 @@ mod tests {
             expires_at_unix_secs: 1234567890,
             refresh_token_expires_at_unix_secs: None,
             scopes: vec![],
+            account_id: None,
+            project_id: None,
             never_refresh: false,
         };
         let aad = b"upstream-001";
@@ -353,5 +369,61 @@ mod tests {
 
         assert_eq!(bundle.refresh_token_expires_at_unix_secs, Some(99));
         assert!(!bundle.never_refresh);
+    }
+    #[test]
+    fn oauth_account_id_roundtrips_and_legacy_ciphertext_defaults_to_none() {
+        let aead = test_service();
+        let aad = b"upstream-account-id";
+        let bundle = OAuthTokenBundle {
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: vec!["openid".to_owned()],
+            never_refresh: false,
+            account_id: Some("account-123".to_owned()),
+            project_id: None,
+        };
+
+        let encrypted = AeadEncryptedField::encrypt(&aead, &bundle, aad).expect("encrypt");
+        let decrypted = encrypted.decrypt(&aead, aad).expect("decrypt");
+        assert_eq!(decrypted.account_id.as_deref(), Some("account-123"));
+
+        let legacy = br#"{"access_token":"legacy-access","refresh_token":"legacy-refresh","expires_at_unix_secs":1234567890,"scopes":["openid"]}"#;
+        let stored = AeadEncryptedField::<OAuthTokenBundle>::from_ciphertext(
+            aead.encrypt(legacy, aad).expect("encrypt legacy plaintext"),
+        );
+        let legacy_bundle = stored
+            .decrypt(&aead, aad)
+            .expect("decrypt legacy ciphertext");
+        assert_eq!(legacy_bundle.account_id, None);
+    }
+    #[test]
+    fn oauth_project_id_roundtrips_and_legacy_ciphertext_defaults_to_none() {
+        let aead = test_service();
+        let aad = b"upstream-project-id";
+        let bundle = OAuthTokenBundle {
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at_unix_secs: 1234567890,
+            refresh_token_expires_at_unix_secs: None,
+            scopes: vec!["openid".to_owned()],
+            never_refresh: false,
+            account_id: None,
+            project_id: Some("gemini-project".to_owned()),
+        };
+
+        let encrypted = AeadEncryptedField::encrypt(&aead, &bundle, aad).expect("encrypt");
+        let decrypted = encrypted.decrypt(&aead, aad).expect("decrypt");
+        assert_eq!(decrypted.project_id.as_deref(), Some("gemini-project"));
+
+        let legacy = br#"{"access_token":"legacy-access","refresh_token":"legacy-refresh","expires_at_unix_secs":1234567890,"scopes":["openid"]}"#;
+        let stored = AeadEncryptedField::<OAuthTokenBundle>::from_ciphertext(
+            aead.encrypt(legacy, aad).expect("encrypt legacy plaintext"),
+        );
+        let legacy_bundle = stored
+            .decrypt(&aead, aad)
+            .expect("decrypt legacy ciphertext");
+        assert_eq!(legacy_bundle.project_id, None);
     }
 }

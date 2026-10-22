@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
+pub use cc_lb_domain::{CredentialKind, Provider};
+
 use crate::StorageResult;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,13 +14,38 @@ pub enum UpstreamKind {
     #[default]
     AnthropicApiKey,
     AnthropicOauth,
+    OpenaiApiKey,
+    OpenaiOauth,
+    GeminiApiKey,
+    GeminiOauth,
 }
 
 impl UpstreamKind {
+    pub const fn provider(self) -> Provider {
+        match self {
+            Self::AnthropicApiKey | Self::AnthropicOauth => Provider::Anthropic,
+            Self::OpenaiApiKey | Self::OpenaiOauth => Provider::Openai,
+            Self::GeminiApiKey | Self::GeminiOauth => Provider::Gemini,
+        }
+    }
+
+    pub const fn credential_kind(self) -> CredentialKind {
+        match self {
+            Self::AnthropicApiKey | Self::OpenaiApiKey | Self::GeminiApiKey => {
+                CredentialKind::ApiKey
+            }
+            Self::AnthropicOauth | Self::OpenaiOauth | Self::GeminiOauth => CredentialKind::Oauth,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::AnthropicOauth => "anthropic_oauth",
+            Self::OpenaiApiKey => "openai_api_key",
+            Self::OpenaiOauth => "openai_oauth",
+            Self::GeminiApiKey => "gemini_api_key",
+            Self::GeminiOauth => "gemini_oauth",
         }
     }
 }
@@ -224,4 +251,20 @@ pub trait UpstreamStore: Send + Sync {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<UpstreamRecord>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpstreamKind;
+    use crate::{CredentialKind, Provider};
+
+    #[test]
+    fn gemini_oauth_has_gemini_oauth_classification() {
+        assert_eq!(UpstreamKind::GeminiOauth.provider(), Provider::Gemini);
+        assert_eq!(
+            UpstreamKind::GeminiOauth.credential_kind(),
+            CredentialKind::Oauth
+        );
+        assert_eq!(UpstreamKind::GeminiOauth.as_str(), "gemini_oauth");
+    }
 }

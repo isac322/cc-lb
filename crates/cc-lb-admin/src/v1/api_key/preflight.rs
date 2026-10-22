@@ -20,7 +20,7 @@ use cc_lb_control::anthropic_api_key::{
 };
 use cc_lb_storage_api::{
     ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability, ApiKeyWorkspace,
-    ApiKeyWorkspaceMode, RemediationCode, UpstreamRecord,
+    ApiKeyWorkspaceMode, RemediationCode, UpstreamKind, UpstreamRecord,
 };
 use serde_json::json;
 use url::Url;
@@ -86,7 +86,7 @@ async fn preflight(
             validate_base_url_input(&url)?;
             url
         }
-        None => effective_base_url(None)?,
+        None => effective_base_url(None, UpstreamKind::AnthropicApiKey)?,
     };
     let workspace_id = body.workspace_id.as_deref().filter(|id| !id.is_empty());
     let outcome = run_preflight(
@@ -229,6 +229,7 @@ pub(crate) struct PreparedApiKeyCreate {
 /// nothing; P0 applies even with `skip_preflight`.
 pub(crate) async fn prepare_api_key_create(
     state: &AdminState,
+    kind: UpstreamKind,
     api_key_value: Option<&str>,
     base_url: Option<&Url>,
     workspace_id: Option<&str>,
@@ -243,7 +244,7 @@ pub(crate) async fn prepare_api_key_create(
     let check = if skip_preflight {
         KeyCheck::unverified(&key, workspace_id, now)
     } else {
-        let base_url = effective_base_url(base_url)?;
+        let base_url = effective_base_url(base_url, kind)?;
         probe_strict(
             state,
             &key,
@@ -324,7 +325,7 @@ pub(crate) async fn prepare_api_key_update(
             &stored_key
         }
     };
-    let base_url = effective_base_url(request.base_url)?;
+    let base_url = effective_base_url(request.base_url, current.kind)?;
     let check = if request.skip_preflight {
         KeyCheck::unverified(key, target_workspace.as_deref(), now)
     } else if new_key.is_some() || workspace_changed {

@@ -72,6 +72,89 @@ async fn buffered_transform_rewrites_tool_name_and_sanitizes_headers() {
     );
     assert_eq!(transform.seen_bodies(), vec![buffered_upstream_body()]);
 }
+#[tokio::test]
+async fn buffered_gemini_oauth_code_assist_response_is_unwrapped() {
+    let wrapped = Bytes::from_static(
+        br#"{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}},"traceId":"trace"}"#,
+    );
+    let expected: serde_json::Value = serde_json::from_slice(
+        br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}}"#,
+    )
+    .expect("expected response JSON");
+    let lifecycle = lifecycle_with_record(
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(wrapped.len(), false),
+            body: wrapped,
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    );
+
+    let request = gemini_generate_request();
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles Gemini Code Assist response");
+    let (_status, _headers, body) = collect_body(response).await;
+
+    let received: serde_json::Value =
+        serde_json::from_slice(&body).expect("received response JSON");
+    assert_eq!(received, expected);
+}
+
+#[tokio::test]
+async fn buffered_native_gemini_response_bytes_remain_unchanged() {
+    let body = Bytes::from_static(
+        br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}}"#,
+    );
+    let lifecycle = lifecycle_with_record(
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(body.len(), false),
+            body: body.clone(),
+        }),
+        upstream_record(
+            StorageUpstreamKind::GeminiApiKey,
+            "https://generativelanguage.googleapis.com/",
+        ),
+    );
+
+    let request = gemini_generate_request();
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles native Gemini response");
+    let (_status, _headers, received) = collect_body(response).await;
+
+    assert_eq!(received, body);
+}
+
+#[tokio::test]
+async fn buffered_anthropic_response_bytes_remain_unchanged() {
+    let body = buffered_upstream_body();
+    let lifecycle = lifecycle_with_record(
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: json_headers(body.len(), false),
+            body: body.clone(),
+        }),
+        default_upstream_record(),
+    );
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":false}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles Anthropic response");
+    let (_status, _headers, received) = collect_body(response).await;
+
+    assert_eq!(received, body);
+}
 
 #[tokio::test]
 async fn buffered_transform_rewrites_upstream_error_response() {
@@ -609,6 +692,161 @@ async fn content_length_client_stops_after_declared_gzip_bytes_without_terminal_
             assert_eq!(reason, TerminationReason::Success);
             assert_eq!(client_status, StatusCode::OK.as_u16());
             break;
+        }
+    }
+}
+
+/// Regression: an identity SSE body with Content-Length relayed through the
+/// request-hinted affinity gate must finalize before its final bytes reach the
+/// client. A client that stops polling once the declared length is satisfied
+/// must not turn the completed response into a 499 client cancellation.
+#[tokio::test]
+async fn content_length_affinity_gated_sse_finalizes_success_before_final_bytes() {
+    let body = complete_message_sse_body();
+    let mut headers = sse_headers();
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&body.len().to_string()).expect("content length header"),
+    );
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers,
+            body: body.clone(),
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles content-length affinity-gated SSE");
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some(body.len().to_string().as_str())
+    );
+    let mut downstream = response.into_body();
+    let mut received = Vec::with_capacity(body.len());
+    while received.len() < body.len() {
+        let frame = downstream
+            .frame()
+            .await
+            .expect("declared SSE bytes frame")
+            .expect("declared SSE frame succeeds")
+            .into_data()
+            .expect("declared SSE data frame");
+        received.extend_from_slice(&frame);
+    }
+    assert_eq!(received, body);
+    // A Content-Length client stops polling once the declared bytes arrived.
+    drop(downstream);
+
+    let mut stream_success_seen = false;
+    loop {
+        match lifecycle_rx
+            .recv()
+            .await
+            .expect("lifecycle event delivered")
+        {
+            LifecycleEvent::StreamCompleted { result, .. } => {
+                let success = result.expect("stream completes successfully");
+                assert_eq!(success.usage.input_tokens, 3);
+                assert_eq!(success.usage.output_tokens, 11);
+                assert_eq!(success.body_bytes, Some(body.len() as u64));
+                stream_success_seen = true;
+            }
+            LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } => {
+                assert_eq!(reason, TerminationReason::Success);
+                assert_eq!(client_status, StatusCode::OK.as_u16());
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(stream_success_seen, "StreamCompleted precedes termination");
+}
+
+/// Control: dropping the downstream body before the upstream body ends is a
+/// real client cancellation on the same affinity-gated SSE path.
+#[tokio::test]
+async fn affinity_gated_sse_downstream_drop_before_end_records_client_closed() {
+    let body = complete_message_sse_body();
+    let split = body
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .expect("first SSE event boundary")
+        + 2;
+    let first = body.slice(..split);
+    let mut headers = sse_headers();
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&body.len().to_string()).expect("content length header"),
+    );
+    let test_bus = TestLifecycleBus::new();
+    let mut lifecycle_rx = test_bus.bus.subscribe_lifecycle();
+    let lifecycle = lifecycle_with_transforms(
+        None,
+        None,
+        Arc::new(ChunkedDispatch {
+            status: StatusCode::OK,
+            headers,
+            chunks: vec![first.clone(), body.slice(split..)],
+        }),
+    )
+    .with_event_bus(test_bus.bus_arc());
+
+    let request = messages_request(Bytes::from_static(
+        br#"{"model":"claude-test","messages":[],"stream":true,"tools":[{"type":"web_search_20250305","name":"web_search"}]}"#,
+    ));
+    let response = handle_authenticated(&lifecycle, request)
+        .await
+        .expect("lifecycle handles affinity-gated SSE");
+    let mut downstream = response.into_body();
+    let frame = downstream
+        .frame()
+        .await
+        .expect("first SSE event frame")
+        .expect("first SSE frame succeeds")
+        .into_data()
+        .expect("first SSE data frame");
+    assert_eq!(frame, first);
+    drop(downstream);
+
+    loop {
+        match lifecycle_rx
+            .recv()
+            .await
+            .expect("lifecycle event delivered")
+        {
+            LifecycleEvent::StreamCompleted { .. } => {
+                panic!("a cancelled stream must not report completion")
+            }
+            LifecycleEvent::RequestTerminated {
+                reason,
+                client_status,
+                ..
+            } => {
+                assert_eq!(
+                    reason,
+                    TerminationReason::ErrorCode("client_closed_request".to_owned())
+                );
+                assert_eq!(client_status, 499);
+                break;
+            }
+            _ => {}
         }
     }
 }
@@ -2271,6 +2509,36 @@ fn lifecycle_with_transforms_and_config(
     dispatcher: Arc<dyn UpstreamDispatch>,
     config: LifecycleConfig,
 ) -> Lifecycle {
+    lifecycle_with_record_and_config(
+        response_transform,
+        sse_transform,
+        dispatcher,
+        config,
+        default_upstream_record(),
+    )
+}
+
+fn lifecycle_with_record(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    record: UpstreamRecord,
+) -> Lifecycle {
+    lifecycle_with_record_and_config(
+        response_transform,
+        None,
+        dispatcher,
+        LifecycleConfig::default(),
+        record,
+    )
+}
+
+fn lifecycle_with_record_and_config(
+    response_transform: Option<Arc<dyn ResponseTransformHook>>,
+    sse_transform: Option<Arc<dyn SseEventTransformHook>>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    config: LifecycleConfig,
+    record: UpstreamRecord,
+) -> Lifecycle {
     let dialect = Arc::new(ShapeTransformDialect::new(
         response_transform,
         sse_transform,
@@ -2291,7 +2559,7 @@ fn lifecycle_with_transforms_and_config(
         name: "principal-test".to_owned(),
         kind: cc_lb_storage_api::PrincipalKind::Machine,
         allowed_models: vec!["*".to_owned()],
-        allowed_upstreams: vec![default_upstream_id()],
+        allowed_upstreams: vec![record.id],
         default_limits: Vec::new(),
         enabled: true,
         deleted_at_unix_secs: None,
@@ -2308,7 +2576,7 @@ fn lifecycle_with_transforms_and_config(
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
         .principal_view(authn.principal_view.clone())
-        .upstream_records(vec![default_upstream_record()])
+        .upstream_records(vec![record])
         .build();
     Lifecycle::new_with_dynamic_view(
         authn.authn,
@@ -2940,6 +3208,22 @@ fn default_upstream_record() -> UpstreamRecord {
         last_warmup_at_unix_secs: None,
         workspace_id: None,
     }
+}
+
+fn upstream_record(kind: StorageUpstreamKind, base_url: &str) -> UpstreamRecord {
+    let mut record = default_upstream_record();
+    record.kind = kind;
+    record.base_url = Some(Url::parse(base_url).expect("provider base URL parses"));
+    record
+}
+
+fn gemini_generate_request() -> http::Request<Bytes> {
+    http::Request::builder()
+        .method("POST")
+        .uri("/v1beta/models/gemini-test:generateContent")
+        .header("x-api-key", common::managed_api_key())
+        .body(Bytes::from_static(br#"{"contents":[]}"#))
+        .expect("Gemini request builds")
 }
 
 fn _principal_for_doc() -> Principal {

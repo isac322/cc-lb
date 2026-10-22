@@ -103,6 +103,8 @@ where
             refresh_token: tokens.refresh_token,
             expires_at_unix_secs: near_expiry_secs(),
             refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
             scopes: vec!["messages".to_owned()],
             never_refresh: false,
         },

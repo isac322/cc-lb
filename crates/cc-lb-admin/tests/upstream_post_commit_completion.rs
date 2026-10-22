@@ -578,6 +578,8 @@ async fn seed_warmup_oauth_upstream(storage: &SqliteStorage, base_url: &str) -> 
         expires_at_unix_secs: 4_000_000_000,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["user:inference".to_owned()],
+        account_id: None,
+        project_id: None,
         never_refresh: true,
     };
     let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(

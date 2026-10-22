@@ -166,7 +166,9 @@ fn shape_request_round_trips() {
     let query: &str = owned.query.as_deref().unwrap_or("");
     assert_eq!(query, "stream=true");
     match owned.upstream {
-        Upstream::AnthropicDirect { base_url } => {
+        Upstream::AnthropicDirect { base_url }
+        | Upstream::OpenaiDirect { base_url }
+        | Upstream::GeminiDirect { base_url } => {
             let base: &str = base_url.as_deref().unwrap_or("");
             assert_eq!(base, "https://api.anthropic.com")
         }

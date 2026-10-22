@@ -75,6 +75,54 @@ pub fn parse_anthropic_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitO
         .collect()
 }
 
+pub fn parse_openai_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObservation> {
+    let mut snapshots = BTreeMap::<(u8, String), (RateLimitKind, PartialSnapshot)>::new();
+
+    for (name, value) in headers {
+        let (kind, field) = match name.as_str() {
+            "x-ratelimit-limit-requests" => (RateLimitKind::Requests, RateLimitField::Limit),
+            "x-ratelimit-remaining-requests" => {
+                (RateLimitKind::Requests, RateLimitField::Remaining)
+            }
+            "x-ratelimit-reset-requests" => (RateLimitKind::Requests, RateLimitField::Reset),
+            "x-ratelimit-limit-tokens" => (RateLimitKind::Tokens, RateLimitField::Limit),
+            "x-ratelimit-remaining-tokens" => (RateLimitKind::Tokens, RateLimitField::Remaining),
+            "x-ratelimit-reset-tokens" => (RateLimitKind::Tokens, RateLimitField::Reset),
+            _ => continue,
+        };
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        let snapshot = &mut snapshots
+            .entry((rate_limit_kind_order(kind), DEFAULT_WINDOW.to_owned()))
+            .or_insert_with(|| (kind, PartialSnapshot::default()))
+            .1;
+        match field {
+            RateLimitField::Limit => {
+                if let Some(parsed) = parse_u64(value) {
+                    snapshot.limit = Some(parsed);
+                }
+            }
+            RateLimitField::Remaining => {
+                if let Some(parsed) = parse_u64(value) {
+                    snapshot.remaining = Some(parsed);
+                }
+            }
+            RateLimitField::Reset => {
+                let value = value.trim();
+                if !value.is_empty() && !value.eq_ignore_ascii_case("n/a") {
+                    snapshot.reset = Some(value.to_owned());
+                }
+            }
+        }
+    }
+
+    snapshots
+        .into_iter()
+        .filter_map(|((_order, window), (kind, snapshot))| snapshot.into_snapshot(kind, window))
+        .collect()
+}
+
 fn parse_header_name(name: &str) -> Option<(RateLimitKind, RateLimitField, String)> {
     let suffix = name.strip_prefix(HEADER_PREFIX)?;
     let parts = suffix
@@ -148,4 +196,69 @@ fn parse_u64(value: &str) -> Option<u64> {
 fn parse_reset(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_openai_rate_limit_headers;
+    use cc_lb_domain::{RateLimitKind, RateLimitObservation};
+    use http::{HeaderMap, HeaderName, HeaderValue};
+
+    #[test]
+    fn parses_openai_request_and_token_rate_limit_headers() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-limit-requests", "1000"),
+            ("x-ratelimit-remaining-requests", "997"),
+            ("x-ratelimit-reset-requests", "2026-05-20T00:00:01Z"),
+            ("x-ratelimit-limit-tokens", "100000"),
+            ("x-ratelimit-remaining-tokens", "99990"),
+            ("x-ratelimit-reset-tokens", "2026-05-20T00:00:02Z"),
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+
+        assert_eq!(
+            parse_openai_rate_limit_headers(&headers),
+            [
+                RateLimitObservation {
+                    kind: RateLimitKind::Requests,
+                    window: "default".to_owned(),
+                    limit: Some(1000),
+                    remaining: Some(997),
+                    reset: Some("2026-05-20T00:00:01Z".to_owned()),
+                },
+                RateLimitObservation {
+                    kind: RateLimitKind::Tokens,
+                    window: "default".to_owned(),
+                    limit: Some(100000),
+                    remaining: Some(99990),
+                    reset: Some("2026-05-20T00:00:02Z".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn openai_na_rate_limit_values_remain_absent() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-limit-requests", "N/A"),
+            ("x-ratelimit-remaining-requests", "N/A"),
+            ("x-ratelimit-reset-requests", "N/A"),
+            ("x-ratelimit-limit-tokens", "N/A"),
+            ("x-ratelimit-remaining-tokens", "N/A"),
+            ("x-ratelimit-reset-tokens", "N/A"),
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+
+        assert!(parse_openai_rate_limit_headers(&headers).is_empty());
+    }
 }

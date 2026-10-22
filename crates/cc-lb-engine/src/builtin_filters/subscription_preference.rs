@@ -77,6 +77,9 @@ pub(crate) const SUBSCRIPTION_ALIVE_REASON: &str = "keep:best_subscription_candi
 pub(crate) const API_KEY_FALLBACK_REASON: &str = "keep:api_key_subscription_exhausted";
 pub(crate) const NO_API_KEY_REASON: &str = "drop:subscription_exhausted_no_api_key";
 pub(crate) const NO_SUBSCRIPTION_REASON: &str = "keep:no_subscription_candidates";
+pub(crate) const NOT_APPLICABLE_REASON: &str = "keep:not_applicable_no_anthropic_candidates";
+pub(crate) const SINGLE_CANDIDATE_PRESERVED_REASON: &str =
+    "keep:single_candidate_preserved_subscription_exhausted";
 
 // -- Window labels. ----------------------------------------------------------
 
@@ -187,6 +190,17 @@ fn evaluate(
         .iter()
         .any(|c| c.kind == UpstreamKind::AnthropicApiKey);
 
+    // The filter only ranks Anthropic subscription/API-key accounts. Candidate sets without any
+    // of them (OpenAI-only, Gemini-only, ...) are outside its scope and pass through unchanged.
+    if !has_subscription && !has_api_key {
+        return FilterOutput {
+            kept_upstream_ids: candidates.iter().map(|c| c.upstream_id).collect(),
+            reason: NOT_APPLICABLE_REASON.to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        };
+    }
+
     if !has_subscription {
         return FilterOutput {
             kept_upstream_ids: collect_kind(candidates, UpstreamKind::AnthropicApiKey),
@@ -201,7 +215,7 @@ fn evaluate(
         if candidate.kind != UpstreamKind::AnthropicOauth {
             continue;
         }
-        if let Some(assessment) = assess_candidate(candidate, index, &base_windows, config) {
+        if let Some(assessment) = assess_candidate(candidate, index, base_windows, config) {
             buckets[assessment.tier as usize].push(assessment);
         }
     }
@@ -306,6 +320,15 @@ fn evaluate(
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
         }
+    } else if let [only] = candidates {
+        // A set already reduced to one upstream (e.g. by hard upstream affinity) has no other
+        // account to prefer; dropping it would only turn a pinned request into a local failure.
+        FilterOutput {
+            kept_upstream_ids: vec![only.upstream_id],
+            reason: SINGLE_CANDIDATE_PRESERVED_REASON.to_owned(),
+            per_candidate_reasons: Vec::new(),
+            subscription_preference: None,
+        }
     } else {
         FilterOutput {
             kept_upstream_ids: Vec::new(),
@@ -316,16 +339,39 @@ fn evaluate(
     }
 }
 
-fn relevant_base_windows(canonical_model: &str) -> Vec<&'static str> {
-    let mut windows = vec![WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
+const BASE_WINDOWS: [&str; 2] = [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
+const FABLE_BASE_WINDOWS: [&str; 3] = [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDOW_SEVEN_DAY_FABLE];
+const SONNET_BASE_WINDOWS: [&str; 3] =
+    [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDOW_SEVEN_DAY_SONNET];
+const OPUS_BASE_WINDOWS: [&str; 3] = [WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, WINDOW_SEVEN_DAY_OPUS];
+
+fn relevant_base_windows(canonical_model: &str) -> &'static [&'static str] {
     if canonical_model == FABLE_MODEL {
-        windows.push(WINDOW_SEVEN_DAY_FABLE);
+        &FABLE_BASE_WINDOWS
     } else if canonical_model.starts_with(SONNET_MODEL_PREFIX) {
-        windows.push(WINDOW_SEVEN_DAY_SONNET);
+        &SONNET_BASE_WINDOWS
     } else if canonical_model.starts_with(OPUS_MODEL_PREFIX) {
-        windows.push(WINDOW_SEVEN_DAY_OPUS);
+        &OPUS_BASE_WINDOWS
+    } else {
+        &BASE_WINDOWS
     }
-    windows
+}
+
+/// Whether the filter's own assessment proves this OAuth candidate unusable
+/// (base quota exhausted with no usable overage). Failover uses it so a
+/// retry never revives an account the filter already knows is exhausted.
+pub(crate) fn subscription_hard_blocked(
+    canonical_model: &str,
+    candidate: &UpstreamCandidate,
+) -> bool {
+    candidate.kind == UpstreamKind::AnthropicOauth
+        && assess_candidate(
+            candidate,
+            0,
+            relevant_base_windows(canonical_model),
+            &FilterConfig::default(),
+        )
+        .is_none()
 }
 
 fn collect_kind(candidates: &[UpstreamCandidate], kind: UpstreamKind) -> Vec<Uuid> {

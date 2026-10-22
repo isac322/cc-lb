@@ -84,7 +84,63 @@ fn healthy_oauth_candidate(name: &str, id_seed: u8) -> UpstreamCandidate {
 fn empty_candidate_list_returns_empty() {
     let output = filter_for_model(&[], MODEL_AGNOSTIC);
     assert!(output.kept_upstream_ids.is_empty());
-    assert_eq!(output.reason, NO_SUBSCRIPTION_REASON);
+    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+}
+
+#[test]
+fn openai_only_candidates_pass_through_unchanged() {
+    let oauth = other_provider("openai-oauth", 1, UpstreamKind::OpenaiOauth);
+    let key = other_provider("openai-key", 2, UpstreamKind::OpenaiApiKey);
+    let output = filter_for_model(&[oauth.clone(), key.clone()], "gpt-5");
+    assert_eq!(
+        output.kept_upstream_ids,
+        vec![oauth.upstream_id, key.upstream_id]
+    );
+    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+    assert!(output.subscription_preference.is_none());
+}
+
+#[test]
+fn gemini_only_candidates_pass_through_unchanged() {
+    let oauth = other_provider("gemini-oauth", 1, UpstreamKind::GeminiOauth);
+    let key = other_provider("gemini-key", 2, UpstreamKind::GeminiApiKey);
+    let output = filter_for_model(&[oauth.clone(), key.clone()], "gemini-2.5-pro");
+    assert_eq!(
+        output.kept_upstream_ids,
+        vec![oauth.upstream_id, key.upstream_id]
+    );
+    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+    assert!(output.subscription_preference.is_none());
+}
+
+#[test]
+fn single_non_anthropic_candidate_is_preserved() {
+    let pinned = other_provider("openai-pinned", 7, UpstreamKind::OpenaiOauth);
+    let output = filter_for_model(std::slice::from_ref(&pinned), "gpt-5");
+    assert_eq!(output.kept_upstream_ids, vec![pinned.upstream_id]);
+    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+}
+
+#[test]
+fn single_exhausted_oauth_candidate_is_preserved() {
+    let pinned = oauth_with(
+        "pinned",
+        1,
+        vec![fresh(WINDOW_SEVEN_DAY).util(1.0).status("rejected").build()],
+    );
+    let output = filter_for_model(std::slice::from_ref(&pinned), MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![pinned.upstream_id]);
+    assert_eq!(output.reason, SINGLE_CANDIDATE_PRESERVED_REASON);
+    assert!(output.subscription_preference.is_none());
+}
+
+#[test]
+fn single_healthy_oauth_candidate_keeps_cost_first_trace() {
+    let pinned = healthy_oauth("pinned", 1);
+    let output = filter_for_model(std::slice::from_ref(&pinned), MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![pinned.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    assert!(output.subscription_preference.is_some());
 }
 
 #[test]
@@ -622,7 +678,7 @@ fn unobserved_optional_scoped_window_remains_partial_base() {
     let assessment = assess_candidate(
         &candidate,
         0,
-        &relevant_base_windows(OPUS_MODEL),
+        relevant_base_windows(OPUS_MODEL),
         &FilterConfig::default(),
     )
     .expect("candidate remains assessable");
@@ -736,10 +792,10 @@ fn model_scoped_weekly_pressure_is_used_without_shared_seven_day() {
         );
         let windows = relevant_base_windows(model);
         let available_assessment =
-            assess_candidate(&available, 0, &windows, &FilterConfig::default())
+            assess_candidate(&available, 0, windows, &FilterConfig::default())
                 .expect("available scoped-weekly candidate is assessable");
         let nearly_exhausted_assessment =
-            assess_candidate(&nearly_exhausted, 1, &windows, &FilterConfig::default())
+            assess_candidate(&nearly_exhausted, 1, windows, &FilterConfig::default())
                 .expect("nearly exhausted scoped-weekly candidate is assessable");
 
         assert!(
@@ -2250,6 +2306,13 @@ fn api_key(name: &str, id_seed: u8) -> UpstreamCandidate {
         organization_type: None,
         rate_limit_tier: None,
         seat_tier: None,
+    }
+}
+
+fn other_provider(name: &str, id_seed: u8, kind: UpstreamKind) -> UpstreamCandidate {
+    UpstreamCandidate {
+        kind,
+        ..api_key(name, id_seed)
     }
 }
 

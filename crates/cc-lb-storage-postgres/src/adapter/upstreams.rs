@@ -910,6 +910,10 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
     match value.as_str() {
         "anthropic_api_key" => Ok(UpstreamKind::AnthropicApiKey),
         "anthropic_oauth" => Ok(UpstreamKind::AnthropicOauth),
+        "openai_api_key" => Ok(UpstreamKind::OpenaiApiKey),
+        "openai_oauth" => Ok(UpstreamKind::OpenaiOauth),
+        "gemini_api_key" => Ok(UpstreamKind::GeminiApiKey),
+        "gemini_oauth" => Ok(UpstreamKind::GeminiOauth),
         other => Err(StorageError::Corrupted {
             message: format!("invalid upstream kind {other}"),
         }),

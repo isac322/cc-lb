@@ -10,3 +10,21 @@ async fn server_starts_and_responds() {
     assert_eq!(response.status, 200);
     assert!(response.body.contains(r#""type":"message""#));
 }
+
+#[tokio::test]
+async fn responses_http_path_remains_an_http_regression() {
+    let server = common::spawn_test_server().await;
+    let response = common::http_post(
+        server.proxy_addr,
+        "/v1/responses",
+        &server.managed_key.plaintext,
+        r#"{"model":"gpt-5","input":"hello"}"#,
+        &[],
+    )
+    .await
+    .expect("post responses");
+
+    assert_eq!(response.status, 503);
+    assert!(response.body.contains(r#""type":"error""#));
+    assert!(!response.body.contains(r#""type":"not_found_error""#));
+}

@@ -33,13 +33,36 @@ async fn multi_route_dispatch() {
     )
     .await
     .expect("delete file route");
+    let count_tokens = common::http_post(
+        server.proxy_addr,
+        "/v1/messages/count_tokens",
+        &server.managed_key.plaintext,
+        r#"{"model":"claude-3-5-sonnet-20241022","messages":[]}"#,
+        &[],
+    )
+    .await
+    .expect("count tokens route");
+    let unknown = common::http_post(
+        server.proxy_addr,
+        "/v1/unknown",
+        &server.managed_key.plaintext,
+        "{}",
+        &[],
+    )
+    .await
+    .expect("unknown route");
+
+    assert_eq!(unknown.status, 404);
+    assert!(unknown.body.contains(r#""type":"operation_not_supported""#));
 
     assert_eq!(messages.status, 200);
     assert!(messages.body.contains(r#""type":"message""#));
-    assert_eq!(models.status, 200);
-    assert!(models.body.contains(r#""type":"list""#));
-    assert_eq!(files.status, 200);
-    assert!(files.body.contains(r#""type":"list""#));
-    assert_eq!(delete_file.status, 200);
-    assert!(delete_file.body.contains(r#""deleted""#));
+    for response in [models, files, delete_file, count_tokens] {
+        assert_eq!(response.status, 404);
+        assert!(
+            response
+                .body
+                .contains(r#""type":"operation_not_supported""#)
+        );
+    }
 }
