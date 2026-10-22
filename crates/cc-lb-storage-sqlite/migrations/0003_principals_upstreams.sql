@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS principals_v1 (
 CREATE TABLE IF NOT EXISTS upstream_spec_v1 (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL CHECK (kind IN ('anthropic_api_key','anthropic_oauth','openai_api_key','openai_oauth','gemini_api_key','gemini_oauth')),
+    kind TEXT NOT NULL CHECK (kind IN ('anthropic_api_key','anthropic_oauth')),
     base_url TEXT,
     enabled INTEGER NOT NULL DEFAULT 1,
     warmup_enabled INTEGER NOT NULL DEFAULT 0,
