@@ -19,7 +19,7 @@ jobs:
     name: Postgres storage stress
     runs-on: cc-lb-2
     container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
 
     services:
       postgres:
@@ -42,6 +42,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - name: Verify baked Rustup bootstrap
+        working-directory: ${{ runner.temp }}
+        run: |
+          command -v rustup
+          rustup --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -71,7 +76,7 @@ jobs:
     name: Postgres E2E and chaos
     runs-on: cc-lb-2
     container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
 
     services:
       postgres:
@@ -94,6 +99,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-rustup-home
+      - name: Verify baked Rustup bootstrap
+        working-directory: ${{ runner.temp }}
+        run: |
+          command -v rustup
+          rustup --version
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

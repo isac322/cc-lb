@@ -4,7 +4,7 @@
 #
 # ARC needs /home/runner/run.sh and uid 1001. Clang 22 / mold link Rust;
 # gcc remains the default cc so autotools (jemalloc) configure correctly.
-# Do not bake rustc; rust-toolchain.toml moves independently.
+# Bake only Rustup and its official proxies; jobs install their own toolchains.
 #
 # Keep ARG RUNNER_VERSION in lockstep with the runner tarball digest. CI reads
 # that ARG for GHCR tags.
@@ -24,12 +24,14 @@ ARG SCCACHE_VERSION=0.18.0
 ARG GH_VERSION=2.102.0
 ARG PROMETHEUS_VERSION=3.15.0
 ARG HADOLINT_VERSION=2.15.1
+ARG RUSTUP_VERSION=1.29.2
 
 # linux-arm64 runner tarball SHA-256 from the v2.338.0 release notes.
 ARG RUNNER_SHA256_ARM64=628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b
 ARG GH_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
 ARG PROMETHEUS_SHA256_ARM64=f1f90ec08e849d494ca66c611470afc50192f0355f1a61c33f2cbde02d067823
 ARG HADOLINT_SHA256_ARM64=f6198ef8090f404dbb771abfee086eb8c48ac177f30da7fd3510aca35b344b5d
+ARG RUSTUP_SHA256_ARM64=a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
 
 ENV RUNNER_MANUALLY_TRAP_SIG=1 \
     ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1
@@ -122,6 +124,8 @@ RUN set -eux; \
         docker_arch=aarch64; \
         sccache_target="aarch64-unknown-linux-musl"; \
         sccache_sha256="2b3284d5da3b46a47dc4229e75bb7b88ac4aa99c8d754fb7d2f84997e5a4354a"; \
+        rustup_target="aarch64-unknown-linux-gnu"; \
+        rustup_sha256="${RUSTUP_SHA256_ARM64}"; \
         prometheus_sha256="${PROMETHEUS_SHA256_ARM64}"; \
         hadolint_sha256="${HADOLINT_SHA256_ARM64}" \
         ;; \
@@ -186,6 +190,37 @@ RUN set -eux; \
     printf '%s  %s\n' "${hadolint_sha256}" /tmp/hadolint | sha256sum --check; \
     install -m 0755 /tmp/hadolint /usr/local/bin/hadolint; \
     rm -f /tmp/hadolint; \
+    rustup_build="$(mktemp -d)"; \
+    curl --fail --silent --show-error --location \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init" \
+      --output "${rustup_build}/rustup-init"; \
+    printf '%s  %s\n' "${rustup_sha256}" "${rustup_build}/rustup-init" | sha256sum --check; \
+    chmod 0755 "${rustup_build}/rustup-init"; \
+    ( \
+      export HOME="${rustup_build}/home" \
+        CARGO_HOME="${rustup_build}/cargo" \
+        RUSTUP_HOME="${rustup_build}/rustup"; \
+      mkdir -p "${HOME}" "${CARGO_HOME}" "${RUSTUP_HOME}"; \
+      env --chdir="${rustup_build}" "${rustup_build}/rustup-init" -y --no-modify-path --default-toolchain none; \
+      install -m 0755 "${CARGO_HOME}/bin/rustup" /usr/local/bin/rustup; \
+      for proxy in "${CARGO_HOME}"/bin/*; do \
+        test "${proxy}" -ef "${CARGO_HOME}/bin/rustup"; \
+        proxy_name="${proxy##*/}"; \
+        if [ "${proxy_name}" != rustup ]; then \
+          ln -s rustup "/usr/local/bin/${proxy_name}"; \
+          test "/usr/local/bin/${proxy_name}" -ef /usr/local/bin/rustup; \
+        fi; \
+      done; \
+      test "$(command -v rustup)" = /usr/local/bin/rustup; \
+      case "$(env --chdir="${rustup_build}" rustup --version)" in "rustup ${RUSTUP_VERSION} "*) ;; *) exit 1 ;; esac; \
+      test "$(env --chdir="${rustup_build}" rustup toolchain list)" = "no installed toolchains"; \
+    ); \
+    rm -rf "${rustup_build}"; \
+    test ! -e "${rustup_build}"; \
+    test ! -e /root/.cargo; \
+    test ! -e /root/.rustup; \
+    test ! -e /home/runner/.cargo; \
+    test ! -e /home/runner/.rustup; \
     chown -R runner:runner /home/runner; \
     chmod 0777 /home/runner; \
     command -v gh; \
@@ -218,7 +253,10 @@ RUN set -eux; \
     command -v sudo; \
     command -v python3; \
     command -v rg; \
+    test "$(command -v rustup)" = /usr/local/bin/rustup; \
+    test /usr/local/bin/rustc -ef /usr/local/bin/rustup; \
     test -x /usr/local/bin/clang-mold; \
+    test ! -e /home/runner/.cargo; \
     test ! -e /home/runner/.rustup; \
     test "$(grep ^docker: /etc/group | cut -d: -f3)" = 123; \
     gcc --version; \
@@ -232,6 +270,19 @@ RUN set -eux; \
     gh --version; \
     ldd --version | grep -Eq '^ldd \(GNU libc\) [0-9]+(\.[0-9]+)+$'; \
     python3 --version; \
+    rustup_smoke="$(mktemp -d)"; \
+    ( \
+      export HOME="${rustup_smoke}/home" \
+        CARGO_HOME="${rustup_smoke}/cargo" \
+        RUSTUP_HOME="${rustup_smoke}/rustup"; \
+      mkdir -p "${HOME}" "${CARGO_HOME}" "${RUSTUP_HOME}"; \
+      case "$(env --chdir="${rustup_smoke}" rustup --version)" in "rustup ${RUSTUP_VERSION} "*) ;; *) exit 1 ;; esac; \
+      test "$(env --chdir="${rustup_smoke}" rustup toolchain list)" = "no installed toolchains"; \
+    ); \
+    rm -rf "${rustup_smoke}"; \
+    test ! -e "${rustup_smoke}"; \
+    test ! -e /home/runner/.cargo; \
+    test ! -e /home/runner/.rustup; \
     printf '%s\n' 'int main(void) { return 0; }' > /tmp/t.c; \
     clang -fuse-ld=mold -o /tmp/t /tmp/t.c; \
     /tmp/t

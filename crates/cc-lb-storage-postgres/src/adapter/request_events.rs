@@ -93,7 +93,7 @@ impl RequestEventStore for PostgresStorage {
 
         let cutoff_ms = cutoff_ms_x_1m / KEY_SEQUENCE_SCALE;
         let result = sqlx::query(
-            "DELETE FROM request_events_v1              WHERE seq IN (                 SELECT seq FROM request_events_v1                 WHERE ts < $1                 ORDER BY seq ASC                 LIMIT $2             )",
+            "DELETE FROM request_events_v1              WHERE seq = ANY(ARRAY(                 SELECT seq FROM request_events_v1                 WHERE ts < $1                 ORDER BY seq ASC                 LIMIT $2             ))",
         )
         .bind(unix_millis_to_datetime(
             cutoff_ms,
