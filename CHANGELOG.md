@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `POST /v1/messages/count_tokens` now uses the Anthropic Messages capability path, restoring count-tokens routing.
+
 - Outbound dispatch no longer forwards the client's `Host` header, so HTTP/2 requests use only the upstream URL's `:authority`.
 - Identity SSE responses with a retained `Content-Length` now finalize lifecycle, usage, and terminal telemetry before yielding the final bytes, so a normally completed response is not recorded as a `499 client_closed_request`.
 - Limit reservations are now reconciled or refunded exactly once on successful, failed, and cancelled terminal paths, so upstream stream errors cannot hold a concurrent slot until TTL expiry.

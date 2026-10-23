@@ -17,7 +17,7 @@ pub(crate) fn classify(method: &Method, path: &str) -> Option<ProviderCapability
         return None;
     }
     match path {
-        "/v1/messages" => Some(ProviderCapability::AnthropicMessages),
+        "/v1/messages" | "/v1/messages/count_tokens" => Some(ProviderCapability::AnthropicMessages),
         "/v1/responses" => Some(ProviderCapability::OpenaiResponses),
         path if is_gemini_generation_path(path) => Some(ProviderCapability::GeminiGenerateContent),
         _ => None,
@@ -50,9 +50,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn allows_only_consistency_safe_generation_operations() {
+    fn allows_consistency_safe_operations() {
         assert_eq!(
             classify(&Method::POST, "/v1/messages"),
+            Some(ProviderCapability::AnthropicMessages)
+        );
+        assert_eq!(
+            classify(&Method::POST, "/v1/messages/count_tokens"),
             Some(ProviderCapability::AnthropicMessages)
         );
         assert_eq!(
@@ -80,7 +84,6 @@ mod tests {
         for (method, path) in [
             (Method::GET, "/v1/models"),
             (Method::GET, "/v1/models/gemini-2.5-pro"),
-            (Method::POST, "/v1/messages/count_tokens"),
             (Method::GET, "/v1/files"),
             (Method::POST, "/v1/files"),
             (Method::DELETE, "/v1/files/file_abc123"),
