@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
+
 ## [2.0.2] - 2026-10-16
 
 ### Fixed
