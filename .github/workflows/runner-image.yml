@@ -1,8 +1,8 @@
 name: runner-image
 
 # Build the ARC runner image whenever its Dockerfile or this workflow changes.
-# Pull requests compile and smoke-test without publishing. Pushes to master
-# publish ghcr.io/isac322/cc-lb-actions-runner. `latest` is never published.
+# Pull requests build cache only. Master publishes immutable and version tags;
+# trusted manual branch candidates publish only immutable tags, never `latest`.
 
 on:
   pull_request:
@@ -16,6 +16,12 @@ on:
       - '.github/runner-image/**'
       - '.github/workflows/runner-image.yml'
   workflow_dispatch:
+    inputs:
+      publish_candidate:
+        description: Publish an immutable candidate from a non-master branch
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,10 +41,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve runner version and publish flag
+      - name: Resolve runner version and publication mode
         id: meta
+        env:
+          PUBLISH_CANDIDATE: ${{ inputs.publish_candidate || false }}
         run: |
           set -euo pipefail
+          case "$PUBLISH_CANDIDATE" in
+            true|false) ;;
+            *)
+              echo "::error::publish_candidate must be true or false"
+              exit 1
+              ;;
+          esac
+          push=false
+          publish_alias=false
+          if [ "$PUBLISH_CANDIDATE" = true ]; then
+            if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] || [ "$GITHUB_REPOSITORY" != isac322/cc-lb ]; then
+              echo "::error::Candidate publication requires a workflow_dispatch in isac322/cc-lb"
+              exit 1
+            fi
+            case "$GITHUB_REF" in
+              refs/heads/master)
+                echo "::error::Candidate publication is not allowed on master"
+                exit 1
+                ;;
+              refs/heads/*) push=true ;;
+              *)
+                echo "::error::Candidate publication requires a non-master branch"
+                exit 1
+                ;;
+            esac
+          elif [ "$GITHUB_REPOSITORY" = isac322/cc-lb ] && [ "$GITHUB_REF" = refs/heads/master ] && [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            push=true
+            publish_alias=true
+          fi
           dockerfile=.github/runner-image/Dockerfile
           version=$(sed -nE 's/^ARG RUNNER_VERSION=//p' "$dockerfile")
           if [ -z "$version" ]; then
@@ -52,11 +89,8 @@ jobs:
             echo "version=$version"
             echo "image=$image"
             echo "immutable_tag=$immutable_tag"
-            if [ "${GITHUB_REF}" = refs/heads/master ] && [ "${GITHUB_EVENT_NAME}" != pull_request ]; then
-              echo "push=true"
-            else
-              echo "push=false"
-            fi
+            echo "push=$push"
+            echo "publish_alias=$publish_alias"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
@@ -79,13 +113,14 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=${{ steps.meta.outputs.immutable_tag }}
-            type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.push == 'true' }}
+            type=raw,value=${{ steps.meta.outputs.version }}-cclb,enable=${{ steps.meta.outputs.publish_alias == 'true' }}
           labels: |
             org.opencontainers.image.description=Wolfi ARC runner image for cc-lb with GitHub CLI, clang 22, mold, and sccache
             org.opencontainers.image.source=https://github.com/isac322/cc-lb
             org.opencontainers.image.revision=${{ github.sha }}
 
       - name: Build runner image
+        id: build_image
         uses: docker/build-push-action@v7
         env:
           DOCKER_BUILD_RECORD_RETENTION_DAYS: "7"
@@ -96,6 +131,6 @@ jobs:
           provenance: false
           load: false
           push: ${{ steps.meta.outputs.push == 'true' }}
-          outputs: ${{ steps.meta.outputs.push == 'true' && '' || 'type=cacheonly' }}
+          outputs: ${{ steps.meta.outputs.push != 'true' && 'type=cacheonly' || '' }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
