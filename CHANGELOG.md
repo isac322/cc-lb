@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 - PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
 
+### Security
+
+- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.10`, and Wasmtime to `49.0.4` to address dependency security advisories.
+- TLS trust intentionally changes: `webpki-roots` removes only `emSign ECC Root CA - G3`, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
+
 ## [2.0.2] - 2026-10-16
 
 ### Fixed
