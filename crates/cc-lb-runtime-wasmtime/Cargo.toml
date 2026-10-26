@@ -24,7 +24,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 arc-swap.workspace = true
-parking_lot = "0.12"
+parking_lot = "0.13"
 rkyv = { workspace = true, features = ["std", "bytecheck"] }
 blake3 = { workspace = true, features = ["std"] }
 wasmparser.workspace = true
