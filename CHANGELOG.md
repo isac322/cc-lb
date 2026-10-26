@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### Changed
+
+- Subscription-quota aggregate reads now deduplicate identical token intervals before storage lookup while preserving the existing response and inclusive-range semantics.
 
 ## [2.0.2] - 2026-10-16
 
