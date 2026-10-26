@@ -3,7 +3,7 @@
 // Supports:
 //   --self-test                                   Run offline unit & OTLP lifecycle tests (0 provider calls)
 //   --preflight [--case <name|all>] [--env-file]  Verify binaries, CLI versions, ports, and credential presence (0 provider calls)
-//   --run --case <name|all> [--env-file]          Run real CLI E2E slice(s) through provider-boundary + budget guard + OTLP + oracle
+//   --run --case <name|all> [--env-file]          Run real CLI E2E slice(s) through cc-lb + budget guard + OTLP + oracle
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
