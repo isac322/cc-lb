@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.10`, and Wasmtime to `49.0.4` to address dependency security advisories.
 - TLS trust intentionally changes: `webpki-roots` removes only `emSign ECC Root CA - G3`, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
 - Updated `ctutils` from `0.4.2` to `0.4.5` to address RUSTSEC-2026-0385 with constant-time mask generation and comparison hardening.
+- Removed the unused Wasmtime global disk-cache feature and updated Tokio and zstd dependencies to their RustSec-fixed release lines; cc-lb's in-process compiled-module cache and zstd payload behavior remain unchanged.
 
 ## [2.0.2] - 2026-10-16
 
