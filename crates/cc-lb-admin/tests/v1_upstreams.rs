@@ -9,12 +9,16 @@ use axum::{
     http::{Request, StatusCode, header},
 };
 use cc_lb_admin::{AdminState, router};
+use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
-use cc_lb_storage_api::{AuditQueryScope, AuditStore};
+use cc_lb_storage_api::{
+    AuditQueryScope, AuditStore, UpstreamCreate, UpstreamStore, upstream::UpstreamKind,
+};
 use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 struct TestResponse {
     status: StatusCode,
@@ -679,4 +683,740 @@ async fn concurrent_same_name_create_has_one_winner() {
     assert_eq!(conflict.status, StatusCode::CONFLICT);
     assert_eq!(body(conflict)["error"], "upstream_name_conflict");
     assert_eq!(body(conflict)["existing_upstream_id"], body(created)["id"]);
+}
+
+fn oauth_bundle_json(
+    access_token: &str,
+    refresh_token: &str,
+    account_id: Option<&str>,
+    project_id: Option<&str>,
+    never_refresh: bool,
+) -> Value {
+    json!({
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expires_at_unix_secs": 1_900_000_000u64,
+        "refresh_token_expires_at_unix_secs": null,
+        "account_id": account_id,
+        "project_id": project_id,
+        "scopes": ["openid", "profile"],
+        "never_refresh": never_refresh
+    })
+}
+
+#[tokio::test]
+async fn access_only_oauth_create_persists_no_refresh_secret()
+-> Result<(), Box<dyn std::error::Error>> {
+    for kind in ["openai_oauth", "gemini_oauth"] {
+        let (_dir, storage) = new_store().await;
+        let response = request(
+            router(test_state(storage.clone())),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("{kind}-access-only"),
+                "kind": kind,
+                "oauth_tokens": oauth_bundle_json(
+                    "access-only-test-token",
+                    "",
+                    None,
+                    (kind == "gemini_oauth").then_some("test-project"),
+                    true
+                )
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::CREATED,
+            "{kind}: {}",
+            body(&response)
+        );
+        let id = Uuid::parse_str(
+            body(&response)
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing upstream id")?,
+        )?;
+        let record = UpstreamStore::get_by_id(storage.as_ref(), id)
+            .await?
+            .ok_or("created upstream is missing")?;
+        assert!(record.oauth_never_refresh);
+        let bundle = record
+            .oauth_credentials
+            .ok_or("missing stored credentials")?
+            .decrypt(&AeadService::from_master_key([0; 32]), id.as_bytes())?;
+        assert_eq!(bundle.access_token, "access-only-test-token");
+        assert_eq!(bundle.refresh_token, "");
+        assert_eq!(bundle.refresh_token_expires_at_unix_secs, None);
+        assert!(bundle.never_refresh);
+        assert_eq!(bundle.expires_at_unix_secs, 1_900_000_000);
+        let rendered = body(&response).to_string();
+        assert!(!rendered.contains("access-only-test-token"));
+        assert!(body(&response).get("oauth_tokens").is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_only_oauth_update_replaces_previous_refresh_secret()
+-> Result<(), Box<dyn std::error::Error>> {
+    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+        let (_dir, storage) = new_store().await;
+        let id = Uuid::new_v4();
+        let previous = cc_lb_aead::OAuthTokenBundle {
+            access_token: "previous-access-test-token".to_owned(),
+            refresh_token: "previous-refresh-test-token".to_owned(),
+            expires_at_unix_secs: 1_900_000_000,
+            refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned()),
+            scopes: Vec::new(),
+            never_refresh: false,
+        };
+        let encrypted = cc_lb_aead::EncryptedOAuthTokens::encrypt(
+            &AeadService::from_master_key([0; 32]),
+            &previous,
+            id.as_bytes(),
+        )?;
+        let original = UpstreamStore::create(
+            storage.as_ref(),
+            UpstreamCreate {
+                id,
+                name: format!("{}-access-update", kind.as_str()),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                    tokens: encrypted,
+                    never_refresh: false,
+                }),
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await?;
+        let response = request(
+            router(test_state(storage.clone())),
+            "PUT",
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({
+                "oauth_tokens": oauth_bundle_json(
+                    "replacement-access-test-token",
+                    "",
+                    None,
+                    (kind == UpstreamKind::GeminiOauth).then_some("test-project"),
+                    true
+                )
+            })),
+            Some(&format!("W/\"{}\"", original.revision)),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{}: {}",
+            kind.as_str(),
+            body(&response)
+        );
+        let stored = UpstreamStore::get_by_id(storage.as_ref(), id)
+            .await?
+            .ok_or("updated upstream is missing")?;
+        assert!(stored.oauth_never_refresh);
+        assert_eq!(
+            stored.oauth_token_generation,
+            original.oauth_token_generation + 1
+        );
+        let bundle = stored
+            .oauth_credentials
+            .as_ref()
+            .ok_or("missing stored credentials")?
+            .decrypt(&AeadService::from_master_key([0; 32]), id.as_bytes())?;
+        assert_eq!(bundle.access_token, "replacement-access-test-token");
+        assert_eq!(bundle.refresh_token, "");
+        assert!(bundle.never_refresh);
+        assert_eq!(bundle.refresh_token_expires_at_unix_secs, None);
+        assert!(
+            !body(&response)
+                .to_string()
+                .contains("replacement-access-test-token")
+        );
+        for (refresh_token, refresh_expiry) in [
+            ("unexpected-refresh-test-token", None),
+            ("", Some(1_950_000_000u64)),
+        ] {
+            let mut invalid = oauth_bundle_json(
+                "rejected-access-test-token",
+                refresh_token,
+                None,
+                (kind == UpstreamKind::GeminiOauth).then_some("test-project"),
+                true,
+            );
+            invalid
+                .as_object_mut()
+                .ok_or("bundle is not an object")?
+                .insert(
+                    "refresh_token_expires_at_unix_secs".to_owned(),
+                    json!(refresh_expiry),
+                );
+            let rejected = request(
+                router(test_state(storage.clone())),
+                "PUT",
+                &format!("/admin/v1/upstreams/{id}"),
+                Some(json!({ "oauth_tokens": invalid })),
+                Some(&format!("W/\"{}\"", stored.revision)),
+            )
+            .await;
+            assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+            let unchanged = UpstreamStore::get_by_id(storage.as_ref(), id)
+                .await?
+                .ok_or("upstream disappeared after rejected update")?;
+            assert_eq!(
+                unchanged.oauth_token_generation,
+                stored.oauth_token_generation
+            );
+            assert_eq!(unchanged.revision, stored.revision);
+            assert_eq!(
+                unchanged
+                    .oauth_credentials
+                    .as_ref()
+                    .map(cc_lb_aead::EncryptedOAuthTokens::ciphertext),
+                stored
+                    .oauth_credentials
+                    .as_ref()
+                    .map(cc_lb_aead::EncryptedOAuthTokens::ciphertext)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_only_oauth_rejects_mixed_refresh_credentials_without_write()
+-> Result<(), Box<dyn std::error::Error>> {
+    for kind in ["openai_oauth", "gemini_oauth"] {
+        for (refresh_token, refresh_expiry) in [
+            ("unexpected-refresh-test-token", None),
+            ("", Some(1_950_000_000u64)),
+        ] {
+            let (_dir, storage) = new_store().await;
+            let mut bundle = oauth_bundle_json(
+                "access-only-test-token",
+                refresh_token,
+                None,
+                (kind == "gemini_oauth").then_some("test-project"),
+                true,
+            );
+            bundle
+                .as_object_mut()
+                .ok_or("bundle is not an object")?
+                .insert(
+                    "refresh_token_expires_at_unix_secs".to_owned(),
+                    json!(refresh_expiry),
+                );
+            let app = router(test_state(storage));
+            let response = request(
+                app.clone(),
+                "POST",
+                "/admin/v1/upstreams",
+                Some(json!({
+                    "name": format!("{kind}-mixed"),
+                    "kind": kind,
+                    "oauth_tokens": bundle
+                })),
+                None,
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::BAD_REQUEST);
+            assert!(
+                !body(&response)
+                    .to_string()
+                    .contains("unexpected-refresh-test-token")
+            );
+            let list = request(app, "GET", "/admin/v1/upstreams", None, None).await;
+            assert_eq!(list.status, StatusCode::OK);
+            assert_eq!(
+                body(&list)
+                    .get("upstreams")
+                    .and_then(Value::as_array)
+                    .ok_or("missing upstreams")?
+                    .len(),
+                0
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_oauth_create_derives_account_id_and_does_not_disclose_tokens() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage.clone()));
+    let access_token = "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiand0LWFjY291bnQifX0.signature";
+    let refresh_token = "openai-refresh-secret";
+
+    let response = request(
+        app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-import",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                access_token,
+                refresh_token,
+                None,
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::CREATED);
+    assert_eq!(body(&response)["kind"], "openai_oauth");
+    let response_text = body(&response).to_string();
+    assert!(!response_text.contains(access_token));
+    assert!(!response_text.contains(refresh_token));
+    assert!(body(&response).get("oauth_tokens").is_none());
+    assert!(body(&response).get("access_token").is_none());
+    assert!(body(&response).get("refresh_token").is_none());
+
+    let id = Uuid::parse_str(body(&response)["id"].as_str().unwrap()).unwrap();
+    let stored = UpstreamStore::get_by_id(storage.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle = stored
+        .oauth_credentials
+        .unwrap()
+        .decrypt(&AeadService::from_master_key([0; 32]), id.as_bytes())
+        .unwrap();
+    assert_eq!(bundle.account_id.as_deref(), Some("jwt-account"));
+    assert_eq!(bundle.access_token, access_token);
+    assert_eq!(bundle.refresh_token, refresh_token);
+    assert!(!bundle.never_refresh);
+}
+
+#[tokio::test]
+async fn openai_oauth_update_accepts_bundle_and_does_not_disclose_tokens() {
+    let (_dir, storage) = new_store().await;
+    let upstream = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "openai-update".to_owned(),
+            kind: UpstreamKind::OpenaiOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+    let app = router(test_state(storage.clone()));
+    let access_token = "openai-update-access-secret";
+    let refresh_token = "openai-update-refresh-secret";
+
+    let response = request(
+        app,
+        "PUT",
+        &format!("/admin/v1/upstreams/{}", upstream.id),
+        Some(json!({
+            "oauth_tokens": oauth_bundle_json(
+                access_token,
+                refresh_token,
+                Some("explicit-account"),
+                None,
+                false
+            )
+        })),
+        Some("W/\"1\""),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    let response_text = body(&response).to_string();
+    assert!(!response_text.contains(access_token));
+    assert!(!response_text.contains(refresh_token));
+    assert!(body(&response).get("oauth_tokens").is_none());
+    assert!(body(&response).get("access_token").is_none());
+    assert!(body(&response).get("refresh_token").is_none());
+
+    let stored = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle = stored
+        .oauth_credentials
+        .unwrap()
+        .decrypt(
+            &AeadService::from_master_key([0; 32]),
+            upstream.id.as_bytes(),
+        )
+        .unwrap();
+    assert_eq!(bundle.account_id.as_deref(), Some("explicit-account"));
+    assert_eq!(bundle.access_token, access_token);
+    assert_eq!(bundle.refresh_token, refresh_token);
+}
+
+#[tokio::test]
+async fn openai_oauth_update_rejects_api_key_value() {
+    let (_dir, storage) = new_store().await;
+    let upstream = UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            id: Uuid::new_v4(),
+            name: "openai-update-api-key".to_owned(),
+            kind: UpstreamKind::OpenaiOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: None,
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = request(
+        router(test_state(storage)),
+        "PUT",
+        &format!("/admin/v1/upstreams/{}", upstream.id),
+        Some(json!({ "api_key_value": "sk-openai-secret" })),
+        Some("W/\"1\""),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "unexpected_api_key");
+}
+
+#[tokio::test]
+async fn openai_oauth_import_rejects_refresh_token_in_access_only_mode() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage.clone()));
+
+    let response = request(
+        app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-long-lived",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "openai-access",
+                "openai-refresh",
+                Some("account"),
+                None,
+                true
+            )
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "invalid_oauth_tokens");
+    assert!(!body(&response).to_string().contains("openai-refresh"));
+    let list = request(
+        router(test_state(storage)),
+        "GET",
+        "/admin/v1/upstreams",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK);
+    assert!(body(&list)["upstreams"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gemini_oauth_requires_project_id_and_persists_body_project_id_without_secrets() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage.clone()));
+    let missing_project = request(
+        app.clone(),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "gemini-missing-project",
+            "kind": "gemini_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "gemini-access",
+                "gemini-refresh",
+                None,
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(missing_project.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&missing_project)["error"], "missing_project_id");
+
+    let access_token = "gemini-access-secret";
+    let refresh_token = "gemini-refresh-secret";
+    let created = request(
+        app,
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "gemini-import",
+            "kind": "gemini_oauth",
+            "project_id": "project-from-request",
+            "oauth_tokens": oauth_bundle_json(
+                access_token,
+                refresh_token,
+                None,
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let response_text = body(&created).to_string();
+    assert!(!response_text.contains(access_token));
+    assert!(!response_text.contains(refresh_token));
+
+    let id = Uuid::parse_str(body(&created)["id"].as_str().unwrap()).unwrap();
+    let stored = UpstreamStore::get_by_id(storage.as_ref(), id)
+        .await
+        .unwrap()
+        .unwrap();
+    let bundle = stored
+        .oauth_credentials
+        .unwrap()
+        .decrypt(&AeadService::from_master_key([0; 32]), id.as_bytes())
+        .unwrap();
+    assert_eq!(bundle.project_id.as_deref(), Some("project-from-request"));
+}
+
+#[tokio::test]
+async fn gemini_oauth_rejects_api_key_import() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "gemini-api-key-mismatch",
+            "kind": "gemini_oauth",
+            "api_key_value": "AIza-secret",
+            "project_id": "project",
+            "oauth_tokens": oauth_bundle_json(
+                "gemini-access",
+                "gemini-refresh",
+                None,
+                Some("project"),
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "invalid_gemini_oauth_credential");
+}
+
+#[tokio::test]
+async fn anthropic_and_api_key_oauth_imports_remain_rejected() {
+    for (index, kind) in ["anthropic_oauth", "openai_api_key"]
+        .into_iter()
+        .enumerate()
+    {
+        let (_dir, storage) = new_store().await;
+        let response = request(
+            router(test_state(storage)),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("oauth-rejected-{index}"),
+                "kind": kind,
+                "oauth_tokens": oauth_bundle_json(
+                    "access-secret",
+                    "refresh-secret",
+                    Some("account"),
+                    None,
+                    false
+                ),
+                "skip_preflight": true
+            })),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(body(&response)["error"], "unexpected_oauth_tokens");
+    }
+}
+
+#[tokio::test]
+async fn openai_oauth_rejects_api_key_value_on_create() {
+    let (_dir, storage) = new_store().await;
+    let response = request(
+        router(test_state(storage)),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-api-key-mismatch",
+            "kind": "openai_oauth",
+            "api_key_value": "sk-openai-secret"
+        })),
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(body(&response)["error"], "unexpected_api_key");
+}
+
+#[tokio::test]
+async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default() {
+    for (index, kind) in ["openai_api_key", "gemini_api_key"].into_iter().enumerate() {
+        let (_dir, storage) = new_store().await;
+        let response = request(
+            router(test_state(storage)),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("non-anthropic-default-preflight-{index}"),
+                "kind": kind,
+                "api_key_value": "provider-secret-key"
+            })),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::CREATED);
+        assert_eq!(body(&response)["kind"], kind);
+    }
+}
+
+#[tokio::test]
+async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updates() {
+    let (_dir, storage) = new_store().await;
+    let state = test_state(storage);
+    let created = request(
+        router(state.clone()),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-oauth-patch",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "access-1",
+                "refresh-1",
+                Some("acct-1"),
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = body(&created)["id"].as_str().unwrap().to_owned();
+
+    let disabled = request(
+        router(state.clone()),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": false })),
+        Some("1"),
+    )
+    .await;
+    assert_eq!(disabled.status, StatusCode::OK);
+    assert_eq!(body(&disabled)["enabled"], false);
+    assert_eq!(
+        disabled.headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some("W/\"2\"")
+    );
+
+    let other = request(
+        router(state.clone()),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "taken-oauth-name",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "other-access",
+                "other-refresh",
+                Some("other-acct"),
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(other.status, StatusCode::CREATED);
+
+    let conflicting = request(
+        router(state.clone()),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "name": "taken-oauth-name",
+            "enabled": true,
+            "oauth_tokens": oauth_bundle_json(
+                "should-not-commit",
+                "should-not-commit-refresh",
+                Some("acct-conflict"),
+                None,
+                false
+            )
+        })),
+        Some("\"2\""),
+    )
+    .await;
+    assert_eq!(conflicting.status, StatusCode::CONFLICT);
+    let uuid = Uuid::parse_str(&id).unwrap();
+    let unchanged = UpstreamStore::get_by_id(state.storage.as_ref().unwrap().as_ref(), uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.revision, 2);
+    assert_eq!(unchanged.oauth_token_generation, 1);
+
+    let combined = request(
+        router(state),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "name": "openai-oauth-renamed",
+            "enabled": true,
+            "oauth_tokens": oauth_bundle_json(
+                "access-2",
+                "refresh-2",
+                Some("acct-2"),
+                None,
+                false
+            )
+        })),
+        Some("\"2\""),
+    )
+    .await;
+    assert_eq!(combined.status, StatusCode::OK);
+    assert_eq!(body(&combined)["name"], "openai-oauth-renamed");
+    assert_eq!(body(&combined)["enabled"], true);
+    assert_eq!(
+        combined.headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some("W/\"3\"")
+    );
 }

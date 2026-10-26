@@ -493,6 +493,8 @@ async fn complete_oauth_draft(
         // lifetime is never substituted.
         expires_at_unix_secs: credentials.expires_at,
         refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
+        account_id: None,
+        project_id: None,
         scopes: credentials.scopes,
         never_refresh: mode.never_refresh(),
     };
@@ -950,6 +952,8 @@ async fn complete_oauth(
         // lifetime is never substituted.
         expires_at_unix_secs: credentials.expires_at,
         refresh_token_expires_at_unix_secs: credentials.refresh_token_expires_at_unix_secs,
+        account_id: None,
+        project_id: None,
         scopes: credentials.scopes,
         never_refresh: mode.never_refresh(),
     };
@@ -1352,7 +1356,7 @@ fn oauth_reconnect_refresh_task(
     }
 }
 
-async fn seed_oauth_bootstrap_tasks(
+pub(super) async fn seed_oauth_bootstrap_tasks(
     state: &AdminState,
     upstream: &UpstreamRecord,
 ) -> Result<(), SchedulerError> {
@@ -1420,7 +1424,7 @@ async fn rollback_oauth_draft_creation(
 /// Rebuilds the serving replica's dynamic view from the committed state left
 /// after a post-commit step failed (and any compensation ran). The caller
 /// still returns that step's original error response unchanged.
-async fn rebuild_after_committed_failure(state: &AdminState, step: &'static str) {
+pub(super) async fn rebuild_after_committed_failure(state: &AdminState, step: &'static str) {
     if let Err(error) = super::apply_dynamic_view_after_mutation(state).await {
         tracing::error!(
             error = %error,

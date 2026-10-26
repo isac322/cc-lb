@@ -81,6 +81,8 @@ enum Reply {
         body: Bytes,
     },
     Transport,
+    /// An SSE 200 that yields `first`, then the upstream connection resets.
+    SseThenDisconnect(Bytes),
     /// A response whose body is never-ending: `chunks_before_stall` 64 KiB
     /// chunks, then it stalls forever.
     Unending {
@@ -184,6 +186,7 @@ struct Fixture {
     lifecycle: Lifecycle,
     dispatch: Arc<ScriptedDispatch>,
     quota_cache: Arc<RecordingQuotaCache>,
+    dynamic_view: Arc<DynamicViewHolder>,
 }
 
 impl Fixture {
@@ -226,9 +229,10 @@ impl Fixture {
             .subscription_quota_routing_max_staleness_secs(60)
             .upstream_records(records)
             .build();
+        let dynamic_view = Arc::new(DynamicViewHolder::new(view));
         let lifecycle = Lifecycle::new_with_dynamic_view(
             authn.authn,
-            Arc::new(DynamicViewHolder::new(view)),
+            dynamic_view.clone(),
             dispatch.clone(),
             LifecycleConfig::default(),
             Arc::new(TestClock::new_at_secs(NOW)),
@@ -237,6 +241,7 @@ impl Fixture {
             lifecycle,
             dispatch,
             quota_cache,
+            dynamic_view,
         }
     }
 
@@ -536,6 +541,17 @@ impl UpstreamDispatch for ScriptedDispatch {
                 response
                     .headers_mut()
                     .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                return Ok(response);
+            }
+            Reply::SseThenDisconnect(first) => {
+                let stream = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(first);
+                    yield Err(std::io::Error::other("upstream connection reset"));
+                };
+                let mut response = Response::new(Body::from_stream(stream));
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
                 return Ok(response);
             }
         };
@@ -1187,6 +1203,27 @@ struct LimitOutcome {
 /// drains its channel and force-finalizes pending reconciliations, so the
 /// engine state read afterwards is final without waiting on a timer.
 async fn run_with_limits(upstreams: Vec<TestUpstream>) -> (Fixture, LimitOutcome) {
+    run_with_limits_request(
+        upstreams,
+        messages_request(Bytes::from_static(REQUEST_BODY)),
+        ClientRead::Full,
+    )
+    .await
+}
+
+/// How the client consumes the response in [`run_with_limits_request`].
+#[derive(Clone, Copy)]
+enum ClientRead {
+    Full,
+    /// The client hangs up after the response head, before reading the body.
+    CancelBeforeBody,
+}
+
+async fn run_with_limits_request(
+    upstreams: Vec<TestUpstream>,
+    request: Request<Bytes>,
+    client_read: ClientRead,
+) -> (Fixture, LimitOutcome) {
     let test_bus = TestLifecycleBus::new();
     let mut lifecycle_events = test_bus.bus.attach_lifecycle_writer(64);
     let reconcile_rx = test_bus.bus.attach_lifecycle_limit_reconcile(64);
@@ -1210,7 +1247,24 @@ async fn run_with_limits(upstreams: Vec<TestUpstream>) -> (Fixture, LimitOutcome
             .with_event_bus(test_bus.bus_arc())
     });
 
-    let (status, _body) = fixture.send().await;
+    let status = match client_read {
+        ClientRead::Full => fixture.send_request(request).await.0,
+        ClientRead::CancelBeforeBody => {
+            let auth = fixture
+                .lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("test request authenticates");
+            let response = fixture
+                .lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("lifecycle handles request");
+            let status = response.status();
+            drop(response);
+            status
+        }
+    };
     let reserved_decisions = tokio::time::timeout(Duration::from_secs(3), async {
         let mut reserved = 0_u32;
         loop {
@@ -1271,10 +1325,9 @@ async fn limit_reservation_reconciled_once_across_failover() {
 
 #[tokio::test]
 async fn limit_reservation_matches_single_upstream_relay_when_failover_exhausted() {
-    // A relayed upstream error hands its reservation to the engine's TTL
-    // sweeper rather than the success reconcile path. An exhausted failover
-    // must leave exactly the state a single relayed 429 leaves: one held
-    // reservation, not one per tried upstream.
+    // A relayed upstream error refunds its reservation on the terminal event.
+    // An exhausted failover must leave exactly the state a single relayed 429
+    // leaves: the reservation refunded once, not held per tried upstream.
     let (baseline_fixture, baseline) = run_with_limits(vec![
         oauth(1, "oauth").replies(vec![Reply::Status(StatusCode::TOO_MANY_REQUESTS)]),
     ])
@@ -1291,11 +1344,168 @@ async fn limit_reservation_matches_single_upstream_relay_when_failover_exhausted
     assert_eq!(fixture.hosts(), vec![host("oauth"), host("key")]);
     assert_eq!(outcome.reserved_decisions, 1);
     assert_eq!(outcome.estimator_calls, 1);
-    assert_eq!(outcome.requests_remaining, REQUEST_CAP - 1);
+    assert_eq!(outcome.requests_remaining, REQUEST_CAP);
     assert_eq!(outcome.requests_remaining, baseline.requests_remaining);
+    assert_eq!(outcome.tokens_remaining, TOKEN_CAP);
     assert_eq!(outcome.tokens_remaining, baseline.tokens_remaining);
-    assert_eq!(outcome.concurrent_in_flight, baseline.concurrent_in_flight);
-    assert!(outcome.concurrent_in_flight <= 1);
+    assert_eq!(outcome.concurrent_in_flight, 0);
+    assert_eq!(baseline.concurrent_in_flight, 0);
+}
+
+/// Asserts the reservation was refunded in full: no request, token, or
+/// concurrent slot stays held after the terminal event.
+fn assert_refunded(outcome: &LimitOutcome, label: &str) {
+    assert_eq!(outcome.reserved_decisions, 1, "{label}: one reservation");
+    assert_eq!(
+        outcome.requests_remaining, REQUEST_CAP,
+        "{label}: request refunded"
+    );
+    assert_eq!(
+        outcome.tokens_remaining, TOKEN_CAP,
+        "{label}: tokens refunded"
+    );
+    assert_eq!(
+        outcome.concurrent_in_flight, 0,
+        "{label}: concurrent slot released"
+    );
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_buffered_upstream_500() {
+    let (fixture, outcome) = run_with_limits(vec![
+        oauth(1, "oauth").replies(vec![Reply::Status(StatusCode::INTERNAL_SERVER_ERROR)]),
+    ])
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fixture.hosts(), vec![host("oauth")]);
+    assert_refunded(&outcome, "buffered 500");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_buffered_upstream_error_body() {
+    let (_fixture, outcome) = run_with_limits(vec![oauth(1, "oauth").replies(vec![Reply::Body {
+        status: StatusCode::BAD_REQUEST,
+        content_type: "application/json",
+        body: Bytes::from_static(
+            br#"{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}"#,
+        ),
+    }])])
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::BAD_REQUEST);
+    assert_refunded(&outcome, "buffered 400");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_streaming_upstream_500() {
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![oauth(1, "oauth").replies(vec![stream_error_reply(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            br#"{"type":"error","error":{"type":"api_error","message":"internal error"}}"#.to_vec(),
+        )])],
+        stream_request(),
+        ClientRead::Full,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_refunded(&outcome, "streaming 500");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_truncated_sse() {
+    let truncated = format!(
+        "{SSE_MESSAGE_START}event: content_block_delta\ndata: {{\"type\":\"content_block_delta\""
+    );
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![oauth(1, "oauth").replies(vec![stream_error_reply(
+            StatusCode::OK,
+            truncated.into_bytes(),
+        )])],
+        stream_request(),
+        ClientRead::Full,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::OK);
+    assert_refunded(&outcome, "truncated SSE");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_mid_stream_provider_error() {
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![oauth(1, "oauth").replies(vec![sse(SSE_MID_STREAM_ERROR)])],
+        stream_request(),
+        ClientRead::Full,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::OK);
+    assert_refunded(&outcome, "mid-stream provider error");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_upstream_disconnect_mid_stream() {
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![
+            oauth(1, "oauth").replies(vec![Reply::SseThenDisconnect(Bytes::from_static(
+                SSE_MESSAGE_START.as_bytes(),
+            ))]),
+        ],
+        stream_request(),
+        ClientRead::Full,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::OK);
+    assert_refunded(&outcome, "upstream disconnect mid-stream");
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_after_transport_error() {
+    let (_fixture, outcome) =
+        run_with_limits(vec![oauth(1, "oauth").replies(vec![Reply::Transport])]).await;
+
+    assert_eq!(outcome.status, StatusCode::BAD_GATEWAY);
+    assert_refunded(&outcome, "transport error");
+}
+
+#[tokio::test]
+async fn limit_reservation_reconciled_after_healthy_stream() {
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![oauth(1, "oauth").replies(vec![sse(SSE_OK)])],
+        stream_request(),
+        ClientRead::Full,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::OK);
+    assert_eq!(outcome.reserved_decisions, 1);
+    assert_eq!(
+        outcome.requests_remaining,
+        REQUEST_CAP - 1,
+        "success counts"
+    );
+    assert_eq!(
+        outcome.tokens_remaining,
+        TOKEN_CAP - 2,
+        "success settles to actual usage"
+    );
+    assert_eq!(outcome.concurrent_in_flight, 0);
+}
+
+#[tokio::test]
+async fn limit_reservation_refunded_when_client_cancels_stream() {
+    let (_fixture, outcome) = run_with_limits_request(
+        vec![oauth(1, "oauth").replies(vec![sse(SSE_OK)])],
+        stream_request(),
+        ClientRead::CancelBeforeBody,
+    )
+    .await;
+
+    assert_eq!(outcome.status, StatusCode::OK);
+    assert_refunded(&outcome, "client cancel");
 }
 
 #[tokio::test]
@@ -1781,4 +1991,1492 @@ async fn sec_13_streamed_key_straddling_store_cap_is_masked()
         assert_clean(stored, &format!("offset {offset}"));
     }
     Ok(())
+}
+
+async fn websocket_gateway_fixture(
+    fixture: Fixture,
+    bytes: usize,
+    slots: usize,
+) -> (
+    cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    Arc<ScriptedDispatch>,
+) {
+    let lifecycle = Arc::new(fixture.lifecycle);
+    let headers = messages_request(Bytes::new()).headers().clone();
+    let auth = lifecycle
+        .authenticate(&headers)
+        .await
+        .expect("fixture authenticates");
+    let gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+        lifecycle, &auth, headers, bytes, slots,
+    );
+    (gateway, fixture.dispatch)
+}
+
+fn websocket_create(lane: &str, previous: Option<&str>) -> Bytes {
+    let mut value = serde_json::json!({
+        "type": "response.create",
+        "stream_id": lane,
+        "model": "gpt-5-codex",
+        "max_output_tokens": 4,
+        "store": false,
+        "input": "gateway regression",
+    });
+    if let Some(previous) = previous {
+        value["previous_response_id"] = serde_json::json!(previous);
+    }
+    Bytes::from(serde_json::to_vec(&value).expect("fixture serializes"))
+}
+
+fn websocket_created(lane: &str, id: &str) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "type": "response.created",
+            "stream_id": lane,
+            "response": {"id": id, "model": "gpt-5-codex", "store": false, "usage": null},
+        }))
+        .expect("fixture serializes"),
+    )
+}
+
+fn websocket_completed(lane: &str, id: &str) -> Bytes {
+    Bytes::from(
+        serde_json::to_vec(&serde_json::json!({
+            "type": "response.completed",
+            "stream_id": lane,
+            "response": {"id": id, "model": "gpt-5-codex", "store": false, "usage": null},
+        }))
+        .expect("fixture serializes"),
+    )
+}
+
+async fn websocket_admit(
+    gateway: &mut cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    frame: Bytes,
+) -> Option<cc_lb_engine::responses_websocket::WebSocketDispatch> {
+    let auth = gateway
+        .authenticate()
+        .await
+        .expect("fresh client check succeeds");
+    gateway
+        .client_message(auth, frame)
+        .await
+        .expect("create is admitted")
+}
+
+async fn websocket_send(
+    gateway: &mut cc_lb_engine::responses_websocket::ResponsesWebSocketGateway,
+    dispatch: &cc_lb_engine::responses_websocket::WebSocketDispatch,
+    connection_id: u64,
+) {
+    let candidate = dispatch.candidates.first().expect("route has a candidate");
+    gateway.assign_connection(
+        dispatch.turn_id,
+        connection_id,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    gateway
+        .validate_send(dispatch.turn_id)
+        .await
+        .expect("current route remains eligible");
+    assert!(gateway.sent(dispatch.turn_id).is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_terminal_status_matches_success_failure_and_cancellation() {
+    use cc_lb_lifecycle::TerminationReason;
+
+    for (kind, expected_status, expected_reason) in [
+        (
+            "response.failed",
+            502,
+            TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+        ),
+        (
+            "client.close",
+            499,
+            TerminationReason::ErrorCode("client_closed_request".to_owned()),
+        ),
+        ("response.completed", 200, TerminationReason::Success),
+    ] {
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let fixture = Fixture::new(vec![TestUpstream::new(
+            50_001,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )])
+        .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
+        let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+        let turn = websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .unwrap();
+        websocket_send(&mut gateway, &turn, 1).await;
+        assert!(
+            gateway
+                .provider_message(1, &websocket_created("main", "resp_terminal_status"))
+                .await
+                .unwrap()
+                .forward
+        );
+        if kind != "client.close" {
+            let terminal = Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": kind,
+                    "stream_id": "main",
+                    "response": {
+                        "id": "resp_terminal_status",
+                        "store": false,
+                        "usage": {
+                            "input_tokens": 10,
+                            "output_tokens": 6,
+                            "total_tokens": 16,
+                            "input_tokens_details": {"cached_tokens": 4},
+                            "output_tokens_details": {"reasoning_tokens": 2},
+                        },
+                    },
+                }))
+                .unwrap(),
+            );
+            assert!(
+                gateway
+                    .provider_message(1, &terminal)
+                    .await
+                    .unwrap()
+                    .forward
+            );
+        }
+        gateway.close();
+        drop(gateway);
+
+        let mut starts = Vec::new();
+        let mut authenticated = Vec::new();
+        let mut terminated = Vec::new();
+        let mut usages = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
+                LifecycleEvent::AuthCompleted {
+                    event_id, result, ..
+                } => {
+                    assert!(result.is_ok(), "{kind} uses the authenticated client rail");
+                    authenticated.push(event_id);
+                }
+                LifecycleEvent::RequestTerminated {
+                    event_id,
+                    reason,
+                    client_status,
+                    ..
+                } => terminated.push((event_id, reason, client_status)),
+                LifecycleEvent::UsageObserved {
+                    event_id, usage, ..
+                } => usages.push((
+                    event_id,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.thinking_tokens,
+                )),
+                _ => {}
+            }
+        }
+        assert_eq!(starts.len(), 1, "{kind} starts exactly one logical turn");
+        assert_eq!(authenticated, starts, "{kind} authenticates that same turn");
+        assert_eq!(terminated.len(), 1, "{kind} terminates exactly once");
+        let (event_id, reason, status) = terminated.pop().unwrap();
+        assert_eq!(
+            starts,
+            vec![event_id.clone()],
+            "{kind} preserves turn identity"
+        );
+        if kind == "client.close" {
+            assert!(usages.is_empty(), "cancellation must not fabricate usage");
+        } else {
+            assert_eq!(usages, vec![(event_id, 6, 6, 4, 2)]);
+        }
+        assert_eq!(reason, expected_reason, "{kind} keeps its terminal reason");
+        assert_eq!(
+            status, expected_status,
+            "{kind} records the logical turn status"
+        );
+        assert!(dispatch.hosts.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn responses_websocket_three_create_fifo_and_parallel_lane_preserve_payloads() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_001,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    let second_frame = websocket_create("main", None);
+    let third_frame = websocket_create("main", None);
+    assert!(
+        websocket_admit(&mut gateway, second_frame.clone())
+            .await
+            .is_none()
+    );
+    assert!(
+        websocket_admit(&mut gateway, third_frame.clone())
+            .await
+            .is_none()
+    );
+    let parallel = websocket_admit(&mut gateway, websocket_create("parallel", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &parallel, 1).await;
+
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_fifo_1"))
+            .await
+            .unwrap()
+            .forward
+    );
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("parallel", "resp_parallel"))
+            .await
+            .unwrap()
+            .forward
+    );
+    let delta = Bytes::from_static(
+        br#"{"type":"response.output_text.delta","stream_id":"parallel","delta":"opaque"}"#,
+    );
+    assert!(gateway.provider_message(1, &delta).await.unwrap().forward);
+    let completed = gateway
+        .provider_message(1, &websocket_completed("parallel", "resp_parallel"))
+        .await
+        .unwrap();
+    assert!(completed.dispatches.is_empty());
+
+    let mut completed = gateway
+        .provider_message(1, &websocket_completed("main", "resp_fifo_1"))
+        .await
+        .unwrap();
+    assert_eq!(completed.dispatches.len(), 1);
+    let second = completed.dispatches.pop().unwrap();
+    assert_eq!(second.frame, second_frame);
+    websocket_send(&mut gateway, &second, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_fifo_2"))
+            .await
+            .unwrap()
+            .forward
+    );
+    let mut completed = gateway
+        .provider_message(1, &websocket_completed("main", "resp_fifo_2"))
+        .await
+        .unwrap();
+    assert_eq!(completed.dispatches.len(), 1);
+    let third = completed.dispatches.pop().unwrap();
+    assert_eq!(third.frame, third_frame);
+    websocket_send(&mut gateway, &third, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_fifo_3"))
+            .await
+            .unwrap()
+            .forward
+    );
+    assert!(
+        gateway
+            .provider_message(1, &websocket_completed("main", "resp_fifo_3"))
+            .await
+            .unwrap()
+            .dispatches
+            .is_empty()
+    );
+    assert!(
+        dispatch.hosts.lock().expect("dispatch log lock").is_empty(),
+        "WS never dispatches through the HTTP body lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_mismatched_lane_and_connection_never_expose_ownership() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_002,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    let error = gateway
+        .provider_message(1, &websocket_created("wrong-lane", "resp_owned"))
+        .await
+        .err()
+        .expect("mismatched lane rejects before expose");
+    assert_eq!(error.code, "invalid_upstream_response");
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_owned"))
+            .await
+            .unwrap()
+            .forward
+    );
+    assert!(
+        gateway
+            .provider_message(1, &websocket_completed("main", "resp_owned"))
+            .await
+            .unwrap()
+            .forward
+    );
+
+    let fork = websocket_admit(&mut gateway, websocket_create("fork", Some("resp_owned")))
+        .await
+        .unwrap();
+    assert_eq!(fork.connection_id, Some(1));
+    let candidate = fork.candidates.first().unwrap();
+    gateway.assign_connection(
+        fork.turn_id,
+        2,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    let error = gateway.validate_send(fork.turn_id).await.unwrap_err();
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    gateway.fail_dispatch(fork.turn_id, &error).await;
+    let duplicate = gateway
+        .provider_message(1, &websocket_completed("main", "resp_owned"))
+        .await
+        .unwrap();
+    assert!(
+        !duplicate.forward,
+        "a known terminal replay is neither exposed nor settled again"
+    );
+    assert!(duplicate.dispatches.is_empty());
+    assert!(duplicate.errors.is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_zero_slots_and_oversize_fail_before_dispatch() {
+    for (byte_cap, slots, expected) in [
+        (1, 64, "request_too_large"),
+        (1_048_576, 0, "overloaded_error"),
+    ] {
+        let fixture = Fixture::new(vec![TestUpstream::new(
+            50_003,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )]);
+        let (mut gateway, dispatch) = websocket_gateway_fixture(fixture, byte_cap, slots).await;
+        let auth = gateway.authenticate().await.unwrap();
+        let error = gateway
+            .client_message(auth, websocket_create("main", None))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected);
+        assert!(dispatch.hosts.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn responses_websocket_close_releases_inflight_queued_and_steer_reservations_once() {
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let limits = vec![
+        Limit {
+            kind: LimitKind::Concurrent,
+            window_secs: 0,
+            cap_micros: 8,
+        },
+        Limit {
+            kind: LimitKind::TotalTokens,
+            window_secs: 60,
+            cap_micros: 100_000,
+        },
+    ];
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_004,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        limits,
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle.with_static_limit_subject(
+            engine,
+            PRINCIPAL.to_owned(),
+            "ws-limit-key".to_owned(),
+            StoredApiKeyRecord {
+                key_hash_b64: "ws-limit-key".to_owned(),
+                status: KeyStatus::Active,
+                ..Default::default()
+            },
+        )
+    });
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_parent"))
+            .await
+            .unwrap()
+            .forward
+    );
+    assert!(
+        websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .is_none()
+    );
+    let steer = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_parent","input":"keep the scope small"}"#);
+    let successor = websocket_admit(&mut gateway, steer).await.unwrap();
+    websocket_send(&mut gateway, &successor, 1).await;
+    assert_eq!(concurrency.current("ws-limit-key"), 3);
+    gateway.close();
+    assert_eq!(concurrency.current("ws-limit-key"), 0);
+    gateway.close();
+    assert_eq!(concurrency.current("ws-limit-key"), 0);
+}
+
+#[tokio::test]
+async fn responses_websocket_idle_key_expiry_or_revocation_rejects_queued_and_new_dispatches() {
+    use cc_lb_control::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
+    use cc_lb_control::api_keys::key_store::KeyStore;
+    use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind, PrincipalStore};
+    use cc_lb_storage_api::{IssueParams, ManagedKeyStore};
+
+    for revoke in [false, true] {
+        let clock = Arc::new(TestClock::new_at_secs(NOW));
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite("sqlite::memory:", clock.clone())
+                .await
+                .unwrap(),
+        );
+        storage.initialize().await.unwrap();
+        let limits = vec![Limit {
+            kind: LimitKind::Concurrent,
+            window_secs: 0,
+            cap_micros: 4,
+        }];
+        let principal = PrincipalStore::create(
+            storage.as_ref(),
+            PrincipalCreate {
+                name: "websocket-key-recheck".to_owned(),
+                kind: PrincipalKind::Human,
+                allowed_models: vec!["*".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: limits.clone(),
+                cache_keepalive: None,
+            },
+            NOW,
+        )
+        .await
+        .unwrap();
+        let principal_id = principal.id.to_string();
+        let generated = cc_lb_control::api_keys::secret::generate_new();
+        let issued = ManagedKeyStore::issue(
+            storage.as_ref(),
+            &principal_id,
+            &generated.key_id,
+            IssueParams {
+                label: "websocket-key-recheck".to_owned(),
+                description: None,
+                expires_at_unix_secs: Some(NOW + 1),
+                limit_overrides: Vec::new(),
+                secret_salt: generated.secret_salt,
+                verify_hash: generated.verify_hash,
+                last_4: generated.last_4,
+                index_hash: generated.index_hash,
+            },
+        )
+        .await
+        .unwrap();
+        let key_storage: Arc<dyn ManagedKeyStore> = storage;
+        let keys = Arc::new(KeyStore::new(key_storage));
+        let authn = Arc::new(BuiltinAuthn::new(keys.clone(), clock.clone()));
+        let view = DynamicViewBuilder::new(0)
+            .principal_view(Arc::new(PrincipalView::for_tests(
+                &principal_id,
+                true,
+                vec!["*".to_owned()],
+                limits,
+                HashMap::new(),
+            )))
+            .signer_factory(Arc::new(ScriptedSignerFactory {
+                credentials: Arc::new(HashMap::from([("openai".to_owned(), Credential::Healthy)])),
+            }))
+            .upstream_records(vec![
+                TestUpstream::new(50_005, "openai", UpstreamKind::OpenaiApiKey).record,
+            ])
+            .build();
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), clock.clone());
+        let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+        let mut events = bus.subscribe_lifecycle();
+        let reconcile = spawn_lifecycle_limit_reconcile_subscriber(
+            bus.attach_lifecycle_limit_reconcile(128),
+            engine.clone(),
+        );
+        let dispatch = Arc::new(ScriptedDispatch {
+            replies: Mutex::new(HashMap::new()),
+            hosts: Mutex::new(Vec::new()),
+            headers: Mutex::new(Vec::new()),
+        });
+        let lifecycle = Arc::new(
+            Lifecycle::new_with_dynamic_view(
+                authn.clone(),
+                Arc::new(DynamicViewHolder::new(view)),
+                dispatch.clone(),
+                LifecycleConfig::default(),
+                clock.clone(),
+            )
+            .with_limit_engine(engine, authn)
+            .with_event_bus(bus),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", generated.plaintext.expose())).unwrap(),
+        );
+        let handshake = lifecycle.authenticate(&headers).await.unwrap();
+        let mut gateway = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+            lifecycle, &handshake, headers, 1_048_576, 64,
+        );
+        assert!(
+            matches!(
+                events.try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+            ),
+            "successful upgrade authentication creates no orphan request lifecycle"
+        );
+        let first = websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .unwrap();
+        websocket_send(&mut gateway, &first, 1).await;
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_before_revoke"))
+            .await
+            .unwrap();
+        assert!(
+            websocket_admit(&mut gateway, websocket_create("main", None))
+                .await
+                .is_none()
+        );
+        if revoke {
+            keys.revoke(&principal_id, &generated.key_id).await.unwrap();
+        } else {
+            clock.advance_secs(2);
+        }
+        let delta = Bytes::from_static(br#"{"type":"response.output_text.delta","stream_id":"main","delta":"already admitted"}"#);
+        assert!(
+            gateway.provider_message(1, &delta).await.unwrap().forward,
+            "key state does not reauthenticate or interrupt provider deltas"
+        );
+        let mut result = gateway
+            .provider_message(1, &websocket_completed("main", "resp_before_revoke"))
+            .await
+            .unwrap();
+        let queued = result.dispatches.pop().unwrap();
+        let candidate = queued.candidates.first().unwrap();
+        gateway.assign_connection(
+            queued.turn_id,
+            1,
+            candidate.upstream_id,
+            &candidate.upstream_name,
+        );
+        let queued_error = gateway.validate_send(queued.turn_id).await.unwrap_err();
+        assert_eq!(queued_error.code, "authentication_error");
+        assert!(
+            gateway
+                .fail_dispatch(queued.turn_id, &queued_error)
+                .await
+                .is_empty()
+        );
+        let auth_error = match gateway.authenticate().await {
+            Ok(_) => panic!("changed key must reject the next create before parse"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            (&auth_error, revoke),
+            (BuiltinAuthError::NotFound, true) | (BuiltinAuthError::Expired, false)
+        ));
+        assert_eq!(
+            gateway.reject_authentication(&auth_error).code,
+            "authentication_error"
+        );
+        gateway.close();
+        reconcile.shutdown().await;
+        assert_eq!(concurrency.current(&issued.key_hash_b64), 0);
+        let mut started = Vec::new();
+        let mut terminated = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                LifecycleEvent::RequestStarted { event_id, .. } => started.push(event_id),
+                LifecycleEvent::RequestTerminated { event_id, .. } => terminated.push(event_id),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            started.len(),
+            3,
+            "two admitted turns and one rejected new create"
+        );
+        assert_eq!(terminated.len(), 3);
+        started.sort();
+        terminated.sort();
+        assert_eq!(started, terminated);
+        started.dedup();
+        assert_eq!(
+            started.len(),
+            3,
+            "reauthentication does not allocate duplicate turn lifecycles"
+        );
+        assert!(dispatch.hosts.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn responses_websocket_midturn_steering_reserves_one_successor_and_keeps_usage_separate() {
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_006,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )])
+    .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_steer_parent"))
+        .await
+        .unwrap();
+    let queued_frame = websocket_create("main", None);
+    assert!(
+        websocket_admit(&mut gateway, queued_frame.clone())
+            .await
+            .is_none()
+    );
+    let first_steer = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_steer_parent","input":"first update"}"#);
+    let second_steer = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_steer_parent","input":"second update"}"#);
+    let successor = websocket_admit(&mut gateway, first_steer)
+        .await
+        .expect("mid-turn steering sends before the parent ends");
+    assert!(
+        websocket_admit(&mut gateway, second_steer.clone())
+            .await
+            .is_none(),
+        "a later control cannot overtake its not-yet-sent first control"
+    );
+    let candidate = successor.candidates.first().unwrap();
+    gateway.assign_connection(
+        successor.turn_id,
+        1,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    gateway.validate_send(successor.turn_id).await.unwrap();
+    let mut controls = gateway.sent(successor.turn_id);
+    assert_eq!(controls.len(), 1);
+    let control = controls.pop().unwrap();
+    assert_eq!(
+        control.turn_id, successor.turn_id,
+        "the second steer does not allocate another response reservation"
+    );
+    assert_eq!(control.frame, second_steer);
+    assert!(gateway.sent(control.turn_id).is_empty());
+    for id in ["steer_first", "steer_second"] {
+        let accepted = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.steer.accepted", "stream_id": "main",
+                "steer": {"id": id, "previous_response_id": "resp_steer_parent"},
+            }))
+            .unwrap(),
+        );
+        assert!(
+            gateway
+                .provider_message(1, &accepted)
+                .await
+                .unwrap()
+                .forward
+        );
+    }
+    let parent_terminal = Bytes::from_static(br#"{"type":"response.incomplete","stream_id":"main","response":{"id":"resp_steer_parent","incomplete_details":{"reason":"steered"},"usage":{"input_tokens":7,"output_tokens":11}}}"#);
+    let terminal = gateway.provider_message(1, &parent_terminal).await.unwrap();
+    assert!(
+        terminal.dispatches.is_empty(),
+        "a sent steering successor owns the lane before queued creates"
+    );
+    let created = Bytes::from_static(br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_steer_successor","previous_response_id":"resp_steer_parent","store":false}}"#);
+    assert!(gateway.provider_message(1, &created).await.unwrap().forward);
+    let completed = Bytes::from_static(br#"{"type":"response.completed","stream_id":"main","response":{"id":"resp_steer_successor","usage":{"input_tokens":3,"output_tokens":5}}}"#);
+    let mut terminal = gateway.provider_message(1, &completed).await.unwrap();
+    assert_eq!(terminal.dispatches.len(), 1);
+    assert_eq!(terminal.dispatches.pop().unwrap().frame, queued_frame);
+    gateway.close();
+
+    let mut starts = Vec::new();
+    let mut ends = Vec::new();
+    let mut usages = HashMap::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::RequestStarted { event_id, .. } => starts.push(event_id),
+            LifecycleEvent::RequestTerminated { event_id, .. } => ends.push(event_id),
+            LifecycleEvent::UsageObserved {
+                event_id, usage, ..
+            } => {
+                assert!(
+                    usages
+                        .insert(event_id, (usage.input_tokens, usage.output_tokens))
+                        .is_none()
+                );
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        starts.len(),
+        3,
+        "parent, queued create, and one steering successor only"
+    );
+    starts.sort();
+    ends.sort();
+    assert_eq!(starts, ends);
+    let mut snapshots: Vec<_> = usages.into_values().collect();
+    snapshots.sort();
+    assert_eq!(
+        snapshots,
+        vec![(3, 5), (7, 11)],
+        "steering never merges parent and successor usage"
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_completed_parent_steering_owns_idle_lane_before_next_create() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_007,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_completed_parent"))
+        .await
+        .unwrap();
+    gateway
+        .provider_message(1, &websocket_completed("main", "resp_completed_parent"))
+        .await
+        .unwrap();
+    let steer = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_completed_parent","input":"continue this response"}"#);
+    let successor = websocket_admit(&mut gateway, steer).await.unwrap();
+    websocket_send(&mut gateway, &successor, 1).await;
+    assert!(
+        websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .is_none()
+    );
+    let created = Bytes::from_static(br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_after_completed","previous_response_id":"resp_completed_parent","store":false}}"#);
+    assert!(gateway.provider_message(1, &created).await.unwrap().forward);
+    let mut terminal = gateway
+        .provider_message(1, &websocket_completed("main", "resp_after_completed"))
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal.dispatches.len(),
+        1,
+        "the next ordinary create starts only after the successor ends"
+    );
+    let next = terminal.dispatches.pop().unwrap();
+    websocket_send(&mut gateway, &next, 1).await;
+}
+
+#[tokio::test]
+async fn responses_websocket_recent_store_false_ids_are_per_provider_connection() {
+    let fixture = Fixture::new(vec![
+        TestUpstream::new(50_008, "openai-first", UpstreamKind::OpenaiApiKey),
+        TestUpstream::new(50_009, "openai-second", UpstreamKind::OpenaiApiKey),
+    ]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    let first_upstream = first.candidates[0].upstream_id;
+    websocket_send(&mut gateway, &first, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_connection_first"))
+        .await
+        .unwrap();
+    gateway
+        .provider_message(1, &websocket_completed("main", "resp_connection_first"))
+        .await
+        .unwrap();
+    let second = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    let fallback = second
+        .candidates
+        .iter()
+        .find(|candidate| candidate.upstream_id != first_upstream)
+        .unwrap();
+    gateway.assign_connection(
+        second.turn_id,
+        2,
+        fallback.upstream_id,
+        &fallback.upstream_name,
+    );
+    gateway.validate_send(second.turn_id).await.unwrap();
+    assert!(gateway.sent(second.turn_id).is_empty());
+    gateway
+        .provider_message(2, &websocket_created("main", "resp_connection_second"))
+        .await
+        .unwrap();
+    gateway
+        .provider_message(2, &websocket_completed("main", "resp_connection_second"))
+        .await
+        .unwrap();
+    let fork = websocket_admit(
+        &mut gateway,
+        websocket_create("fork", Some("resp_connection_first")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fork.connection_id,
+        Some(1),
+        "another provider connection does not erase this connection's session cache"
+    );
+    assert_eq!(fork.candidates.len(), 1);
+    assert_eq!(fork.candidates[0].upstream_id, first_upstream);
+}
+
+#[tokio::test]
+async fn responses_websocket_terminal_releases_concurrency_before_background_settlement() {
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let reconcile_rx = bus.attach_lifecycle_limit_reconcile(128);
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_010,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![Limit {
+            kind: LimitKind::Concurrent,
+            window_secs: 0,
+            cap_micros: 1,
+        }],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle
+            .with_static_limit_subject(
+                engine.clone(),
+                PRINCIPAL.to_owned(),
+                "ws-serial-key".to_owned(),
+                StoredApiKeyRecord {
+                    key_hash_b64: "ws-serial-key".to_owned(),
+                    status: KeyStatus::Active,
+                    ..Default::default()
+                },
+            )
+            .with_event_bus(bus)
+    });
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_serial_first"))
+        .await
+        .unwrap();
+    assert_eq!(concurrency.current("ws-serial-key"), 1);
+    gateway
+        .provider_message(1, &websocket_completed("main", "resp_serial_first"))
+        .await
+        .unwrap();
+    assert_eq!(
+        concurrency.current("ws-serial-key"),
+        0,
+        "response completion, not pricing lag, ends concurrency"
+    );
+    let next = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &next, 1).await;
+    assert_eq!(concurrency.current("ws-serial-key"), 1);
+    gateway.close();
+    assert_eq!(concurrency.current("ws-serial-key"), 0);
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine);
+    reconcile.shutdown().await;
+    assert_eq!(
+        concurrency.current("ws-serial-key"),
+        0,
+        "late settlement never releases a slot twice"
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_early_steering_successor_preserves_parent_and_fifo() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_011,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let parent = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &parent, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_early_parent"))
+        .await
+        .unwrap();
+    let queued = websocket_create("main", None);
+    assert!(
+        websocket_admit(&mut gateway, queued.clone())
+            .await
+            .is_none()
+    );
+    let steer = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_early_parent","input":"steer before the parent terminal arrives"}"#);
+    let successor = websocket_admit(&mut gateway, steer).await.unwrap();
+    websocket_send(&mut gateway, &successor, 1).await;
+    let early_created = Bytes::from_static(br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_early_successor","previous_response_id":"resp_early_parent","store":false}}"#);
+    assert!(
+        gateway
+            .provider_message(1, &early_created)
+            .await
+            .unwrap()
+            .forward
+    );
+    let repeat = Bytes::from_static(br#"{"type":"response.steer","previous_response_id":"resp_early_parent","input":"repeat in the parent protection window"}"#);
+    let repeat_dispatch = websocket_admit(&mut gateway, repeat).await.unwrap();
+    assert_eq!(
+        repeat_dispatch.turn_id, successor.turn_id,
+        "an early id does not allocate a second successor"
+    );
+    assert!(gateway.sent(repeat_dispatch.turn_id).is_empty());
+    let failed = Bytes::from_static(br#"{"type":"response.steer.failed","stream_id":"main","steer":{"id":"late_failed_steer","previous_response_id":"resp_early_parent"},"error":{"code":"response_not_found","message":"parent already completed"}}"#);
+    assert!(
+        gateway.provider_message(1, &failed).await.unwrap().forward,
+        "a late steering failure cannot cancel a committed successor"
+    );
+    assert!(
+        gateway
+            .provider_message(1, &websocket_completed("main", "resp_early_parent"))
+            .await
+            .unwrap()
+            .dispatches
+            .is_empty()
+    );
+    let mut terminal = gateway
+        .provider_message(1, &websocket_completed("main", "resp_early_successor"))
+        .await
+        .unwrap();
+    assert_eq!(terminal.dispatches.len(), 1);
+    assert_eq!(terminal.dispatches.pop().unwrap().frame, queued);
+}
+
+#[tokio::test]
+async fn responses_websocket_durable_bind_failure_never_exposes_response_id() {
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_012,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )])
+    .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let frame = Bytes::from_static(br#"{"type":"response.create","stream_id":"main","model":"gpt-5-codex","store":true,"input":"durable owner is required"}"#);
+    let turn = websocket_admit(&mut gateway, frame).await.unwrap();
+    websocket_send(&mut gateway, &turn, 1).await;
+    let created = Bytes::from_static(br#"{"type":"response.created","stream_id":"main","response":{"id":"resp_must_not_be_exposed","store":true}}"#);
+    let error = gateway
+        .provider_message(1, &created)
+        .await
+        .err()
+        .expect("missing durable storage fails before exposure");
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    assert!(
+        !std::str::from_utf8(&error.to_bytes())
+            .unwrap()
+            .contains("resp_must_not_be_exposed")
+    );
+    let closed = gateway.connection_closed(1, &error.message);
+    assert_eq!(closed.errors.len(), 1);
+    assert!(closed.dispatches.is_empty());
+    gateway.close();
+    let mut started = Vec::new();
+    let mut terminated = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::RequestStarted { event_id, .. } => started.push(event_id),
+            LifecycleEvent::RequestTerminated { event_id, .. } => terminated.push(event_id),
+            _ => {}
+        }
+    }
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        started, terminated,
+        "failed binding still terminates its single turn once"
+    );
+}
+
+#[tokio::test]
+async fn responses_websocket_malformed_terminal_and_connection_error_are_fail_closed() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_013,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let turn = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &turn, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_terminal_owner"))
+        .await
+        .unwrap();
+    let missing_id = Bytes::from_static(br#"{"type":"response.completed","stream_id":"main","response":{"usage":{"input_tokens":7,"output_tokens":11}}}"#);
+    let error = gateway
+        .provider_message(1, &missing_id)
+        .await
+        .err()
+        .expect("a malformed terminal cannot silently finish an arbitrary turn");
+    assert_eq!(error.code, "invalid_upstream_response");
+    let native = Bytes::from_static(br#"{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"websocket_connection_limit_reached","message":"create a new connection"}}"#);
+    let error = gateway
+        .provider_message(1, &native)
+        .await
+        .err()
+        .expect("connection errors must close the owning provider connection");
+    assert_eq!(error.code, "websocket_connection_limit_reached");
+    let closed = gateway.connection_closed(1, &error.message);
+    assert_eq!(closed.errors.len(), 1);
+    assert!(closed.dispatches.is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_reconnect_separates_durable_store_true_from_local_store_false() {
+    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
+
+    // Change real eligibility under explicit FirstPick, not incidental record order.
+    for stored in [false, true] {
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(
+                "sqlite::memory:",
+                Arc::new(TestClock::new_at_secs(NOW)),
+            )
+            .await
+            .unwrap(),
+        );
+        storage.initialize().await.unwrap();
+        let mut upstreams = Vec::new();
+        for (id, name) in [(50_014, "openai-first"), (50_013, "openai-second")] {
+            let mut record = UpstreamStore::create(
+                storage.as_ref(),
+                UpstreamCreate {
+                    id: Uuid::from_u128(id),
+                    name: name.to_owned(),
+                    kind: UpstreamKind::OpenaiApiKey,
+                    base_url: Some(Url::parse(&format!("http://{name}.invalid/")).unwrap()),
+                    api_key_ciphertext: None,
+                    oauth_tokens: None,
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    api_key_access: None,
+                },
+            )
+            .await
+            .unwrap();
+            record.enabled = name == "openai-first";
+            upstreams.push(TestUpstream {
+                record,
+                credential: Credential::Healthy,
+                replies: Vec::new(),
+                quota: Vec::new(),
+            });
+        }
+        let fixture = Fixture::new(upstreams)
+            .with_lifecycle(|lifecycle| lifecycle.with_upstream_affinity_store(storage.clone()));
+        let holder = fixture.dynamic_view.clone();
+        assert_eq!(
+            holder
+                .load()
+                .principal_view
+                .get(PRINCIPAL)
+                .unwrap()
+                .resolved_pipeline(None)
+                .terminal,
+            TerminalStrategy::FirstPick,
+            "this fixture intentionally selects the first eligible candidate",
+        );
+        let dispatch = fixture.dispatch.clone();
+        let lifecycle = Arc::new(fixture.lifecycle);
+        let headers = messages_request(Bytes::new()).headers().clone();
+        let handshake = lifecycle.authenticate(&headers).await.unwrap();
+        let mut first = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+            lifecycle.clone(),
+            &handshake,
+            headers.clone(),
+            1_048_576,
+            64,
+        );
+        let create = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.create", "stream_id": "main", "model": "gpt-5-codex",
+                "store": stored, "input": "create a response before reconnect",
+            }))
+            .unwrap(),
+        );
+        let turn = websocket_admit(&mut first, create).await.unwrap();
+        assert_eq!(
+            turn.candidates.len(),
+            1,
+            "only the initial owner is enabled"
+        );
+        let owner = turn.candidates[0].upstream_id;
+        websocket_send(&mut first, &turn, 1).await;
+        let created = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "response.created", "stream_id": "main",
+                "response": {"id":"resp_before_reconnect", "store": stored},
+            }))
+            .unwrap(),
+        );
+        assert!(first.provider_message(1, &created).await.unwrap().forward);
+        first
+            .provider_message(1, &websocket_completed("main", "resp_before_reconnect"))
+            .await
+            .unwrap();
+        first.close();
+
+        let current = holder.load();
+        let mut records = current.upstreams_snapshot().to_vec();
+        let preferred = records
+            .iter_mut()
+            .find(|record| record.id != owner)
+            .map(|record| {
+                assert!(!record.enabled, "the alternative starts ineligible");
+                record.enabled = true;
+                record.id
+            })
+            .expect("a second upstream exists");
+        assert!(
+            records.iter().all(|record| record.enabled),
+            "the durable owner remains eligible"
+        );
+        assert_ne!(preferred, owner);
+        holder.store(
+            DynamicViewBuilder::new(current.generation)
+                .principal_view(current.principal_view.clone())
+                .signer_factory(current.signer_factory.clone())
+                .upstream_records(records)
+                .build(),
+        );
+        let handshake = lifecycle.authenticate(&headers).await.unwrap();
+        let mut reconnected = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+            lifecycle, &handshake, headers, 1_048_576, 64,
+        );
+        let independent = websocket_admit(&mut reconnected, websocket_create("independent", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            independent.candidates[0].upstream_id, preferred,
+            "independent full history follows current routing"
+        );
+        assert_ne!(independent.candidates[0].upstream_id, owner);
+        let (signed, _) = reconnected
+            .prepare_connection(&independent, &independent.candidates[0])
+            .await
+            .expect("the newly selected upstream can be signed");
+        assert_eq!(signed.host_str(), Some("openai-second.invalid"));
+        websocket_send(&mut reconnected, &independent, 2).await;
+        let auth = reconnected.authenticate().await.unwrap();
+        let continuation = reconnected
+            .client_message(
+                auth,
+                websocket_create("continued", Some("resp_before_reconnect")),
+            )
+            .await;
+        if stored {
+            let continuation = continuation.unwrap().unwrap();
+            assert_eq!(continuation.candidates.len(), 1);
+            assert_eq!(continuation.candidates[0].upstream_id, owner);
+            assert_eq!(
+                continuation.connection_id, None,
+                "durable ownership selects the same upstream, not a dead socket"
+            );
+            websocket_send(&mut reconnected, &continuation, 3).await;
+            let other_principal = "principal-other";
+            let other_lifecycle = Arc::new(
+                Lifecycle::new_with_dynamic_view(
+                    crate::common::managed_authn(other_principal),
+                    Arc::new(DynamicViewHolder::new(
+                        DynamicViewBuilder::new(0)
+                            .principal_view(Arc::new(PrincipalView::for_tests(
+                                other_principal,
+                                true,
+                                vec!["*".to_owned()],
+                                Vec::new(),
+                                HashMap::new(),
+                            )))
+                            .signer_factory(current.signer_factory.clone())
+                            .upstream_records(current.upstreams_snapshot().to_vec())
+                            .build(),
+                    )),
+                    dispatch.clone(),
+                    LifecycleConfig::default(),
+                    Arc::new(TestClock::new_at_secs(NOW)),
+                )
+                .with_upstream_affinity_store(storage.clone()),
+            );
+            let other_headers = messages_request(Bytes::new()).headers().clone();
+            let other_auth = other_lifecycle.authenticate(&other_headers).await.unwrap();
+            assert_eq!(other_auth.principal_id(), other_principal);
+            let mut other = cc_lb_engine::responses_websocket::ResponsesWebSocketGateway::new(
+                other_lifecycle,
+                &other_auth,
+                other_headers,
+                1_048_576,
+                64,
+            );
+            let auth = other.authenticate().await.unwrap();
+            let error = other
+                .client_message(
+                    auth,
+                    websocket_create("cross-principal", Some("resp_before_reconnect")),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code, "upstream_affinity_unavailable",
+                "another principal cannot resolve a stored response through the same upstream"
+            );
+        } else {
+            let error = continuation.unwrap_err();
+            assert_eq!(
+                error.code, "upstream_affinity_unavailable",
+                "connection-local state does not become durable or silently reroute"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_websocket_expired_queued_reservation_rejects_before_sign_or_send() {
+    let concurrency = Arc::new(KeyConcurrencyManager::new());
+    let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let reconcile_rx = bus.attach_lifecycle_limit_reconcile(128);
+    let fixture = Fixture::with_limits(
+        vec![TestUpstream::new(
+            50_016,
+            "openai",
+            UpstreamKind::OpenaiApiKey,
+        )],
+        vec![Limit {
+            kind: LimitKind::Concurrent,
+            window_secs: 0,
+            cap_micros: 4,
+        }],
+    )
+    .with_lifecycle(|lifecycle| {
+        lifecycle
+            .with_static_limit_subject(
+                engine.clone(),
+                PRINCIPAL.to_owned(),
+                "ws-expired-hold".to_owned(),
+                StoredApiKeyRecord {
+                    key_hash_b64: "ws-expired-hold".to_owned(),
+                    status: KeyStatus::Active,
+                    ..Default::default()
+                },
+            )
+            .with_event_bus(bus)
+    });
+    let (mut gateway, dispatch_log) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    gateway
+        .provider_message(1, &websocket_created("main", "resp_before_hold_expiry"))
+        .await
+        .unwrap();
+    while events.try_recv().is_ok() {}
+    assert!(
+        websocket_admit(&mut gateway, websocket_create("main", None))
+            .await
+            .is_none()
+    );
+    let mut ids = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let LifecycleEvent::LimitDecision {
+            decision: LimitDecisionKind::Reserved { reservation_id, .. },
+            ..
+        } = event
+        {
+            ids.push(reservation_id);
+        }
+    }
+    assert_eq!(ids.len(), 1);
+    assert!(!ids[0].is_empty());
+    // The production TTL sweeper retires a reservation through this same API.
+    assert!(engine.refund_by_id(&ids[0]));
+    let mut complete = gateway
+        .provider_message(1, &websocket_completed("main", "resp_before_hold_expiry"))
+        .await
+        .unwrap();
+    let queued = complete.dispatches.pop().unwrap();
+    let candidate = queued.candidates.first().unwrap();
+    let error = gateway
+        .prepare_connection(&queued, candidate)
+        .await
+        .expect_err("an expired hold cannot sign a new connection");
+    assert_eq!(error.code, "reservation_expired");
+    gateway.assign_connection(
+        queued.turn_id,
+        1,
+        candidate.upstream_id,
+        &candidate.upstream_name,
+    );
+    let error = gateway.validate_send(queued.turn_id).await.unwrap_err();
+    assert_eq!(error.code, "reservation_expired");
+    assert!(
+        gateway
+            .fail_dispatch(queued.turn_id, &error)
+            .await
+            .is_empty()
+    );
+    gateway.close();
+    let reconcile = spawn_lifecycle_limit_reconcile_subscriber(reconcile_rx, engine.clone());
+    reconcile.shutdown().await;
+    assert_eq!(concurrency.current("ws-expired-hold"), 0);
+    assert!(!engine.refund_by_id(&ids[0]));
+    assert!(dispatch_log.hosts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn responses_websocket_generate_false_chains_id_without_inventing_usage() {
+    let bus = Arc::new(cc_lb_control::InMemoryBus::new());
+    let mut events = bus.subscribe_lifecycle();
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_017,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )])
+    .with_lifecycle(|lifecycle| lifecycle.with_event_bus(bus));
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let warm = Bytes::from_static(br#"{"type":"response.create","stream_id":"main","model":"gpt-5-codex","store":false,"generate":false,"input":[]}"#);
+    let warm_dispatch = websocket_admit(&mut gateway, warm.clone()).await.unwrap();
+    assert_eq!(warm_dispatch.frame, warm);
+    websocket_send(&mut gateway, &warm_dispatch, 1).await;
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_warm"))
+            .await
+            .unwrap()
+            .forward
+    );
+    let completed = gateway
+        .provider_message(1, &websocket_completed("main", "resp_warm"))
+        .await
+        .unwrap();
+    assert!(completed.forward);
+    assert!(completed.dispatches.is_empty());
+    let continuation = websocket_admit(&mut gateway, websocket_create("main", Some("resp_warm")))
+        .await
+        .unwrap();
+    assert_eq!(continuation.connection_id, Some(1));
+    assert_eq!(continuation.candidates.len(), 1);
+    gateway.close();
+    let mut starts = 0;
+    let mut ends = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            LifecycleEvent::UsageObserved { .. } => {
+                panic!("missing provider usage must not become fabricated zero usage")
+            }
+            LifecycleEvent::RequestStarted { .. } => starts += 1,
+            LifecycleEvent::RequestTerminated { .. } => ends += 1,
+            _ => {}
+        }
+    }
+    assert_eq!((starts, ends), (2, 2));
+}
+
+#[tokio::test]
+async fn responses_websocket_queued_response_id_is_bound_before_creation_or_exposure() {
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_018,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut gateway, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let first = websocket_admit(&mut gateway, websocket_create("main", None))
+        .await
+        .unwrap();
+    websocket_send(&mut gateway, &first, 1).await;
+    let queued = Bytes::from_static(br#"{"type":"response.queued","stream_id":"main","response":{"id":"resp_provider_queued","status":"queued","store":false,"usage":null}}"#);
+    assert!(gateway.provider_message(1, &queued).await.unwrap().forward);
+    let fork = websocket_admit(
+        &mut gateway,
+        websocket_create("fork", Some("resp_provider_queued")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fork.connection_id,
+        Some(1),
+        "a queued response id is already owned before the caller can reference it"
+    );
+    assert_eq!(fork.candidates.len(), 1);
+    assert!(
+        gateway
+            .provider_message(1, &websocket_created("main", "resp_provider_queued"))
+            .await
+            .unwrap()
+            .forward
+    );
+
+    let fixture = Fixture::new(vec![TestUpstream::new(
+        50_019,
+        "openai",
+        UpstreamKind::OpenaiApiKey,
+    )]);
+    let (mut without_store, _) = websocket_gateway_fixture(fixture, 1_048_576, 64).await;
+    let create = Bytes::from_static(br#"{"type":"response.create","stream_id":"main","model":"gpt-5-codex","store":true,"input":"stored queue ownership"}"#);
+    let first = websocket_admit(&mut without_store, create).await.unwrap();
+    websocket_send(&mut without_store, &first, 1).await;
+    let queued = Bytes::from_static(br#"{"type":"response.queued","stream_id":"main","response":{"id":"resp_queued_must_not_escape","status":"queued","store":true,"usage":null}}"#);
+    let error = without_store
+        .provider_message(1, &queued)
+        .await
+        .err()
+        .expect("queued ids must fail closed when durable binding fails");
+    assert_eq!(error.code, "upstream_affinity_unavailable");
+    assert!(
+        !std::str::from_utf8(&error.to_bytes())
+            .unwrap()
+            .contains("resp_queued_must_not_escape")
+    );
 }

@@ -7,8 +7,16 @@
 //!   [`LifecycleEvent::UsageObserved`] and [`LifecycleEvent::StreamCompleted`],
 //! - the cost breakdown carried on [`LifecycleEvent::Priced`].
 //!
-//! On [`LifecycleEvent::RequestTerminated`], the subscriber calls
-//! [`LimitEngine::reconcile_by_id`].
+//! On [`LifecycleEvent::RequestTerminated`], the subscriber settles the
+//! reservation exactly once: successful HTTP responses and all WebSocket turns
+//! with observed usage are reconciled via [`LimitEngine::reconcile_by_id`].
+//! WebSocket interruptions do not erase measured usage. Other outcomes are
+//! refunded in full via [`LimitEngine::refund_by_id`]. The handler hands every committed response's
+//! reservation to this subscriber (`ResponseAccountingGuard::forget`) whatever
+//! its outcome, so no other owner refunds it. Reservations dropped before that
+//! handoff (client cancel, failover pre-commit) are refunded by the handle's
+//! RAII guard; the engine removes the record on first settlement, so the later
+//! terminal event here is a no-op.
 //!
 //! Orphan protection is handled by the `LimitEngine`'s TTL sweeper — it
 //! evicts reservations older than `ttl_secs` regardless of whether the
@@ -24,6 +32,25 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use cc_lb_control::api_keys::limit_engine::LimitEngine;
+
+// A private, statically dispatched boundary lets tests observe real settlement
+// calls without adding public engine hooks or runtime observation state.
+trait ReservationSettlement {
+    fn refund_by_id(&self, id: &str) -> bool;
+    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool;
+}
+
+impl ReservationSettlement for LimitEngine {
+    #[inline]
+    fn refund_by_id(&self, id: &str) -> bool {
+        LimitEngine::refund_by_id(self, id)
+    }
+
+    #[inline]
+    fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool {
+        LimitEngine::reconcile_by_id(self, id, input, output, cost)
+    }
+}
 
 pub const DEFAULT_LIMIT_RECONCILE_MAP_CAP: usize = 4096;
 pub const DEFAULT_LIMIT_RECONCILE_TTL: Duration = Duration::from_secs(300);
@@ -83,6 +110,7 @@ struct Partial {
     reservation_id: Option<String>,
     usage: UsageSnapshot,
     usage_seen: bool,
+    websocket: bool,
     cost_micros: Option<i64>,
     termination: Option<TerminationInfo>,
 }
@@ -132,7 +160,7 @@ async fn subscriber_loop(
             biased;
             event = rx.recv() => {
                 match event {
-                    Some(event) => handle_event(&engine, &mut partials, map_cap, event),
+                    Some(event) => handle_event(engine.as_ref(), &mut partials, map_cap, event),
                     None => break,
                 }
             }
@@ -143,7 +171,7 @@ async fn subscriber_loop(
     }
 
     while let Ok(event) = rx.try_recv() {
-        handle_event(&engine, &mut partials, map_cap, event);
+        handle_event(engine.as_ref(), &mut partials, map_cap, event);
     }
     force_flush_terminations(&engine, &mut partials);
 }
@@ -189,7 +217,7 @@ fn force_flush_terminations(engine: &LimitEngine, partials: &mut HashMap<EventId
 }
 
 fn handle_event(
-    engine: &LimitEngine,
+    engine: &impl ReservationSettlement,
     partials: &mut HashMap<EventId, Partial>,
     map_cap: usize,
     event: LifecycleEvent,
@@ -207,7 +235,11 @@ fn handle_event(
             .increment(1);
             return;
         };
-        let expects_priced = partial.usage_seen && partial.cost_micros.is_none();
+        // Measured WebSocket failures are billable too. Wait for their existing
+        // background pricing event, while unmeasured outcomes refund immediately.
+        let expects_priced = (partial.websocket || matches!(reason, TerminationReason::Success))
+            && partial.usage_seen
+            && partial.cost_micros.is_none();
         let termination = TerminationInfo {
             reason: reason.clone(),
             deadline: now + FINALIZATION_GRACE,
@@ -250,6 +282,11 @@ fn handle_event(
 
 fn merge(partial: &mut Partial, event: LifecycleEvent) {
     match event {
+        LifecycleEvent::ParseCompleted {
+            result: Ok(info), ..
+        } => {
+            partial.websocket = info.method == "GET" && info.path == "/v1/responses";
+        }
         LifecycleEvent::LimitDecision {
             decision: cc_lb_lifecycle::LimitDecisionKind::Reserved { reservation_id, .. },
             ..
@@ -275,7 +312,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
     }
 }
 
-fn finalize(engine: &LimitEngine, partial: Partial, reason: &TerminationReason) {
+fn finalize(engine: &impl ReservationSettlement, partial: Partial, reason: &TerminationReason) {
     let Some(reservation_id) = partial.reservation_id else {
         metrics::counter!(
             "cc_lb_limit_reconcile_subscriber_rows_total",
@@ -292,20 +329,19 @@ fn finalize(engine: &LimitEngine, partial: Partial, reason: &TerminationReason) 
         .increment(1);
         return;
     }
-    // Only reconcile on Success. On errors, handler-side (or TTL sweeper)
-    // handles the refund path — matching legacy behavior.
-    if !matches!(reason, TerminationReason::Success) {
+    // HTTP keeps its existing full-refund error policy. WebSocket turns settle
+    // measured work even when their transport or response ended unsuccessfully.
+    if !partial.usage_seen || (!partial.websocket && !matches!(reason, TerminationReason::Success))
+    {
+        let refunded = engine.refund_by_id(&reservation_id);
+        let outcome = match (refunded, matches!(reason, TerminationReason::Success)) {
+            (false, _) => "already_released",
+            (true, true) => "refunded_no_usage",
+            (true, false) => "refunded_non_success",
+        };
         metrics::counter!(
             "cc_lb_limit_reconcile_subscriber_rows_total",
-            "outcome" => "skipped_non_success",
-        )
-        .increment(1);
-        return;
-    }
-    if !partial.usage_seen {
-        metrics::counter!(
-            "cc_lb_limit_reconcile_subscriber_rows_total",
-            "outcome" => "skipped_no_usage",
+            "outcome" => outcome,
         )
         .increment(1);
         return;
@@ -374,6 +410,269 @@ mod tests {
         s.to_owned()
     }
 
+    fn accounting_fixture() -> (
+        Arc<LimitEngine>,
+        cc_lb_control::api_keys::principal_view::PrincipalView,
+        cc_lb_storage_api::StoredApiKeyRecord,
+        Arc<KeyConcurrencyManager>,
+    ) {
+        use cc_lb_storage_api::principal::{Limit, LimitKind};
+
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(
+            concurrency.clone(),
+            Arc::new(cc_lb_clock::TestClock::new_at_secs(1_800_000_000)),
+        );
+        let limits = vec![
+            Limit {
+                kind: LimitKind::TotalTokens,
+                window_secs: 60,
+                cap_micros: 1_000,
+            },
+            Limit {
+                kind: LimitKind::CostUsd,
+                window_secs: 60,
+                cap_micros: 1_000,
+            },
+            Limit {
+                kind: LimitKind::Concurrent,
+                window_secs: 0,
+                cap_micros: 1,
+            },
+        ];
+        let view = cc_lb_control::api_keys::principal_view::PrincipalView::for_tests(
+            "ws-accounting-principal",
+            true,
+            vec!["gpt-5-codex".to_owned()],
+            limits,
+            HashMap::new(),
+        );
+        let record = cc_lb_storage_api::StoredApiKeyRecord {
+            key_hash_b64: "ws-accounting-key".to_owned(),
+            ..Default::default()
+        };
+        (engine, view, record, concurrency)
+    }
+
+    fn reserved_partial(
+        engine: &Arc<LimitEngine>,
+        view: &cc_lb_control::api_keys::principal_view::PrincipalView,
+        record: &cc_lb_storage_api::StoredApiKeyRecord,
+        method: &str,
+        usage: Option<UsageSnapshot>,
+    ) -> Partial {
+        let Ok(reservation) = engine.reserve(
+            view,
+            record,
+            "ws-accounting-principal",
+            "gpt-5-codex",
+            100,
+            0,
+            Some(200),
+        ) else {
+            panic!("accounting fixture must admit its initial reservation");
+        };
+        let mut partial = Partial {
+            reservation_id: Some(reservation.id().to_owned()),
+            cost_micros: usage.as_ref().map(|_| 25),
+            ..Default::default()
+        };
+        reservation.forget();
+        merge(
+            &mut partial,
+            LifecycleEvent::ParseCompleted {
+                event_id: eid("ws-accounting"),
+                result: Ok(cc_lb_lifecycle::ParseInfo {
+                    path: "/v1/responses".to_owned(),
+                    method: method.to_owned(),
+                    model: Some("gpt-5-codex".to_owned()),
+                    stream: true,
+                    ..Default::default()
+                }),
+            },
+        );
+        if let Some(usage) = usage {
+            merge(
+                &mut partial,
+                LifecycleEvent::UsageObserved {
+                    event_id: eid("ws-accounting"),
+                    usage,
+                    source: UsageSource::NonStreamBody,
+                },
+            );
+        }
+        partial
+    }
+
+    fn remaining_tokens(
+        engine: &LimitEngine,
+        record: &cc_lb_storage_api::StoredApiKeyRecord,
+    ) -> String {
+        let headers = engine.headers_for(&record.key_hash_b64, "ws-accounting-principal");
+        let Some((_, remaining)) = headers
+            .into_iter()
+            .find(|(name, _)| name == "anthropic-ratelimit-tokens-remaining")
+        else {
+            panic!("configured token limit must produce a remaining header");
+        };
+        remaining
+    }
+
+    #[test]
+    fn websocket_interrupted_turn_reconciles_observed_usage_and_cost_once() {
+        use cc_lb_control::api_keys::limit_engine::RejectReason;
+
+        for reason in [
+            TerminationReason::Dropped,
+            TerminationReason::ErrorCode("client_closed_request".to_owned()),
+            TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+        ] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let partial = reserved_partial(
+                &engine,
+                &view,
+                &record,
+                "GET",
+                Some(UsageSnapshot {
+                    input_tokens: 7,
+                    output_tokens: 11,
+                    ..Default::default()
+                }),
+            );
+            let Some(reservation_id) = partial.reservation_id.clone() else {
+                panic!("the turn must retain its reservation identity");
+            };
+            assert_eq!(remaining_tokens(&engine, &record), "900");
+            assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+            finalize(engine.as_ref(), partial, &reason);
+
+            assert_eq!(remaining_tokens(&engine, &record), "982");
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, 25));
+            assert!(!engine.refund_by_id(&reservation_id));
+            assert_eq!(remaining_tokens(&engine, &record), "982");
+            assert!(matches!(
+                engine.reserve(
+                    &view,
+                    &record,
+                    "ws-accounting-principal",
+                    "gpt-5-codex",
+                    0,
+                    0,
+                    Some(976),
+                ),
+                Err(RejectReason::CostRateLimit)
+            ));
+        }
+    }
+
+    #[test]
+    fn websocket_interrupted_turn_without_usage_refunds_and_releases_once() {
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let partial = reserved_partial(&engine, &view, &record, "GET", None);
+        let Some(reservation_id) = partial.reservation_id.clone() else {
+            panic!("the turn must retain its reservation identity");
+        };
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        finalize(engine.as_ref(), partial, &TerminationReason::Dropped);
+
+        assert_eq!(remaining_tokens(&engine, &record), "1000");
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert!(!engine.refund_by_id(&reservation_id));
+        assert!(!engine.reconcile_by_id(&reservation_id, 0, 0, 0));
+        assert_eq!(remaining_tokens(&engine, &record), "1000");
+    }
+
+    #[test]
+    fn http_responses_error_keeps_existing_full_refund_policy() {
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let partial = reserved_partial(
+            &engine,
+            &view,
+            &record,
+            "POST",
+            Some(UsageSnapshot {
+                input_tokens: 7,
+                output_tokens: 11,
+                ..Default::default()
+            }),
+        );
+
+        finalize(
+            engine.as_ref(),
+            partial,
+            &TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+        );
+
+        assert_eq!(remaining_tokens(&engine, &record), "1000");
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+    }
+
+    #[test]
+    fn websocket_failed_usage_waits_for_background_price_before_settlement() {
+        let (engine, view, record, concurrency) = accounting_fixture();
+        let mut partial = reserved_partial(
+            &engine,
+            &view,
+            &record,
+            "GET",
+            Some(UsageSnapshot {
+                input_tokens: 7,
+                output_tokens: 11,
+                ..Default::default()
+            }),
+        );
+        partial.cost_micros = None;
+        let event_id = eid("ws-delayed-price");
+        let mut partials = HashMap::from([(event_id.clone(), partial)]);
+        handle_event(
+            engine.as_ref(),
+            &mut partials,
+            16,
+            LifecycleEvent::RequestTerminated {
+                event_id: event_id.clone(),
+                reason: TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+                client_status: 502,
+                duration_ms: 20,
+                first_body_chunk_ms: None,
+                first_content_delta_ms: None,
+                dns_ms: None,
+                connect_ms: None,
+                connection_reused: None,
+                internal_errors: Vec::new(),
+                proxy_setup_ms: None,
+                setup_timings: Default::default(),
+                io_timings: Default::default(),
+                upstream_body_ms: None,
+                request_body_read_ms: None,
+                request_body_bytes: None,
+                finalize_ms: None,
+                event_kind: None,
+            },
+        );
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+        assert_eq!(remaining_tokens(&engine, &record), "900");
+        assert!(partials.contains_key(&event_id));
+
+        handle_event(
+            engine.as_ref(),
+            &mut partials,
+            16,
+            LifecycleEvent::Priced {
+                event_id: event_id.clone(),
+                cost: cc_lb_request_log::CostBreakdown {
+                    total_micros: Some(25),
+                    ..Default::default()
+                },
+            },
+        );
+        assert!(!partials.contains_key(&event_id));
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert_eq!(remaining_tokens(&engine, &record), "982");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn authoritative_mode_skips_when_reservation_unknown() {
         let (tx, rx) = mpsc::channel(16);
@@ -428,7 +727,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn non_success_termination_skips_reconcile() {
+    async fn non_success_termination_with_released_reservation_is_noop() {
         let (tx, rx) = mpsc::channel(16);
         let engine = build_engine();
         let handle = spawn_lifecycle_limit_reconcile_subscriber(rx, engine.clone());
@@ -499,5 +798,139 @@ mod tests {
         .unwrap();
         drop(tx);
         handle.shutdown().await;
+    }
+
+    struct CountingSettlement<'a> {
+        engine: &'a LimitEngine,
+        refunds: std::cell::Cell<usize>,
+        reconciles: std::cell::Cell<usize>,
+    }
+
+    impl ReservationSettlement for CountingSettlement<'_> {
+        fn refund_by_id(&self, id: &str) -> bool {
+            self.refunds.set(self.refunds.get() + 1);
+            self.engine.refund_by_id(id)
+        }
+
+        fn reconcile_by_id(&self, id: &str, input: u64, output: u64, cost: i64) -> bool {
+            self.reconciles.set(self.reconciles.get() + 1);
+            self.engine.reconcile_by_id(id, input, output, cost)
+        }
+    }
+
+    fn terminal_event(event_id: &str, reason: TerminationReason) -> LifecycleEvent {
+        let client_status = if matches!(reason, TerminationReason::Success) {
+            200
+        } else {
+            502
+        };
+        LifecycleEvent::RequestTerminated {
+            event_id: event_id.to_owned(),
+            reason,
+            client_status,
+            duration_ms: 20,
+            first_body_chunk_ms: None,
+            first_content_delta_ms: None,
+            dns_ms: None,
+            connect_ms: None,
+            connection_reused: None,
+            internal_errors: Vec::new(),
+            proxy_setup_ms: None,
+            setup_timings: Default::default(),
+            io_timings: Default::default(),
+            upstream_body_ms: None,
+            request_body_read_ms: None,
+            request_body_bytes: None,
+            finalize_ms: None,
+            event_kind: None,
+        }
+    }
+
+    #[test]
+    fn real_settlement_invokes_exactly_one_refund_or_reconcile_per_terminal_turn() {
+        for (method, measured, reason) in [
+            ("GET", true, TerminationReason::Dropped),
+            (
+                "GET",
+                true,
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+            ("GET", true, TerminationReason::Success),
+            ("GET", false, TerminationReason::Dropped),
+            ("GET", false, TerminationReason::Success),
+            (
+                "POST",
+                true,
+                TerminationReason::ErrorCode("upstream_stream_error".to_owned()),
+            ),
+        ] {
+            let (engine, view, record, concurrency) = accounting_fixture();
+            let usage = measured.then_some(UsageSnapshot {
+                input_tokens: 7,
+                output_tokens: 11,
+                ..Default::default()
+            });
+            let partial = reserved_partial(&engine, &view, &record, method, usage);
+            let reservation_id = partial.reservation_id.clone().unwrap();
+            let observer = CountingSettlement {
+                engine: engine.as_ref(),
+                refunds: std::cell::Cell::new(0),
+                reconciles: std::cell::Cell::new(0),
+            };
+            let event_id = "ws-exactly-once";
+            let mut partials = HashMap::from([(event_id.to_owned(), partial)]);
+            let terminal = terminal_event(event_id, reason.clone());
+            handle_event(&observer, &mut partials, 16, terminal.clone());
+            let reconciled =
+                measured && (method == "GET" || matches!(reason, TerminationReason::Success));
+            assert_eq!(observer.reconciles.get(), usize::from(reconciled));
+            assert_eq!(observer.refunds.get(), usize::from(!reconciled));
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            assert_eq!(
+                remaining_tokens(&engine, &record),
+                if reconciled { "982" } else { "1000" }
+            );
+            assert!(!partials.contains_key(event_id));
+
+            handle_event(&observer, &mut partials, 16, terminal);
+            assert_eq!(
+                observer.reconciles.get(),
+                usize::from(reconciled),
+                "terminal replay cannot reconcile twice"
+            );
+            assert_eq!(
+                observer.refunds.get(),
+                usize::from(!reconciled),
+                "terminal replay cannot refund twice"
+            );
+            assert!(!engine.refund_by_id(&reservation_id));
+            assert!(!engine.reconcile_by_id(&reservation_id, 7, 11, 25));
+            assert_eq!(
+                remaining_tokens(&engine, &record),
+                if reconciled { "982" } else { "1000" }
+            );
+            assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+            let probe = engine.reserve(
+                &view,
+                &record,
+                "ws-accounting-principal",
+                "gpt-5-codex",
+                0,
+                0,
+                Some(1_000),
+            );
+            if reconciled {
+                assert!(
+                    matches!(
+                        probe,
+                        Err(cc_lb_control::api_keys::limit_engine::RejectReason::CostRateLimit)
+                    ),
+                    "measured cost remains charged after an interrupted WebSocket response"
+                );
+            } else {
+                let probe = probe.expect("a full refund restores the exact cost budget");
+                drop(probe);
+            }
+        }
     }
 }

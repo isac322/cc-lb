@@ -78,12 +78,12 @@ fn main() {
         SchemaEntry {
             impl_generics: "",
             ty: "Upstream",
-            descriptor: "Upstream[AnthropicDirect{base_url:Option<Box<str>>}]",
+            descriptor: "Upstream[AnthropicDirect{base_url:Option<Box<str>>},OpenaiDirect{base_url:Option<Box<str>>},GeminiDirect{base_url:Option<Box<str>>}]",
         },
         SchemaEntry {
             impl_generics: "<'a>",
             ty: "UpstreamRef<'a>",
-            descriptor: "UpstreamRef[AnthropicDirect{base_url:Option<QueryRef>}]",
+            descriptor: "UpstreamRef[AnthropicDirect{base_url:Option<QueryRef>},OpenaiDirect{base_url:Option<QueryRef>},GeminiDirect{base_url:Option<QueryRef>}]",
         },
         SchemaEntry {
             impl_generics: "",

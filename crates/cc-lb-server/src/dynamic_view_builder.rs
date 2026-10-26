@@ -822,7 +822,10 @@ async fn apply_upstreams(
 ) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
     let mut statuses = HashMap::new();
     for upstream in upstreams {
-        let is_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
+        let is_oauth = matches!(
+            upstream.kind,
+            UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+        );
         let last_apply_error = if is_oauth {
             upstream.last_apply_error.clone()
         } else {
@@ -939,14 +942,52 @@ fn validate_upstream(upstream: &UpstreamRecord, aead: &AeadService) -> Result<()
                 });
             }
         }
-        UpstreamKind::AnthropicOauth => {
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
+            if let Err(reason) = resolve_api_key(aead, upstream) {
+                let provider = match upstream.kind {
+                    UpstreamKind::OpenaiApiKey => "openai",
+                    UpstreamKind::GeminiApiKey => "gemini",
+                    _ => unreachable!("provider arm restricts upstream kind"),
+                };
+                return Err(match reason {
+                    ApiKeyResolutionError::Missing => {
+                        format!("{provider} api-key upstream missing api_key_ciphertext")
+                    }
+                    ApiKeyResolutionError::NotDecryptable => {
+                        format!("{provider} api-key upstream credential is not decryptable")
+                    }
+                    ApiKeyResolutionError::NotUtf8 => {
+                        format!("{provider} api-key upstream credential is not valid utf-8")
+                    }
+                    ApiKeyResolutionError::InvalidHeaderValue => {
+                        format!(
+                            "{provider} api-key upstream credential is not a valid header value"
+                        )
+                    }
+                    ApiKeyResolutionError::LegacyEncoding => {
+                        format!(
+                            "{provider} api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream"
+                        )
+                    }
+                });
+            }
+        }
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth => {
+            let provider = match upstream.kind {
+                UpstreamKind::AnthropicOauth => "anthropic",
+                UpstreamKind::OpenaiOauth => "openai",
+                UpstreamKind::GeminiOauth => "gemini",
+                _ => unreachable!("oauth arm restricts upstream kind"),
+            };
             let ciphertext = upstream
                 .oauth_credentials
                 .as_ref()
-                .ok_or_else(|| "anthropic oauth upstream missing oauth credentials".to_owned())?
+                .ok_or_else(|| format!("{provider} oauth upstream missing oauth credentials"))?
                 .ciphertext();
             if ciphertext.len() < 29 {
-                return Err("anthropic oauth credentials ciphertext is corrupt".to_owned());
+                return Err(format!(
+                    "{provider} oauth credentials ciphertext is corrupt"
+                ));
             }
         }
     }
@@ -1035,6 +1076,84 @@ impl SignerFactory for DbCompositeSignerFactory {
                 .build(upstream)
                 .await
             }
+            UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey => {
+                let api_key = resolve_api_key(&self.aead, record).map_err(|reason| {
+                    let provider = match record.kind {
+                        UpstreamKind::OpenaiApiKey => "openai",
+                        UpstreamKind::GeminiApiKey => "gemini",
+                        _ => unreachable!("provider arm restricts upstream kind"),
+                    };
+                    SignerError::MissingCredentials {
+                        reason: match reason {
+                            ApiKeyResolutionError::Missing => {
+                                format!("{provider} api-key upstream has no stored credential")
+                            }
+                            ApiKeyResolutionError::NotDecryptable => {
+                                format!("{provider} api-key upstream credential could not be decrypted; re-set api_key_value for this upstream")
+                            }
+                            ApiKeyResolutionError::NotUtf8 => {
+                                format!("{provider} api-key upstream credential is not valid utf-8")
+                            }
+                            ApiKeyResolutionError::InvalidHeaderValue => {
+                                format!("{provider} api-key upstream credential is not a valid header value; re-set api_key_value for this upstream")
+                            }
+                            ApiKeyResolutionError::LegacyEncoding => {
+                                format!("{provider} api-key upstream credential uses a retired encoding; re-set api_key_value for this upstream")
+                            }
+                        },
+                    }
+                })?;
+                let kind = match record.kind {
+                    UpstreamKind::OpenaiApiKey => {
+                        cc_lb_signer_anthropic_key::ProviderKeyKind::Openai
+                    }
+                    UpstreamKind::GeminiApiKey => {
+                        cc_lb_signer_anthropic_key::ProviderKeyKind::Gemini
+                    }
+                    _ => unreachable!("provider arm restricts upstream kind"),
+                };
+                cc_lb_signer_anthropic_key::ProviderKeySignerFactory::new(kind, api_key.as_str())?
+                    .build(upstream)
+                    .await
+            }
+            UpstreamKind::OpenaiOauth => {
+                let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
+                    SignerError::MissingCredentials {
+                        reason: "openai oauth upstream has no stored credential".to_owned(),
+                    }
+                })?;
+                let tokens = encrypted
+                    .decrypt(&self.aead, record.id.as_bytes())
+                    .map_err(|source| SignerError::SigningFailed {
+                        reason: source.to_string(),
+                    })?;
+                let signer = cc_lb_signer_anthropic_key::OpenaiSubscriptionSigner::new(
+                    tokens.access_token.as_str(),
+                    tokens.account_id.as_deref(),
+                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                    self.clock.clone(),
+                )?;
+                Ok(Arc::new(signer))
+            }
+            UpstreamKind::GeminiOauth => {
+                let encrypted = record.oauth_credentials.as_ref().ok_or_else(|| {
+                    SignerError::MissingCredentials {
+                        reason: "gemini oauth upstream has no stored credential".to_owned(),
+                    }
+                })?;
+                let tokens = encrypted
+                    .decrypt(&self.aead, record.id.as_bytes())
+                    .map_err(|source| SignerError::SigningFailed {
+                        reason: source.to_string(),
+                    })?;
+                let signer = cc_lb_signer_anthropic_key::GeminiSubscriptionSigner::new(
+                    tokens.access_token.as_str(),
+                    tokens.project_id.as_deref(),
+                    tokens.never_refresh.then_some(tokens.expires_at_unix_secs),
+                    self.clock.clone(),
+                )?;
+                Ok(Arc::new(signer))
+            }
             UpstreamKind::AnthropicOauth => {
                 let factory =
                     cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory::for_upstream_name(
@@ -1077,6 +1196,12 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
         (
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
             Upstream::AnthropicDirect { .. }
+        ) | (
+            UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth,
+            Upstream::OpenaiDirect { .. }
+        ) | (
+            UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth,
+            Upstream::GeminiDirect { .. }
         )
     )
 }
@@ -1143,6 +1268,8 @@ mod tests {
                 refresh_token: "long-lived-refresh".to_owned(),
                 expires_at_unix_secs: 1_900_000_000,
                 refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
                 scopes: vec!["messages".to_owned()],
                 never_refresh: true,
             },
@@ -1224,6 +1351,8 @@ mod tests {
                     refresh_token: "valid-refresh".to_owned(),
                     expires_at_unix_secs: 1_900_000_000,
                     refresh_token_expires_at_unix_secs: None,
+                    account_id: None,
+                    project_id: None,
                     scopes: vec!["messages".to_owned()],
                     never_refresh: false,
                 },
@@ -1651,6 +1780,116 @@ mod tests {
         .expect("shape request")
     }
 
+    #[tokio::test]
+    async fn access_only_oauth_signer_rechecks_expiry_before_mutating_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, storage) = storage_fixture(26).await;
+        let stored = create_upstream(&storage, "access-only-expiry").await;
+        let aead = Arc::new(AeadService::from_master_key([19; 32]));
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let clock = Arc::new(TestClock::new_at_secs(1_700_000_000));
+            let mut record = stored.clone();
+            record.kind = kind;
+            record.oauth_never_refresh = true;
+            let mut bundle = oauth_bundle("access-only-test-token", "");
+            bundle.never_refresh = true;
+            bundle.expires_at_unix_secs = 1_700_000_001;
+            bundle.project_id =
+                (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned());
+            record.oauth_credentials = Some(cc_lb_aead::EncryptedOAuthTokens::encrypt(
+                aead.as_ref(),
+                &bundle,
+                record.id.as_bytes(),
+            )?);
+            let factory = DbCompositeSignerFactory::new(
+                vec![record],
+                storage.clone(),
+                aead.clone(),
+                None,
+                clock.clone(),
+            )
+            .with_router_choice_state(stored.name.clone());
+            let upstream = match kind {
+                UpstreamKind::OpenaiOauth => Upstream::OpenaiDirect { base_url: None },
+                UpstreamKind::GeminiOauth => Upstream::GeminiDirect { base_url: None },
+                _ => return Err("unexpected provider kind".into()),
+            };
+            let signer = factory.build(&upstream).await?;
+            let mut fresh_request = shaped_request();
+            fresh_request.headers_mut().insert(
+                "x-request-id",
+                http::HeaderValue::from_static("access-only-expiry-request"),
+            );
+            let fresh = cc_lb_upstream::sign_request(signer.as_ref(), fresh_request).await?;
+            assert_eq!(fresh.body(), &bytes::Bytes::from_static(b"{}"));
+            assert_eq!(
+                fresh.headers().get(http::header::AUTHORIZATION),
+                Some(&http::HeaderValue::from_static(
+                    "Bearer access-only-test-token"
+                ))
+            );
+            assert!(
+                fresh
+                    .headers()
+                    .get(http::header::AUTHORIZATION)
+                    .is_some_and(http::HeaderValue::is_sensitive)
+            );
+            assert_eq!(
+                fresh.headers().get("x-request-id"),
+                Some(&http::HeaderValue::from_static(
+                    "access-only-expiry-request"
+                ))
+            );
+
+            let generate_url = "https://cloudcode-pa.googleapis.com/v1internal:generateContent";
+            let mut malformed_request = shaped_request();
+            malformed_request.set_url(generate_url.parse()?);
+            malformed_request.set_body(bytes::Bytes::from_static(b"not-json"));
+            let parse_failure = if kind == UpstreamKind::GeminiOauth {
+                match cc_lb_upstream::sign_request(signer.as_ref(), malformed_request).await {
+                    Err(SignerError::SigningFailed { reason }) => Some(reason),
+                    result => {
+                        return Err(format!(
+                            "fresh malformed Gemini body must fail parsing: {result:?}"
+                        )
+                        .into());
+                    }
+                }
+            } else {
+                None
+            };
+
+            clock.set_unix_secs(bundle.expires_at_unix_secs);
+            let mut valid_expired_request = shaped_request();
+            valid_expired_request.set_url(generate_url.parse()?);
+            valid_expired_request.set_body(bytes::Bytes::from_static(
+                br#"{"model":"gemini-test","contents":[]}"#,
+            ));
+            let valid_expired =
+                cc_lb_upstream::sign_request(signer.as_ref(), valid_expired_request).await;
+            let mut malformed_expired_request = shaped_request();
+            malformed_expired_request.set_url(generate_url.parse()?);
+            malformed_expired_request.set_body(bytes::Bytes::from_static(b"not-json"));
+            let malformed_expired =
+                cc_lb_upstream::sign_request(signer.as_ref(), malformed_expired_request).await;
+            match (valid_expired, malformed_expired) {
+                (
+                    Err(SignerError::SigningFailed { reason: valid_reason }),
+                    Err(SignerError::SigningFailed { reason: malformed_reason }),
+                ) => {
+                    assert_eq!(valid_reason, malformed_reason);
+                    if let Some(parse_reason) = parse_failure {
+                        assert_ne!(malformed_reason, parse_reason);
+                    }
+                }
+                results => return Err(format!(
+                    "the cached signer must reject both expired requests before body parsing: {results:?}"
+                ).into()),
+            }
+        }
+        Ok(())
+    }
+
     /// SGN-03: the composite factory builds the API-key signer from the
     /// record's own `workspace_id`.
     #[tokio::test]
@@ -1765,6 +2004,8 @@ mod tests {
                 refresh_token: "valid-refresh".to_owned(),
                 expires_at_unix_secs: 1_900_000_000,
                 refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
                 scopes: vec!["messages".to_owned()],
                 never_refresh: false,
             },
@@ -1991,6 +2232,8 @@ mod tests {
             refresh_token: refresh_token.to_owned(),
             expires_at_unix_secs: 1_900_000_000,
             refresh_token_expires_at_unix_secs: None,
+            account_id: None,
+            project_id: None,
             scopes: vec!["messages".to_owned()],
             never_refresh: false,
         }

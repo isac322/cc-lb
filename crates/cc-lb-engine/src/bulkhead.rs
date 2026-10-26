@@ -119,6 +119,26 @@ impl Bulkhead {
             _permit: permit,
         })
     }
+    pub async fn acquire_owned(self: &Arc<Self>) -> Result<OwnedBulkheadGuard, BulkheadError> {
+        let permit = tokio::time::timeout(
+            self.config.acquire_timeout,
+            self.semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| BulkheadError::QueueFull {
+            retry_after: self.config.acquire_timeout,
+        })?
+        .map_err(|_| BulkheadError::QueueFull {
+            retry_after: self.config.acquire_timeout,
+        })?;
+
+        let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.emit_active(active);
+        Ok(OwnedBulkheadGuard {
+            bulkhead: Arc::clone(self),
+            _permit: permit,
+        })
+    }
 
     pub fn active(&self) -> u32 {
         self.in_flight.load(Ordering::SeqCst)
@@ -139,6 +159,21 @@ pub struct BulkheadGuard<'a> {
 }
 
 impl Drop for BulkheadGuard<'_> {
+    fn drop(&mut self) {
+        let active = self
+            .bulkhead
+            .in_flight
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        self.bulkhead.emit_active(active);
+    }
+}
+pub struct OwnedBulkheadGuard {
+    bulkhead: Arc<Bulkhead>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for OwnedBulkheadGuard {
     fn drop(&mut self) {
         let active = self
             .bulkhead
@@ -391,8 +426,14 @@ fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
         return;
     };
 
+    // The ordinary Host header is derived from the request URI by the HTTP/1
+    // client and replaced by `:authority` on HTTP/2; forwarding the
+    // downstream value would point at the proxy's own address, and sending it
+    // alongside `:authority` makes strict HTTP/2 servers reset the stream.
     for (name, value) in source {
-        if let Some(name) = name {
+        if let Some(name) = name
+            && name != http::header::HOST
+        {
             target.append(name, value);
         }
     }
@@ -551,7 +592,10 @@ mod tests {
         shape_request, sign_request,
     };
     use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-    use http::{HeaderMap, HeaderValue, Method, Response, header::CONTENT_ENCODING};
+    use http::{
+        HeaderMap, HeaderValue, Method, Response,
+        header::{CONTENT_ENCODING, HOST},
+    };
     use http_body_util::BodyExt;
     use hyper::{server::conn::http1, service::service_fn};
     use hyper_util::client::legacy::connect::HttpConnector;
@@ -718,6 +762,174 @@ mod tests {
         let _ = server.await;
     }
 
+    #[tokio::test]
+    async fn http1_dispatch_derives_host_from_url_authority() -> TestResult {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let (host_tx, mut host_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |request: Request<hyper::body::Incoming>| {
+                        let hosts: Vec<HeaderValue> =
+                            request.headers().get_all(HOST).iter().cloned().collect();
+                        let _ = host_tx.send(hosts);
+                        async move {
+                            Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                Bytes::from_static(b"ok"),
+                            )))
+                        }
+                    }),
+                )
+                .await;
+        });
+
+        let mut downstream_headers = HeaderMap::new();
+        downstream_headers.insert(HOST, HeaderValue::from_static("127.0.0.1:18489"));
+        let client = build_client(HttpConnector::new(), 1);
+        let base_url = Url::parse(&format!("http://{address}/"))?;
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_with_client(
+                &client,
+                signed_request_with_headers(base_url, downstream_headers).await?,
+            ),
+        )
+        .await??;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = response.into_body().collect().await?.to_bytes();
+        assert_eq!(body, Bytes::from_static(b"ok"));
+
+        let hosts = tokio::time::timeout(Duration::from_secs(5), host_rx.recv())
+            .await?
+            .ok_or("server did not observe the request")?;
+        assert_eq!(hosts, vec![HeaderValue::from_str(&address.to_string())?]);
+
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http2_dispatch_omits_ordinary_host_and_keeps_authority() -> TestResult {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let (observed_tx, mut observed_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Ok(mut connection) = h2::server::handshake(stream).await else {
+                return;
+            };
+            // Each stream is served on its own task so `accept` keeps driving
+            // the connection (and thus the request bodies) concurrently.
+            while let Some(accepted) = connection.accept().await {
+                let observed_tx = observed_tx.clone();
+                tokio::spawn(async move {
+                    let _ = observed_tx.send(serve_h2_stream(accepted).await);
+                });
+            }
+        });
+
+        let mut builder = Client::builder(TokioExecutor::new());
+        builder.http2_only(true);
+        let client: Client<HttpConnector, Full<Bytes>> = builder.build(HttpConnector::new());
+        let base_url = Url::parse(&format!("http://{address}/"))?;
+        let url_authority = address.to_string();
+
+        for incoming_host in [url_authority.as_str(), "127.0.0.1:18489"] {
+            let mut downstream_headers = HeaderMap::new();
+            downstream_headers.insert(HOST, HeaderValue::from_str(incoming_host)?);
+            let request = signed_request_with_headers(base_url.clone(), downstream_headers).await?;
+            let dispatched = tokio::time::timeout(
+                Duration::from_secs(5),
+                dispatch_with_client(&client, request),
+            )
+            .await?;
+            let response = match dispatched {
+                Ok(response) => response,
+                Err(error) if is_h2_protocol_error(&error) => {
+                    return Err(format!(
+                        "incoming Host {incoming_host} caused an HTTP/2 PROTOCOL_ERROR reset: {error}"
+                    )
+                    .into());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            assert_eq!(response.version(), http::Version::HTTP_2);
+            assert_eq!(response.status(), http::StatusCode::OK);
+            let body = response.into_body().collect().await?.to_bytes();
+            assert_eq!(body, Bytes::from_static(b"ok"));
+
+            let (authority, hosts) =
+                tokio::time::timeout(Duration::from_secs(5), observed_rx.recv())
+                    .await?
+                    .ok_or("server did not observe the request")??;
+            assert_eq!(
+                authority.as_deref(),
+                Some(url_authority.as_str()),
+                "incoming Host {incoming_host} must not change :authority"
+            );
+            assert!(
+                hosts.is_empty(),
+                "incoming Host {incoming_host} leaked ordinary host field(s): {hosts:?}"
+            );
+        }
+
+        server.abort();
+        let _ = server.await;
+        Ok(())
+    }
+
+    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    type ObservedH2Request = Result<(Option<String>, Vec<HeaderValue>), String>;
+
+    async fn serve_h2_stream(
+        accepted: Result<(Request<h2::RecvStream>, h2::server::SendResponse<Bytes>), h2::Error>,
+    ) -> ObservedH2Request {
+        let (request, mut respond) = accepted.map_err(|error| error.to_string())?;
+        let authority = request.uri().authority().map(ToString::to_string);
+        let hosts: Vec<HeaderValue> = request.headers().get_all(HOST).iter().cloned().collect();
+        let mut body = request.into_body();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.map_err(|error| error.to_string())?;
+            body.flow_control()
+                .release_capacity(chunk.len())
+                .map_err(|error| error.to_string())?;
+        }
+        let response = Response::builder()
+            .status(http::StatusCode::OK)
+            .body(())
+            .map_err(|error| error.to_string())?;
+        let mut send = respond
+            .send_response(response, false)
+            .map_err(|error| error.to_string())?;
+        send.send_data(Bytes::from_static(b"ok"), true)
+            .map_err(|error| error.to_string())?;
+        Ok((authority, hosts))
+    }
+
+    fn is_h2_protocol_error(error: &DispatchError) -> bool {
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+        while let Some(cause) = current {
+            if cause
+                .downcast_ref::<h2::Error>()
+                .and_then(h2::Error::reason)
+                == Some(h2::Reason::PROTOCOL_ERROR)
+            {
+                return true;
+            }
+            current = cause.source();
+        }
+        false
+    }
+
     fn bulkhead_for_test(semaphore_permits: u32) -> Arc<Bulkhead> {
         Bulkhead::new(
             "test-upstream",
@@ -744,10 +956,19 @@ mod tests {
     }
 
     async fn signed_request_for_url(base_url: Url) -> SignedRequest {
+        signed_request_with_headers(base_url, HeaderMap::new())
+            .await
+            .expect("test request shapes and signs")
+    }
+
+    async fn signed_request_with_headers(
+        base_url: Url,
+        downstream_headers: HeaderMap,
+    ) -> Result<SignedRequest, Box<dyn std::error::Error + Send + Sync>> {
         let upstream = Upstream::AnthropicDirect { base_url: None };
         let context = DialectShapeContext {
             request_id: "test-request".to_owned(),
-            downstream_headers: HeaderMap::new(),
+            downstream_headers,
             method: Method::POST,
             path: "/v1/messages".to_owned(),
             query: None,
@@ -762,12 +983,9 @@ mod tests {
             &context,
             &upstream,
             &principal,
-        )
-        .expect("test request shapes");
+        )?;
 
-        sign_request(&NoopSigner, shaped)
-            .await
-            .expect("test request signs")
+        Ok(sign_request(&NoopSigner, shaped).await?)
     }
 
     struct PassthroughDialect {

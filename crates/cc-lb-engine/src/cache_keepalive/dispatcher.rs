@@ -178,6 +178,13 @@ fn keepalive_upstream_supported(upstream: &UpstreamRecord) -> Result<(), String>
             "AnthropicApiKey keep-alive is disabled until storage-backed signing is available; downstream keys cannot be replayed to Anthropic".to_owned(),
         ),
         UpstreamKind::AnthropicOauth => Ok(()),
+        UpstreamKind::OpenaiApiKey
+        | UpstreamKind::OpenaiOauth
+        | UpstreamKind::GeminiApiKey
+        | UpstreamKind::GeminiOauth => Err(
+            "provider keep-alive is unsupported; provider-specific background replay is not available"
+                .to_owned(),
+        ),
     }
 }
 
@@ -188,6 +195,13 @@ fn direct_anthropic_upstream(upstream: &UpstreamRecord) -> Result<Upstream, Stri
                 base_url: upstream.base_url.clone(),
             })
         }
+        UpstreamKind::OpenaiApiKey
+        | UpstreamKind::OpenaiOauth
+        | UpstreamKind::GeminiApiKey
+        | UpstreamKind::GeminiOauth => Err(
+            "provider API-key keep-alive is unsupported; provider-specific background replay is not available"
+                .to_owned(),
+        ),
     }
 }
 

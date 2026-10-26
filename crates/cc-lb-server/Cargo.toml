@@ -46,7 +46,7 @@ apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
 async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
-axum = { workspace = true, features = ["multipart"] }
+axum = { workspace = true, features = ["multipart", "ws"] }
 bytes.workspace = true
 chrono.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
@@ -101,6 +101,7 @@ tikv-jemallocator = "0.7"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["timeout", "util"] }
 tower-http = { workspace = true, features = ["compression-br", "compression-gzip", "set-header"] }
 tracing.workspace = true

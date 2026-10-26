@@ -390,12 +390,7 @@ fn row_to_binding(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamAffinityB
 }
 
 fn affinity_kind_from_db(value: &str) -> StorageResult<UpstreamAffinityKind> {
-    match value {
-        "anthropic_web_search_encrypted_content" => {
-            Ok(UpstreamAffinityKind::AnthropicWebSearchEncryptedContent)
-        }
-        value => Err(StorageError::Corrupted {
-            message: format!("invalid upstream affinity kind {value}"),
-        }),
-    }
+    UpstreamAffinityKind::from_storage_str(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid upstream affinity kind {value}"),
+    })
 }

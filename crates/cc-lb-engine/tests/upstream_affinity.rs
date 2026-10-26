@@ -21,6 +21,7 @@ use cc_lb_storage_api::{
 use cc_lb_upstream::SignedRequest;
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Request, Response, StatusCode};
+use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -34,6 +35,12 @@ enum ResponseSpec {
     JsonThenError(Bytes),
     Sse(Bytes),
     SseChunks(Vec<Bytes>),
+    /// Yields `first`, waits for `release`, then yields `second`.
+    SseGated {
+        first: Bytes,
+        release: Arc<tokio::sync::Notify>,
+        second: Bytes,
+    },
     SseWithEncoding {
         body: Bytes,
         content_encoding: &'static str,
@@ -93,6 +100,18 @@ impl UpstreamDispatch for RecordingDispatch {
                     for chunk in chunks {
                         yield Ok::<Bytes, io::Error>(chunk);
                     }
+                };
+                ("text/event-stream", None, Body::from_stream(stream))
+            }
+            ResponseSpec::SseGated {
+                first,
+                release,
+                second,
+            } => {
+                let stream = async_stream::stream! {
+                    yield Ok::<Bytes, io::Error>(first);
+                    release.notified().await;
+                    yield Ok::<Bytes, io::Error>(second);
                 };
                 ("text/event-stream", None, Body::from_stream(stream))
             }
@@ -804,7 +823,7 @@ async fn opaque_requests_fail_closed_before_dispatch_when_affinity_is_not_usable
 
 /// #851: an affinity target whose apply status is `ApplyStatus::Error` is no
 /// longer a routing candidate, so the pinned request fails closed with 503
-/// `route_no_upstream_after_filter` instead of dispatching to it. Mirrors the
+/// `upstream_affinity_unavailable` instead of dispatching to it. Mirrors the
 /// disabled-target arm above, which takes the same path through
 /// `build_candidates` → `candidates.retain(affinity target)`.
 #[tokio::test]
@@ -847,7 +866,9 @@ async fn affinity_pinned_to_apply_error_upstream_fails_closed() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let body: Value = serde_json::from_slice(&body).expect("error body json");
-    assert_eq!(body["error"]["type"], "route_no_upstream_after_filter");
+    // The owner is excluded before dispatch, so the request fails with an
+    // explicit affinity error instead of a generic routing miss.
+    assert_eq!(body["error"]["type"], "upstream_affinity_unavailable");
     assert_eq!(dispatch.call_count(), 0);
 }
 
@@ -946,9 +967,11 @@ async fn sse_bind_failure_suppresses_the_encrypted_content_block() {
     assert_eq!(dispatch.call_count(), 1);
 }
 #[tokio::test]
-async fn ordinary_non_json_sse_without_affinity_signal_passes_through() {
+async fn ordinary_anthropic_sse_without_affinity_state_passes_through() {
     let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
-    let raw = Bytes::from_static(b"event: ping\ndata: hello\n\n");
+    let raw = Bytes::from_static(
+        b"event: ping\ndata: {\"type\":\"ping\"}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    );
     let dispatch = RecordingDispatch::with_response(ResponseSpec::Sse(raw.clone()));
     let lifecycle = lifecycle(
         vec![upstream_record(upstream, "origin", true)],
@@ -970,6 +993,167 @@ async fn ordinary_non_json_sse_without_affinity_signal_passes_through() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, raw);
+    assert_eq!(dispatch.call_count(), 1);
+}
+
+/// An Anthropic stream request with no web_search/code_execution tool and no
+/// container still binds provider-owned state the upstream introduces in its
+/// SSE response, matching the unconditional buffered-response scan.
+#[tokio::test]
+async fn unsolicited_anthropic_sse_state_binds_to_selected_upstream() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let ciphertext = "unsolicited-stream-ciphertext";
+    let store = Arc::new(MemoryAffinityStore::default());
+    let raw = Bytes::from(format!(
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"content\":[{{\"encrypted_content\":\"{ciphertext}\"}}]}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    ));
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::Sse(raw.clone()));
+    let lifecycle = lifecycle(
+        vec![upstream_record(upstream, "origin", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[],"stream":true}"#,
+            )),
+        )
+        .await
+        .expect("unsolicited state SSE response handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, raw);
+    assert_eq!(
+        store.upstream_for(&affinity_key(ciphertext)),
+        Some(upstream)
+    );
+    assert_eq!(dispatch.call_count(), 1);
+}
+
+/// An unhinted Anthropic stream whose state-carrying `content_block_start` is
+/// split across upstream chunks holds the partial event until it completes and
+/// binds, then relays exactly the upstream bytes.
+#[tokio::test]
+async fn unsolicited_anthropic_sse_split_state_event_is_held_until_bound() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let ciphertext = "unsolicited-split-ciphertext";
+    let store = Arc::new(MemoryAffinityStore::default());
+    let ping = "event: ping\ndata: {\"type\":\"ping\"}\n\n";
+    let first_chunk = Bytes::from(format!(
+        "{ping}event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"content\":[{{\"encrypted_content\":\"{}",
+        &ciphertext[..10]
+    ));
+    let second_chunk = Bytes::from(format!(
+        "{}\"}}]}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n",
+        &ciphertext[10..]
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::SseGated {
+        first: first_chunk.clone(),
+        release: release.clone(),
+        second: second_chunk.clone(),
+    });
+    let lifecycle = lifecycle(
+        vec![upstream_record(upstream, "origin", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let response = handle_authenticated(
+        &lifecycle,
+        messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"stream":true}"#,
+        )),
+    )
+    .await
+    .expect("split unsolicited state SSE response handled");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    let first_frame = body
+        .frame()
+        .await
+        .expect("first frame delivered")
+        .expect("first frame ok")
+        .into_data()
+        .expect("first data frame");
+    assert_eq!(first_frame, Bytes::from_static(ping.as_bytes()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .is_err(),
+        "partial state-carrying event must not reach the client before it completes"
+    );
+    assert_eq!(store.upstream_for(&affinity_key(ciphertext)), None);
+
+    release.notify_one();
+    let mut delivered = first_frame.to_vec();
+    while let Some(frame) = body.frame().await {
+        if let Ok(data) = frame.expect("frame ok").into_data() {
+            delivered.extend_from_slice(&data);
+        }
+    }
+
+    let mut upstream_bytes = first_chunk.to_vec();
+    upstream_bytes.extend_from_slice(&second_chunk);
+    assert_eq!(delivered, upstream_bytes);
+    assert_eq!(
+        store.upstream_for(&affinity_key(ciphertext)),
+        Some(upstream)
+    );
+    assert_eq!(dispatch.call_count(), 1);
+}
+
+/// An unhinted Anthropic stream relays stateless events through the ungated
+/// passthrough, then fails closed before the first event whose provider-owned
+/// state cannot be bound to the selected upstream.
+#[tokio::test]
+async fn unsolicited_anthropic_sse_bind_failure_fails_closed_only_for_stateful_event() {
+    let upstream = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+    let ciphertext = "unsolicited-bind-failure-ciphertext";
+    let store = Arc::new(MemoryAffinityStore::default());
+    *store.bind_failure.lock().expect("bind failure lock") = Some(ciphertext.to_owned());
+    let stateless_chunk = Bytes::from_static(
+        b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\nevent: ping\ndata: {\"type\":\"ping\"}\n\n",
+    );
+    let stateful_chunk = Bytes::from(format!(
+        "event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"web_search_tool_result\",\"content\":[{{\"encrypted_content\":\"{ciphertext}\"}}]}}}}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    ));
+    let dispatch = RecordingDispatch::with_response(ResponseSpec::SseChunks(vec![
+        stateless_chunk.clone(),
+        stateful_chunk,
+    ]));
+    let lifecycle = lifecycle(
+        vec![upstream_record(upstream, "origin", true)],
+        dispatch.clone(),
+        Some(store.clone()),
+    );
+
+    let (status, _, body) = collect_body(
+        handle_authenticated(
+            &lifecycle,
+            messages_request(Bytes::from_static(
+                br#"{"model":"claude-test","messages":[],"stream":true}"#,
+            )),
+        )
+        .await
+        .expect("unsolicited SSE bind failure handled"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.starts_with(&stateless_chunk[..]));
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("event: error"));
+    assert!(body.contains("upstream affinity is unavailable"));
+    assert!(!body.contains(ciphertext));
+    assert!(!body.contains("message_stop"));
+    assert_eq!(store.upstream_for(&affinity_key(ciphertext)), None);
     assert_eq!(dispatch.call_count(), 1);
 }
 

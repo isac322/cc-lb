@@ -347,6 +347,54 @@ async fn handle_fable_propagates_selected_upstream_429_without_retrying_exhauste
     assert_eq!(fixture.dispatch_hosts(), vec!["steady.invalid"]);
 }
 
+#[tokio::test]
+async fn handle_healthy_preference_winner_429_fails_over_to_healthy_loser() {
+    // Given: both OAuth candidates have healthy quota; the preference winner
+    // returns a provider 429 and the healthy loser returns 200.
+    let fixture = PreviewFixture::with_statuses(
+        urgent_quota(),
+        on_pace_quota(),
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::OK,
+    );
+    let preview = fixture.preview("healthy-winner-429").await;
+    assert_eq!(preview.winner_upstream_id, Some(fixture.urgent_id));
+
+    // When: the real proxy lifecycle handles the request.
+    let status = fixture.handle_model("claude-test").await;
+
+    // Then: provider 429 failover still reaches the healthy remaining candidate.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        fixture.dispatch_hosts(),
+        vec!["urgent.invalid", "steady.invalid"]
+    );
+}
+
+#[tokio::test]
+async fn handle_chain_without_builtin_filter_keeps_429_failover_to_next_candidate() {
+    // Given: a custom chain without the built-in subscription preference
+    // filter; the first candidate returns 429 and the next candidate has
+    // exhausted Fable quota but would return 200.
+    let fixture = no_builtin_filter::Fixture::new(
+        fable_quota(0.2),
+        fable_quota(1.0),
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::OK,
+    );
+
+    // When: the real proxy lifecycle handles a Fable request.
+    let status = fixture.handle_model("claude-fable-5").await;
+
+    // Then: quota hard-blocking stays scoped to the built-in filter, so the
+    // existing 429 failover policy dispatches the next candidate.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        fixture.dispatch_hosts(),
+        vec!["urgent.invalid", "steady.invalid"]
+    );
+}
+
 fn subscription_trace(outcome: &PreviewRouteOutcome) -> &SubscriptionPreferenceTrace {
     outcome
         .trace
@@ -387,4 +435,189 @@ fn print_outcome(label: &str, outcome: &PreviewRouteOutcome) {
         outcome.winner_upstream_id,
         serde_json::to_string(&outcome.trace).expect("routing trace serializes")
     );
+}
+
+mod no_builtin_filter {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use cc_lb_clock::TestClock;
+    use cc_lb_control::api_keys::principal_view::{
+        DialectCache, PrincipalView, RouterPipelineCache,
+    };
+    use cc_lb_control::{DynamicViewBuilder, DynamicViewHolder, SubscriptionQuotaCacheLike};
+    use cc_lb_domain::{SubscriptionQuotaCandidateSnapshot, TerminalStrategy};
+    use cc_lb_engine::{Body, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
+    use cc_lb_storage_api::SubscriptionQuotaSample;
+    use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+    use cc_lb_upstream::SignedRequest;
+    use http::{Response, StatusCode};
+    use parking_lot::Mutex;
+    use url::Url;
+    use uuid::Uuid;
+
+    use crate::common::{TestAuthn, TestState, collect_body, messages_request};
+
+    const PRINCIPAL: &str = "principal-test";
+    const NOW: u64 = 1_700_000_000;
+
+    /// Same lifecycle shape as `PreviewFixture`, but the principal chain has no
+    /// user filters, so the built-in subscription preference filter is absent.
+    pub struct Fixture {
+        lifecycle: Lifecycle,
+        dispatch: Arc<RecordingDispatch>,
+    }
+
+    impl Fixture {
+        pub fn new(
+            urgent: Vec<SubscriptionQuotaCandidateSnapshot>,
+            steady: Vec<SubscriptionQuotaCandidateSnapshot>,
+            urgent_status: StatusCode,
+            steady_status: StatusCode,
+        ) -> Self {
+            let urgent_id = Uuid::from_u128(1);
+            let steady_id = Uuid::from_u128(2);
+            let cache = Arc::new(StaticQuotaCache {
+                snapshots: HashMap::from([(urgent_id, urgent), (steady_id, steady)]),
+            });
+            let dispatch = Arc::new(RecordingDispatch {
+                calls: Mutex::new(Vec::new()),
+                statuses: HashMap::from([
+                    ("urgent.invalid".to_owned(), urgent_status),
+                    ("steady.invalid".to_owned(), steady_status),
+                ]),
+            });
+
+            let pipeline = Arc::new(RouterPipelineCache {
+                user_filters: Vec::new(),
+                terminal: TerminalStrategy::FirstPick,
+                instantiation_error: None,
+            });
+            let principal_view = Arc::new(PrincipalView::for_tests(
+                PRINCIPAL,
+                true,
+                vec!["*".to_owned()],
+                Vec::new(),
+                HashMap::from([(
+                    PRINCIPAL.to_owned(),
+                    (Some(pipeline), DialectCache::Inherit),
+                )]),
+            ));
+            let authn =
+                TestAuthn::with_principal_view(TestState::default(), Arc::clone(&principal_view));
+            let view = DynamicViewBuilder::new(0)
+                .signer_factory(Arc::new(authn.clone()))
+                .principal_view(principal_view)
+                .subscription_quota_cache(cache)
+                .subscription_quota_routing_max_staleness_secs(60)
+                .upstream_records(vec![
+                    upstream(urgent_id, "urgent"),
+                    upstream(steady_id, "steady"),
+                ])
+                .build();
+            let lifecycle = Lifecycle::new_with_dynamic_view(
+                authn.authn,
+                Arc::new(DynamicViewHolder::new(view)),
+                dispatch.clone(),
+                LifecycleConfig::default(),
+                Arc::new(TestClock::new_at_secs(NOW)),
+            );
+            Self {
+                lifecycle,
+                dispatch,
+            }
+        }
+
+        pub async fn handle_model(&self, model: &str) -> StatusCode {
+            let body = format!(r#"{{"model":"{model}","messages":[]}}"#);
+            let request = messages_request(Bytes::from(body));
+            let auth = self
+                .lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("test request authenticates");
+            let response = self
+                .lifecycle
+                .handle(request, &auth)
+                .await
+                .expect("handle succeeds");
+            collect_body(response).await.0
+        }
+
+        pub fn dispatch_hosts(&self) -> Vec<String> {
+            self.dispatch.calls.lock().clone()
+        }
+    }
+
+    fn upstream(id: Uuid, name: &str) -> UpstreamRecord {
+        UpstreamRecord {
+            id,
+            name: name.to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: Some(
+                Url::parse(&format!("http://{name}.invalid/")).expect("test upstream URL parses"),
+            ),
+            enabled: true,
+            revision: 1,
+            ..UpstreamRecord::default()
+        }
+    }
+
+    struct StaticQuotaCache {
+        snapshots: HashMap<Uuid, Vec<SubscriptionQuotaCandidateSnapshot>>,
+    }
+
+    impl SubscriptionQuotaCacheLike for StaticQuotaCache {
+        fn upsert_observation(&self, _record: &SubscriptionQuotaSample) {}
+
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            _now_unix_millis: u64,
+            _max_staleness_secs: u64,
+        ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+            self.snapshots
+                .get(&upstream_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    struct RecordingDispatch {
+        calls: Mutex<Vec<String>>,
+        statuses: HashMap<String, StatusCode>,
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for RecordingDispatch {
+        async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            let host = request
+                .url()
+                .host_str()
+                .expect("test request has host")
+                .to_owned();
+            let status = self
+                .statuses
+                .get(&host)
+                .copied()
+                .expect("test host has a fixed status");
+            self.calls.lock().push(host);
+            let body = if status.is_success() {
+                Bytes::from_static(
+                    br#"{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                )
+            } else {
+                Bytes::from_static(
+                    br#"{"type":"error","error":{"type":"rate_limit_error","message":"quota exhausted"}}"#,
+                )
+            };
+            Ok(Response::builder()
+                .status(status)
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .expect("test response builds"))
+        }
+    }
 }

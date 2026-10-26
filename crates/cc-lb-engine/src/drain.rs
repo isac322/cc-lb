@@ -55,6 +55,23 @@ impl DrainController {
         self.inner.drain_started.load(Ordering::Acquire)
     }
 
+    /// Wait for drain admission to close without polling or allocating a task.
+    ///
+    /// Register before reading the flag so a concurrent trigger cannot be lost.
+    /// The existing notification also wakes on request completion; those wakes
+    /// do not mean that draining has started.
+    pub async fn wait_for_draining(&self) {
+        loop {
+            let notified = self.inner.drained.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self.is_draining() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     pub fn in_flight(&self) -> usize {
         self.inner.in_flight.load(Ordering::Acquire)
     }
@@ -101,7 +118,7 @@ impl DrainController {
         self.inner.drained.notify_waiters();
     }
 
-    fn try_track(&self) -> Option<InFlightGuard> {
+    pub fn try_track(&self) -> Option<InFlightGuard> {
         if self.is_draining() {
             return None;
         }
@@ -203,7 +220,7 @@ impl http_body::Body for GuardedBody {
     }
 }
 
-struct InFlightGuard {
+pub struct InFlightGuard {
     controller: DrainController,
 }
 
@@ -229,6 +246,32 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{DrainController, guard_body, proxy_drain_middleware};
+
+    #[tokio::test]
+    async fn drain_waiters_handle_trigger_existing_state_and_completion_notifications() {
+        use std::task::{Context, Waker};
+
+        let mut context = Context::from_waker(Waker::noop());
+        let controller = DrainController::new();
+        let guard = controller.try_track().expect("initial admission is open");
+        let first = controller.wait_for_draining();
+        let second = controller.wait_for_draining();
+        tokio::pin!(first, second);
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        drop(guard);
+        assert!(
+            first.as_mut().poll(&mut context).is_pending(),
+            "request completion is not a drain trigger"
+        );
+        controller.trigger();
+        assert!(first.as_mut().poll(&mut context).is_ready());
+        assert!(second.as_mut().poll(&mut context).is_ready());
+
+        let already_draining = controller.wait_for_draining();
+        tokio::pin!(already_draining);
+        assert!(already_draining.as_mut().poll(&mut context).is_ready());
+    }
 
     #[tokio::test]
     async fn response_body_stream_holds_in_flight_until_dropped() {

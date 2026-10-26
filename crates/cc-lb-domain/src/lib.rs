@@ -28,5 +28,6 @@ pub use routing::{
 };
 pub use upstream::{
     ANTHROPIC_IDENTITY_HEADERS, ANTHROPIC_WORKSPACE_ID_HEADER, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
-    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, Upstream, UpstreamCandidate, UpstreamKind,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_NAME, CredentialKind, Provider, Upstream, UpstreamCandidate,
+    UpstreamKind,
 };

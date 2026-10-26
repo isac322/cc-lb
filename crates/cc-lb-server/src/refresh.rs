@@ -10,7 +10,7 @@ use cc_lb_control::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_oauth_protocol::{
     ExistingTokenParts, TokenEndpointResponse, is_terminal_refresh_failure,
     parse_token_endpoint_response, refresh_requires_reconnect, refresh_token_form_body,
-    refreshed_token_parts,
+    refresh_token_json_body, refreshed_token_parts,
 };
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
@@ -18,6 +18,7 @@ use cc_lb_scheduler::worker::{
     AdaptiveJob, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus,
 };
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AuditActorFields, AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord,
     UpstreamStatusUpdate,
@@ -38,6 +39,13 @@ use crate::dynamic_view_builder::Stores;
 const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
 const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
 const LAZY_REFRESH_TASK_PAGE_SIZE: u32 = 500;
+
+const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const GEMINI_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GEMINI_OAUTH_CLIENT_ID: &str =
+    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";
 
 type HyperTokenClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -496,12 +504,10 @@ impl LazyRefreshHandle for LazyRefresher {
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "oauth upstream not found".to_owned(),
             })?;
-        let holder = lazy_refresh_holder(self.replica_id);
         let bundle = oauth_token_bundle(&upstream, &self.aead)?;
         if bundle.never_refresh {
-            // Refreshing a 365-day token makes Anthropic revoke it and issue an
-            // 8-hour token instead; long-lived credentials must never be
-            // refreshed.
+            // Access-only imports and Anthropic long-lived grants must stop
+            // before acquiring a refresh claim or contacting a token endpoint.
             return Err(LazyRefreshError::Failed {
                 reason: RefreshError::NotRefreshable.to_string(),
             });
@@ -509,6 +515,7 @@ impl LazyRefreshHandle for LazyRefresher {
         check_refresh_allowed(&self.stores, &upstream, &bundle, &*self.clock)
             .await
             .map_err(lazy_refresh_error)?;
+        let holder = lazy_refresh_holder(self.replica_id);
         let expires_at_unix_secs = bundle.expires_at_unix_secs;
         let claim = self
             .claim_guard
@@ -671,9 +678,8 @@ pub enum RefreshError {
     Parse(cc_lb_oauth_protocol::TokenEndpointParseError),
     #[error("oauth refresh cancelled")]
     Cancelled,
-    /// Refreshing a long-lived (365-day) credential would make Anthropic revoke
-    /// it and issue an 8-hour token instead, so it must never reach the token
-    /// endpoint.
+    /// The credential's policy prohibits token refresh. This protects both
+    /// access-only imports and Anthropic long-lived grants from rotation.
     #[error("long-lived oauth credential must not be refreshed; reauthorization required")]
     NotRefreshable,
 }
@@ -746,9 +752,17 @@ async fn refresh_flow(
         .decrypt(aead, upstream.id.as_bytes())
         .map_err(|_| RefreshError::Decrypt)?;
     check_refresh_allowed(stores, &upstream, &previous, clock).await?;
-    let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
+    let token = request_refresh(
+        http,
+        oauth_cfg,
+        upstream.kind,
+        cancel,
+        &previous.refresh_token,
+    )
+    .await;
     match token {
         Ok(response) => {
+            let account_id = response.account_id.clone().or(previous.account_id.clone());
             let refreshed = refreshed_token_parts(
                 ExistingTokenParts {
                     refresh_token: previous.refresh_token,
@@ -765,6 +779,8 @@ async fn refresh_flow(
                 refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
                 scopes: refreshed.scopes,
                 never_refresh: previous.never_refresh,
+                account_id,
+                project_id: previous.project_id,
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
             let expires_at = bundle.expires_at_unix_secs;
@@ -817,14 +833,32 @@ async fn refresh_flow(
 async fn request_refresh(
     http: &TokenHttpClient,
     oauth_cfg: &AnthropicOAuthConfig,
+    oauth_kind: UpstreamKind,
     cancel: &CancellationToken,
     refresh_token: &str,
 ) -> Result<TokenEndpointResponse, RefreshError> {
-    let body = refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token);
+    let (token_url, content_type, body) = match oauth_kind {
+        UpstreamKind::AnthropicOauth => (
+            oauth_cfg.token_url.as_str(),
+            "application/x-www-form-urlencoded",
+            refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token),
+        ),
+        UpstreamKind::OpenaiOauth => (
+            OPENAI_OAUTH_TOKEN_URL,
+            "application/json",
+            refresh_token_json_body(OPENAI_CODEX_CLIENT_ID, refresh_token),
+        ),
+        UpstreamKind::GeminiOauth => (
+            GEMINI_OAUTH_TOKEN_URL,
+            "application/x-www-form-urlencoded",
+            gemini_refresh_token_form_body(refresh_token),
+        ),
+        _ => return Err(RefreshError::NotRefreshable),
+    };
     let content_length = HeaderValue::from_str(&body.len().to_string())
         .map_err(|error| RefreshError::Http(error.to_string()))?;
-    let request = Request::post(oauth_cfg.token_url.as_str())
-        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+    let request = Request::post(token_url)
+        .header(CONTENT_TYPE, content_type)
         .header(CONTENT_LENGTH, content_length)
         .body(Full::new(Bytes::from(body)))
         .map_err(|error| RefreshError::Http(error.to_string()))?;
@@ -862,6 +896,15 @@ async fn request_refresh(
         });
     }
     parse_token_endpoint_response(&bytes).map_err(RefreshError::Parse)
+}
+
+fn gemini_refresh_token_form_body(refresh_token: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("grant_type", "refresh_token");
+    serializer.append_pair("client_id", GEMINI_OAUTH_CLIENT_ID);
+    serializer.append_pair("client_secret", GEMINI_OAUTH_CLIENT_SECRET);
+    serializer.append_pair("refresh_token", refresh_token);
+    serializer.finish()
 }
 
 fn access_token_fingerprint(access_token: &str) -> String {
@@ -1135,6 +1178,141 @@ mod tests {
         assert!(bundle.never_refresh);
     }
 
+    struct ForbiddenRefreshClaims {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LazyRefreshClaimGuard for ForbiddenRefreshClaims {
+        async fn begin_refresh(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            _expires_at_unix_secs: u64,
+            _now_unix_secs: u64,
+        ) -> StorageResult<LazyRefreshClaim> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(cc_lb_storage_api::StorageError::Fatal {
+                message: "access-only refresh must stop before claim acquisition".to_owned(),
+            })
+        }
+
+        async fn complete_and_bump_generation(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            _generation: u64,
+        ) -> StorageResult<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+
+        async fn release_if_holder(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+        ) -> StorageResult<bool> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+
+        async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(LazyRefreshTaskState::Done)
+        }
+    }
+
+    #[tokio::test]
+    async fn access_only_oauth_lazy_refresh_stops_before_claim_or_generation_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let fixture = LazyRefreshFixture::new(Duration::ZERO).await;
+            let id = Uuid::new_v4();
+            let bundle = OAuthTokenBundle {
+                access_token: "access-only-test-token".to_owned(),
+                refresh_token: String::new(),
+                expires_at_unix_secs: 1,
+                refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned()),
+                scopes: Vec::new(),
+                never_refresh: true,
+            };
+            let encrypted =
+                EncryptedOAuthTokens::encrypt(fixture.aead.as_ref(), &bundle, id.as_bytes())?;
+            let original = UpstreamStore::create(
+                fixture.storage.as_ref(),
+                UpstreamCreate {
+                    id,
+                    name: format!("{}-access-only-guard", kind.as_str()),
+                    kind,
+                    base_url: None,
+                    api_key_ciphertext: None,
+                    oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                        tokens: encrypted,
+                        never_refresh: true,
+                    }),
+                    warmup_enabled: false,
+                    warmup_dialect_plugin: None,
+                    workspace_id: None,
+                    api_key_access: None,
+                },
+            )
+            .await?;
+            let claims = Arc::new(ForbiddenRefreshClaims {
+                calls: AtomicUsize::new(0),
+            });
+            let refresher = fixture.lazy_refresher(
+                claims.clone(),
+                LazyRefreshContentionConfig::for_tests(
+                    Duration::from_secs(1),
+                    Duration::from_millis(1),
+                ),
+            );
+            let result = refresher.refresh_one(id).await;
+            assert!(
+                matches!(result, Err(cc_lb_signer_anthropic_oauth::LazyRefreshError::Failed { ref reason })
+                    if reason == &super::RefreshError::NotRefreshable.to_string()),
+                "access-only credentials must be rejected before any claim: {result:?}"
+            );
+            refresher.enqueue_only(id).await?;
+            assert_eq!(claims.calls.load(Ordering::SeqCst), 0);
+            assert_eq!(fixture.refresh_call_count(), 0);
+            let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), id)
+                .await?
+                .ok_or("missing access-only upstream")?;
+            assert_eq!(
+                current.oauth_token_generation,
+                original.oauth_token_generation
+            );
+            assert_eq!(current.revision, original.revision);
+            assert_eq!(current.last_apply_error, original.last_apply_error);
+            assert_eq!(
+                current
+                    .oauth_credentials
+                    .as_ref()
+                    .map(EncryptedOAuthTokens::ciphertext),
+                original
+                    .oauth_credentials
+                    .as_ref()
+                    .map(EncryptedOAuthTokens::ciphertext)
+            );
+
+            let flow_gate = super::check_refresh_allowed(
+                fixture.stores.as_ref(),
+                &current,
+                &bundle,
+                fixture.clock.as_ref(),
+            )
+            .await;
+            assert!(matches!(
+                flow_gate,
+                Err(super::RefreshError::NotRefreshable)
+            ));
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn wait_for_token_generation_returns_ok_when_done_state_races_with_generation_advance() {
         // Race between wait_for_token_generation's two consecutive reads:
@@ -1301,6 +1479,8 @@ mod tests {
                     refresh_token: "sk-ant-ort01-old".to_owned(),
                     expires_at_unix_secs: 1,
                     refresh_token_expires_at_unix_secs: None,
+                    account_id: None,
+                    project_id: None,
                     scopes: vec!["messages".to_owned()],
                     never_refresh,
                 },
@@ -1573,6 +1753,8 @@ mod tests {
                         refresh_token: "sk-ant-ort01-rotated".to_owned(),
                         expires_at_unix_secs: 9_999_999_999,
                         refresh_token_expires_at_unix_secs: None,
+                        account_id: None,
+                        project_id: None,
                         scopes: vec!["messages".to_owned()],
                         never_refresh: false,
                     },
