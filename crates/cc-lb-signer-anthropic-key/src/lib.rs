@@ -12,12 +12,13 @@ use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, UpstreamError, scrub_secret,
 };
-use http::header::{AUTHORIZATION, HeaderValue};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderValue, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 
 const API_KEY_HEADER: &str = "x-api-key";
-
+const ANTIGRAVITY_USER_AGENT: &str =
+    "antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
 /// Signs requests for one Anthropic API-key upstream.
 ///
 /// Both outbound header values are built once, at construction; `sign` only
@@ -429,6 +430,7 @@ fn wrap_gemini_code_assist_request(
     let body = serde_json::to_vec(&envelope).map_err(|_| SignerError::SigningFailed {
         reason: "Gemini Code Assist request could not be serialized".to_owned(),
     })?;
+    let is_antigravity_host = shaped.url().host_str() == Some("daily-cloudcode-pa.googleapis.com");
     let mut url = shaped.url().clone();
     url.set_path(if is_stream {
         "/v1internal:streamGenerateContent"
@@ -437,6 +439,17 @@ fn wrap_gemini_code_assist_request(
     });
     shaped.set_url(url);
     shaped.set_body(Bytes::from(body));
+    let headers = shaped.headers_mut();
+    headers.remove(CONTENT_LENGTH);
+    if is_antigravity_host {
+        let keep_existing_ua = headers
+            .get(USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ua| ua.starts_with("antigravity/") || ua.starts_with("GeminiCLI/"));
+        if !keep_existing_ua {
+            headers.insert(USER_AGENT, HeaderValue::from_static(ANTIGRAVITY_USER_AGENT));
+        }
+    }
     Ok(())
 }
 
@@ -892,11 +905,17 @@ mod tests {
     async fn gemini_subscription_signer_wraps_request_with_project_and_rewrites_path() {
         let mut shaped = shaped_request();
         shaped.set_url(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+            "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
                 .parse()
                 .expect("url"),
         );
         shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+        shaped
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from_static("15"));
+        shaped
+            .headers_mut()
+            .insert(USER_AGENT, HeaderValue::from_static("node"));
 
         let signer = GeminiSubscriptionSigner::new(
             "gemini-access-token",
@@ -912,5 +931,10 @@ mod tests {
         assert_eq!(body["model"], "gemini-2.5-pro");
         assert_eq!(body["project"], "project-123");
         assert_eq!(body["request"], serde_json::json!({"contents": []}));
+        assert!(!signed.headers().contains_key(CONTENT_LENGTH));
+        assert_eq!(
+            signed.headers().get(USER_AGENT),
+            Some(&HeaderValue::from_static(ANTIGRAVITY_USER_AGENT))
+        );
     }
 }

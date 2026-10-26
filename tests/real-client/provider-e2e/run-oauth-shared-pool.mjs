@@ -44,8 +44,6 @@ const PORTS = {
   geminiTap: 19825,
   codexTap: 19826,
 };
-const ANTIGRAVITY_UA =
-  'antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)';
 
 const sha256 = (v) => createHash('sha256').update(String(v)).digest('hex');
 const sha12 = (v) => sha256(v).slice(0, 12);
@@ -240,7 +238,7 @@ async function startCollector({ port, controlPort, outputFile }) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Local Gemini Tap (forwards chunked + Antigravity User-Agent to cc-lb,
+// 2. Local Gemini Tap (pure pass-through of headers/Content-Length/User-Agent to cc-lb,
 //    records thoughtSignature & auto-rereads from local OMP on 401/502)
 // ---------------------------------------------------------------------------
 function startGeminiOAuthTap({ listenPort, targetPort, adminToken, geminiUpstreamId }) {
@@ -258,11 +256,7 @@ function startGeminiOAuthTap({ listenPort, targetPort, adminToken, geminiUpstrea
       const forwardOnce = () =>
         new Promise((resolve, reject) => {
           const headers = { ...req.headers };
-          delete headers['content-length'];
           delete headers['host'];
-          headers['transfer-encoding'] = 'chunked';
-          headers['user-agent'] = ANTIGRAVITY_UA;
-
           const rewrittenPath = req.url
             .replace('/models/gemini-3.8-flash:', '/models/gemini-3.8-flash-high:')
             .replace('/models/gemini-3.1-pro-preview:', '/models/gemini-3.8-flash-high:')

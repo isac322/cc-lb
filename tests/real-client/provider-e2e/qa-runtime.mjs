@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 export const ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const LEDGER_PATH = '/tmp/cc-lb-actual-cli-e2e-20261020-ledger.json';
 export const BINARY_PATH = '/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb';
-export const EXPECTED_BINARY_SHA256 = '50d43f03ef36956abed6a1894f328c92c6e535263a5e4d29ae971daa8085f977';
+export const EXPECTED_BINARY_SHA256 = '6a2e215ff96a33f58e1f221ba45dc7225cc2dce18be8c4375c0d72d72bef5ecd';
 export const CREDENTIALS_PATH = path.join(ROOT, 'credentials.json');
 
 // Numerical bounds (parent safety review). Drivers MUST respect these; the
