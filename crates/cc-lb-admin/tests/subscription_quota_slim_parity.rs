@@ -87,6 +87,84 @@ async fn subscription_quota_aggregate_exact_boundary_tokens_match_legacy_inclusi
 }
 
 #[tokio::test]
+async fn subscription_quota_aggregate_scatter_exact_duplicate_intervals_match_legacy_inclusive_tokens()
+ {
+    let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
+    let server = admin_test_common::spawn_admin_server_with_clock(clock).await;
+    let upstream_id = create_oauth_upstream(&server, "quota-scatter-duplicate").await;
+    let window_secs = 5 * 3_600;
+    let cc_start = NOW_UNIX_SECS - NOW_UNIX_SECS % window_secs;
+    let provider_sample_end = cc_start;
+    let provider_start = provider_sample_end - window_secs;
+    let buckets = [
+        (provider_start, 11_u64),
+        (cc_start, 17_u64),
+        (NOW_UNIX_SECS, 19_u64),
+    ];
+    server
+        .storage
+        .put_subscription_quota_checkpoints(&[quota_checkpoint(
+            upstream_id,
+            SubscriptionQuotaWindow::FiveHour,
+            NOW_UNIX_SECS - 1_200,
+            2,
+            0.5,
+            provider_sample_end,
+        )])
+        .await
+        .unwrap();
+    for (timestamp, tokens) in buckets {
+        server
+            .storage
+            .append_request_event(&usage_event(
+                timestamp,
+                &format!("scatter-duplicate-{timestamp}"),
+                upstream_id,
+                "quota-scatter-duplicate",
+                tokens,
+            ))
+            .await
+            .unwrap();
+    }
+    server.storage.rollup_usage_once().await.unwrap();
+
+    let (status, _, body) = server
+        .client
+        .get(&format!(
+            "/admin/v1/subscription-quotas/aggregate?upstream_ids={upstream_id}&windows=5h&source=header"
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let window = &body["windows"][0];
+    let lot = &window["provider_lots"][0];
+    let provider_tokens = legacy_inclusive_tokens(&buckets, provider_start, provider_sample_end);
+    let expected = json!({
+        "capacity_estimate_tokens": provider_tokens as f64 / 0.5,
+        "used_before_cc_window_tokens": legacy_inclusive_tokens(&buckets, provider_start, cc_start),
+        "used_tokens": legacy_inclusive_tokens(&buckets, cc_start, NOW_UNIX_SECS),
+        "capacity_to_now_tokens_estimate": 0.0,
+        "projected_capacity_tokens_estimate": 0.0,
+        "lot_utilization": 0.5,
+        "window_utilization": 0.5,
+    });
+    let actual = json!({
+        "capacity_estimate_tokens": lot["capacity_estimate_tokens"],
+        "used_before_cc_window_tokens": lot["used_before_cc_window_tokens"],
+        "used_tokens": window["used_tokens"],
+        "capacity_to_now_tokens_estimate": window["capacity_to_now_tokens_estimate"],
+        "projected_capacity_tokens_estimate": window["projected_capacity_tokens_estimate"],
+        "lot_utilization": lot["utilization"],
+        "window_utilization": window["utilization"],
+    });
+    assert_eq!(
+        serde_json::to_vec(&actual).unwrap(),
+        serde_json::to_vec(&expected).unwrap(),
+        "provider tokens and the cc window must preserve the old inclusive sums when provider tokens and used-before share an exact interval"
+    );
+}
+
+#[tokio::test]
 async fn subscription_quota_slim_aggregate_matches_legacy_reference_for_seven_days_and_fifty_upstreams()
  {
     let clock: ClockHandle = Arc::new(TestClock::new_at_secs(NOW_UNIX_SECS));
