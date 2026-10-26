@@ -119,6 +119,7 @@ function parseArgs(argv) {
     if (arg === '--self-test') opts.mode = 'self-test';
     else if (arg === '--preflight' || arg === '--preflight-only') opts.mode = 'preflight';
     else if (arg === '--run') opts.mode = 'run';
+    else if (arg === '--run-oauth') opts.mode = 'run-oauth';
     else if (arg === '--case' && argv[i + 1]) opts.caseName = argv[++i];
     else if (arg === '--env-file' && argv[i + 1]) opts.envFile = path.resolve(argv[++i]);
     else if (arg === '--work-dir' && argv[i + 1]) opts.workDir = path.resolve(argv[++i]);
@@ -577,6 +578,7 @@ function printHelp() {
   node tests/real-client/provider-e2e/run.mjs --self-test
   node tests/real-client/provider-e2e/run.mjs --preflight [--case <omp-gpt|omp-gemini|codex|agy|all>] [--env-file <path>]
   node tests/real-client/provider-e2e/run.mjs --run --case <omp-gpt|omp-gemini|codex|agy|all> [--env-file <path>] [--work-dir <dir>]
+  node tests/real-client/provider-e2e/run.mjs --run-oauth [--work-dir <dir>]
 `);
 }
 
@@ -591,4 +593,12 @@ if (opts.mode === 'self-test') {
   await runPreflight(opts);
 } else if (opts.mode === 'run') {
   await runLiveSuite(opts);
+} else if (opts.mode === 'run-oauth') {
+  const bunBin = findBinary('bun') ?? 'bun';
+  const proc = spawnSync(bunBin, [path.join(HERE, 'run-oauth-shared-pool.mjs')], {
+    cwd: HERE,
+    stdio: 'inherit',
+    env: { ...process.env, ...(opts.workDir ? { CC_LB_QA_WORK_DIR: opts.workDir } : {}) },
+  });
+  process.exit(proc.status ?? 1);
 }

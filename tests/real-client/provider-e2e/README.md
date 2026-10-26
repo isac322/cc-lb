@@ -54,6 +54,9 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 
 # Run all 4 profiles sequentially
 ./tests/real-client/run-provider-e2e.sh --run --case all --env-file /path/to/.env
+
+# Run shared-pool OAuth E2E (local OMP Gemini OAuth + runbear-local cliproxyapi OpenAI OAuth, never_refresh: true + auto re-read on 401)
+./tests/real-client/run-provider-e2e.sh --run-oauth
 ```
 
 ### Environment Variables
