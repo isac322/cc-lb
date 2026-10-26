@@ -48,7 +48,7 @@ async fn run_upstream_kind_migration(url: &str) -> Result<()> {
     {
         let mut connection = fixture.pool.acquire().await?;
         sqlx::migrate!("./migrations")
-            .run_direct(Some(138), &mut *connection, false)
+            .run_direct(Some(142), &mut *connection, false)
             .await?;
     }
 
@@ -224,15 +224,6 @@ async fn run_upstream_kind_migration(url: &str) -> Result<()> {
         .await?,
         "legacy apply error"
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT holder FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'refresh'",
-        )
-        .bind(anthropic_api_id)
-        .fetch_one(&fixture.pool)
-        .await?,
-        "legacy-holder"
-    );
 
     let constraint: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid)
@@ -314,10 +305,6 @@ async fn run_upstream_kind_migration(url: &str) -> Result<()> {
         (
             "upstream_status_v1",
             "SELECT COUNT(*) FROM upstream_status_v1 WHERE upstream_id = $1 OR upstream_id = $2",
-        ),
-        (
-            "upstream_lease_v1",
-            "SELECT COUNT(*) FROM upstream_lease_v1 WHERE upstream_id = $1 OR upstream_id = $2",
         ),
     ] {
         let count: i64 = sqlx::query_scalar(query)
@@ -451,15 +438,6 @@ async fn seed_anthropic_children(
         "INSERT INTO upstream_status_v1
          (upstream_id, last_apply_error, updated_at)
          VALUES ($1, 'legacy apply error', TIMESTAMPTZ '2026-01-01 00:00:00+00')",
-    )
-    .bind(anthropic_api_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO upstream_lease_v1
-         (upstream_id, lease_kind, holder, until_unix_secs, updated_at)
-         VALUES ($1, 'refresh', 'legacy-holder', 1234,
-                 TIMESTAMPTZ '2026-01-01 00:00:00+00')",
     )
     .bind(anthropic_api_id)
     .execute(pool)

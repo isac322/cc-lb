@@ -241,7 +241,8 @@ pub(crate) async fn prepare_api_key_create(
     }
     gate_key(&key)?;
     let now = now_unix_secs(state);
-    let check = if skip_preflight {
+    let _ = effective_base_url(base_url, kind)?;
+    let check = if skip_preflight || kind != UpstreamKind::AnthropicApiKey {
         KeyCheck::unverified(&key, workspace_id, now)
     } else {
         let base_url = effective_base_url(base_url, kind)?;
@@ -326,7 +327,7 @@ pub(crate) async fn prepare_api_key_update(
         }
     };
     let base_url = effective_base_url(request.base_url, current.kind)?;
-    let check = if request.skip_preflight {
+    let check = if request.skip_preflight || current.kind != UpstreamKind::AnthropicApiKey {
         KeyCheck::unverified(key, target_workspace.as_deref(), now)
     } else if new_key.is_some() || workspace_changed {
         probe_strict(

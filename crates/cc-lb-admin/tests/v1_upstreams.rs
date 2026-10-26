@@ -1284,3 +1284,25 @@ async fn openai_oauth_rejects_api_key_value_on_create() {
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert_eq!(body(&response)["error"], "unexpected_api_key");
 }
+
+#[tokio::test]
+async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default() {
+    for (index, kind) in ["openai_api_key", "gemini_api_key"].into_iter().enumerate() {
+        let (_dir, storage) = new_store().await;
+        let response = request(
+            router(test_state(storage)),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("non-anthropic-default-preflight-{index}"),
+                "kind": kind,
+                "api_key_value": "provider-secret-key"
+            })),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status, StatusCode::CREATED);
+        assert_eq!(body(&response)["kind"], kind);
+    }
+}

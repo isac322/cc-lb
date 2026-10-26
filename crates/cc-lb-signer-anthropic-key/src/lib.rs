@@ -146,6 +146,7 @@ pub enum ProviderKeyKind {
 /// are preserved.
 #[derive(Clone)]
 pub struct ProviderKeySigner {
+    kind: ProviderKeyKind,
     api_key: SecretString,
     header_name: &'static str,
     header_value: HeaderValue,
@@ -164,6 +165,7 @@ impl ProviderKeySigner {
             })?;
         header_value.set_sensitive(true);
         Ok(Self {
+            kind,
             api_key: SecretString::new(Box::from(api_key)),
             header_name,
             header_value,
@@ -187,6 +189,9 @@ impl Signer for ProviderKeySigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
+        if self.kind == ProviderKeyKind::Gemini {
+            ensure_gemini_stream_alt_sse(&mut shaped);
+        }
         let headers = shaped.headers_mut();
         headers.remove(AUTHORIZATION);
         headers.remove("x-api-key");
@@ -370,6 +375,26 @@ impl GeminiSubscriptionSigner {
     }
 }
 
+fn ensure_gemini_stream_alt_sse(shaped: &mut ShapedRequest) {
+    let path = shaped.url().path();
+    if path != "/v1internal:streamGenerateContent" && !path.ends_with(":streamGenerateContent") {
+        return;
+    }
+    let has_alt = shaped.url().query().is_some_and(|q| {
+        q.split('&')
+            .any(|pair| pair == "alt" || pair.starts_with("alt="))
+    });
+    if !has_alt {
+        let mut url = shaped.url().clone();
+        let next_query = match url.query() {
+            Some(existing) if !existing.is_empty() => format!("{existing}&alt=sse"),
+            _ => "alt=sse".to_owned(),
+        };
+        url.set_query(Some(&next_query));
+        shaped.set_url(url);
+    }
+}
+
 fn wrap_gemini_code_assist_request(
     shaped: &mut ShapedRequest,
     project_id: Option<&str>,
@@ -438,6 +463,9 @@ fn wrap_gemini_code_assist_request(
         "/v1internal:generateContent"
     });
     shaped.set_url(url);
+    if is_stream {
+        ensure_gemini_stream_alt_sse(shaped);
+    }
     shaped.set_body(Bytes::from(body));
     let headers = shaped.headers_mut();
     headers.remove(CONTENT_LENGTH);
@@ -936,5 +964,42 @@ mod tests {
             signed.headers().get(USER_AGENT),
             Some(&HeaderValue::from_static(ANTIGRAVITY_USER_AGENT))
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_signers_append_alt_sse_on_stream_generate_content_when_missing() {
+        let mut shaped = shaped_request();
+        shaped.set_url(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+                .parse()
+                .expect("url"),
+        );
+        let key_signer =
+            ProviderKeySigner::new(ProviderKeyKind::Gemini, "gemini-secret").expect("signer");
+        let signed_key = sign_request(&key_signer, shaped).await.expect("sign key");
+        assert_eq!(signed_key.url().query(), Some("alt=sse"));
+
+        let mut oauth_shaped = shaped_request();
+        oauth_shaped.set_url(
+            "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+                .parse()
+                .expect("url"),
+        );
+        oauth_shaped.set_body(Bytes::from_static(br#"{"contents":[]}"#));
+        let oauth_signer = GeminiSubscriptionSigner::new(
+            "gemini-access-token",
+            Some("project-123"),
+            None,
+            Arc::new(cc_lb_clock::SystemClock),
+        )
+        .expect("signer");
+        let signed_oauth = sign_request(&oauth_signer, oauth_shaped)
+            .await
+            .expect("sign oauth");
+        assert_eq!(
+            signed_oauth.url().path(),
+            "/v1internal:streamGenerateContent"
+        );
+        assert_eq!(signed_oauth.url().query(), Some("alt=sse"));
     }
 }
