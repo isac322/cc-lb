@@ -2,7 +2,7 @@
 // Shared-Pool Multi-Provider OAuth Real-CLI E2E Suite
 // - Single cc-lb instance with BOTH:
 //     1) gemini_oauth (read-only from local ~/.omp/agent/agent.db, never_refresh: true, refresh_token: "")
-//     2) openai_oauth (read-only from runbear-local cliproxyapi pod, never_refresh: true, refresh_token: "")
+//     2) openai_oauth (read-only from external OAuth broker pod or JSON file, never_refresh: true, refresh_token: "")
 // - Single Principal with allowed_upstreams: [] (GLOBAL POOL, not bound to specific upstreams)
 // - Single client API key (cclb_...) shared across all CLIs
 // - Automatic Re-Read & Atomic PATCH /admin/v1/upstreams/{id} on 401/invalidation or near-expiry
@@ -70,25 +70,46 @@ function readLocalOmpGeminiAccessOnly() {
 }
 
 function readCliproxyOpenaiAccessOnly() {
+  const localFile = process.env.CC_LB_OPENAI_OAUTH_JSON_FILE;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (localFile && existsSync(localFile)) {
+    const d = JSON.parse(readFileSync(localFile, 'utf8'));
+    const expSec = Math.floor(Date.parse(d.expired) / 1000);
+    return {
+      access_token: d.access_token,
+      expires_at_unix_secs: expSec,
+      account_id: d.account_id,
+      source_file_hash12: sha12(path.basename(localFile)),
+    };
+  }
+  const kubeContext = process.env.CC_LB_OPENAI_OAUTH_KUBE_CONTEXT;
+  const kubeNamespace = process.env.CC_LB_OPENAI_OAUTH_KUBE_NAMESPACE;
+  const podPrefix = process.env.CC_LB_OPENAI_OAUTH_POD_PREFIX ?? 'oauth-broker-';
+  const credGlob = process.env.CC_LB_OPENAI_OAUTH_REMOTE_GLOB ?? '/var/run/oauth/*.json';
+  if (!kubeContext || !kubeNamespace) {
+    throw new Error(
+      'Set CC_LB_OPENAI_OAUTH_JSON_FILE or CC_LB_OPENAI_OAUTH_KUBE_CONTEXT + CC_LB_OPENAI_OAUTH_KUBE_NAMESPACE',
+    );
+  }
   const podNames = execFileSync(
     'kubectl',
-    ['--context', 'runbear-local', '-n', 'llm-proxy', 'get', 'pods', '-o', 'name'],
+    ['--context', kubeContext, '-n', kubeNamespace, 'get', 'pods', '-o', 'name'],
     { encoding: 'utf8' },
   )
     .trim()
     .split(/\r?\n/)
     .map((s) => s.replace(/^pod\//, ''))
-    .filter((s) => s.startsWith('cliproxyapi-'));
+    .filter((s) => s.startsWith(podPrefix));
   const pod = podNames[0];
-  if (!pod) throw new Error('No cliproxyapi pod found in runbear-local/llm-proxy');
+  if (!pod) throw new Error(`No ${podPrefix} pod found in ${kubeContext}/${kubeNamespace}`);
 
   const files = execFileSync(
     'kubectl',
     [
       '--context',
-      'runbear-local',
+      kubeContext,
       '-n',
-      'llm-proxy',
+      kubeNamespace,
       'exec',
       pod,
       '-c',
@@ -96,7 +117,7 @@ function readCliproxyOpenaiAccessOnly() {
       '--',
       'sh',
       '-c',
-      'ls -1 /root/.cli-proxy-api/*.json',
+      `ls -1 ${credGlob}`,
     ],
     { encoding: 'utf8' },
   )
@@ -104,11 +125,10 @@ function readCliproxyOpenaiAccessOnly() {
     .split(/\r?\n/)
     .filter(Boolean);
 
-  const nowSec = Math.floor(Date.now() / 1000);
   for (const f of files) {
     const raw = execFileSync(
       'kubectl',
-      ['--context', 'runbear-local', '-n', 'llm-proxy', 'exec', pod, '-c', 'main', '--', 'cat', f],
+      ['--context', kubeContext, '-n', kubeNamespace, 'exec', pod, '-c', 'main', '--', 'cat', f],
       { encoding: 'utf8' },
     );
     const d = JSON.parse(raw);
@@ -124,7 +144,7 @@ function readCliproxyOpenaiAccessOnly() {
       }
     }
   }
-  throw new Error('No valid codex OAuth entry found in runbear-local cliproxyapi');
+  throw new Error('No valid codex OAuth entry found in configured OAuth broker');
 }
 
 async function adminCall(adminToken, method, routePath, body, extraHeaders = {}) {
@@ -538,8 +558,9 @@ async function runOmpGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
 
   const prompt1 =
     'You are working in a tiny JavaScript project in the current directory. First use the read tool on src/slugify.js and test/slugify.test.js. Then make the smallest edit to src/slugify.js so every existing test passes; do not modify the tests. Run `node --test` once with the bash tool and reply with a one-sentence summary.';
+  const ompBin = process.env.OMP_BIN ?? 'omp';
   const turn1 = await runCmd(
-    '/Users/bhyoo/.local/libexec/omp/omp',
+    ompBin,
     [
       '--model',
       'cclb-gemini-oauth/gemini-3.8-flash-low',
@@ -577,7 +598,7 @@ async function runOmpGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
   const prompt2 =
     'Continuing this session: extend slugify with an optional second argument `{ maxLength }` that truncates the slug to at most maxLength characters and never leaves a trailing dash. Add one test for it to test/slugify.test.js, run `node --test` once with the bash tool, and reply with a one-sentence summary.';
   const turn2 = await runCmd(
-    '/Users/bhyoo/.local/libexec/omp/omp',
+    ompBin,
     [
       '-r',
       sessionId,
@@ -638,8 +659,9 @@ async function runAgyGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
   const beforeIdx = geminiTap.exchanges.length;
   const prompt1 =
     'You are working in a tiny Python project in the current directory. Use your tools: read pricing.py and test_pricing.py, then run `python3 -m unittest -v` to see the failures. Fix pricing.py with the smallest targeted change so every test passes. Do not edit test_pricing.py. Re-run `python3 -m unittest -v` until it passes. Finish with: AGY-OAUTH-TURN1 DONE';
+  const agyBin = process.env.AGY_BIN ?? 'agy';
   const turn1 = await runCmd(
-    '/tmp/cc-lb-antigravity-cli/agy',
+    agyBin,
     [
       '--model',
       'gemini-3.8-flash-high',
@@ -679,7 +701,7 @@ async function runAgyGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
     '--print',
     prompt2,
   ];
-  const turn2 = await runCmd('/tmp/cc-lb-antigravity-cli/agy', turn2Args, { cwd: proj, env });
+  const turn2 = await runCmd(agyBin, turn2Args, { cwd: proj, env });
   const test2 = spawnSync('/usr/bin/python3', ['-m', 'unittest', '-v'], { cwd: proj, encoding: 'utf8' });
 
   const sliceExchanges = geminiTap.exchanges.slice(beforeIdx);
@@ -895,7 +917,7 @@ async function main() {
     const clientKey = keyRes.json.plaintext_key;
 
     // Seed both OAuth upstreams initially with INVALID tokens so the first requests trigger
-    // automatic re-read from local OMP and runbear-local cliproxyapi!
+    // automatic re-read from local OMP and external OpenAI OAuth broker!
     const geminiMeta = readLocalOmpGeminiAccessOnly();
     const nowSec = Math.floor(Date.now() / 1000);
 

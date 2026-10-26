@@ -28,7 +28,7 @@ const SLICE = CONTRACT.slices.find((s) => s.id === 'agy');
 const BOUNDS = CONTRACT.paid_bounds;
 const FIXTURE = path.join(HERE, 'fixture');
 
-const AGY_BIN = process.env.AGY_BIN ?? '/tmp/cc-lb-antigravity-cli/agy';
+const AGY_BIN = process.env.AGY_BIN ?? 'agy';
 // agy has no native label for gemini-3-pro-preview (binary only exposes e.g. gemini-3.1-pro-low,
 // gemini-3.8-flash-high). Default: agy's own Pro low-thinking label; earlier agy captures sent it on the
 // wire as gemini-3.1-pro-preview and used gemini-3.1-flash-lite-preview for auxiliary calls.

@@ -5,7 +5,7 @@ import { lstat, open } from 'node:fs/promises';
 import path from 'node:path';
 import { TextDecoder } from 'node:util';
 
-export const CURRENT_NATIVE_ARTIFACT_ROOT = '/tmp/cc-lb-actual-cli-e2e-20261020/approved-core3-codex-shape-additional-tools-2026-10-22T13-21-26-226Z';
+export const CURRENT_NATIVE_ARTIFACT_ROOT = 'artifacts/codex-shape-probe';
 const SUMMARY_PATH = `${CURRENT_NATIVE_ARTIFACT_ROOT}/summary.json`;
 const MAX_BYTES = 2 * 1024 * 1024;
 const HASH = /^[a-f0-9]{64}$/;

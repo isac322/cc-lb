@@ -45,7 +45,7 @@ const PROVIDER = "openai";
 const EXPECTED_MODEL = "gpt-5.2";
 const EXPECTED_PROVIDER_HOST = "api.openai.com";
 const CLIENT_PROVIDER_ID = "cclb";
-const BINARY_PATH = "/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb";
+const BINARY_PATH = resolve(SLICE_DIR, "../../../../target/debug/cc-lb");
 const EXPECTED_BINARY_SHA256 = "dcde4343277cfc977bdfa77df768ea475d990d86058a879264fc58bb2a4e71a4";
 const EXPECTED_OMP_VERSION_PREFIX = "18.12.5";
 

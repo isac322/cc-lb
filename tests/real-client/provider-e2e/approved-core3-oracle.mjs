@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const BASE = '/tmp/cc-lb-actual-cli-e2e-20261020';
+const BASE = process.env.CC_LB_QA_WORK_DIR ?? path.dirname(new URL(import.meta.url).pathname);
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 async function hashFile(file) {
   const state = createHash('sha256');

@@ -55,7 +55,7 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 # Run all 4 profiles sequentially
 ./tests/real-client/run-provider-e2e.sh --run --case all --env-file /path/to/.env
 
-# Run shared-pool OAuth E2E (local OMP Gemini OAuth + runbear-local cliproxyapi OpenAI OAuth, never_refresh: true + auto re-read on 401)
+# Run shared-pool OAuth E2E (local OMP Gemini OAuth + external OpenAI OAuth broker, never_refresh: true + auto re-read on 401)
 ./tests/real-client/run-provider-e2e.sh --run-oauth
 ```
 
@@ -64,4 +64,4 @@ Stages an isolated working directory, starts the OTLP collector, runs the select
 - `OPENAI_BACKEND_API_KEY` or `OPENAI_API_KEY`: OpenAI API key for `omp-gpt` and `codex`
 - `GEMINI_MANAGED_API_KEY` or `GEMINI_API_KEY`: Google Gemini API key for `omp-gemini` and `agy`
 - `CC_LB_BIN`: Path to `cc-lb` binary (defaults to `target/debug/cc-lb`)
-- `AGY_BIN`: Path to `agy` binary if not on `PATH` (falls back to `/tmp/cc-lb-antigravity-cli/agy`)
+- `AGY_BIN`: Path to `agy` binary if not on `PATH`

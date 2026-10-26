@@ -150,7 +150,6 @@ function findBinary(name) {
     return realpathSync(process.env.AGY_BIN);
   }
   const searchDirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  if (name === 'agy') searchDirs.push('/tmp/cc-lb-antigravity-cli');
   for (const dir of searchDirs) {
     const candidate = path.join(dir, name);
     try {
@@ -388,15 +387,15 @@ function stageWorkDir(workDir, ccLbBin, ccLbSha, ledgerPath, credentialsObj, off
   let rtSource = readFileSync(rtPath, 'utf8');
   rtSource = rtSource
     .replace(
-      "export const LEDGER_PATH = '/tmp/cc-lb-actual-cli-e2e-20261020-ledger.json';",
+      /export const LEDGER_PATH = [^;]+;/,
       `export const LEDGER_PATH = ${JSON.stringify(ledgerPath)};`,
     )
     .replace(
-      "export const BINARY_PATH = '/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb';",
+      /export const BINARY_PATH = [^;]+;/,
       `export const BINARY_PATH = ${JSON.stringify(ccLbBin)};`,
     )
     .replace(
-      "export const EXPECTED_BINARY_SHA256 = '50d43f03ef36956abed6a1894f328c92c6e535263a5e4d29ae971daa8085f977';",
+      /export const EXPECTED_BINARY_SHA256 = [^;]+;/,
       `export const EXPECTED_BINARY_SHA256 = ${JSON.stringify(ccLbSha)};`,
     );
   writeFileSync(rtPath, rtSource, { mode: 0o600 });
@@ -411,7 +410,7 @@ function stageWorkDir(workDir, ccLbBin, ccLbSha, ledgerPath, credentialsObj, off
   let ompGptSource = readFileSync(ompGptPath, 'utf8');
   ompGptSource = ompGptSource
     .replace(
-      'const BINARY_PATH = "/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb";',
+      /const BINARY_PATH = [^;]+;/,
       `const BINARY_PATH = ${JSON.stringify(ccLbBin)};`,
     )
     .replace(

@@ -10,8 +10,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = path.dirname(fileURLToPath(import.meta.url));
-export const LEDGER_PATH = '/tmp/cc-lb-actual-cli-e2e-20261020-ledger.json';
-export const BINARY_PATH = '/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb';
+export const LEDGER_PATH = path.join(ROOT, 'ledger.json');
+export const BINARY_PATH = path.resolve(ROOT, '../../../target/debug/cc-lb');
 export const EXPECTED_BINARY_SHA256 = '6a2e215ff96a33f58e1f221ba45dc7225cc2dce18be8c4375c0d72d72bef5ecd';
 export const CREDENTIALS_PATH = path.join(ROOT, 'credentials.json');
 

@@ -40,13 +40,13 @@
       "at": "2026-10-18T02:19:42Z",
       "requirements": [
         "Never refresh shared OpenAI/Gemini OAuth grants",
-        "Retrieve current credentials from cliproxyapi in runbear-local again when expired"
+        "Retrieve current credentials from external OAuth broker again when expired"
       ]
     }
   ],
   "write_boundary": "New scratch fixtures, private client homes, local SQLite QA rows and bounded real-provider generation calls only. No repository edits, no production/service mutation, no shared OAuth refresh. Source fixes require a precise behavior/file approval. Keep existing QA services and homes untouched.",
   "artifact": {
-    "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/cc-lb-sha256-dcde4343277cfc977bdfa77df768ea475d990d86058a879264fc58bb2a4e71a4",
+    "path": "target/debug/cc-lb",
     "expected_sha256": "dcde4343277cfc977bdfa77df768ea475d990d86058a879264fc58bb2a4e71a4"
   },
   "judgment": {
@@ -123,7 +123,7 @@
   ],
   "fault_policy": "Only local owned fault intermediary or owned QA process; never stress/rate-limit/disable real provider or production. Positive response must still come from real provider. Label injected failures explicitly. Never invent unsupported client options or alter client wire payload to claim native CLI coverage.",
   "secrets": "Retrieve in process memory from existing secure sources, client keys only in0600scratchfiles, no raw headers/bodies/token values in reports. No shared refresh tokens in QA SQLite.",
-  "resource_ledger": "/tmp/cc-lb-actual-cli-e2e-20261020-ledger.json",
+  "resource_ledger": "ledger.json",
   "paid_bounds": {
     "cli_sessions_per_slice": 3,
     "turns_per_session": 2,
@@ -216,7 +216,7 @@
   "completion_rule": "Campaign cannot be COMPLETE/PASS while any required scenario is BLOCKED or NOT_RUN; report overall PARTIAL with each remaining prerequisite. No API-key-only scope reduction is authorized.",
   "cleanup": "Retain resources and ledger until explicit user cleanup signal. No automatic deletion.",
   "historical_artifact_reference": {
-    "path": "/data/data/orca/workspaces/cc-lb/gemini-codex/target/debug/cc-lb",
+    "path": "target/debug/cc-lb",
     "expected_sha256": "50d43f03ef36956abed6a1894f328c92c6e535263a5e4d29ae971daa8085f977"
   },
   "compiled_artifact_binding": {
@@ -225,23 +225,23 @@
     "scope": "FULL_COMMITTED_GIT_ARCHIVE",
     "tracked_blob_count": 2087,
     "compiled_witness": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/compiled-witness.json",
+      "path": "artifacts/compiled-witness.json",
       "sha256": "ed9702d7441e4444f322d0e1245da848e8fcdcec9a5b6792a928fff8af3953fc"
     },
     "compiled_pair": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/compiled-pair.json",
+      "path": "artifacts/compiled-pair.json",
       "sha256": "9b0d7786e6458fae94cfae2decb7891da797ee868f5d3be8c05757da5b5ce387"
     },
     "source_index_before": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/source-hashes.json",
+      "path": "artifacts/source-hashes.json",
       "sha256": "ea39eac8b9fa3a32dc57b76c4822131ffe4c4855cbe8da9010c09b55db477a99"
     },
     "source_index_after": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/source-hashes-after-build.json",
+      "path": "artifacts/source-hashes-after-build.json",
       "sha256": "0ee72f8bb8bb7a24434c336ee261fb302117dd4fe173d66edb811b02f91da3eb"
     },
     "source_archive": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/source.tar",
+      "path": "artifacts/source.tar",
       "sha256": "a35339b8402de317822b0203bd5b858a92a276b5256a98369390fbaeca9298f4"
     },
     "approved_committed_paths": {
@@ -250,7 +250,7 @@
       "CHANGELOG.md": "58a98e1aee2208f17053dc1d991e2092c769d69287de4a4335c7ed9a5ef26bce"
     },
     "overlay_equivalence": {
-      "path": "/tmp/cc-lb-actual-cli-e2e-20261020/after-counttokens-f3b8044e-39bbfeb283/overlay-equivalence.json",
+      "path": "artifacts/overlay-equivalence.json",
       "sha256": "1dbf414ba4036eff8e1505070f8d54a6ef034c9d247ff3fab8636ad9d88c1219"
     },
     "source_coverage_note": "Full 2087 Git blob payload equivalence and complete path sets; not a selected-122-source pin claim",
@@ -280,28 +280,28 @@
           "https://developers.openai.com/api/reference/resources/responses/methods/create",
           "https://developers.openai.com/api/docs/guides/fast-mode",
           "https://developers.openai.com/api/docs/guides/prompt-caching",
-          "User-confirmed OPENAI_BACKEND_API_KEY: RunbearDefaultProject Standard PAYG; no Scale Tier or FedRAMP contract; API omission resolves auto to this project Standard tier",
-          "Read-only project settings descriptor /tmp/cc-lb-openai-project-settings-78b71ecb-c490-437a-baec-6be67df8dd38.json SHA256 72c6e44b401050cb26915c83475abe33953b8de7b6a15196923b88eee0e32e48"
+          "User-confirmed OPENAI_BACKEND_API_KEY: Standard PAYG; no Scale Tier or FedRAMP contract; API omission resolves auto to project Standard tier",
+          "Read-only project settings descriptor SHA256 72c6e44b401050cb26915c83475abe33953b8de7b6a15196923b88eee0e32e48"
         ]
       }
     }
   },
   "approved_client_identity": {
     "schema": "approved-core3-omp-client-v1",
-    "launcher": "/etc/profiles/per-user/bhyoo/bin/omp",
-    "realpath": "/Users/bhyoo/.local/libexec/omp/omp",
+    "launcher": "/usr/local/bin/omp",
+    "realpath": "/usr/local/libexec/omp/omp",
     "sha256": "cfbb5e38cd8f8a3be55e710700be587d287deaacdc58c9b0a661c5086bccfe58",
     "version": "omp/18.12.6",
     "provenance": {
-      "receipt_path": "/tmp/cc-lb-actual-cli-e2e-20261020/evidence/approved-core3-gptmeta1-actual-run-bf0d16.receipt.json",
+      "receipt_path": "artifacts/omp-gpt.receipt.json",
       "receipt_sha256": "5838acd2545ac115dec9a2434c9e23a949ed9e41b210a0103057d92df84c0b42",
-      "version_path": "/tmp/cc-lb-actual-cli-e2e-20261020/fixed-dcde4343277c-core3-v25-gptmeta1/omp-gpt/evidence/omp-version.txt",
+      "version_path": "artifacts/omp-version.txt",
       "version_sha256": "e5dea60785e08b56fe4d58aed32b4794d0cb085465f3f21cb6a3d973c9e84580"
     }
   },
   "credential_binding": {
     "source_type": "envFile",
-    "env_file": "/data/workspace/projects/runbear/plugbear/.env",
+    "env_file": ".env",
     "env_key": "OPENAI_BACKEND_API_KEY",
     "value_read": false
   }
