@@ -10,3 +10,16 @@ Pinned versions are installed by `tests/real-client/install.sh` under `target/te
 | `senpi` | `@code-yeongyu/senpi` | `senpi` | `2026.10.18-1` | `npm view @code-yeongyu/senpi@2026.10.18-1 version` | `2026.10.18-1` |
 
 The `pi` install pins `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, and `@earendil-works/pi-tui` to `1.3.0`; `@earendil-works/pi-coding-agent` is the package that exposes the tested `pi` binary.
+
+## Multi-Provider Live E2E CLI Suite (`tests/real-client/provider-e2e/`)
+
+`tests/real-client/run-provider-e2e.sh` exercises real multi-turn coding-agent workflows (tool loops, session continuation, OpenAI `previous_response_id` and Responses WebSocket + reconnect, Gemini 3 `thoughtSignature` replay, OTLP trace join, and catalog cost reconciliation) across four live provider profiles:
+
+| Profile | Binary | Tested Version | Provider | Primary / Control Models | Entrypoint |
+| --- | --- | --- | --- | --- | --- |
+| `omp-gpt` | `omp` | `18.12.6` | OpenAI (`/v1/responses` HTTP SSE) | `gpt-5.2` | `./tests/real-client/run-provider-e2e.sh --run --case omp-gpt` |
+| `omp-gemini` | `omp` | `18.12.6` | Google Gemini (`streamGenerateContent` SSE) | `gemini-3.1-pro-preview`, `gemini-3.5-flash-lite` | `./tests/real-client/run-provider-e2e.sh --run --case omp-gemini` |
+| `codex` | `codex` | `0.163.0` | OpenAI (`/v1/responses` HTTP SSE + WebSocket) | `gpt-6.1-sol` | `./tests/real-client/run-provider-e2e.sh --run --case codex` |
+| `agy` | `agy` | `1.4.4` | Google Gemini (`streamGenerateContent` SSE) | `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview` | `./tests/real-client/run-provider-e2e.sh --run --case agy` |
+
+Run `./tests/real-client/run-provider-e2e.sh --self-test` for offline unit and OTLP receiver lifecycle verification, or `./tests/real-client/run-provider-e2e.sh --preflight --case all` to check binary and credential readiness without making provider calls.
