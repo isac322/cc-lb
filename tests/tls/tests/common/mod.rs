@@ -26,6 +26,8 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
 pub const STREAM_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"stream through reload"}],"max_tokens":16,"stream":true}"#;
+pub const COUNT_TOKENS_BODY: &str =
+    r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"ping"}]}"#;
 
 pub struct RunningTlsApp {
     pub proxy_addr: SocketAddr,
@@ -302,9 +304,17 @@ async fn tls_get_request(
     let api_key_header = api_key
         .map(|key| format!("x-api-key: {key}\r\n"))
         .unwrap_or_default();
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: localhost\r\n{api_key_header}Connection: close\r\n\r\n"
-    );
+    let request = if path == "/v1/models" {
+        format!(
+            "POST /v1/messages/count_tokens HTTP/1.1\r\nHost: localhost\r\n{api_key_header}anthropic-version: 2023-06-01\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+            COUNT_TOKENS_BODY.len(),
+            COUNT_TOKENS_BODY
+        )
+    } else {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\n{api_key_header}Connection: close\r\n\r\n"
+        )
+    };
     let peer_fingerprint = peer_fingerprint(&stream);
     let protocol_version = stream.get_ref().1.protocol_version();
     stream
