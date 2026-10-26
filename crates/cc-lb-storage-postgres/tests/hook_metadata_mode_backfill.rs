@@ -388,6 +388,7 @@ async fn run_test(url: &str) -> Result<()> {
     fixture.drop_schema().await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_upstream_spec(
     pool: &PgPool,
     id: Uuid,

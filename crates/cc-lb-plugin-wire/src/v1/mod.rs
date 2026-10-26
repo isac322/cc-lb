@@ -293,8 +293,11 @@ pub enum Upstream {
 /// Borrowed mirror of [`Upstream`].
 #[derive(Archive, Serialize)]
 pub enum UpstreamRef<'a> {
+    /// Direct Anthropic API endpoint.
     AnthropicDirect { base_url: Option<QueryRef<'a>> },
+    /// Direct OpenAI API endpoint.
     OpenaiDirect { base_url: Option<QueryRef<'a>> },
+    /// Direct Gemini API endpoint.
     GeminiDirect { base_url: Option<QueryRef<'a>> },
 }
 
