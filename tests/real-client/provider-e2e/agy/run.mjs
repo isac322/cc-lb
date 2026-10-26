@@ -798,6 +798,7 @@ async function main() {
   const startedAt = nowIso();
   const ctx = await rt.prepareSlice({
     name: 'agy',
+    artifact: { path: CONTRACT.artifact.path, expected_sha256: CONTRACT.artifact.expected_sha256 },
     ports: SLICE.ports,
     provider: 'gemini',
     model: WIRE_MODEL,

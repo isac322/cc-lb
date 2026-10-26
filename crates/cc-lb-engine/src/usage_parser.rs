@@ -29,6 +29,8 @@ const TRUNCATION_MARKER: &str = "...";
 pub(crate) struct UsageCounts {
     pub(crate) present: bool,
     pub(crate) input_tokens: u64,
+    pub(crate) gross_input_tokens: Option<u64>,
+    pub(crate) input_includes_cached: bool,
     pub(crate) output_tokens: u64,
     pub(crate) cache_creation_input_tokens: u64,
     pub(crate) cache_creation_input_tokens_5m: u64,
@@ -435,11 +437,15 @@ fn usage_from_value(value: &Value) -> UsageCounts {
 
 fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
     let prompt_token_count = reported.get("promptTokenCount").and_then(Value::as_u64);
+    if prompt_token_count.is_some() {
+        usage.input_includes_cached = true;
+    }
     if let Some(input_tokens) = reported
         .get("input_tokens")
         .and_then(Value::as_u64)
         .or(prompt_token_count)
     {
+        usage.gross_input_tokens = Some(input_tokens);
         usage.input_tokens = input_tokens;
     }
     if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
@@ -450,16 +456,21 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         .and_then(|details| details.get("cached_tokens"))
         .and_then(Value::as_u64)
     {
-        usage.input_tokens = usage.input_tokens.saturating_sub(cached_tokens);
+        usage.input_includes_cached = true;
         usage.cache_read_input_tokens = cached_tokens;
     } else if let Some(cached_tokens) = reported
         .get("cachedContentTokenCount")
         .and_then(Value::as_u64)
     {
-        if prompt_token_count.is_some() {
-            usage.input_tokens = usage.input_tokens.saturating_sub(cached_tokens);
+        if usage.gross_input_tokens.is_some() {
+            usage.input_includes_cached = true;
         }
         usage.cache_read_input_tokens = cached_tokens;
+    }
+    if usage.input_includes_cached
+        && let Some(gross_input) = usage.gross_input_tokens
+    {
+        usage.input_tokens = gross_input.saturating_sub(usage.cache_read_input_tokens);
     }
     if let Some(reasoning_tokens) = reported
         .get("output_tokens_details")
@@ -627,17 +638,42 @@ fn detect_mid_stream_error_with(
 ) -> Option<UpstreamStreamError> {
     let value = event.value().ok().flatten()?;
     let type_str = value.get("type").and_then(Value::as_str);
-    if !event.named_error && type_str != Some("error") && value.get("error").is_none() {
+    let is_response_failed = type_str == Some("response.failed")
+        || event.event_name == Some(b"response.failed")
+        || (value.get("object").and_then(Value::as_str) == Some("response")
+            && value.get("status").and_then(Value::as_str) == Some("failed"));
+    let nested_response_error = value.get("response").and_then(|resp| resp.get("error"));
+    if !event.named_error
+        && type_str != Some("error")
+        && value.get("error").is_none()
+        && !is_response_failed
+        && nested_response_error.is_none()
+    {
         return None;
     }
-    let (mut error_type, error_message) = bounded_upstream_error(value);
+    let error_source = if value.get("error").is_some() {
+        value
+    } else if let Some(response_obj) = value.get("response").filter(|r| r.get("error").is_some()) {
+        response_obj
+    } else {
+        value
+    };
+    let (mut error_type, error_message) = bounded_upstream_error(error_source);
     if error_type.is_none() {
-        let error_obj = value.get("error").unwrap_or(value);
-        error_type = error_obj
-            .get("status")
-            .and_then(Value::as_str)
+        let error_obj = error_source.get("error").unwrap_or(error_source);
+        let candidate_keys: &[&str] = if is_response_failed || nested_response_error.is_some() {
+            &["code", "status"]
+        } else {
+            &["status"]
+        };
+        error_type = candidate_keys
+            .iter()
+            .filter_map(|key| error_obj.get(*key).and_then(Value::as_str))
             .filter(|candidate| !candidate.is_empty())
-            .and_then(BoundedErrorType::parse);
+            .find_map(BoundedErrorType::parse);
+    }
+    if error_type.is_none() && is_response_failed {
+        error_type = BoundedErrorType::parse("response_failed");
     }
     Some(UpstreamStreamError {
         error_type: error_type.map(|error_type| scrub_string(signer, error_type.into_string())),
@@ -1707,5 +1743,48 @@ mod tests {
             assert_eq!(usage.thinking_tokens, 12, "{payload}");
             assert_eq!(usage.estimated_thinking_progress, 0);
         }
+    }
+
+    #[test]
+    fn partial_cumulative_snapshots_retain_cached_subtraction() {
+        let mut gemini = UsageCounts::default();
+        accumulate_raw_sse_usage(
+            b"data: {\"usageMetadata\":{\"promptTokenCount\":120,\"cachedContentTokenCount\":17}}\n\n",
+            &mut gemini,
+        );
+        assert_eq!(gemini.input_tokens, 103);
+        assert_eq!(gemini.cache_read_input_tokens, 17);
+
+        accumulate_raw_sse_usage(
+            b"data: {\"usageMetadata\":{\"promptTokenCount\":120,\"candidatesTokenCount\":10}}\n\n",
+            &mut gemini,
+        );
+        assert_eq!(gemini.input_tokens, 103);
+        assert_eq!(gemini.cache_read_input_tokens, 17);
+        assert_eq!(gemini.output_tokens, 10);
+
+        let mut openai = UsageCounts::default();
+        accumulate_raw_sse_usage(
+            b"data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":120,\"input_tokens_details\":{\"cached_tokens\":17}}}}\n\n",
+            &mut openai,
+        );
+        assert_eq!(openai.input_tokens, 103);
+        assert_eq!(openai.cache_read_input_tokens, 17);
+
+        accumulate_raw_sse_usage(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":120,\"output_tokens\":15}}}\n\n",
+            &mut openai,
+        );
+        assert_eq!(openai.input_tokens, 103);
+        assert_eq!(openai.cache_read_input_tokens, 17);
+        assert_eq!(openai.output_tokens, 15);
+    }
+
+    #[test]
+    fn detect_mid_stream_error_from_openai_response_failed_envelope() {
+        let raw = b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"upstream failed\"}}}\n\n";
+        let err = detect_raw_mid_stream_error(raw).expect("response.failed detected");
+        assert_eq!(err.error_type.as_deref(), Some("server_error"));
+        assert_eq!(err.error_message.as_deref(), Some("upstream failed"));
     }
 }

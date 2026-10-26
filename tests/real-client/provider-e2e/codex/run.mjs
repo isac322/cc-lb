@@ -1258,6 +1258,7 @@ async function main() {
 
   const ctx = await prepareSlice({
     name: "codex",
+    artifact: { path: ARTIFACT.path, expected_sha256: ARTIFACT.expected_sha256 },
     ports: PORTS,
     provider: "openai",
     model: MODEL,

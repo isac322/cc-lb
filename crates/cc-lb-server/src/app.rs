@@ -2622,6 +2622,8 @@ enum WsProviderEvent {
     },
 }
 
+const WS_PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 async fn start_responses_provider(
     request: http::Request<()>,
     connection_id: u64,
@@ -2631,12 +2633,16 @@ async fn start_responses_provider(
     events: tokio::sync::mpsc::Sender<WsProviderEvent>,
     message_cap: usize,
 ) -> Result<WsProviderConnection, String> {
-    let (upstream, _) = connect_async_with_config(
-        request,
-        Some(responses_websocket_config(message_cap)),
-        false,
+    let (upstream, _) = tokio::time::timeout(
+        WS_PROVIDER_CONNECT_TIMEOUT,
+        connect_async_with_config(
+            request,
+            Some(responses_websocket_config(message_cap)),
+            false,
+        ),
     )
     .await
+    .map_err(|_| "upstream WebSocket connection timed out".to_owned())?
     .map_err(|error| format!("upstream WebSocket connection failed: {error}"))?;
     let (sink, mut stream) = upstream.split();
     let task = tokio::spawn(async move {
@@ -2897,13 +2903,48 @@ async fn relay_responses_websocket(
     let reader_closed = client_closed.clone();
     let mut client_reader = WsDownstreamReader {
         task: tokio::spawn(async move {
-            while let Some(result) = downstream_stream.next().await {
-                let message = match result {
-                    Ok(Message::Close(_)) | Err(_) => break,
-                    Ok(message) => message,
-                };
-                if client_tx.send(message).await.is_err() {
-                    return;
+            let mut pending = VecDeque::new();
+            loop {
+                if pending.is_empty() {
+                    let Some(result) = downstream_stream.next().await else {
+                        break;
+                    };
+                    let message = match result {
+                        Ok(Message::Close(_)) | Err(_) => break,
+                        Ok(message) => message,
+                    };
+                    match client_tx.try_send(message) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(message)) => {
+                            pending.push_back(message);
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                    }
+                } else {
+                    tokio::select! {
+                        permit = client_tx.reserve() => {
+                            let Ok(permit) = permit else {
+                                return;
+                            };
+                            if let Some(message) = pending.pop_front() {
+                                permit.send(message);
+                            }
+                        }
+                        result = downstream_stream.next() => {
+                            let Some(result) = result else {
+                                break;
+                            };
+                            match result {
+                                Ok(Message::Close(_)) | Err(_) => break,
+                                Ok(message) => {
+                                    if pending.len() >= capacity {
+                                        break;
+                                    }
+                                    pending.push_back(message);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             reader_closed.cancel();

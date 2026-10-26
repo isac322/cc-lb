@@ -495,22 +495,55 @@ function startCodexOAuthTap({ listenPort, targetPort, adminToken, openaiUpstream
 // ---------------------------------------------------------------------------
 // 4. Scenario Runners (OMP Gemini OAuth, AGY Gemini OAuth, Codex OpenAI OAuth)
 // ---------------------------------------------------------------------------
+function killOwnedGroup(pid, signal) {
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  try {
+    process.kill(-pid, signal);
+  } catch {}
+}
+
 function runCmd(cmd, args, { cwd, env, timeoutMs = 150_000 }) {
   return new Promise((resolve) => {
     const out = [];
     const err = [];
-    const child = spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (c) => out.push(c));
-    child.stderr.on('data', (c) => err.push(c));
-    child.once('close', (code, signal) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let settled = false;
+    let killEscalation = null;
+    const finish = (code, signal) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(killEscalation);
       resolve({
         code,
         signal,
         stdout: Buffer.concat(out).toString('utf8'),
         stderr: Buffer.concat(err).toString('utf8'),
       });
+    };
+    const timer = setTimeout(() => {
+      killOwnedGroup(child.pid, 'SIGTERM');
+      killEscalation = setTimeout(() => {
+        killOwnedGroup(child.pid, 'SIGKILL');
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(null, 'SIGKILL');
+      }, 2_000);
+    }, timeoutMs);
+    child.stdout.on('data', (c) => out.push(c));
+    child.stderr.on('data', (c) => err.push(c));
+    child.once('error', () => {
+      killOwnedGroup(child.pid, 'SIGKILL');
+      finish(1, null);
+    });
+    child.once('close', (code, signal) => {
+      killOwnedGroup(child.pid, 'SIGKILL');
+      finish(code, signal);
     });
   });
 }
@@ -718,7 +751,7 @@ async function runAgyGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
 }
 
 async function runCodexOpenaiOAuthScenario({ codexTap, injectDropState, clientKey, workRoot }) {
-  const codexBin = '/nix/store/h9b93rljh0khvpmbyairiwgdc9q52h14-codex-0.163.0/libexec/codex/bin/codex';
+  const codexBin = process.env.CODEX_BIN ?? 'codex';
   const results = {};
 
   for (const mode of ['http', 'ws', 'ws_reconnect']) {

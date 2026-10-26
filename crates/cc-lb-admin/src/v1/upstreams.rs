@@ -1937,12 +1937,40 @@ async fn update_upstream(
                     UpstreamError::NotApiKeyUpstream
                 });
             }
-            prepare_imported_oauth_bundle(
-                current.kind,
-                body.oauth_token_bundle.clone(),
-                body.project_id.as_deref(),
-                cc_lb_clock::unix_secs(state.clock.now()),
-            )?
+            if body.oauth_token_bundle.is_some() {
+                prepare_imported_oauth_bundle(
+                    current.kind,
+                    body.oauth_token_bundle.clone(),
+                    body.project_id.as_deref(),
+                    cc_lb_clock::unix_secs(state.clock.now()),
+                )?
+            } else if current.kind == UpstreamKind::OpenaiOauth {
+                if body.project_id.is_some() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "unexpected_project_id",
+                        detail: "OpenAI OAuth does not accept project_id".to_owned(),
+                    });
+                }
+                None
+            } else if let Some(raw_project_id) = body.project_id.as_deref() {
+                let project_id = raw_project_id.trim();
+                if project_id.is_empty() {
+                    return Err(UpstreamError::BadRequest {
+                        error: "missing_project_id",
+                        detail: "Gemini OAuth project_id must be non-empty".to_owned(),
+                    });
+                }
+                let mut bundle = current
+                    .oauth_credentials
+                    .as_ref()
+                    .ok_or(UpstreamError::CredentialDecrypt)?
+                    .decrypt(&state.aead, current.id.as_bytes())
+                    .map_err(|_| UpstreamError::CredentialDecrypt)?;
+                bundle.project_id = Some(project_id.to_owned());
+                Some(bundle)
+            } else {
+                None
+            }
         }
         _ => {
             if body.oauth_token_bundle.is_some() || body.project_id.is_some() {
@@ -1956,24 +1984,90 @@ async fn update_upstream(
         }
     };
     if let Some(bundle) = imported_oauth_bundle {
+        let mut fields_changed = changed_fields(&body);
+        if body.oauth_token_bundle.is_some() {
+            fields_changed.push("oauth_tokens");
+        }
+        if current.kind == UpstreamKind::GeminiOauth
+            && (body.project_id.is_some() || body.oauth_token_bundle.is_some())
+            && !fields_changed.contains(&"project_id")
+        {
+            fields_changed.push("project_id");
+        }
+        let has_spec_fields = body.name.is_some()
+            || body.base_url.is_some()
+            || body.clear_base_url
+            || body.enabled.is_some()
+            || body.warmup_enabled.is_some()
+            || body.warmup_dialect_plugin.is_some();
+        let target_base_url = if body.clear_base_url {
+            None
+        } else {
+            body.base_url.clone().or_else(|| current.base_url.clone())
+        };
+        let base_url_written = body.base_url.is_some() || body.clear_base_url;
+        let (old_host, new_host) = if base_url_written {
+            (
+                current.base_url.as_ref().map(audit_host),
+                target_base_url.as_ref().map(audit_host),
+            )
+        } else {
+            (None, None)
+        };
+        let token_revision = if has_spec_fields {
+            let spec_updated = match UpstreamStore::update(
+                storage,
+                current.id,
+                expected_revision,
+                UpstreamUpdate {
+                    name: body.name,
+                    base_url: if body.clear_base_url {
+                        Some(None)
+                    } else {
+                        body.base_url.map(Some)
+                    },
+                    api_key_ciphertext: None,
+                    oauth_token_generation: None,
+                    enabled: body.enabled,
+                    warmup_enabled: body.warmup_enabled,
+                    warmup_dialect_plugin: body.warmup_dialect_plugin,
+                    workspace_id: None,
+                    api_key_access: None,
+                    reset_api_key_poll_state: false,
+                },
+            )
+            .await
+            {
+                Ok(updated) => updated,
+                Err(StorageError::Conflict { message }) => {
+                    return stale_or_conflict(&state, &id, expected_revision, message).await;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            spec_updated.revision
+        } else {
+            expected_revision
+        };
         let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
             &state.aead,
             &bundle,
             current.id.as_bytes(),
         )
         .map_err(|_| UpstreamError::CredentialDecrypt)?;
-        let updated = UpstreamStore::store_oauth_tokens(
+        let updated = match UpstreamStore::store_oauth_tokens(
             storage,
             current.id,
-            expected_revision,
+            token_revision,
             encrypted,
             bundle.never_refresh,
         )
-        .await?;
-        let fields_changed = if current.kind == UpstreamKind::GeminiOauth {
-            vec!["oauth_tokens", "project_id"]
-        } else {
-            vec!["oauth_tokens"]
+        .await
+        {
+            Ok(updated) => updated,
+            Err(StorageError::Conflict { message }) => {
+                return stale_or_conflict(&state, &id, token_revision, message).await;
+            }
+            Err(error) => return Err(error.into()),
         };
         let payload = AuditPayload::UpstreamUpdate {
             upstream_id: updated.id.to_string(),
@@ -1981,8 +2075,8 @@ async fn update_upstream(
             key_hint: None,
             verdict: None,
             remediation: Vec::new(),
-            old_host: None,
-            new_host: None,
+            old_host,
+            new_host,
         };
         let mut response = respond_with_etag(&updated, None);
         add_dynamic_rebind_headers(&mut response, &state).await;

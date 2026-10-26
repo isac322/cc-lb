@@ -188,7 +188,7 @@ function resolveCredentialLocator(spec, envFile, fileEnv) {
     if (typeof fileEnv[key] === 'string' && fileEnv[key].trim().length > 0 && envFile) {
       return {
         found: true,
-        source: { type: 'envfile', path: envFile, key },
+        source: { type: 'envFile', path: envFile, key },
         fingerprint12: sha256(fileEnv[key].trim()).slice(0, 12),
       };
     }
@@ -348,7 +348,6 @@ function stageWorkDir(workDir, ccLbBin, ccLbSha, ledgerPath, credentialsObj, off
     'approved-core3-cap30-contract.json',
     'qa-runtime.mjs',
     'approved-core3-subscription-budget-v30.mjs',
-    'approved-core3-provider-boundary.mjs',
     'approved-core3-oracle.mjs',
     'omp-gpt',
     'omp-gemini',

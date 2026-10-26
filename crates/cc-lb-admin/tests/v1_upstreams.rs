@@ -1306,3 +1306,70 @@ async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default
         assert_eq!(body(&response)["kind"], kind);
     }
 }
+
+#[tokio::test]
+async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updates() {
+    let (_dir, storage) = new_store().await;
+    let state = test_state(storage);
+    let created = request(
+        router(state.clone()),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "openai-oauth-patch",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "access-1",
+                "refresh-1",
+                Some("acct-1"),
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(created.status, StatusCode::CREATED);
+    let id = body(&created)["id"].as_str().unwrap().to_owned();
+
+    let disabled = request(
+        router(state.clone()),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": false })),
+        Some("1"),
+    )
+    .await;
+    assert_eq!(disabled.status, StatusCode::OK);
+    assert_eq!(body(&disabled)["enabled"], false);
+    assert_eq!(
+        disabled.headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some("W/\"2\"")
+    );
+
+    let combined = request(
+        router(state),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "name": "openai-oauth-renamed",
+            "enabled": true,
+            "oauth_tokens": oauth_bundle_json(
+                "access-2",
+                "refresh-2",
+                Some("acct-2"),
+                None,
+                false
+            )
+        })),
+        Some("\"2\""),
+    )
+    .await;
+    assert_eq!(combined.status, StatusCode::OK);
+    assert_eq!(body(&combined)["name"], "openai-oauth-renamed");
+    assert_eq!(body(&combined)["enabled"], true);
+    assert_eq!(
+        combined.headers.get("etag").and_then(|v| v.to_str().ok()),
+        Some("W/\"3\"")
+    );
+}

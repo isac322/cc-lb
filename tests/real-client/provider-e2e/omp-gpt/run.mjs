@@ -1099,6 +1099,7 @@ async function main() {
   // QA_RESUME=1 reuses the runtime's verified, ledgered cc-lb process for this slice (no restart/delete).
   const ctx = await prepareSlice({
     name: SLICE,
+    artifact: { path: BINARY_PATH, expected_sha256: EXPECTED_BINARY_SHA256 },
     ports: PORTS,
     provider: PROVIDER,
     model: EXPECTED_MODEL,

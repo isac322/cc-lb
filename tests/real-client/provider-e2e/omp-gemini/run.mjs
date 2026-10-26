@@ -1065,7 +1065,7 @@ async function main() {
   const localSha = await sha256File(BINARY_PATH);
   // QA_RESUME=1: recover THIS slice's owned, still-running runtime (prepareSlice resume:true; never a new DB).
   const resume = process.env.QA_RESUME === "1";
-  const ctx = await prepareSlice({ name: SLICE, ports: PORTS, provider: PROVIDER, model: PRIMARY_MODEL, pricedModels: [PRIMARY_MODEL, CONTROL_MODEL], resume });
+  const ctx = await prepareSlice({ name: SLICE, artifact: { path: BINARY_PATH, expected_sha256: EXPECTED_BINARY_SHA256 }, ports: PORTS, provider: PROVIDER, model: PRIMARY_MODEL, pricedModels: [PRIMARY_MODEL, CONTROL_MODEL], resume });
   summary.resume = resume ? { resumed: true, attempt: ATTEMPT, recovered: ctx.recovered ?? null } : { resumed: false, attempt: ATTEMPT };
   const evidenceDir = ctx.evidenceDir;
   ensureDir(evidenceDir);

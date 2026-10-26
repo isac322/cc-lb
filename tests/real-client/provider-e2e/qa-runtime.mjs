@@ -316,9 +316,13 @@ async function retrieveSecret(source) {
   switch (source?.type) {
     case 'sqliteAead':
       return retrieveSqliteAead(source);
-    case 'envFile': {
+    case 'envFile':
+    case 'envfile': {
       const text = await readFile(source.path, 'utf8');
       return parseEnvFile(text, source.key);
+    }
+    case 'env': {
+      return process.env[source.key] ?? null;
     }
     case 'gcloudApiKey': {
       let keyName = source.keyName;
@@ -658,7 +662,9 @@ function hostOf(url) {
 // deletes or recreates the DB, and seeds only missing rows (matched by name).
 export async function prepareSlice(opts) {
   const { name, ports, provider, model, otlpEndpoint } = opts;
-  const artifact = runtimeArtifact(opts.artifact);
+  const artifact = runtimeArtifact(
+    opts.artifact ?? { path: BINARY_PATH, expected_sha256: EXPECTED_BINARY_SHA256 },
+  );
   if (!/^[a-z0-9][a-z0-9-]*$/.test(name ?? '')) throw new Error('prepareSlice: invalid name');
   if (!Array.isArray(ports) || ports.length !== 3) throw new Error('prepareSlice: ports must be [proxy, admin, metrics]');
   if (!provider || !model) throw new Error('prepareSlice: provider and model required');
