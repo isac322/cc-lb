@@ -1347,6 +1347,53 @@ async fn openai_and_gemini_oauth_patch_supports_metadata_only_and_combined_updat
         Some("W/\"2\"")
     );
 
+    let other = request(
+        router(state.clone()),
+        "POST",
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": "taken-oauth-name",
+            "kind": "openai_oauth",
+            "oauth_tokens": oauth_bundle_json(
+                "other-access",
+                "other-refresh",
+                Some("other-acct"),
+                None,
+                false
+            )
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(other.status, StatusCode::CREATED);
+
+    let conflicting = request(
+        router(state.clone()),
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({
+            "name": "taken-oauth-name",
+            "enabled": true,
+            "oauth_tokens": oauth_bundle_json(
+                "should-not-commit",
+                "should-not-commit-refresh",
+                Some("acct-conflict"),
+                None,
+                false
+            )
+        })),
+        Some("\"2\""),
+    )
+    .await;
+    assert_eq!(conflicting.status, StatusCode::CONFLICT);
+    let uuid = Uuid::parse_str(&id).unwrap();
+    let unchanged = UpstreamStore::get_by_id(state.storage.as_ref().unwrap().as_ref(), uuid)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.revision, 2);
+    assert_eq!(unchanged.oauth_token_generation, 1);
+
     let combined = request(
         router(state),
         "PATCH",

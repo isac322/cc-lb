@@ -9,7 +9,6 @@ End-to-end coding-agent QA suite that drives real CLI binaries (`omp`, `codex`, 
   - Exact session continuation (`omp -r <session_id>`, `codex exec resume <thread_id>`, `agy --conversation <id>`)
 - **Accounting & observability invariants**:
   - Pre-dispatch conservative token/USD reservation and post-response settlement (`approved-core3-subscription-budget-v30.mjs`)
-  - Local TLS 1.3 / HTTP / WebSocket boundary capture (`approved-core3-provider-boundary.mjs`)
   - HTTP/2 gRPC OTLP span capture (`trace-proof/otlp-receiver.mjs`) with zero decode/drop errors
   - 1:1 correlation join (`approved-core3-oracle.mjs`) from raw provider `response.id` -> OTel `gen_ai.response.id` + `cc_lb.request.id` -> durable `/admin/v1/events/delta` `request_id`
   - Token accounting accuracy (`input_tokens - cached_tokens`, OpenAI `reasoning_tokens` no double-add, Gemini `candidatesTokenCount + thoughtsTokenCount == output_tokens`)

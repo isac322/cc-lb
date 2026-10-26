@@ -156,6 +156,7 @@ pub struct UpstreamUpdate {
     pub base_url: Option<Option<Url>>,
     pub enabled: Option<bool>,
     pub api_key_ciphertext: Option<Vec<u8>>,
+    pub oauth_tokens: Option<OAuthTokensCreate>,
     pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: Option<bool>,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,

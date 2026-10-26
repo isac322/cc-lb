@@ -1994,12 +1994,6 @@ async fn update_upstream(
         {
             fields_changed.push("project_id");
         }
-        let has_spec_fields = body.name.is_some()
-            || body.base_url.is_some()
-            || body.clear_base_url
-            || body.enabled.is_some()
-            || body.warmup_enabled.is_some()
-            || body.warmup_dialect_plugin.is_some();
         let target_base_url = if body.clear_base_url {
             None
         } else {
@@ -2014,58 +2008,42 @@ async fn update_upstream(
         } else {
             (None, None)
         };
-        let token_revision = if has_spec_fields {
-            let spec_updated = match UpstreamStore::update(
-                storage,
-                current.id,
-                expected_revision,
-                UpstreamUpdate {
-                    name: body.name,
-                    base_url: if body.clear_base_url {
-                        Some(None)
-                    } else {
-                        body.base_url.map(Some)
-                    },
-                    api_key_ciphertext: None,
-                    oauth_token_generation: None,
-                    enabled: body.enabled,
-                    warmup_enabled: body.warmup_enabled,
-                    warmup_dialect_plugin: body.warmup_dialect_plugin,
-                    workspace_id: None,
-                    api_key_access: None,
-                    reset_api_key_poll_state: false,
-                },
-            )
-            .await
-            {
-                Ok(updated) => updated,
-                Err(StorageError::Conflict { message }) => {
-                    return stale_or_conflict(&state, &id, expected_revision, message).await;
-                }
-                Err(error) => return Err(error.into()),
-            };
-            spec_updated.revision
-        } else {
-            expected_revision
-        };
         let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
             &state.aead,
             &bundle,
             current.id.as_bytes(),
         )
         .map_err(|_| UpstreamError::CredentialDecrypt)?;
-        let updated = match UpstreamStore::store_oauth_tokens(
+        let updated = match UpstreamStore::update(
             storage,
             current.id,
-            token_revision,
-            encrypted,
-            bundle.never_refresh,
+            expected_revision,
+            UpstreamUpdate {
+                name: body.name,
+                base_url: if body.clear_base_url {
+                    Some(None)
+                } else {
+                    body.base_url.map(Some)
+                },
+                api_key_ciphertext: None,
+                oauth_tokens: Some(OAuthTokensCreate {
+                    tokens: encrypted,
+                    never_refresh: bundle.never_refresh,
+                }),
+                oauth_token_generation: None,
+                enabled: body.enabled,
+                warmup_enabled: body.warmup_enabled,
+                warmup_dialect_plugin: body.warmup_dialect_plugin,
+                workspace_id: None,
+                api_key_access: None,
+                reset_api_key_poll_state: false,
+            },
         )
         .await
         {
             Ok(updated) => updated,
             Err(StorageError::Conflict { message }) => {
-                return stale_or_conflict(&state, &id, token_revision, message).await;
+                return stale_or_conflict(&state, &id, expected_revision, message).await;
             }
             Err(error) => return Err(error.into()),
         };
@@ -2196,6 +2174,7 @@ async fn update_upstream(
                     body.base_url.map(Some)
                 },
                 api_key_ciphertext,
+                oauth_tokens: None,
                 oauth_token_generation: None,
                 enabled: body.enabled,
                 warmup_enabled: body.warmup_enabled,

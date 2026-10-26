@@ -4,8 +4,8 @@ use cc_lb_clock::unix_secs;
 use cc_lb_oauth_protocol::refresh_requires_reconnect;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
-    validate_identifier,
+    OAuthTokensCreate, StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamUpdate, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Row, Transaction};
@@ -335,11 +335,12 @@ async fn update_split(
         || update.workspace_id.is_some()
         || update.api_key_ciphertext.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
+    let oauth_tokens = update.oauth_tokens.take();
     let oauth_token_generation = update.oauth_token_generation.take();
     let api_key_access = update.api_key_access.take();
     let reset_api_key_poll_state = std::mem::take(&mut update.reset_api_key_poll_state);
-    // Spec, api-key, generation, and details updates share one transaction so
-    // a partial update can never commit independently.
+    // Spec, api-key, OAuth credentials, generation, and details updates share
+    // one transaction so a partial update can never commit independently.
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     if has_spec_update {
         update_split_spec_in_tx(&mut tx, id, expected_revision, update).await?;
@@ -349,6 +350,10 @@ async fn update_split(
     let mut changed = has_spec_update;
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret_in_tx(&mut tx, id, Some(ciphertext)).await?;
+        changed = true;
+    }
+    if let Some(oauth_tokens) = oauth_tokens {
+        upsert_split_oauth_token_in_tx(&mut tx, id, &oauth_tokens).await?;
         changed = true;
     }
     if let Some(generation) = oauth_token_generation {
@@ -515,6 +520,24 @@ async fn update_split_oauth_token(
     } else {
         ensure_split_spec_active_in_tx(&mut tx, id).await?;
     }
+    upsert_split_oauth_token_in_tx(
+        &mut tx,
+        id,
+        &OAuthTokensCreate {
+            tokens,
+            never_refresh,
+        },
+    )
+    .await?;
+    notify(&mut tx, id).await?;
+    commit_with_record(tx, id).await
+}
+
+async fn upsert_split_oauth_token_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+    oauth_tokens: &OAuthTokensCreate,
+) -> StorageResult<()> {
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, never_refresh, oauth_token_generation, created_at, updated_at)
          VALUES ($1, $2, $3, 1, NOW(), NOW())
@@ -525,14 +548,12 @@ async fn update_split_oauth_token(
              updated_at = NOW()",
     )
     .bind(id)
-    .bind(tokens.ciphertext())
-    .bind(never_refresh)
-    .execute(&mut *tx)
+    .bind(oauth_tokens.tokens.ciphertext())
+    .bind(oauth_tokens.never_refresh)
+    .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
-    clear_split_apply_error_in_tx(&mut tx, id).await?;
-    notify(&mut tx, id).await?;
-    commit_with_record(tx, id).await
+    clear_split_apply_error_in_tx(tx, id).await
 }
 
 async fn update_split_oauth_token_generation_in_tx(
