@@ -1324,7 +1324,8 @@ impl ResponsesWebSocketGateway {
             // counters directly; normal server traffic always uses the worker.
             if let (Some(engine), Some(usage)) =
                 (turn.prepared.limit_engine.as_ref(), turn.usage.as_ref())
-                && let Some(cost) = cc_lb_pricing::virtual_cost_micros_full_with_context(
+            {
+                let cost = cc_lb_pricing::virtual_cost_micros_full_with_context(
                     &turn.prepared.model,
                     usage.input_tokens,
                     usage.output_tokens,
@@ -1334,7 +1335,7 @@ impl ResponsesWebSocketGateway {
                     usage.cache_read_input_tokens,
                     usage.service_tier.as_deref(),
                 )
-            {
+                .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown);
                 engine.reconcile(
                     reservation,
                     usage.input_tokens,

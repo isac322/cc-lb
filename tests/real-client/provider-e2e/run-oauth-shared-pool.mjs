@@ -1114,6 +1114,12 @@ async function main() {
       '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_generate_content',
     );
     // Live Gemini OAuth :countTokens (direct contents + nested generateContentRequest)
+    const preCountDelta = await adminCall(
+      adminToken,
+      'GET',
+      '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_count_tokens',
+    );
+    const preCountIds = new Set((preCountDelta.json?.events ?? []).map((e) => e.id ?? e.request_id));
     const gmOauthCountDirectRes = await fetch(
       `http://127.0.0.1:${PORTS.proxy}/v1beta/models/gemini-2.5-flash:countTokens?key=should_be_scrubbed`,
       {
@@ -1163,12 +1169,23 @@ async function main() {
       },
     );
     const gmCountAffinityErrJson = await gmCountAffinityErrRes.json();
-    await sleep(400);
-    const gmCountDeltaEvents = await adminCall(
-      adminToken,
-      'GET',
-      '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_count_tokens',
-    );
+    let gmCountDeltaEvents = preCountDelta;
+    let newGmCountEvents = [];
+    const countDeadline = Date.now() + 5_000;
+    while (Date.now() < countDeadline) {
+      gmCountDeltaEvents = await adminCall(
+        adminToken,
+        'GET',
+        '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_count_tokens',
+      );
+      newGmCountEvents = (gmCountDeltaEvents.json?.events ?? []).filter(
+        (e) => !preCountIds.has(e.id ?? e.request_id),
+      );
+      if (newGmCountEvents.length >= 3) {
+        break;
+      }
+      await sleep(50);
+    }
 
 
     // Verify C1: Local proxy error format on OpenAI (/v1/responses) and Gemini (:generateContent)
@@ -1221,7 +1238,7 @@ async function main() {
         gmOauthCountNestedJson.totalTokens > 0 &&
         gmCountAffinityErrRes.status === 503 &&
         gmCountAffinityErrJson.error?.status === 'UNAVAILABLE' &&
-        (gmCountDeltaEvents.json?.events?.length ?? 0) >= 2
+        newGmCountEvents.length >= 3
           ? 'PASS'
           : 'FAIL',
       shared_cc_lb_instance: {

@@ -255,9 +255,33 @@ impl PriceCatalog {
         service_tier: Option<&str>,
     ) -> Option<u64> {
         let normalized = normalize_model_id(model);
-        let Some(pricing) = self.lookup(model, service_tier) else {
+        let snapshot = self.current();
+        let Some((model_key, base_pricing)) = snapshot
+            .models
+            .get_key_value(model)
+            .or_else(|| snapshot.models.get_key_value(&normalized))
+        else {
             record_missing_price_field(&normalized, "model");
             return None;
+        };
+        let tier = canonical_service_tier(service_tier);
+        let resolved = resolve_tier_rate(base_pricing, tier.as_deref());
+        let mut input_price = resolved.input_per_million_usd;
+        let mut output_price = resolved.output_per_million_usd;
+        crate::tier_resolver::apply_threshold_bands(
+            snapshot.above_tokens_rates.get(model_key),
+            max_input,
+            tier.as_deref(),
+            &mut input_price,
+            &mut output_price,
+            None,
+            None,
+        );
+        let pricing = Pricing {
+            model: base_pricing.model.clone(),
+            input_per_million_usd: input_price,
+            output_per_million_usd: output_price,
+            by_tier: BTreeMap::new(),
         };
         Some(token_cost_micros(max_input, max_output, &pricing))
     }
