@@ -454,6 +454,9 @@ const requestIoTimingFields = {
 export const RequestEventKindSchema = z.enum([
   'messages',
   'count_tokens',
+  'openai_responses',
+  'gemini_generate_content',
+  'gemini_count_tokens',
   'models',
   'files',
   'other',

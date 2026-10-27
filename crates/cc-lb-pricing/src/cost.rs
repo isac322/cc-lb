@@ -34,7 +34,11 @@ pub fn virtual_cost_micros_full(
 ) -> ComputedCostBreakdown {
     let normalized = normalize_model_id(model);
     let snapshot = global_catalog().current();
-    let Some(pricing) = snapshot.models.get(&normalized) else {
+    let Some((model_key, pricing)) = snapshot
+        .models
+        .get_key_value(model)
+        .or_else(|| snapshot.models.get_key_value(&normalized))
+    else {
         record_missing_price_field(&normalized, "model");
         return ComputedCostBreakdown::unknown();
     };
@@ -44,19 +48,16 @@ pub fn virtual_cost_micros_full(
     let cc_5m_price = resolve_optional_price(
         snapshot
             .cache_creation_per_million_usd
-            .get(&normalized)
+            .get(model_key)
             .copied(),
         snapshot
             .cache_creation_per_million_usd_by_tier
-            .get(&normalized),
+            .get(model_key),
         tier.as_deref(),
     );
     let cache_read_price = resolve_optional_price(
-        snapshot
-            .cache_read_per_million_usd
-            .get(&normalized)
-            .copied(),
-        snapshot.cache_read_per_million_usd_by_tier.get(&normalized),
+        snapshot.cache_read_per_million_usd.get(model_key).copied(),
+        snapshot.cache_read_per_million_usd_by_tier.get(model_key),
         tier.as_deref(),
     );
 

@@ -1037,7 +1037,14 @@ async fn list_upstreams(
         .collect::<Vec<_>>();
     let api_key_ids = page
         .iter()
-        .filter(|record| record.kind == UpstreamKind::AnthropicApiKey)
+        .filter(|record| {
+            matches!(
+                record.kind,
+                UpstreamKind::AnthropicApiKey
+                    | UpstreamKind::OpenaiApiKey
+                    | UpstreamKind::GeminiApiKey
+            )
+        })
         .map(|record| record.id)
         .collect::<Vec<_>>();
     let details = if api_key_ids.is_empty() {
@@ -2562,7 +2569,10 @@ async fn api_key_details(
     storage: &dyn Storage,
     record: &UpstreamRecord,
 ) -> Result<Option<UpstreamApiKeyDetailsRecord>, UpstreamError> {
-    if record.kind != UpstreamKind::AnthropicApiKey {
+    if !matches!(
+        record.kind,
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
         return Ok(None);
     }
     Ok(UpstreamApiKeyStore::get_api_key_details(storage, record.id).await?)

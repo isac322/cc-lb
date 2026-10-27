@@ -106,6 +106,36 @@ async fn buffered_gemini_oauth_code_assist_response_is_unwrapped() {
 }
 
 #[tokio::test]
+async fn gemini_oauth_sse_unwraps_before_custom_transform() {
+    let transform = Arc::new(GeminiSseMarkerTransform::default());
+    let body = Bytes::from_static(
+        b"event: response\ndata: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}}\n\n",
+    );
+    let lifecycle = lifecycle_with_record_and_config(
+        None,
+        Some(transform.clone()),
+        Arc::new(FixedDispatch {
+            status: StatusCode::OK,
+            headers: sse_headers(),
+            body,
+        }),
+        LifecycleConfig::default(),
+        upstream_record(
+            StorageUpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+    );
+    let response = handle_authenticated(&lifecycle, gemini_generate_request())
+        .await
+        .expect("lifecycle handles Gemini OAuth SSE response");
+    let (_status, _headers, received) = collect_body(response).await;
+    let text = std::str::from_utf8(&received).expect("SSE body is utf8");
+    assert!(text.contains(r#""candidates":[{"content":{"parts":[{"text":"HELLO"}]}}]"#));
+    assert!(!text.contains(r#""response":{"candidates""#));
+    assert_eq!(transform.seen_events(), vec!["response".to_owned()]);
+}
+
+#[tokio::test]
 async fn buffered_native_gemini_response_bytes_remain_unchanged() {
     let body = Bytes::from_static(
         br#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":48}}"#,
@@ -2854,6 +2884,35 @@ impl SseEventTransformHook for SseToolNameTransform {
             });
         }
         Ok(TransformSseEventResult::Unchanged)
+    }
+}
+
+#[derive(Default)]
+struct GeminiSseMarkerTransform {
+    seen: Mutex<Vec<String>>,
+}
+
+impl GeminiSseMarkerTransform {
+    fn seen_events(&self) -> Vec<String> {
+        self.seen.lock().expect("seen lock").clone()
+    }
+}
+
+impl SseEventTransformHook for GeminiSseMarkerTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push(request.event.event.clone());
+        Ok(TransformSseEventResult::Replace {
+            events: vec![SseEvent {
+                event: request.event.event,
+                data: replace_bytes(&request.event.data, b"hello", b"HELLO"),
+            }],
+        })
     }
 }
 

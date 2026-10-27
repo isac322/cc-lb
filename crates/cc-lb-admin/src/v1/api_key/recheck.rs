@@ -25,14 +25,26 @@ use cc_lb_storage_api::{
 use uuid::Uuid;
 
 use super::poll_enqueue::enqueue_usage_poll;
-use super::preflight::{no_store, verdict_label};
+use super::preflight::{no_store, provider_native_preflight, verdict_label};
 use crate::v1::post_commit::complete_after_commit;
 use crate::v1::upstreams::{UpstreamError, audit_upstream_action, storage, upstream_base_url};
 use crate::{AdminState, auth::AdminIdentity};
 
-/// Live API-key upstream named by a path id: 400 for a malformed id, 404 for
-/// an unknown or soft-deleted one, 400 `not_api_key_upstream` for OAuth.
+/// Live Anthropic API-key upstream named by a path id: 400 for a malformed
+/// id, 404 for an unknown or soft-deleted one, 400 `not_api_key_upstream` for
+/// OAuth and other provider kinds.
 pub(super) async fn load_api_key_upstream(
+    storage: &dyn Storage,
+    id: &str,
+) -> Result<UpstreamRecord, UpstreamError> {
+    let record = load_api_key_or_provider_upstream(storage, id).await?;
+    if record.kind != UpstreamKind::AnthropicApiKey {
+        return Err(UpstreamError::NotApiKeyUpstream);
+    }
+    Ok(record)
+}
+
+pub(super) async fn load_api_key_or_provider_upstream(
     storage: &dyn Storage,
     id: &str,
 ) -> Result<UpstreamRecord, UpstreamError> {
@@ -46,7 +58,10 @@ pub(super) async fn load_api_key_upstream(
         .await?
         .filter(|record| record.deleted_at_unix_secs.is_none())
         .ok_or(UpstreamError::NotFound)?;
-    if record.kind != UpstreamKind::AnthropicApiKey {
+    if !matches!(
+        record.kind,
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
         return Err(UpstreamError::NotApiKeyUpstream);
     }
     Ok(record)
@@ -74,7 +89,7 @@ pub(crate) async fn recheck_upstream_api_key(
     Path(id): Path<String>,
 ) -> Result<Response, UpstreamError> {
     let storage = storage(&state)?;
-    let record = load_api_key_upstream(storage, &id).await?;
+    let record = load_api_key_or_provider_upstream(storage, &id).await?;
     let key = stored_api_key(&state, &record)?;
     let base_url = upstream_base_url(&record)?;
     let previous_usage_report = storage
@@ -83,19 +98,26 @@ pub(crate) async fn recheck_upstream_api_key(
         .and_then(|details| details.usage_report_state);
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
-    let mut outcome = run_preflight(
-        &state.anthropic_org_api,
-        PreflightInput {
-            key: &key,
-            base_url: &base_url,
-            workspace_id: None,
-            mode: PreflightMode::StoredKey {
-                stored_workspace_id: record.workspace_id.as_deref(),
+    let mut outcome = if matches!(
+        record.kind,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
+        provider_native_preflight(&state, &key, &base_url, record.kind, now_unix_secs).await
+    } else {
+        run_preflight(
+            &state.anthropic_org_api,
+            PreflightInput {
+                key: &key,
+                base_url: &base_url,
+                workspace_id: None,
+                mode: PreflightMode::StoredKey {
+                    stored_workspace_id: record.workspace_id.as_deref(),
+                },
+                now_unix_secs,
             },
-            now_unix_secs,
-        },
-    )
-    .await;
+        )
+        .await
+    };
     drop(key);
     // A stored key that is now refused (401/403) leaves the operator a
     // reason on the Access row; the probe only phrases transport failures.

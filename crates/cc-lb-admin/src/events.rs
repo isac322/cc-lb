@@ -500,3 +500,31 @@ fn parse_status_class(value: &str) -> Result<StatusClass, EventsError> {
         _ => Err(EventsError::InvalidStatusClass),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_provider_kinds_parse_and_filter_request_events() {
+        for kind in [
+            RequestEventKind::OpenaiResponses,
+            RequestEventKind::GeminiGenerateContent,
+            RequestEventKind::GeminiCountTokens,
+        ] {
+            let params = HashMap::from([("event_kind".to_owned(), kind.as_str().to_owned())]);
+            let filters = parse_stream_filters(&params).expect("multi-provider event kind");
+            assert_eq!(filters.event_kind, Some(kind));
+            let mut event = RequestEvent {
+                event_kind: Some(kind),
+                ..Default::default()
+            };
+            assert!(apply_filters_to_event(&event, &filters));
+            event.event_kind = Some(RequestEventKind::Other);
+            assert!(!apply_filters_to_event(&event, &filters));
+            event.event_kind = Some(kind);
+            event.source_kind = Some("renewal".to_owned());
+            assert!(!apply_filters_to_event(&event, &filters));
+        }
+    }
+}

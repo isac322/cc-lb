@@ -21,7 +21,7 @@ The default admin listener is `[::1]:9090`; use `http://[::1]:9090` for the exam
 
 ### Proxy capability boundary
 
-The proxy routes only consistency-safe operations: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent`. Other provider operations sent to the proxy are rejected with `404 operation_not_supported`, including files/uploads, model and account catalogs, stored-response and conversation management endpoints, and catch-all provider operations. These remain bounded because they are account-bound and cannot be served consistently across credentials.
+The proxy routes only consistency-safe operations: `POST /v1/messages` and `POST /v1/messages/count_tokens` (Anthropic Messages), `POST /v1/responses` (OpenAI Responses, plus the `GET /v1/responses` WebSocket upgrade), and Gemini `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`. Other provider operations sent to the proxy are rejected with `404 operation_not_supported`, including files/uploads, model and account catalogs, stored-response and conversation management endpoints, and catch-all provider operations. These remain bounded because they are account-bound and cannot be served consistently across credentials.
 
 Provider-owned state referenced inside a supported HTTP generation request is forwarded unchanged and kept on its owning upstream through upstream affinity. cc-lb records a SHA-256 digest of each state id together with the upstream that created it, and routes later requests that reference the id only to that upstream:
 
@@ -31,7 +31,7 @@ Provider-owned state referenced inside a supported HTTP generation request is fo
 
 A request whose durable state resolves to an upstream that is disabled, unhealthy, or removed by routing filters fails with `503 upstream_affinity_unavailable` instead of falling back to another upstream; cross-upstream failover is disabled for pinned requests. Prompt-cache analysis and cache-aware routing apply only to Anthropic Messages; OpenAI and Gemini requests carry neutral cache metadata.
 
-Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` run as direct upstream probes during key verification.
+Admin preflight is separate from client proxy routing: `GET /v1/models` and `POST /v1/messages/count_tokens` (Anthropic), `GET /v1/models` (OpenAI), and `GET /v1beta/models` (Gemini) run as direct upstream probes during key verification.
 
 ### Responses WebSocket gateway
 

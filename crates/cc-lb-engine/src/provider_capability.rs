@@ -9,6 +9,7 @@ pub(crate) enum ProviderCapability {
     AnthropicMessages,
     OpenaiResponses,
     GeminiGenerateContent,
+    GeminiCountTokens,
 }
 
 /// Classifies a downstream operation against the consistency-safe routing
@@ -19,6 +20,7 @@ pub(crate) fn classify(method: &Method, path: &str) -> Option<ProviderCapability
     match path {
         "/v1/messages" | "/v1/messages/count_tokens" => Some(ProviderCapability::AnthropicMessages),
         "/v1/responses" => Some(ProviderCapability::OpenaiResponses),
+        path if is_gemini_count_tokens_path(path) => Some(ProviderCapability::GeminiCountTokens),
         path if is_gemini_generation_path(path) => Some(ProviderCapability::GeminiGenerateContent),
         _ => None,
     }
@@ -40,6 +42,12 @@ fn is_gemini_generation_path(path: &str) -> bool {
     let model = model_path
         .strip_suffix(":generateContent")
         .or_else(|| model_path.strip_suffix(":streamGenerateContent"));
+    model.is_some_and(|model| !model.is_empty())
+}
+
+fn is_gemini_count_tokens_path(path: &str) -> bool {
+    let model_path = path.strip_prefix("/v1beta/models/").unwrap_or_default();
+    let model = model_path.strip_suffix(":countTokens");
     model.is_some_and(|model| !model.is_empty())
 }
 
@@ -76,6 +84,10 @@ mod tests {
                 "/v1beta/models/gemini-2.5-pro:streamGenerateContent"
             ),
             Some(ProviderCapability::GeminiGenerateContent)
+        );
+        assert_eq!(
+            classify(&Method::POST, "/v1beta/models/gemini-2.5-pro:countTokens"),
+            Some(ProviderCapability::GeminiCountTokens)
         );
     }
 

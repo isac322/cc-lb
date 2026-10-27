@@ -459,6 +459,7 @@ impl LazyRefresher {
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "oauth upstream not found".to_owned(),
             })?;
+        let is_anthropic_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
         let result = refresh_flow(
             &self.stores,
             self.stores.audit.as_deref(),
@@ -473,7 +474,7 @@ impl LazyRefresher {
         .await;
         match result {
             Ok(generation) => {
-                if let Some(metadata_hook) = &self.metadata_hook {
+                if is_anthropic_oauth && let Some(metadata_hook) = &self.metadata_hook {
                     metadata_hook
                         .enqueue(MetadataHookRequest {
                             upstream_id,
@@ -548,6 +549,7 @@ impl LazyRefreshHandle for LazyRefresher {
                 }
             }
         }
+        let is_anthropic_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
         let result = refresh_flow(
             &self.stores,
             self.stores.audit.as_deref(),
@@ -572,23 +574,25 @@ impl LazyRefreshHandle for LazyRefresher {
                         reason: "oauth refresh claim was not held at completion".to_owned(),
                     });
                 }
-                if let Some(metadata_hook) = &self.metadata_hook {
-                    metadata_hook
-                        .enqueue(MetadataHookRequest {
-                            upstream_id,
-                            credential_generation: generation,
-                            traceparent: None,
-                        })
-                        .await
-                        .map_err(lazy_metadata_hook_error)?;
-                } else {
-                    self.apalis_handle
-                        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
-                            upstream_id,
-                            generation,
-                        )))
-                        .await
-                        .map_err(lazy_scheduler_error)?;
+                if is_anthropic_oauth {
+                    if let Some(metadata_hook) = &self.metadata_hook {
+                        metadata_hook
+                            .enqueue(MetadataHookRequest {
+                                upstream_id,
+                                credential_generation: generation,
+                                traceparent: None,
+                            })
+                            .await
+                            .map_err(lazy_metadata_hook_error)?;
+                    } else {
+                        self.apalis_handle
+                            .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
+                                upstream_id,
+                                generation,
+                            )))
+                            .await
+                            .map_err(lazy_scheduler_error)?;
+                    }
                 }
                 Ok(())
             }

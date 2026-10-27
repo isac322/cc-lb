@@ -19,6 +19,13 @@ use serde_json::{Value, json};
 const API_KEY_HEADER: &str = "x-api-key";
 const ANTIGRAVITY_USER_AGENT: &str =
     "antigravity/hub/2.19.1 (aidev_client; os_type=darwin; arch=arm64; cl=963137146)";
+
+fn strip_provider_credential_headers(headers: &mut http::HeaderMap) {
+    for name in ["authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+        headers.remove(name);
+    }
+}
+
 /// Signs requests for one Anthropic API-key upstream.
 ///
 /// Both outbound header values are built once, at construction; `sign` only
@@ -70,11 +77,9 @@ impl Signer for AnthropicKeySigner {
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
         let headers = shaped.headers_mut();
-        // The Anthropic direct dialect clones downstream headers verbatim and
-        // `authorization` is not hop-by-hop, so a downstream
-        // `Authorization: Bearer sk-cclb-…` would otherwise be forwarded to the
-        // upstream alongside the configured key.
-        headers.remove(AUTHORIZATION);
+        // Downstream credentials are never forwarded; the configured
+        // provider credential below is the only credential sent upstream.
+        strip_provider_credential_headers(headers);
         headers.insert(API_KEY_HEADER, self.api_key_header.clone());
         // The workspace is upstream configuration: a downstream caller can
         // never choose it. `insert` replaces every downstream value.
@@ -193,8 +198,7 @@ impl Signer for ProviderKeySigner {
             ensure_gemini_stream_alt_sse(&mut shaped);
         }
         let headers = shaped.headers_mut();
-        headers.remove(AUTHORIZATION);
-        headers.remove("x-api-key");
+        strip_provider_credential_headers(headers);
         headers.insert(self.header_name, self.header_value.clone());
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
@@ -314,8 +318,7 @@ impl Signer for OpenaiSubscriptionSigner {
     ) -> Result<SignedRequest, SignerError> {
         check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
         let headers = shaped.headers_mut();
-        headers.remove(AUTHORIZATION);
-        headers.remove(API_KEY_HEADER);
+        strip_provider_credential_headers(headers);
         headers.insert(AUTHORIZATION, self.authorization_header.clone());
         match &self.account_header {
             Some(account) => {
@@ -500,8 +503,7 @@ impl Signer for GeminiSubscriptionSigner {
         check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
         wrap_gemini_code_assist_request(&mut shaped, self.project_id.as_deref())?;
         let headers = shaped.headers_mut();
-        headers.remove("x-goog-api-key");
-        headers.remove(AUTHORIZATION);
+        strip_provider_credential_headers(headers);
         headers.insert(AUTHORIZATION, self.authorization_header.clone());
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
@@ -793,6 +795,12 @@ mod tests {
             .insert("x-api-key", HeaderValue::from_static("downstream"));
         shaped
             .headers_mut()
+            .insert("x-goog-api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
+            .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
         let body = shaped.body().clone();
         let signer =
@@ -805,6 +813,8 @@ mod tests {
             Some(&HeaderValue::from_static("Bearer openai-secret"))
         );
         assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(!signed.headers().contains_key("x-goog-api-key"));
+        assert!(!signed.headers().contains_key("api-key"));
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -817,6 +827,9 @@ mod tests {
         shaped
             .headers_mut()
             .insert("x-api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
+            .insert("api-key", HeaderValue::from_static("downstream"));
         let signer =
             ProviderKeySigner::new(ProviderKeyKind::Gemini, "gemini-secret").expect("signer");
         let signed = sign_request(&signer, shaped).await.expect("sign request");
@@ -827,6 +840,7 @@ mod tests {
         );
         assert!(!signed.headers().contains_key(AUTHORIZATION));
         assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(!signed.headers().contains_key("api-key"));
     }
 
     #[test]
@@ -848,6 +862,12 @@ mod tests {
         shaped
             .headers_mut()
             .insert("x-api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
+            .insert("x-goog-api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
+            .insert("api-key", HeaderValue::from_static("downstream"));
         shaped
             .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
@@ -872,6 +892,8 @@ mod tests {
             Some(&HeaderValue::from_static("account-123"))
         );
         assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(!signed.headers().contains_key("x-goog-api-key"));
+        assert!(!signed.headers().contains_key("api-key"));
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
@@ -905,6 +927,12 @@ mod tests {
             .insert("x-goog-api-key", HeaderValue::from_static("downstream"));
         shaped
             .headers_mut()
+            .insert("x-api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
+            .insert("api-key", HeaderValue::from_static("downstream"));
+        shaped
+            .headers_mut()
             .insert("x-request-id", HeaderValue::from_static("request"));
         let body = shaped.body().clone();
 
@@ -923,6 +951,8 @@ mod tests {
             Some(&HeaderValue::from_static("Bearer gemini-access-token"))
         );
         assert!(!signed.headers().contains_key("x-goog-api-key"));
+        assert!(!signed.headers().contains_key("x-api-key"));
+        assert!(!signed.headers().contains_key("api-key"));
         assert_eq!(
             signed.headers().get("x-request-id"),
             Some(&HeaderValue::from_static("request"))
