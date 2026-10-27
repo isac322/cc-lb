@@ -80,6 +80,18 @@ cc-lb is open source and runs in environments we never see.
 
 Rules:
 - Do not derive formulas, thresholds, forecasts, or defaults from one deployment's traffic history, including the owner's. Find a general model, and use observed deployment data only to validate it.
+## Client fidelity and cost priority
+
+Client and provider contract fidelity, prompt-cache behavior, and client-visible cost take priority over maximizing cross-upstream load balancing or failover.
+
+Rules:
+- Never strip, rewrite, or reject a provider operation only to preserve cross-upstream routing. If a client uses provider-owned continuation, tool, cache, file, container, interaction, or session state, preserve the request semantics.
+- Prefer upstream affinity or pinning to the credential, project, workspace, account, or connection that owns the state. Disable failover for the affected request or session when moving it would make the client request invalid, lose a cache, repeat work, or change the billed behavior.
+- Reject only when no safe owner can be selected or the provider explicitly rejects the request; never silently fail over across an ownership boundary.
+- Treat opaque continuation and reasoning fields according to measured provider behavior. Do not classify a field as disposable merely because it is inconvenient for routing.
+- Apply this policy across every provider, CLI, plugin, cache, scheduler, telemetry, and admin surface. Provider-specific exceptions require evidence, not assumptions.
+- Base compatibility decisions on real coding-agent executions of the supported clients through cc-lb, including repository inspection, tool calls and results, continuation, streaming, cache-affecting requests, and failure or failover behavior. A single chat, a health check, or a provider documentation example is insufficient.
+- Before changing a compatibility boundary, capture the client-shaped request and response, selected upstream, affinity decision, cache/cost effect, and client-visible result in an isolated local E2E scenario. Preserve the scenario as an automated regression test or documented manual test when automation cannot reproduce it.
 
 ## Public surface parity
 

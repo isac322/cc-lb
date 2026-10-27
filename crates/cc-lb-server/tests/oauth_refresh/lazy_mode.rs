@@ -364,6 +364,8 @@ impl LazyFixture {
                 refresh_token: "refresh-reconnected".to_owned(),
                 expires_at_unix_secs: now_secs(self.inner.clock.as_ref()).saturating_sub(1),
                 refresh_token_expires_at_unix_secs: refresh_deadline,
+                account_id: None,
+                project_id: None,
                 scopes: vec!["messages".to_owned()],
                 never_refresh: false,
             },

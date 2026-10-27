@@ -269,13 +269,22 @@ pub struct FilterResponse {
 }
 
 /// Upstream backend exposed to plugins. Mirrors
-/// `cc_lb_domain::Upstream` (currently a single variant —
-/// extending the host enum requires extending this one in lockstep
-/// and bumping a wire schema tag).
+/// `cc_lb_domain::Upstream`.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 #[rkyv(derive(Debug))]
 pub enum Upstream {
+    /// Direct Anthropic API endpoint.
     AnthropicDirect {
+        /// Operator-configured base URL override, if any.
+        base_url: Option<Box<str>>,
+    },
+    /// Direct OpenAI API endpoint.
+    OpenaiDirect {
+        /// Operator-configured base URL override, if any.
+        base_url: Option<Box<str>>,
+    },
+    /// Direct Gemini API endpoint.
+    GeminiDirect {
         /// Operator-configured base URL override, if any.
         base_url: Option<Box<str>>,
     },
@@ -284,7 +293,12 @@ pub enum Upstream {
 /// Borrowed mirror of [`Upstream`].
 #[derive(Archive, Serialize)]
 pub enum UpstreamRef<'a> {
+    /// Direct Anthropic API endpoint.
     AnthropicDirect { base_url: Option<QueryRef<'a>> },
+    /// Direct OpenAI API endpoint.
+    OpenaiDirect { base_url: Option<QueryRef<'a>> },
+    /// Direct Gemini API endpoint.
+    GeminiDirect { base_url: Option<QueryRef<'a>> },
 }
 
 /// Shape hook input (owned form).

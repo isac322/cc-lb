@@ -180,6 +180,8 @@ async fn seed_oauth_upstream(server: &SpawnedAdminServer, base_url: &str) -> Ups
         expires_at_unix_secs: 4_000_000_000,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["user:profile".to_owned()],
+        account_id: None,
+        project_id: None,
         never_refresh: true,
     };
     let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
@@ -324,6 +326,8 @@ async fn get_limit_resets_hides_coupon_after_credential_rotation() {
     seed_identity(&server, &upstream).await;
 
     let rotated = OAuthTokenBundle {
+        account_id: None,
+        project_id: None,
         access_token: "sk-ant-oat01-rotated".to_owned(),
         refresh_token: "sk-ant-ort01-rotated".to_owned(),
         expires_at_unix_secs: 4_000_000_000,

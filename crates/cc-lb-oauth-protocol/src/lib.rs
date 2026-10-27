@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -16,6 +17,8 @@ pub struct TokenEndpointResponse {
     pub expires_in: u64,
     pub refresh_token_expires_in: Option<u64>,
     pub scope: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +45,38 @@ pub fn refresh_token_form_body(client_id: &str, refresh_token: &str) -> String {
     serializer.finish()
 }
 
+pub fn refresh_token_json_body(client_id: &str, refresh_token: &str) -> String {
+    serde_json::json!({
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": refresh_token,
+    })
+    .to_string()
+}
+
 pub fn parse_token_endpoint_response(
     body: &[u8],
 ) -> Result<TokenEndpointResponse, TokenEndpointParseError> {
-    serde_json::from_slice(body).map_err(|source| TokenEndpointParseError::Json { source })
+    let value = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|source| TokenEndpointParseError::Json { source })?;
+    let mut response = serde_json::from_value::<TokenEndpointResponse>(value.clone())
+        .map_err(|source| TokenEndpointParseError::Json { source })?;
+    if value.get("account_id").is_none() {
+        response.account_id = account_id_from_access_token(&response.access_token);
+    }
+    Ok(response)
+}
+
+pub fn account_id_from_access_token(access_token: &str) -> Option<String> {
+    let payload = access_token.split('.').nth(1)?;
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|account_id| !account_id.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Deserialize)]
@@ -119,6 +150,20 @@ mod tests {
                 ("client_id".into(), "client id".into()),
                 ("refresh_token".into(), "rt+/=".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn refresh_json_body_encodes_openai_refresh_grant() {
+        let body = refresh_token_json_body("codex-client", "refresh-token");
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "grant_type": "refresh_token",
+                "client_id": "codex-client",
+                "refresh_token": "refresh-token",
+            })
         );
     }
 
@@ -210,5 +255,103 @@ mod tests {
         assert_eq!(refreshed.expires_at_unix_secs, u64::MAX);
         assert_eq!(refreshed.refresh_token_expires_at_unix_secs, Some(u64::MAX));
         assert_eq!(refreshed.scopes, vec!["a", "b", "c"]);
+    }
+    #[test]
+    fn parse_account_id_from_jwt_access_token_with_top_level_precedence_and_opaque_fallback() {
+        let jwt_access_token = "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiand0LWFjY291bnQifX0.signature";
+        let jwt_response = parse_token_endpoint_response(
+            format!(r#"{{"access_token":"{jwt_access_token}","expires_in":60}}"#).as_bytes(),
+        )
+        .expect("JWT token response parses");
+        assert_eq!(jwt_response.account_id.as_deref(), Some("jwt-account"));
+
+        let top_level_response = parse_token_endpoint_response(
+            format!(
+                r#"{{"access_token":"{jwt_access_token}","expires_in":60,"account_id":"response-account"}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("top-level account id response parses");
+        assert_eq!(
+            top_level_response.account_id.as_deref(),
+            Some("response-account")
+        );
+
+        let opaque_response =
+            parse_token_endpoint_response(br#"{"access_token":"opaque-access","expires_in":60}"#)
+                .expect("opaque token response parses");
+        assert_eq!(opaque_response.account_id, None);
+    }
+
+    #[test]
+    fn account_id_from_access_token_derives_reusable_openai_jwt_claim() {
+        let access_token = jwt_access_token(serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "jwt-account",
+            },
+        }));
+
+        assert_eq!(
+            account_id_from_access_token(&access_token).as_deref(),
+            Some("jwt-account")
+        );
+    }
+
+    #[test]
+    fn account_id_from_access_token_rejects_opaque_malformed_and_empty_claims() {
+        use base64::Engine as _;
+
+        assert_eq!(account_id_from_access_token("opaque-access"), None);
+        let malformed_claims = format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(b"{malformed-json")
+        );
+        assert_eq!(account_id_from_access_token(&malformed_claims), None);
+        assert_eq!(
+            account_id_from_access_token("header.not-base64.signature"),
+            None
+        );
+        assert_eq!(
+            account_id_from_access_token(&jwt_access_token(serde_json::json!({}))),
+            None
+        );
+        assert_eq!(
+            account_id_from_access_token(&jwt_access_token(serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "",
+                },
+            }))),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_token_endpoint_response_preserves_explicit_top_level_account_id() {
+        let access_token = jwt_access_token(serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "jwt-account",
+            },
+        }));
+        let response = parse_token_endpoint_response(
+            serde_json::json!({
+                "access_token": access_token,
+                "expires_in": 60,
+                "account_id": "response-account",
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("token response parses");
+
+        assert_eq!(response.account_id.as_deref(), Some("response-account"));
+    }
+
+    fn jwt_access_token(claims: serde_json::Value) -> String {
+        use base64::Engine as _;
+
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims serialize"))
+        )
     }
 }

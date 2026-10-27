@@ -647,17 +647,14 @@ fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
 async fn wait_for_proxy_ready_or_exit(
     process: &mut TestProcess,
     addr: SocketAddr,
-    managed_key: &ManagedTestKey,
+    _managed_key: &ManagedTestKey,
 ) -> Result<(), StartupFailure> {
     wait_for_status_with_request_or_exit(
         process,
         addr,
-        "/v1/models",
+        "/readyz",
         200,
-        &format!(
-            "GET /v1/models HTTP/1.1\r\nHost: {addr}\r\nx-api-key: {}\r\nConnection: close\r\n\r\n",
-            managed_key.plaintext
-        ),
+        &format!("GET /readyz HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
     )
     .await
 }

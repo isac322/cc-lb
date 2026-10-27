@@ -53,6 +53,7 @@ pub mod model_resolution;
 pub mod pg_notify_fanout;
 #[cfg(not(loom))]
 pub mod prompt_cache_simulator;
+pub(crate) mod provider_capability;
 #[cfg(not(loom))]
 mod request_classification;
 pub mod request_context;
@@ -62,6 +63,8 @@ pub mod request_diagnostics_sink;
 pub mod request_timing;
 #[cfg(not(loom))]
 pub(crate) mod response_transform;
+#[cfg(not(loom))]
+pub mod responses_websocket;
 #[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]
@@ -87,7 +90,7 @@ pub use authn_rail::{Authenticated, authenticate_first, reject_unauthenticated};
 #[cfg(not(loom))]
 pub use bulkhead::{
     Bulkhead, BulkheadDispatch, BulkheadError, BulkheadRegistry, BulkheadRuntimeConfig,
-    ExecuteError, make_default_dispatcher,
+    ExecuteError, OwnedBulkheadGuard, make_default_dispatcher,
 };
 #[cfg(not(loom))]
 pub use cc_lb_upstream::ApiKeyAwareSignerFactory;

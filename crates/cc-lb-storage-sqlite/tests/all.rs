@@ -18,6 +18,8 @@ mod price_catalog_retention;
 mod principal_terminal_strategy;
 #[path = "prompt_cache_observation.rs"]
 mod prompt_cache_observation;
+#[path = "provider_kind_migration_compat.rs"]
+mod provider_kind_migration_compat;
 #[path = "quota_aggregate.rs"]
 mod quota_aggregate;
 #[path = "reassembly_serde_fixtures.rs"]

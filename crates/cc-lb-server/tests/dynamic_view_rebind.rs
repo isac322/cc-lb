@@ -277,6 +277,8 @@ async fn oauth_reconnect_error_survives_active_and_disabled_rebuilds_until_token
     let bundle = OAuthTokenBundle {
         access_token: "access-before-reconnect".to_owned(),
         refresh_token: "refresh-before-reconnect".to_owned(),
+        account_id: None,
+        project_id: None,
         expires_at_unix_secs: 1_900_000_000,
         refresh_token_expires_at_unix_secs: None,
         scopes: vec!["messages".to_owned()],

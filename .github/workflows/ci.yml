@@ -462,9 +462,31 @@ jobs:
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
       # both targets installed above.
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
+      - name: Setup Rust cache
+        run: |
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "GIT_SHA=0000000"
+            echo "SOURCE_DATE_EPOCH=0"
+          } >> "$GITHUB_ENV"
+          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
+          sccache_path="$(command -v sccache || true)"
+          rustc_path="$(command -v rustc || true)"
+          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
+            "$sccache_path" --stop-server >/dev/null 2>&1 || true
+            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
+              {
+                echo "SCCACHE_PATH=$sccache_path"
+                echo "RUSTC_WRAPPER=sccache"
+                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
+              } >> "$GITHUB_ENV"
+            else
+              "$sccache_path" --stop-server >/dev/null 2>&1 || true
+              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
+            fi
+          else
+            echo "::warning::sccache is unavailable; continuing without compiler caching"
+          fi
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest,sqlx-cli

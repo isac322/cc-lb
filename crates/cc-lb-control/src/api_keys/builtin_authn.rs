@@ -118,7 +118,10 @@ impl BuiltinAuthn {
 }
 
 fn extract_credential(headers: &http::HeaderMap) -> Result<&str, BuiltinAuthError> {
-    if let Some(value) = headers.get("x-api-key") {
+    if let Some(value) = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("x-goog-api-key"))
+    {
         return value.to_str().map_err(|_| BuiltinAuthError::MissingHeader);
     }
 
@@ -284,6 +287,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_api_key_header_authenticates() {
+        let generated = secret::generate_new();
+        let record = active_record(&generated);
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(Some((
+            "principal-1".to_owned(),
+            generated.key_id.clone(),
+            record,
+        )))));
+
+        let success = authn
+            .authenticate(
+                &headers_with_x_goog_api_key(generated.plaintext.expose()),
+                &principal_view(true),
+            )
+            .await
+            .expect("x-goog-api-key authenticates");
+
+        assert_eq!(success.principal_id, "principal-1");
+        assert_eq!(
+            success.api_key.as_deref(),
+            Some(generated.plaintext.expose())
+        );
+    }
+
+    #[tokio::test]
     async fn neither_header_returns_missing() {
         let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)));
 
@@ -381,6 +409,14 @@ mod tests {
         headers.insert(
             "x-api-key",
             HeaderValue::from_str(api_key).expect("test api key is a valid header value"),
+        );
+        headers
+    }
+    fn headers_with_x_goog_api_key(api_key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-goog-api-key",
+            HeaderValue::from_str(api_key).expect("test Google API key is a valid header value"),
         );
         headers
     }

@@ -348,8 +348,8 @@ impl Partial {
             upstream_response_status: self.upstream_response_status,
             input_tokens: self.usage_seen.then_some(self.usage.input_tokens),
             output_tokens: self.usage_seen.then_some(self.usage.output_tokens),
-            cache_creation_input_tokens: self
-                .usage_seen
+            cache_creation_input_tokens: (self.usage_seen
+                && self.usage.cache_creation_input_tokens > 0)
                 .then_some(self.usage.cache_creation_input_tokens),
             cache_creation_input_tokens_5m: (self.usage_seen
                 && self.usage.cache_creation_input_tokens_5m > 0)
@@ -1395,8 +1395,8 @@ fn finalize_base(
         upstream_stream_warning_message: diagnostics.and_then(|d| d.warning_message.clone()),
         input_tokens: partial.usage_seen.then_some(partial.usage.input_tokens),
         output_tokens: partial.usage_seen.then_some(partial.usage.output_tokens),
-        cache_creation_input_tokens: partial
-            .usage_seen
+        cache_creation_input_tokens: (partial.usage_seen
+            && partial.usage.cache_creation_input_tokens > 0)
             .then_some(partial.usage.cache_creation_input_tokens),
         cache_creation_input_tokens_5m: (partial.usage.cache_creation_input_tokens_5m > 0)
             .then_some(partial.usage.cache_creation_input_tokens_5m),

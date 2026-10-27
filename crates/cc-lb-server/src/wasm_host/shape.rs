@@ -203,11 +203,17 @@ fn with_wire_shape_request<R>(
             value: value.as_bytes(),
         })
         .collect();
-    let base_url_str = match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.as_ref().map(|u| u.to_string()),
-    };
-    let upstream_ref = UpstreamRef::AnthropicDirect {
-        base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+    let base_url_str = upstream_base_url(upstream).map(|u| u.to_string());
+    let upstream_ref = match upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
     };
     let query_ref = context.query.as_deref().map(|s| QueryRef { value: s });
     let request = cc_lb_plugin_wire::ShapeRequestRef {
@@ -229,7 +235,9 @@ fn with_wire_shape_request<R>(
 
 fn upstream_base_url(upstream: &Upstream) -> Option<url::Url> {
     match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.clone(),
+        Upstream::AnthropicDirect { base_url }
+        | Upstream::OpenaiDirect { base_url }
+        | Upstream::GeminiDirect { base_url } => base_url.clone(),
     }
 }
 
@@ -348,8 +356,16 @@ fn host_to_wire_transform_response(
     let principal_kind = principal_kind_to_wire(&request.principal);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
-    let upstream = UpstreamRef::AnthropicDirect {
-        base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+    let upstream = match &request.upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
     };
     let wire = TransformResponseRequestRef {
         request_id: request.request_id.as_str(),
@@ -375,8 +391,16 @@ fn host_to_wire_transform_sse_event(
     let principal_kind = principal_kind_to_wire(&request.principal);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
-    let upstream = UpstreamRef::AnthropicDirect {
-        base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+    let upstream = match &request.upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
     };
     let event = SseEventRef {
         event: request.event.event.as_str(),
@@ -485,7 +509,9 @@ fn header_refs_from_map(headers: &http::HeaderMap) -> Vec<HeaderRef<'_>> {
 
 fn upstream_base_url_str(upstream: &Upstream) -> Option<String> {
     match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.as_ref().map(ToString::to_string),
+        Upstream::AnthropicDirect { base_url }
+        | Upstream::OpenaiDirect { base_url }
+        | Upstream::GeminiDirect { base_url } => base_url.as_ref().map(ToString::to_string),
     }
 }
 

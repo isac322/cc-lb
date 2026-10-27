@@ -37,6 +37,9 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{LONG_LIVED_METADATA_REFRESH_BUCKET_SECS, should_poll_oauth_usage};
+
+use super::super::http::upstream_base_url;
+
 use crate::cache_keepalive_enqueuer::CacheKeepaliveTaskPusher;
 use crate::dynamic_view_builder::Stores;
 use crate::refresh::{LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefresher, LazyRefresherDeps};
@@ -82,6 +85,31 @@ fn usage_poll_includes_never_refresh_upstream() {
     assert!(should_poll_oauth_usage(&upstream));
 }
 
+#[test]
+fn usage_default_base_url_is_provider_specific() {
+    for (kind, expected) in [
+        (UpstreamKind::AnthropicOauth, "https://api.anthropic.com/"),
+        (
+            UpstreamKind::OpenaiOauth,
+            "https://chatgpt.com/backend-api/codex",
+        ),
+        (UpstreamKind::OpenaiApiKey, "https://api.openai.com/"),
+        (
+            UpstreamKind::GeminiOauth,
+            "https://cloudcode-pa.googleapis.com/v1internal",
+        ),
+        (
+            UpstreamKind::GeminiApiKey,
+            "https://generativelanguage.googleapis.com/",
+        ),
+    ] {
+        let mut upstream = registered_oauth_upstream();
+        upstream.kind = kind;
+        let actual = upstream_base_url(&upstream).expect("default provider URL parses");
+        assert_eq!(actual.as_str(), expected, "{kind:?}");
+    }
+}
+
 /// A long-lived (365-day) credential must never reach the token endpoint:
 /// refreshing it makes Anthropic revoke the grant and issue an 8-hour token.
 /// The dispatch's `token_url` points at a guaranteed-closed port, so if the
@@ -101,6 +129,136 @@ async fn refresh_upstream_returns_not_refreshable_for_long_lived_credential() {
     assert!(matches!(outcome, RefreshOutcome::NotRefreshable));
 }
 
+async fn scoped_refresh_probe_record(
+    fixture: &DispatchFixture,
+    kind: UpstreamKind,
+    never_refresh: bool,
+) -> Result<UpstreamRecord, Box<dyn std::error::Error>> {
+    let id = Uuid::new_v4();
+    let bundle = OAuthTokenBundle {
+        access_token: "scoped-refresh-access-test-token".to_owned(),
+        refresh_token: if never_refresh && kind != UpstreamKind::AnthropicOauth {
+            String::new()
+        } else {
+            "scoped-refresh-test-token".to_owned()
+        },
+        expires_at_unix_secs: 1,
+        refresh_token_expires_at_unix_secs: None,
+        account_id: None,
+        project_id: (kind == UpstreamKind::GeminiOauth).then(|| "test-project".to_owned()),
+        scopes: Vec::new(),
+        never_refresh,
+    };
+    let tokens = EncryptedOAuthTokens::encrypt(fixture.aead.as_ref(), &bundle, id.as_bytes())?;
+    Ok(UpstreamStore::create(
+        fixture.storage.as_ref(),
+        UpstreamCreate {
+            id,
+            name: format!("{}-refresh-probe-{id}", kind.as_str()),
+            kind,
+            base_url: None,
+            api_key_ciphertext: None,
+            oauth_tokens: Some(cc_lb_storage_api::OAuthTokensCreate {
+                tokens,
+                never_refresh,
+            }),
+            warmup_enabled: false,
+            warmup_dialect_plugin: None,
+            workspace_id: None,
+            api_key_access: None,
+        },
+    )
+    .await?)
+}
+
+async fn assert_refresh_probe_unchanged(
+    fixture: &DispatchFixture,
+    original: &UpstreamRecord,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let current = UpstreamStore::get_by_id(fixture.storage.as_ref(), original.id)
+        .await?
+        .ok_or("refresh probe upstream disappeared")?;
+    assert_eq!(
+        current.oauth_token_generation,
+        original.oauth_token_generation
+    );
+    assert_eq!(current.revision, original.revision);
+    assert_eq!(current.last_apply_error, original.last_apply_error);
+    assert_eq!(
+        current.last_apply_at_unix_secs,
+        original.last_apply_at_unix_secs
+    );
+    assert_eq!(
+        current
+            .oauth_credentials
+            .as_ref()
+            .map(EncryptedOAuthTokens::ciphertext),
+        original
+            .oauth_credentials
+            .as_ref()
+            .map(EncryptedOAuthTokens::ciphertext)
+    );
+    assert_eq!(fixture.claim_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.refresh_entry_calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_only_oauth_direct_scheduler_refresh_never_enters_transport()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DispatchFixture::new().await;
+    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+        let original = scoped_refresh_probe_record(&fixture, kind, true).await?;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let outcome = crate::scheduler_dispatch::http::with_denied_token_refresh(
+            calls.clone(),
+            fixture.dispatch.refresh_upstream(original.clone()),
+        )
+        .await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "access-only refresh entered transport"
+        );
+        assert!(matches!(outcome, Ok(RefreshOutcome::NotRefreshable)));
+        assert_refresh_probe_unchanged(&fixture, &original).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn access_only_oauth_scoped_transport_control_denies_refreshable_providers_independently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = DispatchFixture::new().await;
+    let openai = scoped_refresh_probe_record(&fixture, UpstreamKind::OpenaiOauth, false).await?;
+    let gemini = scoped_refresh_probe_record(&fixture, UpstreamKind::GeminiOauth, false).await?;
+    let openai_calls = Arc::new(AtomicUsize::new(0));
+    let gemini_calls = Arc::new(AtomicUsize::new(0));
+    let (openai_result, gemini_result) = tokio::join!(
+        crate::scheduler_dispatch::http::with_denied_token_refresh(
+            openai_calls.clone(),
+            fixture.dispatch.refresh_upstream(openai.clone()),
+        ),
+        crate::scheduler_dispatch::http::with_denied_token_refresh(
+            gemini_calls.clone(),
+            fixture.dispatch.refresh_upstream(gemini.clone()),
+        ),
+    );
+    assert_eq!(openai_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gemini_calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        openai_result,
+        Err(cc_lb_scheduler::error::SchedulerError::Job(_))
+    ));
+    assert!(matches!(
+        gemini_result,
+        Err(cc_lb_scheduler::error::SchedulerError::Job(_))
+    ));
+    assert_refresh_probe_unchanged(&fixture, &openai).await?;
+    assert_refresh_probe_unchanged(&fixture, &gemini).await?;
+    Ok(())
+}
+
 /// Contrast case: a refreshing credential is not short-circuited and the
 /// refresh attempt reaches the token endpoint, which fails fast against the
 /// fixture's closed port.
@@ -115,6 +273,60 @@ async fn refresh_upstream_attempts_token_endpoint_for_refreshing_credential() {
         outcome.is_err(),
         "a refreshing credential must attempt the token endpoint, got {outcome:?}"
     );
+}
+
+/// Gemini refresh must ignore the Anthropic configuration's token URL and use
+/// Google's fixed installed-app endpoint. A loopback success endpoint makes
+/// accidental config-driven behavior fail deterministically.
+#[tokio::test]
+async fn gemini_refresh_does_not_use_configured_token_url() {
+    let app = axum::Router::new().route(
+        "/oauth/token",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "access_token": "config-url-access",
+                "expires_in": 3600,
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind configured token endpoint");
+    let endpoint = Url::parse(&format!(
+        "http://{}/oauth/token",
+        listener
+            .local_addr()
+            .expect("configured token endpoint address")
+    ))
+    .expect("configured token endpoint URL");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve configured token endpoint");
+    });
+
+    let config = cc_lb_config::AnthropicOAuthConfig {
+        client_id: "unused-anthropic-client".to_owned(),
+        auth_url: endpoint.clone(),
+        token_url: endpoint,
+        redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect URL"),
+        scopes: vec!["openid".to_owned()],
+    };
+    let client = crate::scheduler_dispatch::http::json_http_client();
+    let result = crate::scheduler_dispatch::http::request_refresh(
+        &client,
+        &config,
+        cc_lb_storage_api::upstream::UpstreamKind::GeminiOauth,
+        &CancellationToken::new(),
+        "gemini-refresh-token",
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "Gemini refresh must not use the configured Anthropic token URL: {result:?}"
+    );
+    server.abort();
 }
 
 /// The proactive usage-poll refresh must skip long-lived credentials entirely.
@@ -494,6 +706,8 @@ impl DispatchFixture {
                 refresh_token: "sk-ant-ort01-old".to_owned(),
                 expires_at_unix_secs: 1,
                 refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
                 scopes: vec!["messages".to_owned()],
                 never_refresh,
             },

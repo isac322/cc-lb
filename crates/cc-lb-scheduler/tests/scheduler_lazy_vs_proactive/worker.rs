@@ -136,6 +136,7 @@ async fn refresh_tokens(
         previous.refresh_token.as_str(),
     )
     .await?;
+    let account_id = response.account_id.clone().or(previous.account_id.clone());
     let refreshed = refreshed_token_parts(
         ExistingTokenParts {
             refresh_token: previous.refresh_token,
@@ -153,6 +154,8 @@ async fn refresh_tokens(
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: None,
+            account_id,
+            project_id: None,
             scopes: refreshed.scopes,
             never_refresh: false,
         },

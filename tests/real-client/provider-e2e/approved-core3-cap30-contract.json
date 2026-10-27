@@ -1,0 +1,308 @@
+{
+  "revision_status": "FINAL_ARTIFACT_BOUND_POLICY_ELIGIBLE_PER_RUN_GATES_REQUIRED",
+  "execution_release": true,
+  "objective": "Restore original real CLI coding-agent E2E QA and execute against current cc-lb with real provider credentials; never substitute fake upstream or raw HTTP for client coverage.",
+  "original_user_evidence": [
+    {
+      "at": "2026-10-18T02:52:02.140Z",
+      "requirements": [
+        "Run actual Codex and Antigravity CLIs through proxy",
+        "Exercise broad supported API, cache and Codex WebSocket behavior",
+        "Obtain approval before architectural changes",
+        "Plugins explicitly deferred"
+      ]
+    },
+    {
+      "at": "2026-10-18T07:15:26.034Z",
+      "requirements": [
+        "Actual agy, codex, omp executions through cc-lb Gemini/GPT",
+        "Real coding-agent scenarios, not a few chats",
+        "Client fidelity and cache cost take priority over LB",
+        "Preserve provider-owned state; ask before architectural changes"
+      ]
+    },
+    {
+      "at": "2026-10-18T11:14:08Z",
+      "requirements": [
+        "Agree comprehensive QA list",
+        "Exercise varied API features and medium-duration client sessions",
+        "Investigate and iterate defects; architectural changes still require approval"
+      ]
+    },
+    {
+      "at": "2026-10-19T01:16:01Z",
+      "requirements": [
+        "Send actual real service requests",
+        "Use a moderate coding task rather than needless complexity"
+      ]
+    },
+    {
+      "at": "2026-10-18T02:19:42Z",
+      "requirements": [
+        "Never refresh shared OpenAI/Gemini OAuth grants",
+        "Retrieve current credentials from external OAuth broker again when expired"
+      ]
+    }
+  ],
+  "write_boundary": "New scratch fixtures, private client homes, local SQLite QA rows and bounded real-provider generation calls only. No repository edits, no production/service mutation, no shared OAuth refresh. Source fixes require a precise behavior/file approval. Keep existing QA services and homes untouched.",
+  "artifact": {
+    "path": "target/debug/cc-lb",
+    "expected_sha256": "dcde4343277cfc977bdfa77df768ea475d990d86058a879264fc58bb2a4e71a4"
+  },
+  "judgment": {
+    "PASS": "Current target binary plus real named CLI plus real provider completes intended behavior; emitted client protocol and resulting usage/events agree.",
+    "FAIL": "Executed supported scenario violates its observed contract; attach exact reproducible artifact and layer.",
+    "BLOCKED": "Required capability or credential is unavailable or unsafe; report precise prerequisite, never mark PASS.",
+    "NOT_RUN": "No execution evidence yet; remains open."
+  },
+  "coding_task": "Each client gets an isolated tiny local project. It must inspect files using actual tools, make a small targeted scratch-only code improvement, execute fixture tests, then continue the same session for a second change or explanation. Use small context and bounded requests, not the full cc-lb repository.",
+  "slices": [
+    {
+      "id": "codex",
+      "ports": [
+        18500,
+        18501,
+        18502
+      ],
+      "scenarios": [
+        "HTTP stateless coding tool loop",
+        "WebSocket coding tools",
+        "Session resume",
+        "WebSocket reconnect/full replay"
+      ]
+    },
+    {
+      "id": "omp-gpt",
+      "ports": [
+        18510,
+        18511,
+        18512
+      ],
+      "scenarios": [
+        "Stateless tools",
+        "Stateful store:true previous_response_id continuation",
+        "Session continue"
+      ]
+    },
+    {
+      "id": "omp-gemini",
+      "ports": [
+        18520,
+        18521,
+        18522
+      ],
+      "scenarios": [
+        "Gemini3 real coding tools with thoughtSignature",
+        "Session continue",
+        "Gemini3.5FlashLite lower-cost transport control"
+      ]
+    },
+    {
+      "id": "agy",
+      "ports": [
+        18530,
+        18531,
+        18532
+      ],
+      "scenarios": [
+        "Actual Antigravity coding tools",
+        "thoughtSignature continuity",
+        "Session continue"
+      ]
+    }
+  ],
+  "cross_cutting": [
+    "Fresh principal OpenAI/Gemini routing",
+    "Unauthenticated and wrong-key rejection before paid call",
+    "Stateful owner failure without cross-owner failover",
+    "Stateless injected429 then real-provider failover",
+    "Client cancellation and stream interruption release quota/concurrency",
+    "Real cache usage and cache-miss cost evidence without pretending Anthropic cache analysis applies",
+    "Gemini cachedContent known-owner/unbound-owner behavior",
+    "Usage,quota,request events,metrics,traces observability; respect async consistency"
+  ],
+  "fault_policy": "Only local owned fault intermediary or owned QA process; never stress/rate-limit/disable real provider or production. Positive response must still come from real provider. Label injected failures explicitly. Never invent unsupported client options or alter client wire payload to claim native CLI coverage.",
+  "secrets": "Retrieve in process memory from existing secure sources, client keys only in0600scratchfiles, no raw headers/bodies/token values in reports. No shared refresh tokens in QA SQLite.",
+  "resource_ledger": "ledger.json",
+  "paid_bounds": {
+    "cli_sessions_per_slice": 3,
+    "turns_per_session": 2,
+    "wall_seconds_per_cli_run": 120,
+    "generation_attempts_per_slice": 16,
+    "max_output_tokens_when_client_supports_it": 2000,
+    "usd_ceiling_per_slice": 3,
+    "usd_ceiling_campaign": 30,
+    "enforcement": "Historical per-slice USD3 bounds remain unchanged; this revision uses the user-authorized USD30 campaign ceiling with explicitly selected new-run slice USD6. Cap every tool generation, replay, error and cancellation. Hitting a bound is BLOCKED-budget, never a proxy defect."
+  },
+  "websocket_guard": "Current opaque Responses WS relay has no per-turn principal usage/limit/event hooks. Before paid WS execution, the owned client-side tap must count generation frames and provider usage and enforce16attempts/USD3 plus CLI deadline. Missing reliable enforcement is BLOCKED-budget. Driver-computed pricing must not be mislabeled cc-lb cost; absence of cc-lb WS accounting is separately investigated as a candidate defect.",
+  "paid_attempt_overrides": {
+    "codex": {
+      "max_generation_attempts": 32,
+      "usd_ceiling": 3,
+      "reason": "Historical Codex attempt override retained; this revision changes only the campaign ceiling to USD30 and keeps the USD3 historical slice and attempt bound."
+    }
+  },
+  "credential_guard": "API-key upstreams only in phase1; OpenAI and Gemini subscription baselines remain required scope and BLOCKED pending separately approved safe support. Fresh private client homes must not copy any real auth.json, provider OAuth files, external keyring credentials, or user sessions. Client only receives local principal key. Scan private credential file names before each launch, never contents in output.",
+  "observability_guard": {
+    "before": "Record metrics baseline and committed events delta cursor before each CLI run.",
+    "after": "Wait for request ids and terminal event completeness using finite async event/delta observation, deadline30s; no fixed sleep as proof.",
+    "loss_counters": [
+      "lifecycle_assembler_full",
+      "lifecycle_assembler_storage_error",
+      "subscription_quota_full"
+    ],
+    "rollups": "Do not judge dashboard materializations before a completed rollup; report pending separately."
+  },
+  "required_evidence_fields": [
+    "binary_sha256",
+    "client_binary_and_current_version",
+    "client_session_id",
+    "client_tool_calls_and_fixture_test_output",
+    "API_family_and_endpoint",
+    "observed_transport",
+    "principal_id",
+    "key_id",
+    "upstream_id",
+    "real_provider_host",
+    "model",
+    "stream",
+    "store",
+    "previous_response_id_presence",
+    "session_turn_header_presence",
+    "HTTP_status",
+    "provider_response_id",
+    "provider_input_cached_output_reasoning_tokens",
+    "cc_lb_tokens_and_cost",
+    "Gemini_replayed_function_call_thoughtSignature_presence"
+  ],
+  "provider_proof": "Verify target binary digest before every slice, no fake/direct fallback in client config, expected real provider upstream host in QA storage and network evidence, provider-issued response id plus nonzero reported usage. Local owned fault intermediary is permitted only when explicitly labeled and logs distinguish forwarded requests from injected failures.",
+  "native_state_assertions": "Resume exact session id, not global newest. Assert store/previous_response_id, HTTP/WS and thoughtSignature from observed requests, not flags or assumptions. Unsupported native capability is BLOCKED/client-limited, never silently rewritten or called native coverage.",
+  "cache_assertions": "Record provider cache threshold, exact unchanged-prefix qualification, all real token usage and priced miss cost. A hit is PASS only if cached_tokens>0 on later same-prefix request. An observed miss is not a defect or a fabricated hit. Below threshold is not applicable. Missing catalog pricing blocks cost proof. Anthropic cache analysis is not claimed for GPT/Gemini.",
+  "cached_content_assertions": "No named native client is known to emit cachedContent. Mark raw HTTP real-provider owner/unbound probes as separate server-contract checks, outside actual CLI totals. Existing unsupported management routes must not be bypassed by forged affinity rows or direct database edits.",
+  "fault_assertions": "Injected429 must be answered locally without provider forwarding; failover success must use a different upstream id and return real provider usage. Stateful owner failure must not forward to another owner. Never disable or rate-limit real credentials. Auth rejection must make zero upstream attempts.",
+  "cwd_guard": "Every cc-lb/client process cwd and all runtime/cache/catalog/WASM paths must resolve under the new campaign scratch root. Existing QA services and profiles stay untouched.",
+  "port_roles": {
+    "client_slice_port_order": [
+      "proxy",
+      "admin",
+      "metrics"
+    ],
+    "server_contract_slice": {
+      "proxy": 18540,
+      "admin": 18541,
+      "metrics": 18542,
+      "owned_fault_relays": [
+        18543,
+        18544
+      ]
+    },
+    "client_metadata_observers": "Allocate additional unused loopback ports and record exact ownership before launch; never conflate observers with provider upstreams."
+  },
+  "cancellation_assertions": "Cancel actual CLI or owned raw-contract client mid-stream. Within30s in-flight/concurrency and reservation gauges return to baseline, terminal event records cancellation, follow-up request is admitted, and any provider-billed usage is reported. Loss-counter increases invalidate the run. No TTL-expiry fallback counts as timely release.",
+  "fresh_principal_assertions": "Each client request event principal_id and key_id equal the fresh QA identity, selected upstream_id belongs to its allowed set, eligible OpenAI/Gemini API-key candidate survives default filters, and no existing shared principal is modified.",
+  "low_cost_control_assertions": "Use the same native CLI coding task and streaming transport for Gemini3 and Gemini3.5FlashLite; record actual request-shape differences and compare token usage/cost only when measured. Transport control PASS requires real tool-loop completion. Missing pricing blocks cost comparison, not proof of transport. No fabricated identical-body claim for different client-native model settings.",
+  "required_subscription_baselines": [
+    {
+      "id": "openai-subscription-baseline",
+      "status": "BLOCKED",
+      "prerequisite": "Explicit behavior/file approval for a safe subscription credential path that never refreshes the shared grant or stores its refresh token; current OAuth registration rejects never_refresh and schedules refresh."
+    },
+    {
+      "id": "gemini-subscription-baseline",
+      "status": "BLOCKED",
+      "prerequisite": "Explicit behavior/file approval for a safe subscription credential path that never refreshes the shared grant or stores its refresh token; current OAuth registration rejects never_refresh and schedules refresh."
+    }
+  ],
+  "completion_rule": "Campaign cannot be COMPLETE/PASS while any required scenario is BLOCKED or NOT_RUN; report overall PARTIAL with each remaining prerequisite. No API-key-only scope reduction is authorized.",
+  "cleanup": "Retain resources and ledger until explicit user cleanup signal. No automatic deletion.",
+  "historical_artifact_reference": {
+    "path": "target/debug/cc-lb",
+    "expected_sha256": "50d43f03ef36956abed6a1894f328c92c6e535263a5e4d29ae971daa8085f977"
+  },
+  "compiled_artifact_binding": {
+    "source_commit": "f3b8044ea427fab13cfafffae01c7d4189507684",
+    "source_tree": "c793b0ebda2668fa560a959ca6c09b2707f9a94b",
+    "scope": "FULL_COMMITTED_GIT_ARCHIVE",
+    "tracked_blob_count": 2087,
+    "compiled_witness": {
+      "path": "artifacts/compiled-witness.json",
+      "sha256": "ed9702d7441e4444f322d0e1245da848e8fcdcec9a5b6792a928fff8af3953fc"
+    },
+    "compiled_pair": {
+      "path": "artifacts/compiled-pair.json",
+      "sha256": "9b0d7786e6458fae94cfae2decb7891da797ee868f5d3be8c05757da5b5ce387"
+    },
+    "source_index_before": {
+      "path": "artifacts/source-hashes.json",
+      "sha256": "ea39eac8b9fa3a32dc57b76c4822131ffe4c4855cbe8da9010c09b55db477a99"
+    },
+    "source_index_after": {
+      "path": "artifacts/source-hashes-after-build.json",
+      "sha256": "0ee72f8bb8bb7a24434c336ee261fb302117dd4fe173d66edb811b02f91da3eb"
+    },
+    "source_archive": {
+      "path": "artifacts/source.tar",
+      "sha256": "a35339b8402de317822b0203bd5b858a92a276b5256a98369390fbaeca9298f4"
+    },
+    "approved_committed_paths": {
+      "crates/cc-lb-engine/src/provider_capability.rs": "8ad7050062b203dbdc139aa53afb86b7143944d29bff4fe02de00a7af811224f",
+      "crates/cc-lb-server/tests/multi_route_dispatch.rs": "5c066351419b2004c2e57ec8e3e2188e018e77a4ac291b324f4d0b4709b044e8",
+      "CHANGELOG.md": "58a98e1aee2208f17053dc1d991e2092c769d69287de4a4335c7ed9a5ef26bce"
+    },
+    "overlay_equivalence": {
+      "path": "artifacts/overlay-equivalence.json",
+      "sha256": "1dbf414ba4036eff8e1505070f8d54a6ef034c9d247ff3fab8636ad9d88c1219"
+    },
+    "source_coverage_note": "Full 2087 Git blob payload equivalence and complete path sets; not a selected-122-source pin claim",
+    "validation_scope": "Compiled identity and approved three-file source binding only; new-binary runtime, performance and paid validation remain pending"
+  },
+  "api_key_pricing_eligibility": {
+    "schema": "approved-core3-api-key-pricing-eligibility-v1",
+    "account_scope": {
+      "credential_env": "OPENAI_BACKEND_API_KEY",
+      "basis": "user_confirmed_project_standard_payg_scale_no_fedramp",
+      "omitted_service_tier_resolves_to": "default",
+      "scope": "this_project_only",
+      "universal_default_claimed": false,
+      "key_value_read": false,
+      "confirmed_at": "2026-10-23T07:27:12.708Z"
+    },
+    "models": {
+      "gpt-5.2": {
+        "protocol": "openai-responses",
+        "eligible_tiers": [
+          "default"
+        ],
+        "omitted_tier": "default",
+        "citations": [
+          "https://developers.openai.com/api/docs/models/gpt-5.2",
+          "https://developers.openai.com/api/docs/pricing",
+          "https://developers.openai.com/api/reference/resources/responses/methods/create",
+          "https://developers.openai.com/api/docs/guides/fast-mode",
+          "https://developers.openai.com/api/docs/guides/prompt-caching",
+          "User-confirmed OPENAI_BACKEND_API_KEY: Standard PAYG; no Scale Tier or FedRAMP contract; API omission resolves auto to project Standard tier",
+          "Read-only project settings descriptor SHA256 72c6e44b401050cb26915c83475abe33953b8de7b6a15196923b88eee0e32e48"
+        ]
+      }
+    }
+  },
+  "approved_client_identity": {
+    "schema": "approved-core3-omp-client-v1",
+    "launcher": "/usr/local/bin/omp",
+    "realpath": "/usr/local/libexec/omp/omp",
+    "sha256": "cfbb5e38cd8f8a3be55e710700be587d287deaacdc58c9b0a661c5086bccfe58",
+    "version": "omp/18.12.6",
+    "provenance": {
+      "receipt_path": "artifacts/omp-gpt.receipt.json",
+      "receipt_sha256": "5838acd2545ac115dec9a2434c9e23a949ed9e41b210a0103057d92df84c0b42",
+      "version_path": "artifacts/omp-version.txt",
+      "version_sha256": "e5dea60785e08b56fe4d58aed32b4794d0cb085465f3f21cb6a3d973c9e84580"
+    }
+  },
+  "credential_binding": {
+    "source_type": "envFile",
+    "env_file": ".env",
+    "env_key": "OPENAI_BACKEND_API_KEY",
+    "value_read": false
+  }
+}

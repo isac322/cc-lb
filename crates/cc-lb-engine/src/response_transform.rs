@@ -3,11 +3,13 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::header::{CONTENT_ENCODING, CONTENT_LENGTH};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use serde_json::Value;
 
 use cc_lb_domain::{Principal, Upstream};
 use cc_lb_upstream::{
-    ResponseTransformError, SseEvent, SseEventTransformHook, TransformResponseResult,
-    TransformSseEventRequest, TransformSseEventResult, UpstreamDialect,
+    ResponseTransformError, ResponseTransformHook, SseEvent, SseEventTransformHook,
+    TransformResponseRequest, TransformResponseResult, TransformSseEventRequest,
+    TransformSseEventResult, UpstreamDialect,
 };
 
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -21,6 +23,7 @@ pub(crate) struct ResponseTransformContext {
     pub(crate) request_method: Method,
     pub(crate) request_path: String,
     pub(crate) dialect: Arc<dyn UpstreamDialect>,
+    pub(crate) gemini_oauth: bool,
 }
 
 pub(crate) struct BufferedTransformParts {
@@ -35,6 +38,59 @@ pub(crate) enum SseTransformOutcome {
     FailOpen,
     Error(ResponseTransformError),
 }
+pub(crate) struct GeminiOauthResponseTransform;
+
+impl ResponseTransformHook for GeminiOauthResponseTransform {
+    fn transform_response(
+        &self,
+        request: TransformResponseRequest,
+    ) -> Result<TransformResponseResult, ResponseTransformError> {
+        let Some(body) = unwrap_gemini_code_assist_body(&request.body)? else {
+            return Ok(TransformResponseResult::Unchanged);
+        };
+        Ok(TransformResponseResult::Replace {
+            status: None,
+            headers: None,
+            body: Some(body),
+        })
+    }
+}
+
+impl SseEventTransformHook for GeminiOauthResponseTransform {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        let Some(data) = unwrap_gemini_code_assist_body(&request.event.data)? else {
+            return Ok(TransformSseEventResult::Unchanged);
+        };
+        Ok(TransformSseEventResult::Replace {
+            events: vec![SseEvent {
+                event: request.event.event,
+                data,
+            }],
+        })
+    }
+}
+
+pub(crate) fn unwrap_gemini_code_assist_body(
+    body: &[u8],
+) -> Result<Option<Bytes>, ResponseTransformError> {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return Ok(None);
+    };
+    let Some(response) = value.get("response") else {
+        return Ok(None);
+    };
+    serde_json::to_vec(response)
+        .map(Bytes::from)
+        .map(Some)
+        .map_err(|error| ResponseTransformError::Runtime {
+            reason: format!("failed to encode Gemini response: {error}"),
+        })
+}
+pub(crate) static GEMINI_OAUTH_RESPONSE_TRANSFORM: GeminiOauthResponseTransform =
+    GeminiOauthResponseTransform;
 
 pub(crate) fn apply_buffered_transform_result(
     upstream_status: StatusCode,
@@ -80,7 +136,7 @@ pub(crate) fn sanitized_response_headers_for_plugin(headers: &HeaderMap) -> Head
     sanitized
 }
 
-fn sanitize_downstream_response_headers(
+pub(crate) fn sanitize_downstream_response_headers(
     mut headers: HeaderMap,
     body_len: usize,
     content_encoding: Option<HeaderValue>,
