@@ -24,7 +24,7 @@ pub use propagation::{inject_current_trace_context, parent_context_from_headers}
 pub use redaction::{
     REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, RedactingMakeWriter,
     RedactionLayer, RedactionPolicy, enforce_routing_trace_caps, redact_internal_errors,
-    redact_routing_trace, truncate_reason,
+    redact_routing_trace, sanitize_url_for_log, truncate_reason,
 };
 pub use trace_layer::{
     ObservabilityTraceLayer, ProxyMakeSpan, ProxyOnBodyChunk, ProxyOnRequest, ProxyOnResponse,

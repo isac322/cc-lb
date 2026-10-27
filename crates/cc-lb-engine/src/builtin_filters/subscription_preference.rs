@@ -2,14 +2,15 @@
 //!
 //! Selects at most one OAuth upstream per request via:
 //!
-//! 1. A strict tier ordering (KnownBase > PartialBase > Overage > UnknownProbe)
-//!    that keeps the Anthropic base plan strictly higher priority than the
+//! 1. Anthropic candidates use a strict tier ordering (KnownBase > PartialBase > Overage >
+//!    UnknownProbe) that keeps the Anthropic base plan strictly higher priority than the
 //!    overage bucket.
-//! 2. Within the winning tier, deterministic cost-first-v2 selection. Candidates
-//!    within five percent of the lowest known input cost use urgency, the raw
-//!    five-hour pressure, the overage-only warning multiplier, upstream ID, and
-//!    original position as stable tiebreaks. Base-tier warning signals remain
-//!    observable but do not affect ranking.
+//! 2. OpenAI and Gemini candidates prefer OAuth over API keys, ranking OAuth candidates by
+//!    predicted cache reads and then upstream ID.
+//! 3. Within the winning Anthropic tier, deterministic cost-first-v2 selection. Candidates
+//!    within five percent of the lowest known input cost use urgency, the raw five-hour
+//!    pressure, the overage-only warning multiplier, upstream ID, and original position as
+//!    stable tiebreaks. Base-tier warning signals remain observable but do not affect ranking.
 //!
 //! ## Design rationale
 //!
@@ -190,12 +191,70 @@ fn evaluate(
         .iter()
         .any(|c| c.kind == UpstreamKind::AnthropicApiKey);
 
-    // The filter only ranks Anthropic subscription/API-key accounts. Candidate sets without any
-    // of them (OpenAI-only, Gemini-only, ...) are outside its scope and pass through unchanged.
+    // Anthropic candidates are the filter's original scope and retain the full four-tier
+    // subscription logic below. Other providers use the simpler OAuth/API-key preference.
     if !has_subscription && !has_api_key {
+        let has_openai_or_gemini = candidates.iter().any(|candidate| {
+            matches!(
+                candidate.kind,
+                UpstreamKind::OpenaiOauth
+                    | UpstreamKind::OpenaiApiKey
+                    | UpstreamKind::GeminiOauth
+                    | UpstreamKind::GeminiApiKey
+            )
+        });
+        if !has_openai_or_gemini {
+            return FilterOutput {
+                kept_upstream_ids: candidates.iter().map(|c| c.upstream_id).collect(),
+                reason: NOT_APPLICABLE_REASON.to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            };
+        }
+
+        if let Some(winner) = candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.kind,
+                    UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+                )
+            })
+            .max_by(|left, right| {
+                let left_cache_read_tokens = left
+                    .cache_score
+                    .as_ref()
+                    .map_or(0, |score| score.predicted_cache_read_tokens);
+                let right_cache_read_tokens = right
+                    .cache_score
+                    .as_ref()
+                    .map_or(0, |score| score.predicted_cache_read_tokens);
+                left_cache_read_tokens
+                    .cmp(&right_cache_read_tokens)
+                    .then_with(|| right.upstream_id.cmp(&left.upstream_id))
+            })
+        {
+            return FilterOutput {
+                kept_upstream_ids: vec![winner.upstream_id],
+                reason: SUBSCRIPTION_ALIVE_REASON.to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            };
+        }
+
+        let api_key_ids = candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.kind,
+                    UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+                )
+            })
+            .map(|candidate| candidate.upstream_id)
+            .collect();
         return FilterOutput {
-            kept_upstream_ids: candidates.iter().map(|c| c.upstream_id).collect(),
-            reason: NOT_APPLICABLE_REASON.to_owned(),
+            kept_upstream_ids: api_key_ids,
+            reason: API_KEY_FALLBACK_REASON.to_owned(),
             per_candidate_reasons: Vec::new(),
             subscription_preference: None,
         };

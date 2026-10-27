@@ -64,6 +64,7 @@ struct Partial {
     service_tier: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
+    cache_creation_input_tokens: u64,
     cache_creation_5m: u64,
     cache_creation_1h: u64,
     cache_read: u64,
@@ -175,6 +176,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         LifecycleEvent::UsageObserved { usage, .. } => {
             partial.input_tokens = usage.input_tokens;
             partial.output_tokens = usage.output_tokens;
+            partial.cache_creation_input_tokens = usage.cache_creation_input_tokens;
             partial.cache_creation_5m = usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = usage.cache_creation_input_tokens_1h;
             partial.cache_read = usage.cache_read_input_tokens;
@@ -187,6 +189,7 @@ fn merge(partial: &mut Partial, event: LifecycleEvent) {
         } => {
             partial.input_tokens = success.usage.input_tokens;
             partial.output_tokens = success.usage.output_tokens;
+            partial.cache_creation_input_tokens = success.usage.cache_creation_input_tokens;
             partial.cache_creation_5m = success.usage.cache_creation_input_tokens_5m;
             partial.cache_creation_1h = success.usage.cache_creation_input_tokens_1h;
             partial.cache_read = success.usage.cache_read_input_tokens;
@@ -202,15 +205,17 @@ fn compute_cost(partial: &Partial) -> Option<CostBreakdown> {
         return None;
     }
     let model = partial.model.as_deref()?;
-    let breakdown = crate::virtual_cost_micros_full(
+    let breakdown = crate::virtual_cost_micros_full_with_context(
         model,
         partial.input_tokens,
         partial.output_tokens,
+        partial.cache_creation_input_tokens,
         partial.cache_creation_5m,
         partial.cache_creation_1h,
         partial.cache_read,
         partial.service_tier.as_deref(),
-    );
+    )
+    .unwrap_or_else(crate::ComputedCostBreakdown::unknown);
     Some(event_cost_breakdown_from_pricing(breakdown))
 }
 

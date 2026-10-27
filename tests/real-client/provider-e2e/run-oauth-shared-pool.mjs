@@ -1113,6 +1113,63 @@ async function main() {
       'GET',
       '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_generate_content',
     );
+    // Live Gemini OAuth :countTokens (direct contents + nested generateContentRequest)
+    const gmOauthCountDirectRes = await fetch(
+      `http://127.0.0.1:${PORTS.proxy}/v1beta/models/gemini-2.5-flash:countTokens?key=should_be_scrubbed`,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': clientKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: 'hello live gemini oauth countTokens' }] }],
+        }),
+      },
+    );
+    const gmOauthCountDirectJson = await gmOauthCountDirectRes.json();
+
+    const gmOauthCountNestedRes = await fetch(
+      `http://127.0.0.1:${PORTS.proxy}/v1beta/models/gemini-2.5-flash:countTokens`,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': clientKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          generateContentRequest: {
+            contents: [{ role: 'user', parts: [{ text: 'nested generateContentRequest live countTokens' }] }],
+          },
+        }),
+      },
+    );
+    const gmOauthCountNestedJson = await gmOauthCountNestedRes.json();
+
+    const gmCountAffinityErrRes = await fetch(
+      `http://127.0.0.1:${PORTS.proxy}/v1beta/models/gemini-2.5-flash:countTokens`,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': clientKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          generateContentRequest: {
+            cachedContent: 'cachedContents/unbound-count-affinity-check',
+            contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+          },
+        }),
+      },
+    );
+    const gmCountAffinityErrJson = await gmCountAffinityErrRes.json();
+    await sleep(400);
+    const gmCountDeltaEvents = await adminCall(
+      adminToken,
+      'GET',
+      '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_count_tokens',
+    );
+
 
     // Verify C1: Local proxy error format on OpenAI (/v1/responses) and Gemini (:generateContent)
     const oaLocalErrRes = await fetch(`http://127.0.0.1:${PORTS.proxy}/v1/responses`, {
@@ -1157,7 +1214,14 @@ async function main() {
         gmLocalErrRes.status === 503 &&
         gmLocalErrJson.type === undefined &&
         gmLocalErrJson.error?.code === 503 &&
-        gmLocalErrJson.error?.status === 'UNAVAILABLE'
+        gmLocalErrJson.error?.status === 'UNAVAILABLE' &&
+        gmOauthCountDirectRes.status === 200 &&
+         gmOauthCountDirectJson.totalTokens > 0 &&
+        gmOauthCountNestedRes.status === 200 &&
+        gmOauthCountNestedJson.totalTokens > 0 &&
+        gmCountAffinityErrRes.status === 503 &&
+        gmCountAffinityErrJson.error?.status === 'UNAVAILABLE' &&
+        (gmCountDeltaEvents.json?.events?.length ?? 0) >= 2
           ? 'PASS'
           : 'FAIL',
       shared_cc_lb_instance: {
@@ -1179,6 +1243,10 @@ async function main() {
         attachedWasmPlugins: uploadedPlugins,
         openaiResponsesEventKindCount: oaDeltaEvents.json?.events?.length ?? 0,
         geminiGenerateContentEventKindCount: gmDeltaEvents.json?.events?.length ?? 0,
+        geminiCountTokensEventKindCount: gmCountDeltaEvents.json?.events?.length ?? 0,
+        geminiOauthCountDirect: gmOauthCountDirectJson,
+        geminiOauthCountNested: gmOauthCountNestedJson,
+        geminiCountAffinityError: gmCountAffinityErrJson,
         openaiLocalErrorEnvelope: oaLocalErrJson,
         geminiLocalErrorEnvelope: gmLocalErrJson,
       },

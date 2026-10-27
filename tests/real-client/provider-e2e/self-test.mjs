@@ -482,21 +482,58 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
           );
           return;
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'ratelimit-limit': '100;w=60',
+          'ratelimit-remaining': '99',
+          'ratelimit-reset': '60',
+        });
         res.end(
           JSON.stringify({
-            id: 'resp_ok_1',
+            id: `resp_ok_${mockRequests.length}`,
             object: 'response',
             status: 'completed',
             model: parsed.model ?? 'gpt-5.2',
             service_tier: 'priority',
             output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }],
-            usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+            usage: {
+              input_tokens: 100,
+              input_tokens_details: { cached_tokens: 20, cache_write_tokens: 10 },
+              output_tokens: 5,
+              total_tokens: 105,
+            },
           }),
         );
         return;
       }
       if (req.method === 'POST' && req.url.includes(':generateContent')) {
+        let parsedGm = {};
+        try {
+          parsedGm = JSON.parse(bodyText);
+        } catch {}
+        const promptText = JSON.stringify(parsedGm);
+        if (promptText.includes('trigger_gemini_429_retry_info')) {
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'x-goog-request-id': 'goog-req-429-retryinfo',
+          });
+          res.end(
+            JSON.stringify({
+              error: {
+                code: 429,
+                message: 'Quota exceeded for metric',
+                status: 'RESOURCE_EXHAUSTED',
+                details: [
+                  {
+                    '@type': 'type.googleapis.com/google.rpc.RetryInfo',
+                    retryDelay: '9s',
+                  },
+                ],
+              },
+            }),
+          );
+          return;
+        }
         res.writeHead(200, {
           'Content-Type': 'application/json',
           'x-goog-request-id': 'goog-req-gen-1',
@@ -505,7 +542,13 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
         res.end(
           JSON.stringify({
             candidates: [{ content: { role: 'model', parts: [{ text: 'gemini-ok' }] }, finishReason: 'STOP' }],
-            usageMetadata: { promptTokenCount: 18, candidatesTokenCount: 6, totalTokenCount: 24 },
+            usageMetadata: {
+              promptTokenCount: 100,
+              cachedContentTokenCount: 20,
+              cacheCreationTokenCount: 10,
+              candidatesTokenCount: 6,
+              totalTokenCount: 106,
+            },
           }),
         );
         return;
@@ -661,6 +704,26 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
   });
   assert.equal(gmKeyUp.status, 201, `create gemini_api_key failed: ${gmKeyUp.text}`);
   const gmKeyUpstreamId = gmKeyUp.json.id;
+  assert.equal(
+    oaKeyUp.headers.get('cache-control')?.includes('no-store'),
+    true,
+    'openai_api_key create response must set Cache-Control: no-store',
+  );
+  assert.equal(
+    gmKeyUp.headers.get('cache-control')?.includes('no-store'),
+    true,
+    'gemini_api_key create response must set Cache-Control: no-store',
+  );
+  const invalidWarmupUp = await adminCall('POST', '/admin/v1/upstreams', {
+    name: 'e2e-invalid-openai-warmup',
+    kind: 'openai_api_key',
+    base_url: mockBaseUrl,
+    api_key_value: 'sk-openai-warmup-reject',
+    warmup_enabled: true,
+  });
+  assert.equal(invalidWarmupUp.status, 400, 'non-AnthropicOauth warmup_enabled:true must be rejected with 400');
+  assert.equal(invalidWarmupUp.json?.error, 'warmup_unsupported_kind');
+
 
   const nowSec = Math.floor(Date.now() / 1000);
   const oaOauthUp = await adminCall('POST', '/admin/v1/upstreams', {
@@ -872,6 +935,104 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
     false,
     `Outer Code Assist response envelope must be unwrapped: ${gmOauthStreamText}`,
   );
+  // Verify Gemini OAuth :countTokens wrapping into /v1internal:countTokens with {"request":{"model":"models/...", ...}}
+  const gmOauthCountRes = await fetch(
+    `http://127.0.0.1:${proxyPort}/v1beta/models/gemini-2.5-pro:countTokens?key=leak_oauth_count_key&keep_count=1`,
+    {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': clientKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        generateContentRequest: {
+          contents: [{ role: 'user', parts: [{ text: 'count via gemini oauth' }] }],
+        },
+      }),
+    },
+  );
+  assert.equal(gmOauthCountRes.status, 200, `Gemini OAuth :countTokens failed: ${await gmOauthCountRes.clone().text()}`);
+  const gmOauthCountJson = await gmOauthCountRes.json();
+  assert.equal(gmOauthCountJson.totalTokens, 42);
+  const lastGmOauthCountMock = mockRequests.at(-1);
+  assert.equal(
+    lastGmOauthCountMock.url.startsWith('/v1internal:countTokens'),
+    true,
+    `Gemini OAuth :countTokens must rewrite path to /v1internal:countTokens, got: ${lastGmOauthCountMock.url}`,
+  );
+  assert.equal(
+    lastGmOauthCountMock.url.includes('leak_oauth_count_key'),
+    false,
+    'Gemini OAuth :countTokens query key= must be scrubbed',
+  );
+  assert.equal(
+    lastGmOauthCountMock.url.includes('keep_count=1'),
+    true,
+    'Gemini OAuth :countTokens non-secret query parameter must be preserved',
+  );
+  const wrappedCountBody = JSON.parse(lastGmOauthCountMock.bodyText);
+  assert.equal(wrappedCountBody.model, undefined, 'v1internal:countTokens must not have top-level model');
+  assert.equal(wrappedCountBody.project, undefined, 'v1internal:countTokens must not have top-level project');
+  assert.equal(wrappedCountBody.request?.model, 'models/gemini-2.5-pro');
+
+  // Verify built-in SubscriptionPreferenceFilter OAuth-first selection and API-key fallback on OpenAI pool
+  await setUpstreamEnabled(oaKeyUpstreamId, true);
+  await setUpstreamEnabled(oaOauthUpstreamId, true);
+  await new Promise((r) => setTimeout(r, 300));
+
+  const oaSubPrefRes = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${clientKey}`,
+      'Content-Type': 'application/json',
+      session_id: 'codex-e2e-session-123',
+    },
+    body: JSON.stringify({ model: 'gpt-5.2', input: 'prefer oauth over api key' }),
+  });
+  assert.equal(oaSubPrefRes.status, 200);
+  const lastOaSubPrefMock = mockRequests.at(-1);
+  assert.equal(
+    lastOaSubPrefMock.headers['authorization'],
+    'Bearer oa-oauth-mock-token',
+    'SubscriptionPreferenceFilter must select OpenAI OAuth upstream over OpenAI API key when both are enabled',
+  );
+
+  await setUpstreamEnabled(oaOauthUpstreamId, false);
+  await new Promise((r) => setTimeout(r, 300));
+  const oaFallbackRes = await fetch(`http://127.0.0.1:${proxyPort}/v1/responses`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${clientKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model: 'gpt-5.2', input: 'fallback to api key' }),
+  });
+  assert.equal(oaFallbackRes.status, 200);
+  assert.equal(
+    mockRequests.at(-1).headers['authorization'],
+    'Bearer sk-openai-mock-secret',
+    'SubscriptionPreferenceFilter must fall back to OpenAI API key when OAuth upstream is disabled',
+  );
+
+  // Trigger Gemini 429 with JSON RetryInfo.retryDelay (without HTTP Retry-After header)
+  await setUpstreamEnabled(gmOauthUpstreamId, false);
+  await setUpstreamEnabled(gmKeyUpstreamId, true);
+  await new Promise((r) => setTimeout(r, 300));
+  const gm429RetryInfoRes = await fetch(
+    `http://127.0.0.1:${proxyPort}/v1beta/models/gemini-2.5-pro:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': clientKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: 'trigger_gemini_429_retry_info' }] }],
+      }),
+    },
+  );
+  assert.equal(gm429RetryInfoRes.status, 429);
+
 
   // Re-enable gmKeyUp and disable gmOauthUp
   await setUpstreamEnabled(gmOauthUpstreamId, false);
@@ -933,6 +1094,28 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
   assert.equal(gmLimitJson.error?.code, 429);
   assert.equal(gmLimitJson.error?.status, 'RESOURCE_EXHAUSTED');
   assert.equal(gmLimitJson.error?.limit_kind, 'input_tokens');
+  // Large wrapped Gemini countTokens generateContentRequest (>24,000 bytes => >6,000 estimated input tokens > 5,000 cap)
+  const gmWrappedCountLimitReject = await fetch(
+    `http://127.0.0.1:${proxyPort}/v1beta/models/gemini-2.5-pro:countTokens`,
+    {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': clientKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        generateContentRequest: {
+          contents: [{ role: 'user', parts: [{ text: 'z'.repeat(24000) }] }],
+        },
+      }),
+    },
+  );
+  assert.equal(
+    gmWrappedCountLimitReject.status,
+    429,
+    'Large wrapped generateContentRequest in :countTokens must exceed 5,000 input token limit',
+  );
+
 
   // 8. Verify C5 & D3 (Event kinds in /admin/v1/events/delta & local API-key usage in /admin/v1/upstreams/{id}/usage)
   await new Promise((r) => setTimeout(r, 800));
@@ -950,10 +1133,35 @@ test('live cc-lb binary E2E across all provider upstreams verifies 5-area backen
     true,
     'HTTP 200 response.failed must be recorded with error_code=upstream_stream_error',
   );
+  assert.equal(
+    oaEvents.json.events.some(
+      (e) =>
+        e.input_tokens === 70 &&
+        e.cache_read_input_tokens === 20 &&
+        e.cache_creation_input_tokens === 10,
+    ),
+    true,
+    'OpenAI usage must subtract both cached_tokens (20) and cache_write_tokens (10) from gross input_tokens (100 -> 70)',
+  );
+  assert.equal(
+    oaEvents.json.events.some((e) => e.observed_session_id === 'codex-e2e-session-123'),
+    true,
+    'Codex session_id header must be captured in observed_session_id',
+  );
 
   const gmGenEvents = await adminCall('GET', '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_generate_content');
   assert.equal(gmGenEvents.status, 200, `gmGenEvents failed: ${gmGenEvents.text}`);
   assert.equal(gmGenEvents.json.events.length >= 2, true, 'gemini_generate_content events must be recorded');
+  assert.equal(
+    gmGenEvents.json.events.some(
+      (e) =>
+        e.input_tokens === 70 &&
+        e.cache_read_input_tokens === 20 &&
+        e.cache_creation_input_tokens === 10,
+    ),
+    true,
+    'Gemini usage must subtract both cachedContentTokenCount (20) and cacheCreationTokenCount (10) from promptTokenCount (100 -> 70)',
+  );
 
   const gmCountEvents = await adminCall('GET', '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_count_tokens');
   assert.equal(gmCountEvents.status, 200, `gmCountEvents failed: ${gmCountEvents.text}`);

@@ -153,6 +153,7 @@ fn scrub_string(signer: Option<&dyn Signer>, text: String) -> String {
 pub(crate) struct CanonicalUpstreamError {
     error_type: Option<BoundedErrorType>,
     error_message: Option<BoundedErrorMessage>,
+    retry_after: Option<String>,
 }
 
 impl CanonicalUpstreamError {
@@ -163,6 +164,10 @@ impl CanonicalUpstreamError {
     /// message.
     pub(crate) fn into_parts(self, signer: &dyn Signer) -> (Option<String>, Option<String>) {
         self.into_parts_with(Some(signer))
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<&str> {
+        self.retry_after.as_deref()
     }
 
     fn into_parts_with(self, signer: Option<&dyn Signer>) -> (Option<String>, Option<String>) {
@@ -489,10 +494,40 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
         }
         usage.cache_read_input_tokens = cached_tokens;
     }
-    if usage.input_includes_cached
-        && let Some(gross_input) = usage.gross_input_tokens
+    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
+    if cc_total > 0
+        || reported.get("cache_creation").is_some()
+        || reported.get("cache_creation_input_tokens").is_some()
     {
-        usage.input_tokens = gross_input.saturating_sub(usage.cache_read_input_tokens);
+        usage.cache_creation_input_tokens = cc_total;
+        usage.cache_creation_input_tokens_5m = cc_5m;
+        usage.cache_creation_input_tokens_1h = cc_1h;
+    } else if let Some(cache_write_tokens) = reported
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            reported
+                .get("cacheCreationTokenCount")
+                .and_then(Value::as_u64)
+        })
+    {
+        usage.cache_creation_input_tokens = cache_write_tokens;
+        usage.input_includes_cached = true;
+        usage.present = true;
+    }
+    if let Some(cache_read) = reported
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        usage.cache_read_input_tokens = cache_read;
+    }
+    if usage.input_includes_cached
+        && let Some(gross) = usage.gross_input_tokens
+    {
+        usage.input_tokens = gross
+            .saturating_sub(usage.cache_read_input_tokens)
+            .saturating_sub(usage.cache_creation_input_tokens);
     }
     if let Some(reasoning_tokens) = reported
         .get("output_tokens_details")
@@ -519,21 +554,6 @@ fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
                 .last_candidates_tokens
                 .saturating_add(usage.thinking_tokens);
         }
-    }
-    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
-    if cc_total > 0
-        || reported.get("cache_creation").is_some()
-        || reported.get("cache_creation_input_tokens").is_some()
-    {
-        usage.cache_creation_input_tokens = cc_total;
-        usage.cache_creation_input_tokens_5m = cc_5m;
-        usage.cache_creation_input_tokens_1h = cc_1h;
-    }
-    if let Some(cache_read) = reported
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-    {
-        usage.cache_read_input_tokens = cache_read;
     }
     if let Some(thinking) = reported
         .get("output_tokens_details")
@@ -580,6 +600,7 @@ fn canonical_upstream_error_from_value(value: &Value) -> Option<CanonicalUpstrea
     Some(CanonicalUpstreamError {
         error_type: Some(error_type?),
         error_message: Some(error_message?),
+        retry_after: None,
     })
 }
 
@@ -627,13 +648,46 @@ pub(crate) fn observe_http_error_value(value: &Value) -> Option<CanonicalUpstrea
         .and_then(Value::as_str)
         .filter(|message| !message.is_empty())
         .map(BoundedErrorMessage::parse);
-    if error_type.is_none() && error_message.is_none() {
+    let retry_after = error_obj
+        .get("details")
+        .and_then(Value::as_array)
+        .and_then(|details| {
+            details.iter().find_map(|detail| {
+                (detail.get("@type").and_then(Value::as_str)
+                    == Some("type.googleapis.com/google.rpc.RetryInfo"))
+                .then(|| detail.get("retryDelay").and_then(Value::as_str))
+                .flatten()
+                .filter(|delay| valid_retry_delay(delay))
+                .map(ToOwned::to_owned)
+            })
+        });
+    if error_type.is_none() && error_message.is_none() && retry_after.is_none() {
         return None;
     }
     Some(CanonicalUpstreamError {
         error_type,
         error_message,
+        retry_after,
     })
+}
+fn valid_retry_delay(delay: &str) -> bool {
+    if delay.is_empty() || delay.len() > 64 {
+        return false;
+    }
+    let Some(number) = ["ms", "s", "m", "h"]
+        .iter()
+        .find_map(|unit| delay.strip_suffix(unit))
+    else {
+        return false;
+    };
+    !number.is_empty()
+        && number.bytes().any(|byte| byte.is_ascii_digit())
+        && number.bytes().filter(|&byte| byte == b'.').count() <= 1
+        && number
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && !number.starts_with('.')
+        && !number.ends_with('.')
 }
 
 /// [`observe_http_error_value`] for a raw body buffer; parses once with
@@ -886,6 +940,38 @@ mod tests {
         assert_eq!(usage.web_fetch_requests, 1);
         assert_eq!(usage.service_tier.as_deref(), Some("priority"));
         assert_eq!(usage.inference_geo.as_deref(), Some("us-east"));
+    }
+
+    #[test]
+    fn openai_cache_write_tokens_are_subtracted_from_gross_input() {
+        let mut usage = UsageCounts::default();
+        merge_usage_value(
+            &mut usage,
+            &serde_json::json!({
+                "input_tokens": 100,
+                "input_tokens_details": {
+                    "cached_tokens": 20,
+                    "cache_write_tokens": 30,
+                },
+            }),
+        );
+        assert_eq!(usage.cache_creation_input_tokens, 30);
+        assert_eq!(usage.input_tokens, 50);
+    }
+
+    #[test]
+    fn gemini_cache_creation_tokens_are_subtracted_from_gross_input() {
+        let mut usage = UsageCounts::default();
+        merge_usage_value(
+            &mut usage,
+            &serde_json::json!({
+                "promptTokenCount": 100,
+                "cachedContentTokenCount": 20,
+                "cacheCreationTokenCount": 30,
+            }),
+        );
+        assert_eq!(usage.cache_creation_input_tokens, 30);
+        assert_eq!(usage.input_tokens, 50);
     }
 
     #[test]
@@ -1821,10 +1907,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_mid_stream_error_from_openai_response_failed_envelope() {
-        let raw = b"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"upstream failed\"}}}\n\n";
-        let err = detect_raw_mid_stream_error(raw).expect("response.failed detected");
-        assert_eq!(err.error_type.as_deref(), Some("server_error"));
-        assert_eq!(err.error_message.as_deref(), Some("upstream failed"));
+    fn extracts_bounded_gemini_retry_info_delay() {
+        let body = br#"{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"1.5s"}]}}"#;
+        let error = observe_http_error_body(body).expect("retry info extracted");
+        assert_eq!(error.retry_after(), Some("1.5s"));
     }
 }

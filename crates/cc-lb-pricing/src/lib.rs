@@ -13,7 +13,10 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
-pub use cost::{cache_creation_1h_micros_from_input, virtual_cost_micros_full};
+pub use cost::{
+    cache_creation_1h_micros_from_input, virtual_cost_micros_full,
+    virtual_cost_micros_full_with_context,
+};
 use cost::{record_missing_price_field, resolved_cache_creation_1h_price, token_cost_micros};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
@@ -29,6 +32,21 @@ pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError};
 pub struct TierRate {
     pub input_per_million_usd: UsdPerMillion,
     pub output_per_million_usd: UsdPerMillion,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThresholdRate {
+    pub input_per_million_usd: Option<UsdPerMillion>,
+    pub output_per_million_usd: Option<UsdPerMillion>,
+    pub cache_creation_per_million_usd: Option<UsdPerMillion>,
+    pub cache_read_per_million_usd: Option<UsdPerMillion>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThresholdBand {
+    pub default: ThresholdRate,
+    #[serde(default)]
+    pub by_tier: BTreeMap<String, ThresholdRate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -134,6 +152,8 @@ pub struct CatalogSnapshot {
     pub cache_creation_per_million_usd_by_tier: HashMap<String, BTreeMap<String, UsdPerMillion>>,
     #[serde(default)]
     pub cache_read_per_million_usd_by_tier: HashMap<String, BTreeMap<String, UsdPerMillion>>,
+    #[serde(default)]
+    pub above_tokens_rates: HashMap<String, BTreeMap<u64, ThresholdBand>>,
     pub status: CatalogStatus,
 }
 
@@ -148,6 +168,7 @@ impl CatalogSnapshot {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: CatalogStatus::CostDisabled,
         }
     }
@@ -299,6 +320,7 @@ mod tests {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: CatalogStatus::Ok,
         }
     }

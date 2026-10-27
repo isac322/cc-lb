@@ -93,6 +93,7 @@ pub struct WebSocketCandidate {
 pub(crate) struct WebSocketIngress<'a> {
     pub headers: &'a HeaderMap,
     pub frame: &'a Bytes,
+    pub query: Option<&'a str>,
 }
 
 pub(crate) struct PreparedWebSocketTurn {
@@ -208,9 +209,13 @@ impl ResponsesWebSocketGateway {
         }
     }
 
-    /// Preserve the raw query of the authenticated downstream upgrade.
+    /// Preserve the downstream upgrade query after removing API-key parameters.
     pub fn with_downstream_query(mut self, query: Option<String>) -> Self {
-        self.query = query;
+        self.query = query.and_then(|query| match cc_lb_upstream::scrub_query_api_key(&query) {
+            std::borrow::Cow::Borrowed(_) => Some(query),
+            std::borrow::Cow::Owned(clean) if clean.is_empty() => None,
+            std::borrow::Cow::Owned(clean) => Some(clean),
+        });
         self
     }
 
@@ -380,6 +385,7 @@ impl ResponsesWebSocketGateway {
                 WebSocketIngress {
                     headers: &self.headers,
                     frame: &frame,
+                    query: self.query.as_deref(),
                 },
                 body.clone(),
                 owner.as_ref().map(|owner| owner.upstream_id),
@@ -549,6 +555,7 @@ impl ResponsesWebSocketGateway {
                 WebSocketIngress {
                     headers: &self.headers,
                     frame: &frame,
+                    query: self.query.as_deref(),
                 },
                 body.clone(),
                 Some(owner.upstream_id),
@@ -665,6 +672,7 @@ impl ResponsesWebSocketGateway {
                 WebSocketIngress {
                     headers: &self.headers,
                     frame: &turn.frame,
+                    query: self.query.as_deref(),
                 },
                 &turn.body,
                 candidate.upstream_id,
@@ -787,6 +795,7 @@ impl ResponsesWebSocketGateway {
                 WebSocketIngress {
                     headers: &self.headers,
                     frame: &turn.frame,
+                    query: self.query.as_deref(),
                 },
                 &turn.body,
                 upstream_id,
@@ -1315,16 +1324,17 @@ impl ResponsesWebSocketGateway {
             // counters directly; normal server traffic always uses the worker.
             if let (Some(engine), Some(usage)) =
                 (turn.prepared.limit_engine.as_ref(), turn.usage.as_ref())
-            {
-                let cost = cc_lb_pricing::virtual_cost_micros_full(
+                && let Some(cost) = cc_lb_pricing::virtual_cost_micros_full_with_context(
                     &turn.prepared.model,
                     usage.input_tokens,
                     usage.output_tokens,
+                    usage.cache_creation_input_tokens,
                     usage.cache_creation_input_tokens_5m,
                     usage.cache_creation_input_tokens_1h,
                     usage.cache_read_input_tokens,
                     usage.service_tier.as_deref(),
-                );
+                )
+            {
                 engine.reconcile(
                     reservation,
                     usage.input_tokens,

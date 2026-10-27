@@ -80,14 +80,18 @@ impl<'a> RequestView<'a> {
         session_id: Option<&'a str>,
         parent_session_id: Option<&'a str>,
     ) -> Self {
-        let system = value.get("system");
+        let system = value
+            .get("system")
+            .or_else(|| value.get("instructions"))
+            .or_else(|| value.get("systemInstruction"))
+            .or_else(|| value.pointer("/generateContentRequest/systemInstruction"));
         Self {
             value,
             leading_system: leading_system_content(value),
             system,
             first_user: first_user_content(value),
             last_user: last_user_content(value),
-            billing: billing_attribution(system),
+            billing: billing_attribution(value.get("system")),
             session_id,
             parent_session_id,
         }
@@ -163,6 +167,11 @@ impl<'a> RequestView<'a> {
             .get("tools")
             .and_then(Value::as_array)
             .is_some_and(|tools| !tools.is_empty())
+            || self
+                .value
+                .pointer("/generateContentRequest/tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty())
     }
 
     pub(crate) fn pointer(&self, path: &str) -> Option<&'a Value> {
@@ -247,33 +256,102 @@ fn billing_attribution(system: Option<&Value>) -> Option<BillingAttribution<'_>>
 }
 
 fn leading_system_content(value: &Value) -> Option<&Value> {
+    if let Some(messages) = value.get("messages").and_then(Value::as_array)
+        && let Some(message) = messages.first()
+        && message.get("role").and_then(Value::as_str) == Some("system")
+    {
+        return message.get("content");
+    }
+
     value
-        .get("messages")
+        .get("input")
         .and_then(Value::as_array)
-        .and_then(|messages| messages.first())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
-        .and_then(|message| message.get("content"))
+        .and_then(|input| input.first())
+        .filter(|item| {
+            matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            )
+        })
+        .and_then(|item| item.get("content").or(Some(item)))
 }
 
 fn first_user_content(value: &Value) -> Option<&Value> {
-    value
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| {
-            messages
+    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        return messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .and_then(|message| message.get("content"));
+    }
+
+    if let Some(input) = value.get("input") {
+        return match input {
+            Value::String(_) => Some(input),
+            Value::Array(input) => input
                 .iter()
-                .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        })
-        .and_then(|message| message.get("content"))
+                .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+                .and_then(|item| item.get("content").or(Some(item))),
+            _ => None,
+        };
+    }
+
+    first_gemini_user_content(value)
 }
 
 fn last_user_content(value: &Value) -> Option<&Value> {
+    if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        return messages
+            .last()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+            .and_then(|message| message.get("content"));
+    }
+
+    if let Some(input) = value.get("input") {
+        return match input {
+            Value::String(_) => Some(input),
+            Value::Array(input) => input
+                .iter()
+                .rev()
+                .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+                .and_then(|item| item.get("content").or(Some(item))),
+            _ => None,
+        };
+    }
+
+    last_gemini_user_content(value)
+}
+
+fn gemini_contents(value: &Value) -> Option<&[Value]> {
     value
-        .get("messages")
+        .get("contents")
         .and_then(Value::as_array)
-        .and_then(|messages| messages.last())
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|message| message.get("content"))
+        .map(Vec::as_slice)
+        .or_else(|| {
+            value
+                .pointer("/generateContentRequest/contents")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+        })
+}
+
+fn first_gemini_user_content(value: &Value) -> Option<&Value> {
+    gemini_contents(value)?
+        .iter()
+        .find(|item| gemini_user_or_absent_role(item))
+        .and_then(|item| item.get("parts"))
+}
+
+fn last_gemini_user_content(value: &Value) -> Option<&Value> {
+    gemini_contents(value)?
+        .iter()
+        .rev()
+        .find(|item| gemini_user_or_absent_role(item))
+        .and_then(|item| item.get("parts"))
+}
+
+fn gemini_user_or_absent_role(item: &Value) -> bool {
+    item.get("role")
+        .is_none_or(|role| role.as_str() == Some("user"))
 }
 
 fn text_block_starts_with(content: &Value, marker: &str) -> bool {
@@ -290,22 +368,27 @@ fn bounded_text_contains(content: &Value, marker: &str) -> bool {
 fn text_blocks(content: &Value) -> impl Iterator<Item = &str> {
     let direct = match content {
         Value::String(text) => Some(text.as_str()),
+        Value::Object(object) => object.get("text").and_then(Value::as_str),
         _ => None,
     };
     let blocks = match content {
         Value::Array(blocks) => Some(blocks.as_slice()),
         _ => None,
     };
+    let parts = content
+        .get("parts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice);
 
     direct
         .into_iter()
-        .chain(blocks.into_iter().flatten().filter_map(|block| {
-            (block.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| block.get("text").and_then(Value::as_str))
-                .flatten()
-        }))
+        .chain(blocks.into_iter().flatten().filter_map(text_block))
+        .chain(parts.into_iter().flatten().filter_map(text_block))
 }
 
+fn text_block(block: &Value) -> Option<&str> {
+    block.get("text").and_then(Value::as_str)
+}
 fn bounded_prefix(text: &str) -> &str {
     let mut end = text.len().min(CLASSIFIER_TEXT_LIMIT);
     while !text.is_char_boundary(end) {
@@ -428,5 +511,99 @@ mod tests {
             classify_client_request_kind(Some(&value), None, None, false),
             None
         );
+    }
+
+    #[test]
+    fn request_view_supports_openai_instruction_and_input_fallbacks() {
+        let precedence = json!({
+            "system": "PRIMARY SYSTEM",
+            "instructions": "SECONDARY SYSTEM",
+            "systemInstruction": {"parts": [{"text": "TERTIARY SYSTEM"}]},
+            "generateContentRequest": {
+                "systemInstruction": {"parts": [{"text": "NESTED SYSTEM"}]}
+            }
+        });
+        let view = RequestView::new(&precedence, None, None);
+        assert!(view.system_starts_with("PRIMARY SYSTEM"));
+        assert!(!view.system_contains("SECONDARY SYSTEM"));
+
+        let instructions = json!({
+            "instructions": [{"type": "text", "text": "OPENAI SYSTEM"}],
+            "input": "OPENAI INPUT"
+        });
+        let view = RequestView::new(&instructions, None, None);
+        assert!(view.system_contains("OPENAI SYSTEM"));
+        assert!(view.first_user_starts_with("OPENAI INPUT"));
+        assert!(view.last_user_starts_with("OPENAI INPUT"));
+
+        let input = json!({
+            "input": [
+                {"role": "developer", "content": [{"type": "input_text", "text": "DEVELOPER SYSTEM"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "FIRST INPUT"}]},
+                {"role": "assistant", "content": [{"type": "input_text", "text": "ASSISTANT"}]},
+                {"role": "user", "content": [{"type": "input_text", "text": "LAST INPUT"}]}
+            ]
+        });
+        let view = RequestView::new(&input, None, None);
+        assert!(view.leading_system_starts_with("DEVELOPER SYSTEM"));
+        assert!(view.first_user_starts_with("FIRST INPUT"));
+        assert!(view.last_user_starts_with("LAST INPUT"));
+        let raw_item = json!({
+            "input": [
+                {"role": "user", "text": "RAW INPUT ITEM"}
+            ]
+        });
+        let view = RequestView::new(&raw_item, None, None);
+        assert!(view.first_user_starts_with("RAW INPUT ITEM"));
+        assert!(view.last_user_starts_with("RAW INPUT ITEM"));
+    }
+    #[test]
+    fn request_view_supports_gemini_system_contents_and_nested_request() {
+        let value = json!({
+            "systemInstruction": {
+                "parts": [{"text": "GEMINI SYSTEM"}]
+            },
+            "contents": [
+                {"role": "model", "parts": [{"text": "MODEL"}]},
+                {"parts": [{"text": "FIRST GEMINI USER"}]},
+                {"role": "user", "parts": [{"text": "LAST GEMINI USER"}]}
+            ],
+            "generateContentRequest": {
+                "systemInstruction": {"parts": [{"text": "NESTED SYSTEM"}]},
+                "contents": [{"role": "user", "parts": [{"text": "NESTED USER"}]}],
+                "tools": [{"function": {"name": "lookup"}}]
+            }
+        });
+        let view = RequestView::new(&value, None, None);
+        assert!(view.system_starts_with("GEMINI SYSTEM"));
+        assert!(view.first_user_starts_with("FIRST GEMINI USER"));
+        assert!(view.last_user_starts_with("LAST GEMINI USER"));
+        assert!(view.has_tools());
+
+        let nested = json!({
+            "generateContentRequest": {
+                "systemInstruction": {"parts": [{"text": "NESTED SYSTEM"}]},
+                "contents": [{"role": "user", "parts": [{"text": "NESTED USER"}]}]
+            }
+        });
+        let view = RequestView::new(&nested, None, None);
+        assert!(view.system_starts_with("NESTED SYSTEM"));
+        assert!(view.first_user_starts_with("NESTED USER"));
+        assert!(view.last_user_starts_with("NESTED USER"));
+    }
+
+    #[test]
+    fn request_view_keeps_billing_attribution_on_system_only() {
+        let value = json!({
+            "instructions": [{
+                "text": "x-anthropic-billing-header: cc_entrypoint=wrong"
+            }],
+            "systemInstruction": {
+                "parts": [{"text": "x-anthropic-billing-header: cc_entrypoint=wrong"}]
+            }
+        });
+        let view = RequestView::new(&value, None, None);
+        assert!(view.billing().is_none());
+        assert!(!view.has_provenance());
     }
 }

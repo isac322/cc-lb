@@ -32,6 +32,30 @@ pub fn virtual_cost_micros_full(
     cache_read_input: u64,
     service_tier: Option<&str>,
 ) -> ComputedCostBreakdown {
+    virtual_cost_micros_full_with_context(
+        model,
+        input,
+        output,
+        cache_creation_5m_input.saturating_add(cache_creation_1h_input),
+        cache_creation_5m_input,
+        cache_creation_1h_input,
+        cache_read_input,
+        service_tier,
+    )
+    .unwrap_or_else(ComputedCostBreakdown::unknown)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn virtual_cost_micros_full_with_context(
+    model: &str,
+    input: u64,
+    output: u64,
+    cache_creation_input_tokens: u64,
+    cache_creation_5m_input: u64,
+    cache_creation_1h_input: u64,
+    cache_read_input: u64,
+    service_tier: Option<&str>,
+) -> Option<ComputedCostBreakdown> {
     let normalized = normalize_model_id(model);
     let snapshot = global_catalog().current();
     let Some((model_key, pricing)) = snapshot
@@ -40,12 +64,14 @@ pub fn virtual_cost_micros_full(
         .or_else(|| snapshot.models.get_key_value(&normalized))
     else {
         record_missing_price_field(&normalized, "model");
-        return ComputedCostBreakdown::unknown();
+        return None;
     };
 
     let tier = canonical_service_tier(service_tier);
-    let rate = resolve_tier_rate(pricing, tier.as_deref());
-    let cc_5m_price = resolve_optional_price(
+    let base_rate = resolve_tier_rate(pricing, tier.as_deref());
+    let mut input_price = base_rate.input_per_million_usd;
+    let mut output_price = base_rate.output_per_million_usd;
+    let mut cache_creation_price = resolve_optional_price(
         snapshot
             .cache_creation_per_million_usd
             .get(model_key)
@@ -55,23 +81,55 @@ pub fn virtual_cost_micros_full(
             .get(model_key),
         tier.as_deref(),
     );
-    let cache_read_price = resolve_optional_price(
+    let mut cache_read_price = resolve_optional_price(
         snapshot.cache_read_per_million_usd.get(model_key).copied(),
         snapshot.cache_read_per_million_usd_by_tier.get(model_key),
         tier.as_deref(),
     );
 
-    let input_micros = component_cost(input, rate.input_per_million_usd);
-    let output_micros = component_cost(output, rate.output_per_million_usd);
+    let gross_input_tokens = input
+        .saturating_add(cache_read_input)
+        .saturating_add(cache_creation_input_tokens);
+    if let Some(bands) = snapshot.above_tokens_rates.get(model_key) {
+        for (threshold, band) in bands {
+            if gross_input_tokens <= *threshold {
+                break;
+            }
+            let threshold_rate = tier
+                .as_deref()
+                .and_then(|tier| band.by_tier.get(tier))
+                .unwrap_or(&band.default);
+            if let Some(price) = threshold_rate.input_per_million_usd {
+                input_price = price;
+            }
+            if let Some(price) = threshold_rate.output_per_million_usd {
+                output_price = price;
+            }
+            if let Some(price) = threshold_rate.cache_creation_per_million_usd {
+                cache_creation_price = Some(price);
+            }
+            if let Some(price) = threshold_rate.cache_read_per_million_usd {
+                cache_read_price = Some(price);
+            }
+        }
+    }
 
-    let (cc_5m_micros, cc_1h_micros) = if let Some(price_5m) = cc_5m_price {
-        let price_1h = resolved_cache_creation_1h_price(rate.input_per_million_usd);
+    let generic_creation = cache_creation_input_tokens
+        .saturating_sub(cache_creation_5m_input.saturating_add(cache_creation_1h_input));
+    let input_micros = component_cost(input, input_price).saturating_add(component_cost(
+        generic_creation,
+        cache_creation_price.unwrap_or(input_price),
+    ));
+    let output_micros = component_cost(output, output_price);
+
+    let (cc_5m_micros, cc_1h_micros) = if let Some(price_5m) = cache_creation_price {
+        let price_1h = resolved_cache_creation_1h_price(input_price);
         (
             component_cost(cache_creation_5m_input, price_5m),
             component_cost(cache_creation_1h_input, price_1h),
         )
     } else {
-        if cache_creation_5m_input + cache_creation_1h_input > 0 {
+        if cache_creation_5m_input.saturating_add(cache_creation_1h_input) > 0 {
             record_missing_cache_field(&normalized, "cache_creation_per_million_usd");
         }
         (0, 0)
@@ -98,7 +156,7 @@ pub fn virtual_cost_micros_full(
         .saturating_add(cc1_i)
         .saturating_add(cr_i);
 
-    ComputedCostBreakdown {
+    Some(ComputedCostBreakdown {
         input_micros: input_i,
         output_micros: output_i,
         cache_creation_5m_micros: cc5_i,
@@ -106,7 +164,7 @@ pub fn virtual_cost_micros_full(
         cache_read_micros: cr_i,
         total_micros: total,
         pricing_status: PricingStatus::Known,
-    }
+    })
 }
 
 pub(crate) fn token_cost_micros(
@@ -141,7 +199,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::*;
-    use crate::{CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, Pricing};
+    use crate::{
+        CatalogSnapshot, CatalogStatus, GLOBAL_TEST_LOCK, Pricing, ThresholdBand, ThresholdRate,
+    };
 
     #[test]
     fn one_hour_cache_write_uses_base_input_when_five_minute_price_differs() {
@@ -171,11 +231,102 @@ mod tests {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: CatalogStatus::Ok,
         });
 
         let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 1_000_000, 0, None);
 
         assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
+    }
+
+    #[test]
+    fn threshold_rates_activate_only_above_the_cliff_and_inherit_sparse_fields() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "threshold-cliff-test";
+        let base_input = UsdPerMillion::from_whole_usd(1);
+        let base_output = UsdPerMillion::from_whole_usd(2);
+        let mut bands = BTreeMap::new();
+        bands.insert(
+            200_000,
+            ThresholdBand {
+                default: ThresholdRate {
+                    output_per_million_usd: Some(UsdPerMillion::from_whole_usd(4)),
+                    ..ThresholdRate::default()
+                },
+                by_tier: BTreeMap::new(),
+            },
+        );
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: base_input,
+                    output_per_million_usd: base_output,
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::from([(model.to_owned(), bands)]),
+            status: CatalogStatus::Ok,
+        });
+
+        let at_cliff =
+            virtual_cost_micros_full_with_context(model, 200_000, 1_000_000, 0, 0, 0, 0, None)
+                .expect("known model");
+        let above_cliff =
+            virtual_cost_micros_full_with_context(model, 200_001, 1_000_000, 0, 0, 0, 0, None)
+                .expect("known model");
+        assert_eq!(at_cliff.input_micros, 200_000);
+        assert_eq!(at_cliff.output_micros, 2_000_000);
+        assert_eq!(above_cliff.input_micros, 200_001);
+        assert_eq!(above_cliff.output_micros, 4_000_000);
+
+        let above_output =
+            virtual_cost_micros_full_with_context(model, 0, 1_000_000, 200_001, 0, 0, 0, None)
+                .expect("known model");
+        assert_eq!(above_output.output_micros, 4_000_000);
+    }
+
+    #[test]
+    fn generic_cache_creation_tokens_use_active_creation_or_input_price() {
+        let _guard = GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model = "generic-cache-creation-test";
+        global_catalog().install_snapshot(CatalogSnapshot {
+            payload_hash: String::new(),
+            fetched_at_ms: 1,
+            models: HashMap::from([(
+                model.to_owned(),
+                Pricing {
+                    model: model.to_owned(),
+                    input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+                    output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+                    by_tier: BTreeMap::new(),
+                },
+            )]),
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            cache_creation_per_million_usd_by_tier: HashMap::new(),
+            cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
+            status: CatalogStatus::Ok,
+        });
+
+        let breakdown = virtual_cost_micros_full_with_context(model, 0, 0, 100, 0, 0, 0, None)
+            .expect("known model");
+        assert_eq!(breakdown.input_micros, 300);
+        assert_eq!(breakdown.total_micros, 300);
     }
 }

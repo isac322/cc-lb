@@ -911,6 +911,7 @@ async fn assert_pnl_converter_invalid_input_is_http_400() {
         cache_read_per_million_usd,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
 

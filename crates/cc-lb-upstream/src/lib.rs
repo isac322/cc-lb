@@ -25,7 +25,7 @@ pub use transform::{
     ResponseTransformHook, SseEvent, SseEventTransformHook, TransformResponseRequest,
     TransformResponseResult, TransformSseEventRequest, TransformSseEventResult,
 };
-pub use url::upstream_request_url;
+pub use url::{scrub_query_api_key, scrub_url_query_api_key, upstream_request_url};
 
 mod private {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

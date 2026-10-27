@@ -95,13 +95,9 @@ pub(crate) fn extract_request_affinity_keys(
                 )?;
             }
         }
-        ProviderCapability::GeminiGenerateContent => {
-            collector.reference(
-                UpstreamAffinityKind::GeminiCachedContent,
-                value.get("cachedContent"),
-            )?;
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
+            extract_gemini_cached_content(value, &mut collector)?;
         }
-        ProviderCapability::GeminiCountTokens => {}
     }
     Ok(collector.keys)
 }
@@ -173,6 +169,22 @@ struct KeyCollector<'a> {
     principal_id: &'a str,
     seen: HashSet<(UpstreamAffinityKind, [u8; 32])>,
     keys: Vec<UpstreamAffinityKey>,
+}
+
+fn extract_gemini_cached_content(
+    value: &Value,
+    collector: &mut KeyCollector<'_>,
+) -> Result<(), UpstreamAffinityExtractionError> {
+    collector.reference(
+        UpstreamAffinityKind::GeminiCachedContent,
+        value.get("cachedContent"),
+    )?;
+    collector.reference(
+        UpstreamAffinityKind::GeminiCachedContent,
+        value
+            .get("generateContentRequest")
+            .and_then(|request| request.get("cachedContent")),
+    )
 }
 
 impl<'a> KeyCollector<'a> {
@@ -593,11 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_top_level_gemini_cached_content() {
+    fn extracts_top_level_and_nested_gemini_cached_content() {
         let keys = extract_request_affinity_keys(
             ProviderCapability::GeminiGenerateContent,
             &serde_json::json!({
                 "cachedContent": "cachedContents/abc",
+                "generateContentRequest": {"cachedContent": "cachedContents/def"},
                 "contents": [{"parts": [{"text": "hi", "thoughtSignature": "sig"}]}]
             }),
             "principal-gemini",
@@ -606,10 +619,16 @@ mod tests {
         assert!(keys.iter().all(|key| key.provider == "gemini"));
         assert_eq!(
             kinds_and_digests(&keys),
-            HashSet::from([(
-                UpstreamAffinityKind::GeminiCachedContent,
-                digest("cachedContents/abc")
-            )])
+            HashSet::from([
+                (
+                    UpstreamAffinityKind::GeminiCachedContent,
+                    digest("cachedContents/abc")
+                ),
+                (
+                    UpstreamAffinityKind::GeminiCachedContent,
+                    digest("cachedContents/def")
+                ),
+            ])
         );
         assert!(!request_observes_response_affinity(
             ProviderCapability::GeminiGenerateContent,
@@ -623,6 +642,42 @@ mod tests {
             )
             .expect("extracts")
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn extracts_gemini_count_tokens_top_level_cached_content() {
+        let keys = extract_request_affinity_keys(
+            ProviderCapability::GeminiCountTokens,
+            &serde_json::json!({"cachedContent": "cachedContents/count-top"}),
+            "principal-gemini-count",
+        )
+        .expect("extracts");
+        assert_eq!(
+            kinds_and_digests(&keys),
+            HashSet::from([(
+                UpstreamAffinityKind::GeminiCachedContent,
+                digest("cachedContents/count-top")
+            )])
+        );
+    }
+
+    #[test]
+    fn extracts_gemini_count_tokens_nested_cached_content() {
+        let keys = extract_request_affinity_keys(
+            ProviderCapability::GeminiCountTokens,
+            &serde_json::json!({
+                "generateContentRequest": {"cachedContent": "cachedContents/count-nested"}
+            }),
+            "principal-gemini-count",
+        )
+        .expect("extracts");
+        assert_eq!(
+            kinds_and_digests(&keys),
+            HashSet::from([(
+                UpstreamAffinityKind::GeminiCachedContent,
+                digest("cachedContents/count-nested")
+            )])
         );
     }
 

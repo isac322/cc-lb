@@ -191,6 +191,8 @@ pub enum LifecycleEvent {
         event_id: EventId,
         error_type: String,
         error_message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<String>,
     },
     /// Upstream body attribution for an abnormally ended streaming response.
     /// Emitted at most once, before `StreamCompleted`.

@@ -157,6 +157,31 @@ fn handle_event(
             };
             apply_observations(cache, sink, upstream_id, &headers);
         }
+        LifecycleEvent::RequestLogUpstreamErrorObserved {
+            retry_after: Some(retry_after),
+            ..
+        } => {
+            let Some(upstream_id) = partials
+                .get(&event_id)
+                .and_then(|partial| partial.upstream_id)
+            else {
+                metrics::counter!(
+                    "cc_lb_lifecycle_rate_limit_header_events_total",
+                    "outcome" => "error_without_upstream_id"
+                )
+                .increment(1);
+                return;
+            };
+            apply_observations(
+                cache,
+                sink,
+                upstream_id,
+                &HeaderSnapshot {
+                    retry_after: Some(retry_after),
+                    ..Default::default()
+                },
+            );
+        }
         LifecycleEvent::RequestTerminated { .. } => {
             partials.remove(&event_id);
         }
@@ -365,6 +390,47 @@ mod tests {
                 .iter()
                 .all(|record| record.upstream_id == upstream_id)
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn upstream_error_retry_after_updates_cache_and_sink() {
+        let (tx, rx) = mpsc::channel(16);
+        let upstream_id = Uuid::from_u128(2);
+        let cache = Arc::new(RwLock::new(UpstreamRateLimitCache::default()));
+        let (sink, mut sink_rx) = UpstreamRateLimitSink::with_capacity(16);
+        let handle = spawn_lifecycle_rate_limit_header_subscriber(rx, cache.clone(), Some(sink));
+
+        tx.send(LifecycleEvent::UpstreamAttempt {
+            event_id: eid("rate-retry"),
+            attempt_num: 1,
+            upstream_id,
+        })
+        .await
+        .unwrap();
+        tx.send(LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: eid("rate-retry"),
+            error_type: "rate_limit_error".to_owned(),
+            error_message: "try again later".to_owned(),
+            retry_after: Some("7".to_owned()),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.shutdown().await;
+
+        let cache_guard = cache.read();
+        let snapshots = cache_guard.snapshots.get(&upstream_id).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].kind, RateLimitKind::Requests);
+        assert_eq!(snapshots[0].window, "retry_after");
+        assert_eq!(snapshots[0].reset.as_deref(), Some("7"));
+        assert_eq!(snapshots[0].limit, None);
+        assert_eq!(snapshots[0].remaining, None);
+        drop(cache_guard);
+
+        let record = sink_rx.try_recv().unwrap();
+        assert_eq!(record.upstream_id, upstream_id);
+        assert_eq!(record.window, "retry_after");
     }
 
     #[tokio::test(flavor = "current_thread")]
