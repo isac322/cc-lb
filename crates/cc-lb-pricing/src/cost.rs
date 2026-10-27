@@ -153,16 +153,6 @@ pub fn virtual_cost_micros_full_with_context(
     })
 }
 
-pub(crate) fn token_cost_micros(
-    input_tokens: u64,
-    output_tokens: u64,
-    pricing: &crate::Pricing,
-) -> u64 {
-    let total = component_cost(input_tokens, pricing.input_per_million_usd)
-        + component_cost(output_tokens, pricing.output_per_million_usd);
-    total.try_into().unwrap_or(u64::MAX)
-}
-
 fn component_cost(tokens: u64, price: UsdPerMillion) -> u128 {
     u128::from(tokens) * u128::from(price.as_micros_usd()) / 1_000_000
 }
@@ -368,10 +358,19 @@ mod tests {
             .expect("estimate above cliff");
         assert_eq!(estimated_at_cliff, 600_000);
         assert_eq!(estimated_above_cliff, 29_700_000);
+        // Explicit cache token bound (150k input + 60k cache = 210k > 200k cliff):
+        // reserves both 150k input and 60k cache at the $99/M cliff rate => 20,790,000 micros.
+        let estimated_explicit_cache_crossing_cliff = global_catalog()
+            .estimate_max_with_cache(model, 150_000, 0, 60_000, false, Some("priority"))
+            .expect("estimate explicit cache crossing cliff");
+        assert_eq!(estimated_explicit_cache_crossing_cliff, 20_790_000);
+
+        // Opaque/external cache marker below body cliff (50k input, worst-case bound pads to 200,001):
+        // reserves 50k input + 150,001 cache at $99/M => 19,800,099 micros.
         let estimated_cache_bearing_below_cliff = global_catalog()
-            .estimate_max_with_cache(model, 50_000, 0, true, Some("priority"))
+            .estimate_max_with_cache(model, 50_000, 0, 0, true, Some("priority"))
             .expect("estimate cache-bearing below cliff");
-        assert_eq!(estimated_cache_bearing_below_cliff, 4_950_000);
+        assert_eq!(estimated_cache_bearing_below_cliff, 19_800_099);
     }
 
     #[test]

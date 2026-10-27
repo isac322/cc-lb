@@ -584,6 +584,7 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
         model: &str,
         max_input: u64,
         max_output: u64,
+        estimated_cache_tokens: u64,
         can_cross_cache_cliff: bool,
         service_tier: Option<&str>,
     ) -> Option<i64> {
@@ -592,6 +593,7 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
                 model,
                 max_input,
                 max_output,
+                estimated_cache_tokens,
                 can_cross_cache_cliff,
                 service_tier,
             )
@@ -756,14 +758,16 @@ async fn assert_cost_rate_limited(response: http::Response<axum::body::Body>) {
 }
 
 #[tokio::test]
-async fn cache_bearing_request_below_body_cliff_reserves_cliff_cost_rate() {
+async fn cache_bearing_request_below_body_cliff_reserves_cliff_cost_and_cache_token_bound() {
     // Base input rate is $1/M (4,000 min tokens => 4,000 micros), while above-200k cliff input
-    // rate is $10/M (4,000 min tokens => 40,000 micros). A cache-bearing request can cross the
-    // 200k gross-input cliff via cached tokens even when its body is small, so admission must
-    // reserve the 40,000-micro cliff cost and reject a 10,000-micro cap (while admitting 50,000).
+    // rate is $10/M. A cache-bearing request with a 4,000-token body estimate and a cache
+    // directive reserves the worst-case cliff bound (200,001 total tokens = 4,000 input +
+    // 196,001 cache tokens at $10/M => 2,000,010 micros), so even a 500,000-micro cap (well
+    // above the 40,000-micro body-only cliff cost) is rejected while a 3,000,000-micro cap
+    // is admitted.
     for (cap_micros, expected_status, expected_calls) in [
-        (10_000, StatusCode::TOO_MANY_REQUESTS, 0),
-        (50_000, StatusCode::OK, 1),
+        (500_000, StatusCode::TOO_MANY_REQUESTS, 0),
+        (3_000_000, StatusCode::OK, 1),
     ] {
         let state = TestState::default();
         let lifecycle =

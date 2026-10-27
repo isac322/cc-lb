@@ -2212,10 +2212,16 @@ pub trait LimitCostEstimator: Send + Sync {
         model: &str,
         max_input: u64,
         max_output: u64,
+        estimated_cache_tokens: u64,
         _can_cross_cache_cliff: bool,
         service_tier: Option<&str>,
     ) -> Option<i64> {
-        self.estimate_max(model, max_input, max_output, service_tier)
+        self.estimate_max(
+            model,
+            max_input.saturating_add(estimated_cache_tokens),
+            max_output,
+            service_tier,
+        )
     }
 }
 
@@ -4465,6 +4471,12 @@ impl Lifecycle {
         };
         let limit_request = body_view.limit_request(&ctx.canonical_model_id);
         let max_input_estimate = limit_request.input_tokens_estimate;
+        let estimated_cache_tokens = ctx
+            .cache_breakpoints
+            .iter()
+            .map(|bp| bp.prefix_bytes.as_token_estimate())
+            .max()
+            .unwrap_or(0);
         let can_cross_cache_cliff =
             !ctx.cache_breakpoints.is_empty() || limit_request.can_cross_cache_cliff;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
@@ -4472,6 +4484,7 @@ impl Lifecycle {
                 &limit_request.model,
                 max_input_estimate as u64,
                 limit_request.max_tokens.max(0) as u64,
+                estimated_cache_tokens,
                 can_cross_cache_cliff,
                 limit_request.service_tier.as_deref(),
             )

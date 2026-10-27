@@ -261,6 +261,7 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
         model: &str,
         max_input: u64,
         max_output: u64,
+        estimated_cache_tokens: u64,
         can_cross_cache_cliff: bool,
         service_tier: Option<&str>,
     ) -> Option<i64> {
@@ -269,6 +270,7 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
                 model,
                 max_input,
                 max_output,
+                estimated_cache_tokens,
                 can_cross_cache_cliff,
                 service_tier,
             )

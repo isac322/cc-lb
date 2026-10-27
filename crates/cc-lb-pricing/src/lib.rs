@@ -17,7 +17,7 @@ pub use cost::{
     cache_creation_1h_micros_from_input, virtual_cost_micros_full,
     virtual_cost_micros_full_with_context,
 };
-use cost::{record_missing_price_field, resolved_cache_creation_1h_price, token_cost_micros};
+use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
 #[cfg(test)]
@@ -254,7 +254,7 @@ impl PriceCatalog {
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<u64> {
-        self.estimate_max_with_cache(model, max_input, max_output, false, service_tier)
+        self.estimate_max_with_cache(model, max_input, max_output, 0, false, service_tier)
     }
 
     pub fn estimate_max_with_cache(
@@ -262,6 +262,7 @@ impl PriceCatalog {
         model: &str,
         max_input: u64,
         max_output: u64,
+        estimated_cache_tokens: u64,
         can_cross_cache_cliff: bool,
         service_tier: Option<&str>,
     ) -> Option<u64> {
@@ -279,31 +280,59 @@ impl PriceCatalog {
         let resolved = resolve_tier_rate(base_pricing, tier.as_deref());
         let mut input_price = resolved.input_per_million_usd;
         let mut output_price = resolved.output_per_million_usd;
-        if can_cross_cache_cliff {
-            crate::tier_resolver::apply_max_threshold_bands(
-                snapshot.above_tokens_rates.get(model_key),
-                tier.as_deref(),
-                &mut input_price,
-                &mut output_price,
-            );
+        let mut cache_creation_price = resolve_optional_price(
+            snapshot
+                .cache_creation_per_million_usd
+                .get(model_key)
+                .copied(),
+            snapshot
+                .cache_creation_per_million_usd_by_tier
+                .get(model_key),
+            tier.as_deref(),
+        );
+        let mut cache_read_price = resolve_optional_price(
+            snapshot.cache_read_per_million_usd.get(model_key).copied(),
+            snapshot.cache_read_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        );
+        let bands = snapshot.above_tokens_rates.get(model_key);
+        let effective_cache_tokens = if can_cross_cache_cliff
+            && let Some(max_threshold) = bands.and_then(|b| b.keys().next_back().copied())
+        {
+            estimated_cache_tokens.max(max_threshold.saturating_add(1).saturating_sub(max_input))
         } else {
-            crate::tier_resolver::apply_threshold_bands(
-                snapshot.above_tokens_rates.get(model_key),
-                max_input,
-                tier.as_deref(),
-                &mut input_price,
-                &mut output_price,
-                None,
-                None,
-            );
-        }
-        let pricing = Pricing {
-            model: base_pricing.model.clone(),
-            input_per_million_usd: input_price,
-            output_per_million_usd: output_price,
-            by_tier: BTreeMap::new(),
+            estimated_cache_tokens
         };
-        Some(token_cost_micros(max_input, max_output, &pricing))
+        let gross_input = max_input.saturating_add(effective_cache_tokens);
+        crate::tier_resolver::apply_threshold_bands(
+            bands,
+            gross_input,
+            tier.as_deref(),
+            &mut input_price,
+            &mut output_price,
+            Some(&mut cache_creation_price),
+            Some(&mut cache_read_price),
+        );
+        let mut cache_unit_price = input_price;
+        for candidate in [cache_creation_price, cache_read_price]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.as_micros_usd() > cache_unit_price.as_micros_usd() {
+                cache_unit_price = candidate;
+            }
+        }
+        let input_cost =
+            u128::from(max_input) * u128::from(input_price.as_micros_usd()) / 1_000_000;
+        let cache_cost = u128::from(effective_cache_tokens)
+            * u128::from(cache_unit_price.as_micros_usd())
+            / 1_000_000;
+        let output_cost =
+            u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
+        let total = input_cost
+            .saturating_add(cache_cost)
+            .saturating_add(output_cost);
+        Some(u64::try_from(total).unwrap_or(u64::MAX))
     }
 
     pub fn status(&self) -> CatalogStatus {

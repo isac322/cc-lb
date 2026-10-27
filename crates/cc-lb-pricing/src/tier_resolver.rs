@@ -83,36 +83,6 @@ pub(crate) fn apply_threshold_bands(
     }
 }
 
-pub(crate) fn apply_max_threshold_bands(
-    bands: Option<&BTreeMap<u64, ThresholdBand>>,
-    tier: Option<&str>,
-    input_price: &mut UsdPerMillion,
-    output_price: &mut UsdPerMillion,
-) {
-    let Some(bands) = bands else {
-        return;
-    };
-    for band in bands.values() {
-        let tier_rate = tier.and_then(|name| band.by_tier.get(name));
-        if let Some(price) = resolve_threshold_component(
-            band.default.input_per_million_usd,
-            tier_rate.and_then(|rate| rate.input_per_million_usd),
-            tier,
-        ) && price.as_micros_usd() > input_price.as_micros_usd()
-        {
-            *input_price = price;
-        }
-        if let Some(price) = resolve_threshold_component(
-            band.default.output_per_million_usd,
-            tier_rate.and_then(|rate| rate.output_per_million_usd),
-            tier,
-        ) && price.as_micros_usd() > output_price.as_micros_usd()
-        {
-            *output_price = price;
-        }
-    }
-}
-
 fn fallback_price(base: UsdPerMillion, tier: Option<&str>) -> UsdPerMillion {
     match tier {
         Some("batch") => UsdPerMillion::from_micros_usd(base.as_micros_usd() / 2),
