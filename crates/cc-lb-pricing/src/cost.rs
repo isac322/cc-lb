@@ -368,6 +368,10 @@ mod tests {
             .expect("estimate above cliff");
         assert_eq!(estimated_at_cliff, 600_000);
         assert_eq!(estimated_above_cliff, 29_700_000);
+        let estimated_cache_bearing_below_cliff = global_catalog()
+            .estimate_max_with_cache(model, 50_000, 0, true, Some("priority"))
+            .expect("estimate cache-bearing below cliff");
+        assert_eq!(estimated_cache_bearing_below_cliff, 4_950_000);
     }
 
     #[test]

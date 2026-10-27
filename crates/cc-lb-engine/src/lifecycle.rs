@@ -2206,6 +2206,17 @@ pub trait LimitCostEstimator: Send + Sync {
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<i64>;
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        _can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.estimate_max(model, max_input, max_output, service_tier)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -4454,11 +4465,14 @@ impl Lifecycle {
         };
         let limit_request = body_view.limit_request(&ctx.canonical_model_id);
         let max_input_estimate = limit_request.input_tokens_estimate;
+        let can_cross_cache_cliff =
+            !ctx.cache_breakpoints.is_empty() || limit_request.can_cross_cache_cliff;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
-            estimator.estimate_max(
+            estimator.estimate_max_with_cache(
                 &limit_request.model,
                 max_input_estimate as u64,
                 limit_request.max_tokens.max(0) as u64,
+                can_cross_cache_cliff,
                 limit_request.service_tier.as_deref(),
             )
         });
@@ -7904,10 +7918,10 @@ struct LimitRequest {
     model: String,
     max_tokens: i64,
     input_tokens_estimate: i64,
+    can_cross_cache_cliff: bool,
     stream: bool,
     service_tier: Option<String>,
 }
-
 impl LimitRequest {
     /// `fallback_model` is the request's canonical model id. It is used only
     /// when the body carries no `model` (e.g. Gemini, where the model lives in
@@ -7935,6 +7949,7 @@ impl LimitRequest {
             input_tokens_estimate: value
                 .map(estimate_input_tokens)
                 .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
+            can_cross_cache_cliff: value.is_some_and(request_can_cross_cache_cliff),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -7954,6 +7969,7 @@ fn estimate_input_tokens(value: &Value) -> i64 {
     let mut nodes = 0;
     let mut bytes = 0;
     for key in [
+        "tools",
         "system",
         "messages",
         "instructions",
@@ -7966,7 +7982,7 @@ fn estimate_input_tokens(value: &Value) -> i64 {
         }
     }
     if let Some(request) = value.get("generateContentRequest") {
-        for key in ["contents", "systemInstruction"] {
+        for key in ["tools", "contents", "systemInstruction"] {
             if let Some(selected) = request.get(key) {
                 collect_input_bytes(selected, &mut nodes, &mut bytes);
             }
@@ -7975,6 +7991,52 @@ fn estimate_input_tokens(value: &Value) -> i64 {
     i64::try_from(bytes / 4)
         .unwrap_or(i64::MAX)
         .max(DEFAULT_MAX_INPUT_ESTIMATE)
+}
+
+fn request_can_cross_cache_cliff(value: &Value) -> bool {
+    if [
+        "previous_response_id",
+        "conversation",
+        "cachedContent",
+        "container",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
+    ]
+    .iter()
+    .any(|key| value.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return true;
+    }
+    if value
+        .get("generateContentRequest")
+        .and_then(|req| req.get("cachedContent"))
+        .is_some_and(|v| !v.is_null())
+    {
+        return true;
+    }
+    let mut nodes = 0;
+    value_contains_cache_marker(value, &mut nodes)
+}
+
+fn value_contains_cache_marker(value: &Value, nodes: &mut usize) -> bool {
+    if *nodes >= INPUT_ESTIMATE_MAX_NODES {
+        return false;
+    }
+    *nodes += 1;
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("cache_control") || map.contains_key("prompt_cache_breakpoint") {
+                return true;
+            }
+            map.values()
+                .any(|child| value_contains_cache_marker(child, nodes))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|child| value_contains_cache_marker(child, nodes)),
+        _ => false,
+    }
 }
 
 fn collect_input_bytes(value: &Value, nodes: &mut usize, bytes: &mut usize) {

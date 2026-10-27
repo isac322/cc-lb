@@ -255,6 +255,25 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
             .estimate_max(model, max_input, max_output, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache(
+                model,
+                max_input,
+                max_output,
+                can_cross_cache_cliff,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 pub struct App {

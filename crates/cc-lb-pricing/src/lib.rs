@@ -254,6 +254,17 @@ impl PriceCatalog {
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<u64> {
+        self.estimate_max_with_cache(model, max_input, max_output, false, service_tier)
+    }
+
+    pub fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<u64> {
         let normalized = normalize_model_id(model);
         let snapshot = self.current();
         let Some((model_key, base_pricing)) = snapshot
@@ -268,15 +279,24 @@ impl PriceCatalog {
         let resolved = resolve_tier_rate(base_pricing, tier.as_deref());
         let mut input_price = resolved.input_per_million_usd;
         let mut output_price = resolved.output_per_million_usd;
-        crate::tier_resolver::apply_threshold_bands(
-            snapshot.above_tokens_rates.get(model_key),
-            max_input,
-            tier.as_deref(),
-            &mut input_price,
-            &mut output_price,
-            None,
-            None,
-        );
+        if can_cross_cache_cliff {
+            crate::tier_resolver::apply_max_threshold_bands(
+                snapshot.above_tokens_rates.get(model_key),
+                tier.as_deref(),
+                &mut input_price,
+                &mut output_price,
+            );
+        } else {
+            crate::tier_resolver::apply_threshold_bands(
+                snapshot.above_tokens_rates.get(model_key),
+                max_input,
+                tier.as_deref(),
+                &mut input_price,
+                &mut output_price,
+                None,
+                None,
+            );
+        }
         let pricing = Pricing {
             model: base_pricing.model.clone(),
             input_per_million_usd: input_price,
