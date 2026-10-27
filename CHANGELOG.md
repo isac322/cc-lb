@@ -7,8 +7,6 @@ All notable changes to this project will be documented in this file.
 
 - Subscription-quota aggregate reads now deduplicate identical token intervals before storage lookup while preserving the existing response and inclusive-range semantics.
 
-### Changed
-
 - PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
 - Supported Anthropic Messages, OpenAI Responses, and Gemini generation requests now preserve provider-owned continuation, file, container, cache, and response state through upstream affinity instead of rejecting supported generation bodies to protect cross-upstream load balancing. Stateless requests retain normal routing and failover; pinned requests stay on their owning upstream. Anthropic prompt-cache analysis remains provider-specific. SQLite provider storage preserves historical migration checksums and adds provider kinds through migration `0099`.
 - OpenAI and Gemini OAuth imports accept access-only bundles with `never_refresh: true`, an empty refresh-token string, and no refresh-token expiry. Updating the bundle replaces the stored credentials atomically. cc-lb never refreshes these tokens and rejects expired tokens before new signing operations; existing provider WebSocket connections are not closed just because the token expires. Refreshing credentials and Anthropic long-lived credentials are unchanged.
