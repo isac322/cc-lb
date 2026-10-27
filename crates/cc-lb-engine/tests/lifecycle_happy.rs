@@ -760,14 +760,14 @@ async fn assert_cost_rate_limited(response: http::Response<axum::body::Body>) {
 #[tokio::test]
 async fn cache_bearing_request_below_body_cliff_reserves_cliff_cost_and_cache_token_bound() {
     // Base input rate is $1/M (4,000 min tokens => 4,000 micros), while above-200k cliff input
-    // rate is $10/M. A cache-bearing request with a 4,000-token body estimate and a cache
-    // directive reserves the worst-case cliff bound (200,001 total tokens = 4,000 input +
-    // 196,001 cache tokens at $10/M => 2,000,010 micros), so even a 500,000-micro cap (well
-    // above the 40,000-micro body-only cliff cost) is rejected while a 3,000,000-micro cap
-    // is admitted.
+    // rate is $10/M. A request with a 4,000-token body estimate and an opaque cache marker
+    // reserves the policy worst-case bound (1,048,576 total tokens = 4,000 input + 1,044,576
+    // cache tokens at $10/M => 10,485,760 micros), covering even a 1,000,000-token cached
+    // prefix (10,040,000 micros). A 10,000,000-micro cap (well above the 2,000,010-micro
+    // minimum cliff-crossing amount) is rejected, while an 11,000,000-micro cap is admitted.
     for (cap_micros, expected_status, expected_calls) in [
-        (500_000, StatusCode::TOO_MANY_REQUESTS, 0),
-        (3_000_000, StatusCode::OK, 1),
+        (10_000_000, StatusCode::TOO_MANY_REQUESTS, 0),
+        (11_000_000, StatusCode::OK, 1),
     ] {
         let state = TestState::default();
         let lifecycle =

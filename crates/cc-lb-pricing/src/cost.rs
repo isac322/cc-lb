@@ -365,12 +365,13 @@ mod tests {
             .expect("estimate explicit cache crossing cliff");
         assert_eq!(estimated_explicit_cache_crossing_cliff, 20_790_000);
 
-        // Opaque/external cache marker below body cliff (50k input, worst-case bound pads to 200,001):
-        // reserves 50k input + 150,001 cache at $99/M => 19,800,099 micros.
+        // Opaque/external cache marker below body cliff (50k input, worst-case bound pads to
+        // OPAQUE_CACHE_WORST_CASE_INPUT_TOKENS = 1,048,576 total tokens = 50k input + 998,576 cache):
+        // reserves 1,048,576 tokens at $99/M => 103,809,024 micros.
         let estimated_cache_bearing_below_cliff = global_catalog()
             .estimate_max_with_cache(model, 50_000, 0, 0, true, Some("priority"))
             .expect("estimate cache-bearing below cliff");
-        assert_eq!(estimated_cache_bearing_below_cliff, 19_800_099);
+        assert_eq!(estimated_cache_bearing_below_cliff, 103_809_024);
     }
 
     #[test]

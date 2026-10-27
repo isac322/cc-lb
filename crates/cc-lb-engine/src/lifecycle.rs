@@ -4478,7 +4478,7 @@ impl Lifecycle {
             .max()
             .unwrap_or(0);
         let can_cross_cache_cliff =
-            !ctx.cache_breakpoints.is_empty() || limit_request.can_cross_cache_cliff;
+            ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             estimator.estimate_max_with_cache(
                 &limit_request.model,

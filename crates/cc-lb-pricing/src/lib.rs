@@ -178,6 +178,11 @@ pub struct PriceCatalog {
     snapshot: ArcSwap<CatalogSnapshot>,
 }
 
+/// Policy-defined worst-case gross input token bound (1 MiB / 1,048,576 tokens) reserved
+/// when a request carries an opaque or server-side cache reference whose cached prefix size
+/// cannot be bounded from the local request body alone.
+pub const OPAQUE_CACHE_WORST_CASE_INPUT_TOKENS: u64 = 1_048_576;
+
 impl PriceCatalog {
     pub fn new_empty() -> Arc<Self> {
         Arc::new(Self {
@@ -296,10 +301,13 @@ impl PriceCatalog {
             tier.as_deref(),
         );
         let bands = snapshot.above_tokens_rates.get(model_key);
-        let effective_cache_tokens = if can_cross_cache_cliff
-            && let Some(max_threshold) = bands.and_then(|b| b.keys().next_back().copied())
-        {
-            estimated_cache_tokens.max(max_threshold.saturating_add(1).saturating_sub(max_input))
+        let effective_cache_tokens = if can_cross_cache_cliff {
+            let max_threshold_bound = bands
+                .and_then(|b| b.keys().next_back().copied())
+                .map(|t| t.saturating_add(1))
+                .unwrap_or(0);
+            let worst_case_gross = OPAQUE_CACHE_WORST_CASE_INPUT_TOKENS.max(max_threshold_bound);
+            estimated_cache_tokens.max(worst_case_gross.saturating_sub(max_input))
         } else {
             estimated_cache_tokens
         };
