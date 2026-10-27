@@ -7,16 +7,16 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
-
-### Security
-
-- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.10`, and Wasmtime to `49.0.4` to address dependency security advisories.
-- TLS trust intentionally changes: `webpki-roots` removes only `emSign ECC Root CA - G3`, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
-- Updated `ctutils` from `0.4.2` to `0.4.5` to address RUSTSEC-2026-0385 with constant-time mask generation and comparison hardening.
-- Removed the unused Wasmtime global disk-cache feature and updated Tokio and zstd dependencies to their RustSec-fixed release lines; cc-lb's in-process compiled-module cache and zstd payload behavior remain unchanged.
 - Supported Anthropic Messages, OpenAI Responses, and Gemini generation requests now preserve provider-owned continuation, file, container, cache, and response state through upstream affinity instead of rejecting supported generation bodies to protect cross-upstream load balancing. Stateless requests retain normal routing and failover; pinned requests stay on their owning upstream. Anthropic prompt-cache analysis remains provider-specific. SQLite provider storage preserves historical migration checksums and adds provider kinds through migration `0099`.
 - OpenAI and Gemini OAuth imports accept access-only bundles with `never_refresh: true`, an empty refresh-token string, and no refresh-token expiry. Updating the bundle replaces the stored credentials atomically. cc-lb never refreshes these tokens and rejects expired tokens before new signing operations; existing provider WebSocket connections are not closed just because the token expires. Refreshing credentials and Anthropic long-lived credentials are unchanged.
 - Responses WebSockets now apply current client authorization, owner routing, quota reservation, usage accounting, and request telemetry per supported turn, with lazy provider connections and bounded FIFO lanes. Ordinary `response.create` messages require an explicit model; steering auto-successors inherit the parent model. Independent full-history turns may reselect an upstream, while connection-local continuations stay on their exact provider connection. WebSocket `store: false` response ids remain connection-local, conversation ownership remains durable, and HTTP response-id behavior is unchanged. Closing or disconnecting cancels active work without adding a `response.cancel` operation.
+
+### Security
+
+- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.4` to address dependency security advisories.
+- TLS trust intentionally changes: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
+- Updated `ctutils` from `0.4.2` to `0.4.5` to address RUSTSEC-2026-0385 with constant-time mask generation and comparison hardening.
+- Removed the unused Wasmtime global disk-cache feature and updated Tokio and zstd dependencies to their RustSec-fixed release lines; cc-lb's in-process compiled-module cache and zstd payload behavior remain unchanged.
 
 ### Fixed
 
