@@ -448,7 +448,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
+      - name: Export isolated Rustup home
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
       - name: Verify baked Rustup bootstrap
         working-directory: ${{ runner.temp }}
         run: |
