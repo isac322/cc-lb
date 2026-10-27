@@ -445,6 +445,8 @@ fn wrap_gemini_code_assist_request(
         })?;
 
     let envelope = if is_count {
+        // Cloud Code Assist `/v1internal:countTokens` accepts only `{ "request": { "model": "models/<id>", ... } }`
+        // and rejects top-level `model` or `project` fields with HTTP 400 INVALID_ARGUMENT.
         let model = Value::String(format!("models/{model}"));
         let request = if original.get("model").is_none()
             && let Some(request) = original.get("request").and_then(Value::as_object)

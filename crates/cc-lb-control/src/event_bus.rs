@@ -424,14 +424,24 @@ impl RequestEventBus for InMemoryBus {
             // Row-bearing event routed only to the durable assembler.
             self.send_to_assembler(event);
             if let Some((event_id, retry_after)) = retry_after {
-                let _ = self.inner.lifecycle_broadcast_tx.send(
-                    LifecycleEvent::RequestLogUpstreamErrorObserved {
-                        event_id,
-                        error_type: String::new(),
-                        error_message: String::new(),
-                        retry_after: Some(retry_after),
-                    },
-                );
+                let sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
+                    event_id,
+                    error_type: String::new(),
+                    error_message: String::new(),
+                    retry_after: Some(retry_after),
+                };
+                let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
+                let rate_limit_header_tx = {
+                    let guard = self
+                        .inner
+                        .lifecycle_rate_limit_header_tx
+                        .lock()
+                        .expect("event bus lifecycle rate limit header mutex poisoned");
+                    guard.clone()
+                };
+                if let Some(tx) = rate_limit_header_tx {
+                    let _ = tx.try_send(sanitized);
+                }
             }
             return;
         }
@@ -825,6 +835,7 @@ mod tests {
         let bus = InMemoryBus::new();
         let mut broadcast_rx = bus.subscribe_lifecycle();
         let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+        let mut rate_limit_rx = bus.attach_lifecycle_rate_limit_header(1);
         let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
             event_id: "evt-retry".into(),
             error_type: "rate_limit_error".into(),
@@ -834,15 +845,20 @@ mod tests {
 
         bus.publish_lifecycle(event.clone());
 
+        let expected_sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: "evt-retry".into(),
+            error_type: String::new(),
+            error_message: String::new(),
+            retry_after: Some("30".into()),
+        };
         assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
         assert_eq!(
             broadcast_rx.try_recv().expect("broadcast signal"),
-            LifecycleEvent::RequestLogUpstreamErrorObserved {
-                event_id: "evt-retry".into(),
-                error_type: String::new(),
-                error_message: String::new(),
-                retry_after: Some("30".into()),
-            }
+            expected_sanitized
+        );
+        assert_eq!(
+            rate_limit_rx.try_recv().expect("rate limit header signal"),
+            expected_sanitized
         );
     }
 
