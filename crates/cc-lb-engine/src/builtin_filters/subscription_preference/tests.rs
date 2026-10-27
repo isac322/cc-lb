@@ -88,28 +88,30 @@ fn empty_candidate_list_returns_empty() {
 }
 
 #[test]
-fn openai_only_candidates_pass_through_unchanged() {
+fn openai_only_candidates_prefer_oauth() {
     let oauth = other_provider("openai-oauth", 1, UpstreamKind::OpenaiOauth);
-    let key = other_provider("openai-key", 2, UpstreamKind::OpenaiApiKey);
-    let output = filter_for_model(&[oauth.clone(), key.clone()], "gpt-5");
-    assert_eq!(
-        output.kept_upstream_ids,
-        vec![oauth.upstream_id, key.upstream_id]
+    let key = with_live_cache(
+        other_provider("openai-key", 2, UpstreamKind::OpenaiApiKey),
+        10_000,
     );
-    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+    let output = filter_for_model(&[key, oauth.clone()], "gpt-5");
+    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    assert!(output.per_candidate_reasons.is_empty());
     assert!(output.subscription_preference.is_none());
 }
 
 #[test]
-fn gemini_only_candidates_pass_through_unchanged() {
+fn gemini_only_candidates_prefer_oauth() {
     let oauth = other_provider("gemini-oauth", 1, UpstreamKind::GeminiOauth);
-    let key = other_provider("gemini-key", 2, UpstreamKind::GeminiApiKey);
-    let output = filter_for_model(&[oauth.clone(), key.clone()], "gemini-2.5-pro");
-    assert_eq!(
-        output.kept_upstream_ids,
-        vec![oauth.upstream_id, key.upstream_id]
+    let key = with_live_cache(
+        other_provider("gemini-key", 2, UpstreamKind::GeminiApiKey),
+        10_000,
     );
-    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+    let output = filter_for_model(&[key, oauth.clone()], "gemini-2.5-pro");
+    assert_eq!(output.kept_upstream_ids, vec![oauth.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    assert!(output.per_candidate_reasons.is_empty());
     assert!(output.subscription_preference.is_none());
 }
 
@@ -118,7 +120,117 @@ fn single_non_anthropic_candidate_is_preserved() {
     let pinned = other_provider("openai-pinned", 7, UpstreamKind::OpenaiOauth);
     let output = filter_for_model(std::slice::from_ref(&pinned), "gpt-5");
     assert_eq!(output.kept_upstream_ids, vec![pinned.upstream_id]);
-    assert_eq!(output.reason, NOT_APPLICABLE_REASON);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+}
+
+#[test]
+fn non_anthropic_oauth_ranks_by_cache_reads_before_upstream_id() {
+    for (kind, model) in [
+        (UpstreamKind::OpenaiOauth, "gpt-5"),
+        (UpstreamKind::GeminiOauth, "gemini-2.5-pro"),
+    ] {
+        let uncached = other_provider("uncached", 1, kind);
+        let cached = with_live_cache(other_provider("cached", 2, kind), 100);
+        let more_cached = with_live_cache(other_provider("more-cached", 3, kind), 200);
+        for candidates in [
+            vec![uncached.clone(), cached.clone(), more_cached.clone()],
+            vec![more_cached.clone(), cached.clone(), uncached.clone()],
+        ] {
+            let output = filter_for_model(&candidates, model);
+            assert_eq!(output.kept_upstream_ids, vec![more_cached.upstream_id]);
+            assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+            assert!(output.per_candidate_reasons.is_empty());
+            assert!(output.subscription_preference.is_none());
+        }
+    }
+}
+
+#[test]
+fn non_anthropic_oauth_cache_ties_choose_lowest_upstream_id() {
+    for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+        for read_tokens in [0, 100] {
+            let low_id = with_live_cache(other_provider("low-id", 1, kind), read_tokens);
+            let high_id = with_live_cache(other_provider("high-id", 2, kind), read_tokens);
+            for candidates in [
+                vec![high_id.clone(), low_id.clone()],
+                vec![low_id.clone(), high_id.clone()],
+            ] {
+                let output = filter_for_model(&candidates, MODEL_AGNOSTIC);
+                assert_eq!(output.kept_upstream_ids, vec![low_id.upstream_id]);
+            }
+        }
+    }
+}
+
+#[test]
+fn non_anthropic_oauth_missing_cache_score_ties_with_zero_reads() {
+    let missing = other_provider("missing", 1, UpstreamKind::OpenaiOauth);
+    let zero = with_live_cache(other_provider("zero", 2, UpstreamKind::GeminiOauth), 0);
+    let output = filter_for_model(&[zero, missing.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![missing.upstream_id]);
+}
+
+#[test]
+fn openai_and_gemini_oauth_share_cache_ranking() {
+    let openai = with_live_cache(other_provider("openai", 1, UpstreamKind::OpenaiOauth), 100);
+    let gemini = with_live_cache(other_provider("gemini", 2, UpstreamKind::GeminiOauth), 200);
+    let output = filter_for_model(&[openai, gemini.clone()], MODEL_AGNOSTIC);
+    assert_eq!(output.kept_upstream_ids, vec![gemini.upstream_id]);
+}
+
+#[test]
+fn non_anthropic_api_key_fallback_preserves_input_order() {
+    for kinds in [
+        [UpstreamKind::OpenaiApiKey, UpstreamKind::OpenaiApiKey],
+        [UpstreamKind::GeminiApiKey, UpstreamKind::GeminiApiKey],
+        [UpstreamKind::GeminiApiKey, UpstreamKind::OpenaiApiKey],
+    ] {
+        let first = other_provider("first", 2, kinds[0]);
+        let second = with_live_cache(other_provider("second", 1, kinds[1]), 10_000);
+        let output = filter_for_model(&[first.clone(), second.clone()], MODEL_AGNOSTIC);
+        assert_eq!(
+            output.kept_upstream_ids,
+            vec![first.upstream_id, second.upstream_id]
+        );
+        assert_eq!(output.reason, API_KEY_FALLBACK_REASON);
+        assert!(output.per_candidate_reasons.is_empty());
+        assert!(output.subscription_preference.is_none());
+    }
+}
+
+#[test]
+fn anthropic_candidates_preserve_existing_selection_with_other_providers() {
+    let anthropic_oauth = healthy_oauth("anthropic-oauth", 3);
+    let anthropic_key = api_key("anthropic-key", 4);
+    let openai_oauth = with_live_cache(
+        other_provider("openai", 1, UpstreamKind::OpenaiOauth),
+        10_000,
+    );
+    let gemini_oauth = with_live_cache(
+        other_provider("gemini", 2, UpstreamKind::GeminiOauth),
+        20_000,
+    );
+    let output = filter_for_model(
+        &[
+            openai_oauth.clone(),
+            anthropic_oauth.clone(),
+            gemini_oauth.clone(),
+            anthropic_key.clone(),
+        ],
+        MODEL_AGNOSTIC,
+    );
+    assert_eq!(output.kept_upstream_ids, vec![anthropic_oauth.upstream_id]);
+    assert_eq!(output.reason, SUBSCRIPTION_ALIVE_REASON);
+    assert!(output.subscription_preference.is_some());
+
+    let output = filter_for_model(
+        &[openai_oauth, anthropic_key.clone(), gemini_oauth],
+        MODEL_AGNOSTIC,
+    );
+    assert_eq!(output.kept_upstream_ids, vec![anthropic_key.upstream_id]);
+    assert_eq!(output.reason, NO_SUBSCRIPTION_REASON);
+    assert!(output.per_candidate_reasons.is_empty());
+    assert!(output.subscription_preference.is_none());
 }
 
 #[test]

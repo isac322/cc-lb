@@ -68,6 +68,7 @@ fn install_priced_snapshot(catalog: &PriceCatalog, payload_hash: &str) {
         cache_read_per_million_usd,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }
@@ -339,6 +340,7 @@ fn unknown_pricing_stays_null_and_summary_skips_it() {
         cache_read_per_million_usd: partial_read,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let partial_turns = vec![summary_turn_with("partial", 100, "partial-model", 20_000)];
@@ -536,6 +538,7 @@ fn pnl_saturates_then_dollar_converter_returns_invalid_input() {
         cache_read_per_million_usd,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let session = summary_item(CacheKeepaliveSessionEntrySource::Session, NOW_MS);

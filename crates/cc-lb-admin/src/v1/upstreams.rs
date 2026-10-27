@@ -812,6 +812,14 @@ async fn create_upstream(
     let id = Uuid::new_v4();
     let name = body.name.clone();
     let kind = body.kind;
+    if kind != UpstreamKind::AnthropicOauth
+        && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "warmup_unsupported_kind",
+            detail: "warmup is supported only for anthropic_oauth upstreams".to_owned(),
+        });
+    }
     let oauth_bundle = match kind {
         UpstreamKind::GeminiOauth if body.oauth_token_bundle.is_none() => {
             if body.api_key_value.is_some() || body.workspace_id.is_some() {
@@ -1907,6 +1915,14 @@ async fn update_upstream(
     if let Some(base_url) = body.base_url.as_ref() {
         validate_base_url_input(base_url)?;
     }
+    if current.kind != UpstreamKind::AnthropicOauth
+        && (body.warmup_enabled == Some(true) || body.warmup_dialect_plugin.is_some())
+    {
+        return Err(UpstreamError::BadRequest {
+            error: "warmup_unsupported_kind",
+            detail: "warmup is supported only for anthropic_oauth upstreams".to_owned(),
+        });
+    }
     if body.warmup_enabled == Some(true)
         && current.kind == UpstreamKind::AnthropicOauth
         && current.oauth_credentials.is_none()
@@ -2256,7 +2272,10 @@ async fn update_upstream(
 /// Create and update answers for an API-key upstream follow a key check, so
 /// they are never cacheable, like the preflight and re-check answers.
 fn key_handling_response(record: &UpstreamRecord, response: Response) -> Response {
-    if record.kind == UpstreamKind::AnthropicApiKey {
+    if matches!(
+        record.kind,
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
         no_store(response)
     } else {
         response

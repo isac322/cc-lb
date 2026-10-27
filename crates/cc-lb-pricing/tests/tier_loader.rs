@@ -20,6 +20,9 @@ const TIERED_LITELLM_JSON: &str = r#"
     "output_cost_per_token_flex": 0.000006,
     "cache_read_input_token_cost_priority": 0.000002,
     "input_cost_per_token_above_200k_tokens": 0.000099,
+    "output_cost_per_token_priority_above_200k_tokens": 0.000020,
+    "cache_creation_input_token_cost_above_200k_tokens": 0.000010,
+    "cache_read_input_token_cost_above_200k_tokens": 0.000005,
     "cache_read_input_token_cost_cache_hit": 0.000099
   }
 }
@@ -105,20 +108,31 @@ async fn refresh_discovers_canonical_tiers_and_excludes_non_tier_suffixes()
         })
     );
     assert_eq!(pricing.by_tier.len(), 3);
+    let threshold_band = snapshot
+        .above_tokens_rates
+        .get("tiered-model")
+        .and_then(|bands| bands.get(&200_000))
+        .expect("above_200k threshold should be parsed");
     assert_eq!(
-        snapshot
-            .cache_read_per_million_usd_by_tier
-            .get("tiered-model")
-            .and_then(|rates| rates.get("priority")),
-        Some(&UsdPerMillion::from_whole_usd(2))
+        threshold_band.default.input_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(99))
     );
     assert_eq!(
-        snapshot
-            .cache_read_per_million_usd_by_tier
-            .get("tiered-model")
-            .map(std::collections::BTreeMap::len),
-        Some(1)
+        threshold_band.default.cache_creation_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(10))
     );
+    assert_eq!(
+        threshold_band.default.cache_read_per_million_usd,
+        Some(UsdPerMillion::from_whole_usd(5))
+    );
+    assert_eq!(
+        threshold_band.by_tier.get("priority"),
+        Some(&cc_lb_pricing::ThresholdRate {
+            output_per_million_usd: Some(UsdPerMillion::from_whole_usd(20)),
+            ..cc_lb_pricing::ThresholdRate::default()
+        })
+    );
+    assert_eq!(snapshot.above_tokens_rates["tiered-model"].len(), 1);
     server.verify().await;
     Ok(())
 }

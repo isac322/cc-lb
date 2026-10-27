@@ -1,4 +1,59 @@
+use std::borrow::Cow;
+
 use url::Url;
+
+/// Removes case-insensitive `key` query parameters while preserving all other
+/// query segments and their order.
+#[must_use]
+pub fn scrub_query_api_key(query: &str) -> Cow<'_, str> {
+    let has_api_key = query.split('&').any(|segment| {
+        segment
+            .split('=')
+            .next()
+            .unwrap_or(segment)
+            .eq_ignore_ascii_case("key")
+    });
+    if !has_api_key {
+        return Cow::Borrowed(query);
+    }
+
+    Cow::Owned(
+        query
+            .split('&')
+            .filter(|segment| {
+                !segment
+                    .split('=')
+                    .next()
+                    .unwrap_or(segment)
+                    .eq_ignore_ascii_case("key")
+            })
+            .collect::<Vec<_>>()
+            .join("&"),
+    )
+}
+
+/// Removes case-insensitive `key` query parameters from a URL.
+pub fn scrub_url_query_api_key(url: &mut Url) {
+    let Some(query) = url.query() else {
+        return;
+    };
+    let scrubbed = scrub_query_api_key(query);
+    let (remove, replacement) = match scrubbed {
+        Cow::Borrowed(clean) => (clean.is_empty(), None),
+        Cow::Owned(clean) => {
+            if clean.is_empty() {
+                (true, None)
+            } else {
+                (false, Some(clean))
+            }
+        }
+    };
+    if remove {
+        url.set_query(None);
+    } else if let Some(clean) = replacement {
+        url.set_query(Some(&clean));
+    }
+}
 
 /// Builds the URL a request for `path` is sent to on an upstream at
 /// `base_url`.
@@ -17,8 +72,29 @@ pub fn upstream_request_url(base_url: &Url, path: &str, query: Option<&str>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::upstream_request_url;
+    use super::{scrub_query_api_key, scrub_url_query_api_key, upstream_request_url};
+    use std::borrow::Cow;
     use url::Url;
+
+    #[test]
+    fn scrub_query_api_key_removes_key_segments() {
+        assert_eq!(scrub_query_api_key("key=secret"), "");
+        assert_eq!(scrub_query_api_key("KEY=secret"), "");
+        assert_eq!(scrub_query_api_key("foo=1&key=secret&bar=2"), "foo=1&bar=2");
+        assert_eq!(scrub_query_api_key("key"), "");
+        assert!(matches!(scrub_query_api_key("foo=1"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn scrub_url_query_api_key_preserves_non_key_segments() {
+        let mut url = Url::parse("https://example.com/path?key=secret&keep=1").expect("url");
+        scrub_url_query_api_key(&mut url);
+        assert_eq!(url.as_str(), "https://example.com/path?keep=1");
+
+        let mut only_key = Url::parse("https://example.com/path?KEY=secret").expect("url");
+        scrub_url_query_api_key(&mut only_key);
+        assert_eq!(only_key.as_str(), "https://example.com/path");
+    }
 
     fn built(base: &str, path: &str, query: Option<&str>) -> String {
         let base = Url::parse(base).expect("test base URL parses");

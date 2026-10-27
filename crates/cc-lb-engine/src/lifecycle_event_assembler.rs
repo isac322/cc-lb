@@ -433,15 +433,17 @@ impl Partial {
     // reconciliation, which must stay driven solely by the real `Priced` event.
     fn estimated_cost_options(&self) -> Option<CostBreakdownOptions> {
         self.estimated_cost_options_with(|model, usage| {
-            cc_lb_pricing::virtual_cost_micros_full(
+            cc_lb_pricing::virtual_cost_micros_full_with_context(
                 model,
                 usage.input_tokens,
                 usage.output_tokens,
+                usage.cache_creation_input_tokens,
                 usage.cache_creation_input_tokens_5m,
                 usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
                 usage.service_tier.as_deref(),
             )
+            .unwrap_or_else(cc_lb_pricing::ComputedCostBreakdown::unknown)
             .into()
         })
     }
@@ -2531,6 +2533,7 @@ mod tests {
             event_id: event_id.clone(),
             error_type: "rate_limit_error".into(),
             error_message: "bounded".into(),
+            retry_after: None,
         })
         .await
         .unwrap();

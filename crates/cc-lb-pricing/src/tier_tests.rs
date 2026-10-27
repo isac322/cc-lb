@@ -70,6 +70,7 @@ fn tier_snapshot(with_explicit_tiers: bool) -> CatalogSnapshot {
         cache_read_per_million_usd_by_tier: cache_read_by_tier
             .map(|rates| HashMap::from([(MODEL.to_owned(), rates)]))
             .unwrap_or_default(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     }
 }

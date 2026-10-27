@@ -546,6 +546,7 @@ fn seed_price_catalog() {
         cache_read_per_million_usd: std::collections::HashMap::new(),
         cache_creation_per_million_usd_by_tier: std::collections::HashMap::new(),
         cache_read_per_million_usd_by_tier: std::collections::HashMap::new(),
+        above_tokens_rates: std::collections::HashMap::new(),
         status: CatalogStatus::Ok,
     });
 }

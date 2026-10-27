@@ -5,7 +5,7 @@ mod unified;
 
 pub use standard::{
     parse_anthropic_rate_limit_headers, parse_openai_rate_limit_headers,
-    parse_retry_after_rate_limit_headers,
+    parse_retry_after_rate_limit_headers, parse_standard_rate_limit_headers,
 };
 pub use unified::parse_anthropic_unified_headers;
 

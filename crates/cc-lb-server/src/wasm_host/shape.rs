@@ -18,7 +18,7 @@ use rkyv::util::AlignedVec;
 
 use super::{
     access_archived_scoped_or_copy,
-    filter_request::{is_stripped_downstream_header, principal_kind_to_wire, scrub_query_api_key},
+    filter_request::{is_stripped_downstream_header, principal_kind_to_wire},
     serialize_with_input_scratch,
 };
 
@@ -215,7 +215,10 @@ fn with_wire_shape_request<R>(
             base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
         },
     };
-    let scrubbed_query = context.query.as_deref().map(scrub_query_api_key);
+    let scrubbed_query = context
+        .query
+        .as_deref()
+        .map(cc_lb_upstream::scrub_query_api_key);
     let query_ref = scrubbed_query.as_deref().map(|s| QueryRef { value: s });
     let request = cc_lb_plugin_wire::ShapeRequestRef {
         request_id: context.request_id.as_str(),
@@ -297,7 +300,7 @@ fn wire_to_host_shaped_request(
     }
 
     let url_str: &str = &archived.url;
-    let url = url::Url::parse(url_str)?;
+    let mut parsed_url = url::Url::parse(url_str)?;
 
     if matches!(
         origin_policy,
@@ -305,7 +308,7 @@ fn wire_to_host_shaped_request(
     ) && let Some(expected) = upstream_base_url(upstream)
     {
         let expected_origin = expected.origin();
-        let actual_origin = url.origin();
+        let actual_origin = parsed_url.origin();
         if expected_origin != actual_origin {
             return Err(DialectError::UnsupportedRequest {
                 reason: format!(
@@ -316,6 +319,7 @@ fn wire_to_host_shaped_request(
             });
         }
     }
+    cc_lb_upstream::scrub_url_query_api_key(&mut parsed_url);
 
     let method_str: &str = &archived.method;
     let method = http::Method::from_bytes(method_str.as_bytes()).map_err(|e| {
@@ -355,7 +359,12 @@ fn wire_to_host_shaped_request(
     }
 
     let body: &[u8] = &archived.body;
-    Ok(builder.shaped_request(url, method, headers, bytes::Bytes::copy_from_slice(body)))
+    Ok(builder.shaped_request(
+        parsed_url,
+        method,
+        headers,
+        bytes::Bytes::copy_from_slice(body),
+    ))
 }
 
 fn runtime_error_to_dialect(err: WasmtimeRuntimeError) -> DialectError {
@@ -582,8 +591,8 @@ fn response_runtime_error(reason: String) -> ResponseTransformError {
 mod tests {
     use bytes::Bytes;
     use cc_lb_domain::{PrincipalKind, Upstream};
-    use cc_lb_plugin_wire::ArchivedShapeRequest;
-    use cc_lb_upstream::DialectShapeContext;
+    use cc_lb_plugin_wire::{ArchivedShapeRequest, ArchivedShapeResponse, ShapeResponse};
+    use cc_lb_upstream::{DialectShapeContext, UpstreamDialect, shape_request};
     use http::{HeaderMap, HeaderValue, Method};
 
     use super::*;
@@ -667,5 +676,61 @@ mod tests {
         for name in ["Authorization", "x-api-key", "x-goog-api-key", "api-key"] {
             assert!(is_stripped_shape_output_header(name), "{name}");
         }
+    }
+    #[test]
+    fn shape_output_scrubs_query_api_keys() {
+        struct ScrubbingDialect;
+
+        impl UpstreamDialect for ScrubbingDialect {
+            fn shape(
+                &self,
+                _context: &DialectShapeContext,
+                upstream: &Upstream,
+                _principal: &Principal,
+                builder: &mut ShapedRequestBuilder,
+            ) -> Result<ShapedRequest, DialectError> {
+                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ShapeResponse {
+                    url: Box::from(
+                        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=secret&keep=1",
+                    ),
+                    method: Box::from("POST"),
+                    headers: Box::new([]),
+                    body: Box::new([]),
+                })
+                .map_err(|error| DialectError::UnsupportedRequest {
+                    reason: error.to_string(),
+                })?;
+                let archived =
+                    rkyv::access::<ArchivedShapeResponse, RkyvError>(&bytes).map_err(|error| {
+                        DialectError::UnsupportedRequest {
+                            reason: error.to_string(),
+                        }
+                    })?;
+                wire_to_host_shaped_request(
+                    builder,
+                    archived,
+                    upstream,
+                    cc_lb_runtime_wasmtime::policy::ShapeOriginPolicy::Unrestricted,
+                    &cc_lb_runtime_wasmtime::policy::PluginWireBounds::default(),
+                )
+            }
+        }
+
+        let context = DialectShapeContext {
+            request_id: "req-shape-url".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1beta/models/gemini-2.5-flash:generateContent".to_owned(),
+            query: None,
+            body_bytes: Bytes::new(),
+        };
+        let shaped = shape_request(
+            &ScrubbingDialect,
+            &context,
+            &Upstream::GeminiDirect { base_url: None },
+            &principal(),
+        )
+        .expect("shape request");
+        assert_eq!(shaped.url().query(), Some("keep=1"));
     }
 }

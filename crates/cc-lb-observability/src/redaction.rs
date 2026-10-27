@@ -22,20 +22,66 @@ pub const ROUTING_REASON_MAX_BYTES: usize = MAX_ERROR_MESSAGE_LEN;
 const TRUNCATED_SUFFIX: &str = "...[truncated]";
 const ROUTING_TRACE_TRUNCATED_STAGE: &str = "routing_trace_truncated";
 
-const SECRET_PATTERNS: [&str; 8] = [
+/// Masks case-insensitive `key` query parameter values in a URL.
+#[must_use]
+pub fn sanitize_url_for_log(url: &str) -> Cow<'_, str> {
+    let Some(query_start) = url.find('?') else {
+        return Cow::Borrowed(url);
+    };
+    let query_with_fragment = &url[query_start + 1..];
+    let (query, fragment, has_fragment) = query_with_fragment
+        .split_once('#')
+        .map_or((query_with_fragment, "", false), |(query, fragment)| {
+            (query, fragment, true)
+        });
+    let mut changed = false;
+    let mut sanitized = String::with_capacity(url.len());
+    sanitized.push_str(&url[..query_start + 1]);
+    for (index, segment) in query.split('&').enumerate() {
+        if index > 0 {
+            sanitized.push('&');
+        }
+        if let Some((name, _value)) = segment.split_once('=')
+            && name.eq_ignore_ascii_case("key")
+        {
+            sanitized.push_str(name);
+            sanitized.push('=');
+            sanitized.push_str(REDACTED);
+            changed = true;
+        } else {
+            sanitized.push_str(segment);
+        }
+    }
+    if has_fragment {
+        sanitized.push('#');
+        sanitized.push_str(fragment);
+    }
+    if changed {
+        Cow::Owned(sanitized)
+    } else {
+        Cow::Borrowed(url)
+    }
+}
+const SECRET_PATTERNS: [&str; 12] = [
     r"sk-ant-[a-zA-Z0-9_-]+",
     r"sk-ant-ort01-[a-zA-Z0-9_-]+",
     r"Bearer\s+[a-zA-Z0-9._~\-/+]+",
     r"x-api-key:\s*\S+",
+    r"x-goog-api-key:\s*\S+",
+    r"api-key:\s*\S+",
+    r"AIza[0-9A-Za-z_-]{20,}",
+    r#"[?&][kK][eE][yY]=[^&#\s"']+"#,
     r"AKIA[A-Z0-9]{16}",
     r"ASIA[A-Z0-9]{16}",
     r#"aws_secret_access_key\s*=\s*['"]\S+['"]"#,
     r"-----BEGIN (?:.* )?PRIVATE KEY-----[\s\S]*?-----END (?:.* )?PRIVATE KEY-----",
 ];
 
-const SENSITIVE_FIELDS: [&str; 9] = [
+const SENSITIVE_FIELDS: [&str; 11] = [
     "authorization",
     "x-api-key",
+    "x-goog-api-key",
+    "api-key",
     "api_key",
     "token",
     "refresh_token",
@@ -59,13 +105,13 @@ static SECRET_REGEXES: Lazy<Result<Vec<Regex>, regex::Error>> = Lazy::new(|| {
 
 static SENSITIVE_JSON_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)("(?:authorization|x-api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
+        r#"(?i)("(?:authorization|x-api-key|x-goog-api-key|api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
     )
 });
 
 static SENSITIVE_TEXT_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)\b(authorization|x-api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
+        r#"(?i)\b(authorization|x-api-key|x-goog-api-key|api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
     )
 });
 

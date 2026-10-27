@@ -13,8 +13,11 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
-pub use cost::{cache_creation_1h_micros_from_input, virtual_cost_micros_full};
-use cost::{record_missing_price_field, resolved_cache_creation_1h_price, token_cost_micros};
+pub use cost::{
+    cache_creation_1h_micros_from_input, virtual_cost_micros_full,
+    virtual_cost_micros_full_with_context,
+};
+use cost::{record_missing_price_field, resolved_cache_creation_1h_price};
 use tier_resolver::{resolve_optional_price, resolve_tier_rate};
 
 #[cfg(test)]
@@ -29,6 +32,21 @@ pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError};
 pub struct TierRate {
     pub input_per_million_usd: UsdPerMillion,
     pub output_per_million_usd: UsdPerMillion,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThresholdRate {
+    pub input_per_million_usd: Option<UsdPerMillion>,
+    pub output_per_million_usd: Option<UsdPerMillion>,
+    pub cache_creation_per_million_usd: Option<UsdPerMillion>,
+    pub cache_read_per_million_usd: Option<UsdPerMillion>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThresholdBand {
+    pub default: ThresholdRate,
+    #[serde(default)]
+    pub by_tier: BTreeMap<String, ThresholdRate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -134,6 +152,8 @@ pub struct CatalogSnapshot {
     pub cache_creation_per_million_usd_by_tier: HashMap<String, BTreeMap<String, UsdPerMillion>>,
     #[serde(default)]
     pub cache_read_per_million_usd_by_tier: HashMap<String, BTreeMap<String, UsdPerMillion>>,
+    #[serde(default)]
+    pub above_tokens_rates: HashMap<String, BTreeMap<u64, ThresholdBand>>,
     pub status: CatalogStatus,
 }
 
@@ -148,6 +168,7 @@ impl CatalogSnapshot {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: CatalogStatus::CostDisabled,
         }
     }
@@ -156,6 +177,11 @@ impl CatalogSnapshot {
 pub struct PriceCatalog {
     snapshot: ArcSwap<CatalogSnapshot>,
 }
+
+/// Policy-defined worst-case gross input token bound (1 MiB / 1,048,576 tokens) reserved
+/// when a request carries an opaque or server-side cache reference whose cached prefix size
+/// cannot be bounded from the local request body alone.
+pub const OPAQUE_CACHE_WORST_CASE_INPUT_TOKENS: u64 = 1_048_576;
 
 impl PriceCatalog {
     pub fn new_empty() -> Arc<Self> {
@@ -233,12 +259,88 @@ impl PriceCatalog {
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<u64> {
+        self.estimate_max_with_cache(model, max_input, max_output, 0, false, service_tier)
+    }
+
+    pub fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<u64> {
         let normalized = normalize_model_id(model);
-        let Some(pricing) = self.lookup(model, service_tier) else {
+        let snapshot = self.current();
+        let Some((model_key, base_pricing)) = snapshot
+            .models
+            .get_key_value(model)
+            .or_else(|| snapshot.models.get_key_value(&normalized))
+        else {
             record_missing_price_field(&normalized, "model");
             return None;
         };
-        Some(token_cost_micros(max_input, max_output, &pricing))
+        let tier = canonical_service_tier(service_tier);
+        let resolved = resolve_tier_rate(base_pricing, tier.as_deref());
+        let mut input_price = resolved.input_per_million_usd;
+        let mut output_price = resolved.output_per_million_usd;
+        let mut cache_creation_price = resolve_optional_price(
+            snapshot
+                .cache_creation_per_million_usd
+                .get(model_key)
+                .copied(),
+            snapshot
+                .cache_creation_per_million_usd_by_tier
+                .get(model_key),
+            tier.as_deref(),
+        );
+        let mut cache_read_price = resolve_optional_price(
+            snapshot.cache_read_per_million_usd.get(model_key).copied(),
+            snapshot.cache_read_per_million_usd_by_tier.get(model_key),
+            tier.as_deref(),
+        );
+        let bands = snapshot.above_tokens_rates.get(model_key);
+        let effective_cache_tokens = if can_cross_cache_cliff {
+            let max_threshold_bound = bands
+                .and_then(|b| b.keys().next_back().copied())
+                .map(|t| t.saturating_add(1))
+                .unwrap_or(0);
+            let worst_case_gross = OPAQUE_CACHE_WORST_CASE_INPUT_TOKENS.max(max_threshold_bound);
+            estimated_cache_tokens.max(worst_case_gross.saturating_sub(max_input))
+        } else {
+            estimated_cache_tokens
+        };
+        let gross_input = max_input.saturating_add(effective_cache_tokens);
+        crate::tier_resolver::apply_threshold_bands(
+            bands,
+            gross_input,
+            tier.as_deref(),
+            &mut input_price,
+            &mut output_price,
+            Some(&mut cache_creation_price),
+            Some(&mut cache_read_price),
+        );
+        let mut cache_unit_price = input_price;
+        for candidate in [cache_creation_price, cache_read_price]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.as_micros_usd() > cache_unit_price.as_micros_usd() {
+                cache_unit_price = candidate;
+            }
+        }
+        let input_cost =
+            u128::from(max_input) * u128::from(input_price.as_micros_usd()) / 1_000_000;
+        let cache_cost = u128::from(effective_cache_tokens)
+            * u128::from(cache_unit_price.as_micros_usd())
+            / 1_000_000;
+        let output_cost =
+            u128::from(max_output) * u128::from(output_price.as_micros_usd()) / 1_000_000;
+        let total = input_cost
+            .saturating_add(cache_cost)
+            .saturating_add(output_cost);
+        Some(u64::try_from(total).unwrap_or(u64::MAX))
     }
 
     pub fn status(&self) -> CatalogStatus {
@@ -299,6 +401,7 @@ mod tests {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: CatalogStatus::Ok,
         }
     }

@@ -52,7 +52,7 @@ use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     ManagedKeyStore, MetaStore, RuntimeChangeNotifier, Storage, UpstreamRecord,
 };
-use cc_lb_upstream::SignedRequest;
+use cc_lb_upstream::{SignedRequest, scrub_query_api_key};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -253,6 +253,27 @@ impl cc_lb_engine::LimitCostEstimator for PricingLimitCostEstimator {
     ) -> Option<i64> {
         self.catalog
             .estimate_max(model, max_input, max_output, service_tier)
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                service_tier,
+            )
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
 }
@@ -2226,6 +2247,7 @@ fn claude_default_snapshot(clock: &dyn cc_lb_clock::Clock) -> cc_lb_pricing::Cat
         cache_read_per_million_usd: cache_read,
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     }
 }
@@ -2585,7 +2607,10 @@ async fn responses_websocket_handler(
         state.body_caps.messages,
         slots,
     )
-    .with_downstream_query(uri.query().map(str::to_owned));
+    .with_downstream_query(uri.query().and_then(|query| {
+        let scrubbed = scrub_query_api_key(query);
+        (!scrubbed.is_empty()).then_some(scrubbed.into_owned())
+    }));
     websocket
         .max_message_size(state.body_caps.messages)
         .max_frame_size(state.body_caps.messages)
@@ -4623,6 +4648,7 @@ mod tests {
             cache_read_per_million_usd: HashMap::new(),
             cache_creation_per_million_usd_by_tier: HashMap::new(),
             cache_read_per_million_usd_by_tier: HashMap::new(),
+            above_tokens_rates: HashMap::new(),
             status: cc_lb_pricing::CatalogStatus::Ok,
         });
 

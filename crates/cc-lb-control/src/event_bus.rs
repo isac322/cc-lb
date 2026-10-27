@@ -413,9 +413,36 @@ impl RequestEventBus for InMemoryBus {
             LifecycleEvent::RequestLogUpstreamErrorObserved { .. }
                 | LifecycleEvent::UpstreamStreamDiagnosticsObserved { .. }
         ) {
-            // Row-bearing event routed only to the durable assembler; never
-            // broadcast or written to the metric writer channel.
+            let retry_after = match &event {
+                LifecycleEvent::RequestLogUpstreamErrorObserved {
+                    event_id,
+                    retry_after: Some(retry_after),
+                    ..
+                } => Some((event_id.clone(), retry_after.clone())),
+                _ => None,
+            };
+            // Row-bearing event routed only to the durable assembler.
             self.send_to_assembler(event);
+            if let Some((event_id, retry_after)) = retry_after {
+                let sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
+                    event_id,
+                    error_type: String::new(),
+                    error_message: String::new(),
+                    retry_after: Some(retry_after),
+                };
+                let _ = self.inner.lifecycle_broadcast_tx.send(sanitized.clone());
+                let rate_limit_header_tx = {
+                    let guard = self
+                        .inner
+                        .lifecycle_rate_limit_header_tx
+                        .lock()
+                        .expect("event bus lifecycle rate limit header mutex poisoned");
+                    guard.clone()
+                };
+                if let Some(tx) = rate_limit_header_tx {
+                    let _ = tx.try_send(sanitized);
+                }
+            }
             return;
         }
         // Advisory broadcast copy for live dashboards; the durable request
@@ -793,6 +820,7 @@ mod tests {
             event_id: "evt-private".into(),
             error_type: "rate_limit_error".into(),
             error_message: "bounded".into(),
+            retry_after: None,
         };
 
         bus.publish_lifecycle(event.clone());
@@ -800,6 +828,38 @@ mod tests {
         assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
         assert!(broadcast_rx.try_recv().is_err());
         assert!(writer_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn request_log_retry_after_broadcast_is_sanitized() {
+        let bus = InMemoryBus::new();
+        let mut broadcast_rx = bus.subscribe_lifecycle();
+        let mut assembler_rx = bus.attach_lifecycle_assembler(1);
+        let mut rate_limit_rx = bus.attach_lifecycle_rate_limit_header(1);
+        let event = LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: "evt-retry".into(),
+            error_type: "rate_limit_error".into(),
+            error_message: "private".into(),
+            retry_after: Some("30".into()),
+        };
+
+        bus.publish_lifecycle(event.clone());
+
+        let expected_sanitized = LifecycleEvent::RequestLogUpstreamErrorObserved {
+            event_id: "evt-retry".into(),
+            error_type: String::new(),
+            error_message: String::new(),
+            retry_after: Some("30".into()),
+        };
+        assert_eq!(assembler_rx.try_recv().expect("assembler event"), event);
+        assert_eq!(
+            broadcast_rx.try_recv().expect("broadcast signal"),
+            expected_sanitized
+        );
+        assert_eq!(
+            rate_limit_rx.try_recv().expect("rate limit header signal"),
+            expected_sanitized
+        );
     }
 
     #[tokio::test]

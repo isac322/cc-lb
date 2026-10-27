@@ -152,27 +152,7 @@ pub(super) fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) 
 }
 
 pub(super) fn scrub_query_api_key(query: &str) -> Cow<'_, str> {
-    let has_api_key = query.split('&').any(|pair| {
-        pair.split_once('=')
-            .map(|(name, _)| name.eq_ignore_ascii_case("key"))
-            .unwrap_or_else(|| pair.eq_ignore_ascii_case("key"))
-    });
-    if !has_api_key {
-        return Cow::Borrowed(query);
-    }
-
-    Cow::Owned(
-        query
-            .split('&')
-            .filter(|pair| {
-                !pair
-                    .split_once('=')
-                    .map(|(name, _)| name.eq_ignore_ascii_case("key"))
-                    .unwrap_or_else(|| pair.eq_ignore_ascii_case("key"))
-            })
-            .collect::<Vec<_>>()
-            .join("&"),
-    )
+    cc_lb_upstream::scrub_query_api_key(query)
 }
 
 #[cfg(test)]

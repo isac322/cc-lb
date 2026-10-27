@@ -578,6 +578,27 @@ impl LimitCostEstimator for CatalogLimitCostEstimator {
             .estimate_max(model, max_input, max_output, service_tier)
             .map(|cost| cost.try_into().unwrap_or(i64::MAX))
     }
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.catalog
+            .estimate_max_with_cache(
+                model,
+                max_input,
+                max_output,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
+                service_tier,
+            )
+            .map(|cost| cost.try_into().unwrap_or(i64::MAX))
+    }
 }
 
 fn priced_catalog() -> Arc<PriceCatalog> {
@@ -599,9 +620,24 @@ fn priced_catalog() -> Arc<PriceCatalog> {
         )
     })
     .collect();
+    let mut above_tokens_rates = HashMap::new();
+    above_tokens_rates.insert(
+        PRICED_OPENAI_MODEL.to_owned(),
+        BTreeMap::from([(
+            200_000,
+            cc_lb_pricing::ThresholdBand {
+                default: cc_lb_pricing::ThresholdRate {
+                    input_per_million_usd: Some(UsdPerMillion::from_whole_usd(10)),
+                    ..cc_lb_pricing::ThresholdRate::default()
+                },
+                by_tier: BTreeMap::new(),
+            },
+        )]),
+    );
     let catalog = PriceCatalog::new_empty();
     catalog.install_snapshot(CatalogSnapshot {
         models,
+        above_tokens_rates,
         status: CatalogStatus::Ok,
         ..CatalogSnapshot::empty_cost_disabled()
     });
@@ -719,4 +755,38 @@ async fn assert_cost_rate_limited(response: http::Response<axum::body::Body>) {
     let body: serde_json::Value = serde_json::from_slice(&body).expect("error body is JSON");
     assert_eq!(body["error"]["type"], "rate_limit_error");
     assert_eq!(body["error"]["limit_kind"], "cost_usd");
+}
+
+#[tokio::test]
+async fn cache_bearing_request_below_body_cliff_reserves_cliff_cost_and_cache_token_bound() {
+    // Base input rate is $1/M (4,000 min tokens => 4,000 micros), while above-200k cliff input
+    // rate is $10/M. A request with a 4,000-token body estimate and an opaque cache marker
+    // reserves the policy worst-case bound (1,048,576 total tokens = 4,000 input + 1,044,576
+    // cache tokens at $10/M => 10,485,760 micros), covering even a 1,000,000-token cached
+    // prefix (10,040,000 micros). A 10,000,000-micro cap (well above the 2,000,010-micro
+    // minimum cliff-crossing amount) is rejected, while an 11,000,000-micro cap is admitted.
+    for (cap_micros, expected_status, expected_calls) in [
+        (10_000_000, StatusCode::TOO_MANY_REQUESTS, 0),
+        (11_000_000, StatusCode::OK, 1),
+    ] {
+        let state = TestState::default();
+        let lifecycle =
+            usd_limited_lifecycle(StorageUpstreamKind::OpenaiApiKey, cap_micros, &state);
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-api-key", managed_api_key())
+            .body(Bytes::from_static(
+                br#"{"model":"gpt-limit-test","prompt_cache_key":"cache-ns-1","input":"hi"}"#,
+            ))
+            .expect("OpenAI request builds");
+        let response = handle(&lifecycle, request).await;
+        let (status, _headers, _body) = collect_body(response).await;
+        assert_eq!(status, expected_status, "cap {cap_micros}");
+        assert_eq!(
+            state.upstream_calls.load(Ordering::Relaxed),
+            expected_calls,
+            "cap {cap_micros}"
+        );
+    }
 }

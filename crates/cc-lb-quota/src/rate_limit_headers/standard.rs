@@ -36,6 +36,45 @@ impl PartialSnapshot {
     }
 }
 
+pub fn parse_standard_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObservation> {
+    let mut snapshot = PartialSnapshot::default();
+
+    for (name, value) in headers {
+        let field = match name.as_str() {
+            "ratelimit-limit" => RateLimitField::Limit,
+            "ratelimit-remaining" => RateLimitField::Remaining,
+            "ratelimit-reset" => RateLimitField::Reset,
+            _ => continue,
+        };
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+
+        match field {
+            RateLimitField::Limit => {
+                if let Some(parsed) = parse_standard_u64(value) {
+                    snapshot.limit = Some(parsed);
+                }
+            }
+            RateLimitField::Remaining => {
+                if let Some(parsed) = parse_standard_u64(value) {
+                    snapshot.remaining = Some(parsed);
+                }
+            }
+            RateLimitField::Reset => {
+                if let Some(parsed) = parse_standard_reset(value) {
+                    snapshot.reset = Some(parsed);
+                }
+            }
+        }
+    }
+
+    snapshot
+        .into_snapshot(RateLimitKind::Requests, DEFAULT_WINDOW.to_owned())
+        .into_iter()
+        .collect()
+}
+
 pub fn parse_anthropic_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObservation> {
     let mut snapshots = BTreeMap::<(u8, String), (RateLimitKind, PartialSnapshot)>::new();
 
@@ -123,7 +162,7 @@ pub fn parse_openai_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObse
         .collect()
 }
 
-/// Observe a bounded retry window when no provider-specific limit was parsed.
+/// Observe a bounded retry window when no rate-limit observation was parsed.
 ///
 /// The raw delay or HTTP date remains in `reset`, just as provider reset
 /// headers do. A retry hint does not imply any request limit or remaining quota.
@@ -138,6 +177,7 @@ pub fn parse_retry_after_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimi
     };
     if !parse_anthropic_rate_limit_headers(headers).is_empty()
         || !parse_openai_rate_limit_headers(headers).is_empty()
+        || !parse_standard_rate_limit_headers(headers).is_empty()
     {
         return Vec::new();
     }
@@ -216,6 +256,15 @@ fn window_identity(parts: &[&str]) -> String {
     }
 }
 
+fn parse_standard_u64(value: &str) -> Option<u64> {
+    value.split([',', ';']).next().and_then(parse_u64)
+}
+
+fn parse_standard_reset(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && !value.eq_ignore_ascii_case("n/a")).then(|| value.to_owned())
+}
+
 fn parse_u64(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok()
 }
@@ -227,9 +276,160 @@ fn parse_reset(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_openai_rate_limit_headers, parse_retry_after_rate_limit_headers};
+    use super::{
+        parse_openai_rate_limit_headers, parse_retry_after_rate_limit_headers,
+        parse_standard_rate_limit_headers,
+    };
     use cc_lb_domain::{RateLimitKind, RateLimitObservation};
     use http::{HeaderMap, HeaderName, HeaderValue};
+
+    #[test]
+    fn parses_plain_and_structured_standard_headers() {
+        for (limit, remaining) in [
+            ("100", "75"),
+            (" 100 ", " 75 "),
+            ("100, 100;w=60", "75, 75;w=60"),
+            ("100;w=60", "75;w=60"),
+            (" 100 ;w=60, 1000;w=3600", " 75 ;w=60"),
+        ] {
+            let mut headers = HeaderMap::new();
+            for (name, value) in [
+                ("ratelimit-limit", limit),
+                ("ratelimit-remaining", remaining),
+                ("ratelimit-reset", " 60 "),
+            ] {
+                headers.insert(
+                    HeaderName::from_static(name),
+                    HeaderValue::from_static(value),
+                );
+            }
+
+            assert_eq!(
+                parse_standard_rate_limit_headers(&headers),
+                vec![RateLimitObservation {
+                    kind: RateLimitKind::Requests,
+                    window: "default".to_owned(),
+                    limit: Some(100),
+                    remaining: Some(75),
+                    reset: Some("60".to_owned()),
+                }],
+            );
+        }
+    }
+
+    #[test]
+    fn standard_headers_preserve_partial_observations() {
+        for (name, value, limit, remaining, reset) in [
+            ("ratelimit-limit", "100;w=60", Some(100), None, None),
+            ("ratelimit-remaining", "0", None, Some(0), None),
+            ("ratelimit-reset", " 30s ", None, None, Some("30s")),
+        ] {
+            let mut headers = HeaderMap::new();
+            for invalid_name in ["ratelimit-limit", "ratelimit-remaining", "ratelimit-reset"] {
+                headers.insert(
+                    HeaderName::from_static(invalid_name),
+                    HeaderValue::from_static("N/A"),
+                );
+            }
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+
+            assert_eq!(
+                parse_standard_rate_limit_headers(&headers),
+                vec![RateLimitObservation {
+                    kind: RateLimitKind::Requests,
+                    window: "default".to_owned(),
+                    limit,
+                    remaining,
+                    reset: reset.map(str::to_owned),
+                }],
+            );
+        }
+    }
+
+    #[test]
+    fn standard_headers_ignore_missing_invalid_and_unrelated_values() {
+        assert!(parse_standard_rate_limit_headers(&HeaderMap::new()).is_empty());
+        for value in [
+            HeaderValue::from_static(""),
+            HeaderValue::from_static("   "),
+            HeaderValue::from_static("n/A"),
+            HeaderValue::from_static("-1"),
+            HeaderValue::from_static("1.5"),
+            HeaderValue::from_static("18446744073709551616"),
+            HeaderValue::from_static("invalid, 100;w=60"),
+            HeaderValue::from_static(";w=60"),
+            HeaderValue::from_bytes(&[0xff]).expect("opaque header"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("ratelimit-limit", value.clone());
+            headers.insert("ratelimit-remaining", value);
+            headers.insert("ratelimit-reset", HeaderValue::from_static(" N/a "));
+            headers.insert(
+                "x-ratelimit-limit-requests",
+                HeaderValue::from_static("100"),
+            );
+
+            assert!(parse_standard_rate_limit_headers(&headers).is_empty());
+        }
+
+        for value in [
+            HeaderValue::from_static(""),
+            HeaderValue::from_static("   "),
+            HeaderValue::from_static(" N/A "),
+            HeaderValue::from_bytes(&[0xff]).expect("opaque header"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("ratelimit-reset", value);
+            assert!(parse_standard_rate_limit_headers(&headers).is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_yields_to_each_standard_header_observation() {
+        for (name, value) in [
+            ("ratelimit-limit", "100, 100;w=60"),
+            ("ratelimit-remaining", "0"),
+            ("ratelimit-reset", "30"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static("60"));
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+            assert!(parse_retry_after_rate_limit_headers(&headers).is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_remains_available_for_invalid_standard_headers() {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("ratelimit-limit", "invalid, 100;w=60"),
+            ("ratelimit-remaining", "-1"),
+            ("ratelimit-reset", " N/a "),
+        ] {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static("30"));
+
+        assert_eq!(
+            parse_retry_after_rate_limit_headers(&headers),
+            vec![RateLimitObservation {
+                kind: RateLimitKind::Requests,
+                window: "retry_after".to_owned(),
+                limit: None,
+                remaining: None,
+                reset: Some("30".to_owned()),
+            }],
+        );
+    }
 
     #[test]
     fn retry_after_observes_delay_or_http_date_without_inventing_quota() {

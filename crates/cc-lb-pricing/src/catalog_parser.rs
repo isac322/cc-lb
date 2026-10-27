@@ -5,7 +5,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 
 use crate::loader::LoaderError;
-use crate::{CatalogSnapshot, CatalogStatus, Pricing, TierRate, UsdPerMillion};
+use crate::{
+    CatalogSnapshot, CatalogStatus, Pricing, ThresholdBand, ThresholdRate, TierRate, UsdPerMillion,
+};
 
 type RawTierCosts<'a> = BTreeMap<String, (&'a str, f64)>;
 
@@ -20,6 +22,7 @@ pub(crate) fn parse_litellm_json(
     let mut cache_read_per_million_usd = HashMap::new();
     let mut cache_creation_per_million_usd_by_tier = HashMap::new();
     let mut cache_read_per_million_usd_by_tier = HashMap::new();
+    let mut above_tokens_rates = HashMap::new();
 
     for (model, value) in root {
         if model == "sample_spec" {
@@ -110,6 +113,39 @@ pub(crate) fn parse_litellm_json(
             discover_tier_costs(object, "cache_read_input_token_cost"),
         )?;
 
+        let mut model_above_tokens_rates = BTreeMap::<u64, ThresholdBand>::new();
+        insert_above_token_costs(
+            &mut model_above_tokens_rates,
+            &model,
+            object,
+            "input_cost_per_token",
+            |rate| &mut rate.input_per_million_usd,
+        )?;
+        insert_above_token_costs(
+            &mut model_above_tokens_rates,
+            &model,
+            object,
+            "output_cost_per_token",
+            |rate| &mut rate.output_per_million_usd,
+        )?;
+        insert_above_token_costs(
+            &mut model_above_tokens_rates,
+            &model,
+            object,
+            "cache_creation_input_token_cost",
+            |rate| &mut rate.cache_creation_per_million_usd,
+        )?;
+        insert_above_token_costs(
+            &mut model_above_tokens_rates,
+            &model,
+            object,
+            "cache_read_input_token_cost",
+            |rate| &mut rate.cache_read_per_million_usd,
+        )?;
+        if !model_above_tokens_rates.is_empty() {
+            above_tokens_rates.insert(model.clone(), model_above_tokens_rates);
+        }
+
         models.insert(
             model.clone(),
             Pricing {
@@ -139,6 +175,7 @@ pub(crate) fn parse_litellm_json(
         cache_read_per_million_usd,
         cache_creation_per_million_usd_by_tier,
         cache_read_per_million_usd_by_tier,
+        above_tokens_rates,
         status: CatalogStatus::Ok,
     })
 }
@@ -148,7 +185,10 @@ fn discover_tier_costs<'a>(object: &'a Map<String, Value>, base: &str) -> RawTie
         .iter()
         .filter_map(|(key, value)| {
             let suffix = key.strip_prefix(base)?.strip_prefix('_')?;
-            if suffix.starts_with("above_") || suffix == "cache_hit" {
+            if suffix.to_ascii_lowercase().contains("above_")
+                || suffix.to_ascii_lowercase().contains("cache_hit")
+                || suffix.to_ascii_lowercase().contains("hr")
+            {
                 return None;
             }
             let tier = match suffix {
@@ -193,6 +233,75 @@ fn insert_cache_tier_costs(
     }
     target.insert(model.to_owned(), rates);
     Ok(())
+}
+
+fn insert_above_token_costs<F>(
+    target: &mut BTreeMap<u64, ThresholdBand>,
+    model: &str,
+    object: &Map<String, Value>,
+    base: &str,
+    mut set_rate: F,
+) -> Result<(), LoaderError>
+where
+    F: FnMut(&mut ThresholdRate) -> &mut Option<UsdPerMillion>,
+{
+    for (key, value) in object {
+        let Some((threshold, tier)) = parse_above_token_key(key, base) else {
+            continue;
+        };
+        let Some(cost) = value.as_f64() else {
+            continue;
+        };
+        let price = usd_per_token_to_per_million(model, key, cost)?;
+        let band = target.entry(threshold).or_default();
+        let rate = match tier {
+            Some(tier) => band.by_tier.entry(tier).or_default(),
+            None => &mut band.default,
+        };
+        *set_rate(rate) = Some(price);
+    }
+    Ok(())
+}
+
+fn parse_above_token_key(key: &str, base: &str) -> Option<(u64, Option<String>)> {
+    let suffix = key.strip_prefix(base)?.strip_prefix('_')?;
+    let parts = suffix.split('_').collect::<Vec<_>>();
+    let above_index = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("above"))?;
+    if !parts.get(above_index + 2)?.eq_ignore_ascii_case("tokens") {
+        return None;
+    }
+    let threshold = parse_token_threshold(parts[above_index + 1])?;
+    let mut tier = None;
+    for candidate in parts[..above_index]
+        .iter()
+        .chain(parts[above_index + 3..].iter())
+    {
+        let canonical = match candidate.to_ascii_lowercase().as_str() {
+            "priority" => "priority",
+            "batch" | "batches" => "batch",
+            "flex" => "flex",
+            "ultrafast" => "ultrafast",
+            _ => return None,
+        };
+        if tier.replace(canonical.to_owned()).is_some() {
+            return None;
+        }
+    }
+    Some((threshold, tier))
+}
+
+fn parse_token_threshold(raw: &str) -> Option<u64> {
+    let normalized = raw.to_ascii_lowercase();
+    let (digits, multiplier) = if let Some(digits) = normalized.strip_suffix('k') {
+        (digits, 1_000_u64)
+    } else if let Some(digits) = normalized.strip_suffix('m') {
+        (digits, 1_000_000_u64)
+    } else {
+        (normalized.as_str(), 1)
+    };
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 fn usd_per_token_to_per_million(

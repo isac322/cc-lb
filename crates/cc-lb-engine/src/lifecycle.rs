@@ -21,6 +21,7 @@ use cc_lb_domain::{
 use cc_lb_quota::build_subscription_quota_samples;
 use cc_lb_quota::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_openai_rate_limit_headers,
+    parse_standard_rate_limit_headers,
 };
 use cc_lb_request_log::{
     HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
@@ -2205,6 +2206,23 @@ pub trait LimitCostEstimator: Send + Sync {
         max_output: u64,
         service_tier: Option<&str>,
     ) -> Option<i64>;
+
+    fn estimate_max_with_cache(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        estimated_cache_tokens: u64,
+        _can_cross_cache_cliff: bool,
+        service_tier: Option<&str>,
+    ) -> Option<i64> {
+        self.estimate_max(
+            model,
+            max_input.saturating_add(estimated_cache_tokens),
+            max_output,
+            service_tier,
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3263,6 +3281,7 @@ impl Lifecycle {
             .downstream_headers(downstream_headers)
             .method(http::Method::GET)
             .path("/v1/responses".to_owned())
+            .query(ingress.query.map(str::to_owned))
             .body_bytes(ingress.frame.clone())
             .canonical_model_id(canonical_model.clone())
             .requested_service_tier(service_tier.map(str::to_owned))
@@ -4452,11 +4471,21 @@ impl Lifecycle {
         };
         let limit_request = body_view.limit_request(&ctx.canonical_model_id);
         let max_input_estimate = limit_request.input_tokens_estimate;
+        let estimated_cache_tokens = ctx
+            .cache_breakpoints
+            .iter()
+            .map(|bp| bp.prefix_bytes.as_token_estimate())
+            .max()
+            .unwrap_or(0);
+        let can_cross_cache_cliff =
+            ctx.cache_breakpoints.is_empty() && limit_request.can_cross_cache_cliff;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
-            estimator.estimate_max(
+            estimator.estimate_max_with_cache(
                 &limit_request.model,
                 max_input_estimate as u64,
                 limit_request.max_tokens.max(0) as u64,
+                estimated_cache_tokens,
+                can_cross_cache_cliff,
                 limit_request.service_tier.as_deref(),
             )
         });
@@ -4707,6 +4736,10 @@ impl Lifecycle {
         // Provider error text can echo the credential; the parser masks it
         // before its store cap so a secret split by the cap cannot survive.
         // Successful responses never get here.
+        let retry_after = canonical_upstream_error
+            .as_ref()
+            .and_then(usage_parser::CanonicalUpstreamError::retry_after)
+            .map(ToOwned::to_owned);
         let (upstream_error_type, parsed_upstream_message) = canonical_upstream_error
             .map(|error| error.into_parts(signer.as_ref()))
             .unwrap_or_default();
@@ -4919,12 +4952,21 @@ impl Lifecycle {
                 || status.is_server_error()
                 || non_error_status_response_failed
             {
-                if upstream_error_type.is_some() || upstream_error_message.is_some() {
+                if upstream_error_type.is_some()
+                    || upstream_error_message.is_some()
+                    || (status == StatusCode::TOO_MANY_REQUESTS
+                        && parts.headers.get(RETRY_AFTER).is_none()
+                        && retry_after.is_some())
+                {
                     o.emit_lifecycle(
                         cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
                             event_id: o.event_id().to_owned(),
                             error_type: upstream_error_type.unwrap_or_default(),
                             error_message: upstream_error_message.unwrap_or_default(),
+                            retry_after: (status == StatusCode::TOO_MANY_REQUESTS
+                                && parts.headers.get(RETRY_AFTER).is_none())
+                            .then_some(retry_after.clone())
+                            .flatten(),
                         },
                     );
                 }
@@ -4956,6 +4998,7 @@ impl Lifecycle {
                         event_id: o.event_id().to_owned(),
                         error_type: stop.stop_reason.clone(),
                         error_message: abnormal_stop_error_message(stop),
+                        retry_after: None,
                     },
                 );
                 let code = match stop.stop_reason.as_str() {
@@ -5097,6 +5140,7 @@ impl Lifecycle {
                         Some(message) => message,
                         None => scrubbed_upstream_error_body(signer, &error_body, false),
                     },
+                    retry_after: None,
                 },
             );
         }
@@ -5332,7 +5376,7 @@ impl Lifecycle {
             .map(|k| k.as_str().to_owned())
             .collect();
         tracing::info!(
-            url = %signed.url(),
+            url = %cc_lb_observability::sanitize_url_for_log(signed.url().as_str()),
             method = %signed.method(),
             header_count = signed.headers().len(),
             headers = ?signed_header_names,
@@ -5562,6 +5606,7 @@ impl Lifecycle {
         let parse_sse_events = !upstream_error_status || upstream_is_sse;
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
+        let has_retry_after_header = parts.headers.get(RETRY_AFTER).is_some();
         let stream = async_stream::stream! {
             let custom_sse_hook = transform_ctx.dialect.sse_event_transform_hook();
             let composed_sse_hook = custom_sse_hook.map(|custom| {
@@ -7198,25 +7243,37 @@ impl Lifecycle {
                     Some(stream_total_ms),
                     elapsed_ms(first_chunk_at),
                 );
+                let canonical_error =
+                    usage_parser::observe_http_error_body(&upstream_error_body);
+                let retry_after = canonical_error
+                    .as_ref()
+                    .and_then(usage_parser::CanonicalUpstreamError::retry_after)
+                    .map(ToOwned::to_owned);
                 if upstream_error_status
                     && !upstream_error_body_decode_failed
                     && !upstream_error_body.is_empty()
                 {
-                    let (error_type, message) = usage_parser::observe_http_error_body(&upstream_error_body)
+                    let (error_type, message) = canonical_error
                         .map(|error| error.into_parts(signer.as_ref()))
                         .unwrap_or_default();
-                    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
-                        event_id: o.event_id().to_owned(),
-                        error_type: error_type.unwrap_or_default(),
-                        error_message: match message {
-                            Some(message) => message,
-                            None => scrubbed_upstream_error_body(
-                                signer.as_ref(),
-                                &upstream_error_body,
-                                upstream_error_body_truncated,
-                            ),
+                    o.emit_lifecycle(
+                        cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
+                            event_id: o.event_id().to_owned(),
+                            error_type: error_type.unwrap_or_default(),
+                            error_message: match message {
+                                Some(message) => message,
+                                None => scrubbed_upstream_error_body(
+                                    signer.as_ref(),
+                                    &upstream_error_body,
+                                    upstream_error_body_truncated,
+                                ),
+                            },
+                            retry_after: (status == StatusCode::TOO_MANY_REQUESTS
+                                && !has_retry_after_header)
+                                .then_some(retry_after)
+                                .flatten(),
                         },
-                    });
+                    );
                 }
                 if stream_affinity_error.is_some() && !upstream_error_status {
                     o.set_failure(InternalFailure {
@@ -7241,6 +7298,7 @@ impl Lifecycle {
                             event_id: o.event_id().to_owned(),
                             error_type: stop.stop_reason.clone(),
                             error_message: abnormal_stop_error_message(stop),
+                            retry_after: None,
                         },
                     );
                     let code = match stop.stop_reason.as_str() {
@@ -7306,6 +7364,7 @@ pub fn observe_rate_limits(
     let mut observations = parse_anthropic_rate_limit_headers(headers)
         .into_iter()
         .chain(parse_openai_rate_limit_headers(headers))
+        .chain(parse_standard_rate_limit_headers(headers))
         .map(|snapshot| UpstreamRateLimitObservationRecord {
             upstream_id,
             window: snapshot.window,
@@ -7682,11 +7741,16 @@ impl UpstreamDialect for RawPassthroughDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
+        let scrubbed_query = context
+            .query
+            .as_deref()
+            .map(cc_lb_upstream::scrub_query_api_key);
+        let scrubbed_query = scrubbed_query.as_deref().filter(|query| !query.is_empty());
         let url = if self.openai_oauth && context.path == "/v1/responses" {
             let mut url = self.base_url.clone();
             let path = format!("{}/responses", url.path().trim_end_matches('/'));
             url.set_path(&path);
-            url.set_query(context.query.as_deref());
+            url.set_query(scrubbed_query);
             url
         } else {
             let base_url = if self.openai_oauth_default {
@@ -7694,7 +7758,7 @@ impl UpstreamDialect for RawPassthroughDialect {
             } else {
                 self.base_url.clone()
             };
-            cc_lb_upstream::upstream_request_url(&base_url, &context.path, context.query.as_deref())
+            cc_lb_upstream::upstream_request_url(&base_url, &context.path, scrubbed_query)
         };
         Ok(builder.shaped_request(
             url,
@@ -7742,7 +7806,10 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
-        let should_capture = if is_openai {
+        let should_capture = matches!(
+            name_lc,
+            "ratelimit-limit" | "ratelimit-remaining" | "ratelimit-reset"
+        ) || if is_openai {
             name_lc.starts_with("x-ratelimit-")
         } else {
             name_lc.starts_with("anthropic-ratelimit-")
@@ -7864,10 +7931,10 @@ struct LimitRequest {
     model: String,
     max_tokens: i64,
     input_tokens_estimate: i64,
+    can_cross_cache_cliff: bool,
     stream: bool,
     service_tier: Option<String>,
 }
-
 impl LimitRequest {
     /// `fallback_model` is the request's canonical model id. It is used only
     /// when the body carries no `model` (e.g. Gemini, where the model lives in
@@ -7895,6 +7962,7 @@ impl LimitRequest {
             input_tokens_estimate: value
                 .map(estimate_input_tokens)
                 .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
+            can_cross_cache_cliff: value.is_some_and(request_can_cross_cache_cliff),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -7914,6 +7982,7 @@ fn estimate_input_tokens(value: &Value) -> i64 {
     let mut nodes = 0;
     let mut bytes = 0;
     for key in [
+        "tools",
         "system",
         "messages",
         "instructions",
@@ -7925,9 +7994,62 @@ fn estimate_input_tokens(value: &Value) -> i64 {
             collect_input_bytes(selected, &mut nodes, &mut bytes);
         }
     }
+    if let Some(request) = value.get("generateContentRequest") {
+        for key in ["tools", "contents", "systemInstruction"] {
+            if let Some(selected) = request.get(key) {
+                collect_input_bytes(selected, &mut nodes, &mut bytes);
+            }
+        }
+    }
     i64::try_from(bytes / 4)
         .unwrap_or(i64::MAX)
         .max(DEFAULT_MAX_INPUT_ESTIMATE)
+}
+
+fn request_can_cross_cache_cliff(value: &Value) -> bool {
+    if [
+        "previous_response_id",
+        "conversation",
+        "cachedContent",
+        "container",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
+    ]
+    .iter()
+    .any(|key| value.get(*key).is_some_and(|v| !v.is_null()))
+    {
+        return true;
+    }
+    if value
+        .get("generateContentRequest")
+        .and_then(|req| req.get("cachedContent"))
+        .is_some_and(|v| !v.is_null())
+    {
+        return true;
+    }
+    let mut nodes = 0;
+    value_contains_cache_marker(value, &mut nodes)
+}
+
+fn value_contains_cache_marker(value: &Value, nodes: &mut usize) -> bool {
+    if *nodes >= INPUT_ESTIMATE_MAX_NODES {
+        return false;
+    }
+    *nodes += 1;
+    match value {
+        Value::Object(map) => {
+            if map.contains_key("cache_control") || map.contains_key("prompt_cache_breakpoint") {
+                return true;
+            }
+            map.values()
+                .any(|child| value_contains_cache_marker(child, nodes))
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|child| value_contains_cache_marker(child, nodes)),
+        _ => false,
+    }
 }
 
 fn collect_input_bytes(value: &Value, nodes: &mut usize, bytes: &mut usize) {
@@ -8480,12 +8602,13 @@ fn request_session_identity(
     metadata: &MetadataIdentity,
     value: Option<&Value>,
 ) -> Option<(String, &'static str)> {
-    const SESSION_HEADERS: [&str; 5] = [
+    const SESSION_HEADERS: [&str; 6] = [
         "x-claude-code-session-id",
         "x-claude-session-id",
         "x-hermes-session-id",
         "x-session-affinity",
         "x-session-id",
+        "session_id",
     ];
 
     SESSION_HEADERS
@@ -13477,6 +13600,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &frame,
+                    query: None,
                 },
                 body.clone(),
                 None,
@@ -13558,6 +13682,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &local_frame,
+                    query: None,
                 },
                 local_body.clone(),
                 Some(first_id),
@@ -13579,6 +13704,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &local_frame,
+                    query: None,
                 },
                 local_body.as_ref(),
                 first_id,
@@ -13630,7 +13756,8 @@ mod tests {
                     &auth,
                     WebSocketIngress {
                         headers: request.headers(),
-                        frame: &frame
+                        frame: &frame,
+                        query: None,
                     },
                     body.as_ref(),
                     first_id,
@@ -13656,6 +13783,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &frame,
+                    query: None,
                 },
                 body.as_ref(),
                 first_id,
@@ -13786,6 +13914,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &frame,
+                    query: None,
                 },
                 body.clone(),
                 Some(owner),
@@ -13807,6 +13936,7 @@ mod tests {
                 WebSocketIngress {
                     headers: request.headers(),
                     frame: &frame,
+                    query: None,
                 },
                 body.as_ref(),
                 owner,
@@ -13822,7 +13952,8 @@ mod tests {
                     &auth,
                     WebSocketIngress {
                         headers: request.headers(),
-                        frame: &frame
+                        frame: &frame,
+                        query: None,
                     },
                     body,
                     Some(owner),
@@ -13888,6 +14019,7 @@ mod tests {
                     WebSocketIngress {
                         headers: request.headers(),
                         frame: &frame,
+                        query: None,
                     },
                     body,
                     None,
@@ -13927,6 +14059,7 @@ mod tests {
                     WebSocketIngress {
                         headers: request.headers(),
                         frame: &frame,
+                        query: None,
                     },
                     Arc::new(json!({"model":"gpt-test","store":false})),
                     None,

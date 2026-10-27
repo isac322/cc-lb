@@ -1324,11 +1324,30 @@ async fn openai_oauth_rejects_api_key_value_on_create() {
 }
 
 #[tokio::test]
-async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default() {
+async fn openai_and_gemini_api_key_writes_are_not_cacheable() {
     for (index, kind) in ["openai_api_key", "gemini_api_key"].into_iter().enumerate() {
         let (_dir, storage) = new_store().await;
+        let app = router(test_state(storage));
+        let missing_key = request(
+            app.clone(),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("non-anthropic-default-preflight-{index}"),
+                "kind": kind
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(missing_key.status, StatusCode::BAD_REQUEST, "{kind}");
+        assert_eq!(body(&missing_key)["error"], "missing_api_key", "{kind}");
+        assert_eq!(
+            body(&missing_key)["detail"],
+            "api-key upstreams require api_key_value",
+            "{kind}"
+        );
         let response = request(
-            router(test_state(storage)),
+            app.clone(),
             "POST",
             "/admin/v1/upstreams",
             Some(json!({
@@ -1342,6 +1361,158 @@ async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default
 
         assert_eq!(response.status, StatusCode::CREATED);
         assert_eq!(body(&response)["kind"], kind);
+        assert_eq!(
+            response.headers.get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{kind}"
+        );
+
+        let id = body(&response)["id"].as_str().unwrap();
+        let updated = request(
+            app,
+            "PATCH",
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({ "api_key_value": "replacement-provider-secret-key" })),
+            Some("W/\"1\""),
+        )
+        .await;
+        assert_eq!(updated.status, StatusCode::OK, "{kind}");
+        assert_eq!(
+            updated.headers.get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "{kind}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_anthropic_oauth_upstreams_reject_warmup_on_create_and_update() {
+    for kind in [
+        "openai_api_key",
+        "gemini_api_key",
+        "openai_oauth",
+        "gemini_oauth",
+    ] {
+        let (_dir, storage) = new_store().await;
+        let app = router(test_state(storage.clone()));
+        let mut create_body = json!({
+            "name": format!("unsupported-warmup-{kind}"),
+            "kind": kind,
+            "warmup_enabled": false
+        });
+        if kind.ends_with("_api_key") {
+            create_body["api_key_value"] = json!("provider-secret-key");
+        } else {
+            create_body["oauth_tokens"] = oauth_bundle_json(
+                "provider-access",
+                "provider-refresh",
+                Some("provider-account"),
+                (kind == "gemini_oauth").then_some("provider-project"),
+                false,
+            );
+        }
+        let plugin = json!({
+            "wasm_registry_id": Uuid::new_v4(),
+            "config": {}
+        });
+        let unsupported_requests = [
+            json!({ "warmup_enabled": true }),
+            json!({ "warmup_dialect_plugin": plugin.clone() }),
+            json!({
+                "warmup_enabled": false,
+                "warmup_dialect_plugin": plugin
+            }),
+        ];
+        for warmup in &unsupported_requests {
+            let mut rejected_body = create_body.clone();
+            rejected_body
+                .as_object_mut()
+                .unwrap()
+                .remove("warmup_enabled");
+            rejected_body
+                .as_object_mut()
+                .unwrap()
+                .extend(warmup.as_object().unwrap().clone());
+            let rejected = request(
+                app.clone(),
+                "POST",
+                "/admin/v1/upstreams",
+                Some(rejected_body),
+                None,
+            )
+            .await;
+            assert_eq!(rejected.status, StatusCode::BAD_REQUEST, "{kind}: {warmup}");
+            assert_eq!(
+                body(&rejected)["error"],
+                "warmup_unsupported_kind",
+                "{kind}: {warmup}"
+            );
+            assert_eq!(
+                body(&rejected)["detail"],
+                "warmup is supported only for anthropic_oauth upstreams",
+                "{kind}: {warmup}"
+            );
+        }
+
+        let created = request(
+            app.clone(),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(create_body),
+            None,
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{kind}");
+        assert_eq!(body(&created)["warmup_enabled"], false, "{kind}");
+        let id = body(&created)["id"].as_str().unwrap();
+        for method in ["PUT", "PATCH"] {
+            for warmup in &unsupported_requests {
+                let rejected = request(
+                    app.clone(),
+                    method,
+                    &format!("/admin/v1/upstreams/{id}"),
+                    Some(warmup.clone()),
+                    Some("W/\"1\""),
+                )
+                .await;
+                assert_eq!(
+                    rejected.status,
+                    StatusCode::BAD_REQUEST,
+                    "{kind}: {method} {warmup}"
+                );
+                assert_eq!(
+                    body(&rejected)["error"],
+                    "warmup_unsupported_kind",
+                    "{kind}: {method} {warmup}"
+                );
+                assert_eq!(
+                    body(&rejected)["detail"],
+                    "warmup is supported only for anthropic_oauth upstreams",
+                    "{kind}: {method} {warmup}"
+                );
+            }
+        }
+        let stored = UpstreamStore::get_by_id(storage.as_ref(), Uuid::parse_str(id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.revision, 1, "{kind}");
+        assert!(!stored.warmup_enabled, "{kind}");
+        assert!(stored.warmup_dialect_plugin.is_none(), "{kind}");
+
+        let disabled = request(
+            app,
+            "PATCH",
+            &format!("/admin/v1/upstreams/{id}"),
+            Some(json!({
+                "warmup_enabled": false,
+                "warmup_dialect_plugin": null
+            })),
+            Some("W/\"1\""),
+        )
+        .await;
+        assert_eq!(disabled.status, StatusCode::OK, "{kind}");
+        assert_eq!(body(&disabled)["warmup_enabled"], false, "{kind}");
     }
 }
 

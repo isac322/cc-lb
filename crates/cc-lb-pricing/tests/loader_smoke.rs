@@ -199,6 +199,7 @@ async fn install_latest_local_does_not_fetch_or_replace_payload_when_unchanged()
         cache_read_per_million_usd: HashMap::new(),
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();
@@ -236,6 +237,7 @@ async fn install_latest_local_retains_snapshot_and_skips_disk_fallback_on_storag
         cache_read_per_million_usd: HashMap::new(),
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();
@@ -276,6 +278,7 @@ async fn install_latest_local_propagates_corruption_without_installing_payload()
         cache_read_per_million_usd: HashMap::new(),
         cache_creation_per_million_usd_by_tier: HashMap::new(),
         cache_read_per_million_usd_by_tier: HashMap::new(),
+        above_tokens_rates: HashMap::new(),
         status: CatalogStatus::Ok,
     });
     let before = catalog.current();

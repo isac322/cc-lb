@@ -1391,9 +1391,9 @@ fn refund_difference(
             LimitKind::CostUsd => actual_cost_micros,
             LimitKind::Concurrent => continue,
         };
-        let refund = amount.amount.saturating_sub(actual).max(0);
-        if refund > 0 {
-            engine.record_amount(key_id, amount.kind, amount.window_sec, -refund, now_sec);
+        let delta = actual.saturating_sub(amount.amount);
+        if delta != 0 {
+            engine.record_amount(key_id, amount.kind, amount.window_sec, delta, now_sec);
         }
     }
     // TODO(T22): enqueue PrincipalLimitStateRow via master's existing limit_state_writer
@@ -1748,6 +1748,25 @@ mod tests {
         assert!(
             !engine.reconcile_by_id(&id, 0, 0, 0),
             "second call is idempotent no-op"
+        );
+    }
+
+    #[test]
+    fn reconcile_by_id_tops_up_when_actual_exceeds_reserved() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000_000);
+        let key_id = key_id_for(&record);
+        let now_sec = unix_secs(engine.inner.clock.now());
+        let res = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .expect("reserve");
+        let id = res.id().to_owned();
+        std::mem::forget(res);
+
+        assert!(engine.reconcile_by_id(&id, 0, 250, 0));
+        assert_eq!(
+            engine.current_total(&key_id, LimitKind::OutputTokens, 60, now_sec),
+            250,
+            "reserved 100, actual output 250 → +150 top-up → 250 recorded",
         );
     }
 

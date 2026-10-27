@@ -1,6 +1,6 @@
 use cc_lb_clock::unix_secs;
 use cc_lb_engine::cache_keepalive::{RenewalFinalization, RenewalUsage, RequestSnapshot};
-use cc_lb_pricing::virtual_cost_micros_full;
+use cc_lb_pricing::{ComputedCostBreakdown, virtual_cost_micros_full_with_context};
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::cache_keepalive::CacheKeepaliveJob;
 use cc_lb_storage_api::upstream::UpstreamRecord;
@@ -32,15 +32,17 @@ impl SchedulerDispatch {
                 )
             })?;
         let model = keepalive_model(snapshot)?;
-        let cost = virtual_cost_micros_full(
+        let cost = virtual_cost_micros_full_with_context(
             &model,
             finalization.usage.input_tokens,
             finalization.usage.output_tokens,
+            finalization.usage.cache_creation_input_tokens,
             finalization.usage.cache_creation_input_tokens_5m,
             finalization.usage.cache_creation_input_tokens_1h,
             finalization.usage.cache_read_input_tokens,
             None,
-        );
+        )
+        .unwrap_or_else(ComputedCostBreakdown::unknown);
         let ts = unix_secs(self.clock.now());
         let duration_ms = duration_ms(finalization.duration);
         let event = renewal_request_event(RenewalRequestEventInput {

@@ -10,7 +10,7 @@ use cc_lb_clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_domain::{ANTHROPIC_WORKSPACE_ID_HEADER, Upstream};
 use cc_lb_upstream::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, UpstreamError, scrub_secret,
+    SigningCapability, UpstreamError, scrub_secret, scrub_url_query_api_key,
 };
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, HeaderValue, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
@@ -76,8 +76,10 @@ impl Signer for AnthropicKeySigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
+        let mut url = shaped.url().clone();
+        scrub_url_query_api_key(&mut url);
+        shaped.set_url(url);
         let headers = shaped.headers_mut();
-        // Downstream credentials are never forwarded; the configured
         // provider credential below is the only credential sent upstream.
         strip_provider_credential_headers(headers);
         headers.insert(API_KEY_HEADER, self.api_key_header.clone());
@@ -194,6 +196,9 @@ impl Signer for ProviderKeySigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
+        let mut url = shaped.url().clone();
+        scrub_url_query_api_key(&mut url);
+        shaped.set_url(url);
         if self.kind == ProviderKeyKind::Gemini {
             ensure_gemini_stream_alt_sse(&mut shaped);
         }
@@ -402,11 +407,16 @@ fn wrap_gemini_code_assist_request(
     shaped: &mut ShapedRequest,
     project_id: Option<&str>,
 ) -> Result<(), SignerError> {
+    let mut url = shaped.url().clone();
+    scrub_url_query_api_key(&mut url);
+    shaped.set_url(url);
+
     let path = shaped.url().path();
     let is_stream =
         path == "/v1internal:streamGenerateContent" || path.ends_with(":streamGenerateContent");
     let is_generate = path == "/v1internal:generateContent" || path.ends_with(":generateContent");
-    if !is_stream && !is_generate {
+    let is_count = path == "/v1internal:countTokens" || path.ends_with(":countTokens");
+    if !is_stream && !is_generate && !is_count {
         return Ok(());
     }
 
@@ -414,45 +424,76 @@ fn wrap_gemini_code_assist_request(
         serde_json::from_slice::<Value>(shaped.body()).map_err(|_| SignerError::SigningFailed {
             reason: "Gemini Code Assist request body must be valid JSON".to_owned(),
         })?;
-    let already_wrapped = original.get("request").is_some() && original.get("model").is_some();
     let model = path
         .strip_prefix("/v1beta/models/")
         .and_then(|model_path| {
             model_path
                 .strip_suffix(":generateContent")
                 .or_else(|| model_path.strip_suffix(":streamGenerateContent"))
+                .or_else(|| model_path.strip_suffix(":countTokens"))
         })
-        .map(str::to_owned)
+        .or_else(|| original.get("model").and_then(Value::as_str))
         .or_else(|| {
             original
-                .get("model")
+                .get("generateContentRequest")
+                .and_then(|request| request.get("model"))
                 .and_then(Value::as_str)
-                .map(str::to_owned)
         })
+        .map(|model| model.strip_prefix("models/").unwrap_or(model).to_owned())
         .ok_or_else(|| SignerError::SigningFailed {
             reason: "Gemini Code Assist request has no model".to_owned(),
         })?;
 
-    let envelope = if already_wrapped {
-        let mut envelope = original;
-        if let Some(project_id) = project_id {
-            envelope["project"] = Value::String(project_id.to_owned());
-        }
-        envelope
+    let envelope = if is_count {
+        // Cloud Code Assist `/v1internal:countTokens` accepts only `{ "request": { "model": "models/<id>", ... } }`
+        // and rejects top-level `model` or `project` fields with HTTP 400 INVALID_ARGUMENT.
+        let model = Value::String(format!("models/{model}"));
+        let request = if original.get("model").is_none()
+            && let Some(request) = original.get("request").and_then(Value::as_object)
+        {
+            let mut request = request.clone();
+            request.insert("model".to_owned(), model);
+            Value::Object(request)
+        } else if let Some(inner) = original
+            .get("generateContentRequest")
+            .and_then(Value::as_object)
+        {
+            let mut inner = inner.clone();
+            inner.insert("model".to_owned(), model);
+            Value::Object(inner)
+        } else if let Some(mut object) = original.as_object().cloned() {
+            object.remove("project");
+            object.insert("model".to_owned(), model);
+            Value::Object(object)
+        } else {
+            return Err(SignerError::SigningFailed {
+                reason: "Gemini Code Assist countTokens request must be a JSON object".to_owned(),
+            });
+        };
+        json!({ "request": request })
     } else {
-        let project = project_id
-            .map(|project_id| Value::String(project_id.to_owned()))
-            .or_else(|| original.get("project").cloned());
-        match project {
-            Some(project) => json!({
-                "model": model,
-                "project": project,
-                "request": original,
-            }),
-            None => json!({
-                "model": model,
-                "request": original,
-            }),
+        let already_wrapped = original.get("request").is_some() && original.get("model").is_some();
+        if already_wrapped {
+            let mut envelope = original;
+            if let Some(project_id) = project_id {
+                envelope["project"] = Value::String(project_id.to_owned());
+            }
+            envelope
+        } else {
+            let project = project_id
+                .map(|project_id| Value::String(project_id.to_owned()))
+                .or_else(|| original.get("project").cloned());
+            match project {
+                Some(project) => json!({
+                    "model": model,
+                    "project": project,
+                    "request": original,
+                }),
+                None => json!({
+                    "model": model,
+                    "request": original,
+                }),
+            }
         }
     };
     let body = serde_json::to_vec(&envelope).map_err(|_| SignerError::SigningFailed {
@@ -462,6 +503,8 @@ fn wrap_gemini_code_assist_request(
     let mut url = shaped.url().clone();
     url.set_path(if is_stream {
         "/v1internal:streamGenerateContent"
+    } else if is_count {
+        "/v1internal:countTokens"
     } else {
         "/v1internal:generateContent"
     });
@@ -500,6 +543,9 @@ impl Signer for GeminiSubscriptionSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
+        let mut url = shaped.url().clone();
+        scrub_url_query_api_key(&mut url);
+        shaped.set_url(url);
         check_access_token_expiry(self.expires_at_unix_secs, self.clock.as_ref())?;
         wrap_gemini_code_assist_request(&mut shaped, self.project_id.as_deref())?;
         let headers = shaped.headers_mut();
@@ -997,21 +1043,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gemini_subscription_signer_wraps_count_tokens_requests() {
+        for original in [
+            serde_json::json!({"contents": []}),
+            serde_json::json!({"generateContentRequest": {"contents": []}}),
+        ] {
+            let mut shaped = shaped_request();
+            shaped.set_url(
+                "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-flash:countTokens"
+                    .parse()
+                    .expect("url"),
+            );
+            shaped.set_body(Bytes::from(serde_json::to_vec(&original).expect("body")));
+
+            let signer = GeminiSubscriptionSigner::new(
+                "gemini-access-token",
+                None,
+                None,
+                Arc::new(cc_lb_clock::SystemClock),
+            )
+            .expect("signer");
+            let signed = sign_request(&signer, shaped).await.expect("sign request");
+            let body: Value = serde_json::from_slice(signed.body()).expect("json body");
+
+            assert_eq!(signed.url().path(), "/v1internal:countTokens");
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "request": {
+                        "model": "models/gemini-2.5-flash",
+                        "contents": []
+                    }
+                })
+            );
+        }
+    }
+    #[tokio::test]
     async fn gemini_signers_append_alt_sse_on_stream_generate_content_when_missing() {
         let mut shaped = shaped_request();
         shaped.set_url(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=leaked&keep=1"
                 .parse()
                 .expect("url"),
         );
         let key_signer =
             ProviderKeySigner::new(ProviderKeyKind::Gemini, "gemini-secret").expect("signer");
         let signed_key = sign_request(&key_signer, shaped).await.expect("sign key");
-        assert_eq!(signed_key.url().query(), Some("alt=sse"));
+        assert_eq!(signed_key.url().query(), Some("keep=1&alt=sse"));
 
         let mut oauth_shaped = shaped_request();
         oauth_shaped.set_url(
-            "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent"
+            "https://daily-cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?key=leaked&keep=1"
                 .parse()
                 .expect("url"),
         );
@@ -1030,6 +1112,6 @@ mod tests {
             signed_oauth.url().path(),
             "/v1internal:streamGenerateContent"
         );
-        assert_eq!(signed_oauth.url().query(), Some("alt=sse"));
+        assert_eq!(signed_oauth.url().query(), Some("keep=1&alt=sse"));
     }
 }

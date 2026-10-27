@@ -689,7 +689,7 @@ pub(crate) fn normalize_key_input(raw: Option<&str>) -> Result<NormalizedApiKey,
     normalize_api_key(raw.unwrap_or_default()).map_err(|error| match error {
         KeyInputError::Missing => UpstreamError::BadRequest {
             error: "missing_api_key",
-            detail: "anthropic_api_key upstreams require api_key_value".to_owned(),
+            detail: "api-key upstreams require api_key_value".to_owned(),
         },
         KeyInputError::InvalidCharacters => UpstreamError::InvalidInput {
             field: "api_key_value".to_owned(),
