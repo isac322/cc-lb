@@ -123,6 +123,33 @@ pub fn parse_openai_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObse
         .collect()
 }
 
+/// Observe a bounded retry window when no provider-specific limit was parsed.
+///
+/// The raw delay or HTTP date remains in `reset`, just as provider reset
+/// headers do. A retry hint does not imply any request limit or remaining quota.
+pub fn parse_retry_after_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObservation> {
+    let Some(value) = headers
+        .get(http::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+    else {
+        return Vec::new();
+    };
+    if !parse_anthropic_rate_limit_headers(headers).is_empty()
+        || !parse_openai_rate_limit_headers(headers).is_empty()
+    {
+        return Vec::new();
+    }
+    vec![RateLimitObservation {
+        kind: RateLimitKind::Requests,
+        window: "retry_after".to_owned(),
+        limit: None,
+        remaining: None,
+        reset: Some(value.to_owned()),
+    }]
+}
+
 fn parse_header_name(name: &str) -> Option<(RateLimitKind, RateLimitField, String)> {
     let suffix = name.strip_prefix(HEADER_PREFIX)?;
     let parts = suffix
@@ -200,9 +227,75 @@ fn parse_reset(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_openai_rate_limit_headers;
+    use super::{parse_openai_rate_limit_headers, parse_retry_after_rate_limit_headers};
     use cc_lb_domain::{RateLimitKind, RateLimitObservation};
     use http::{HeaderMap, HeaderName, HeaderValue};
+
+    #[test]
+    fn retry_after_observes_delay_or_http_date_without_inventing_quota() {
+        for value in ["30", "Wed, 21 Oct 2026 07:28:00 GMT"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static(value));
+            assert_eq!(
+                parse_retry_after_rate_limit_headers(&headers),
+                vec![RateLimitObservation {
+                    kind: RateLimitKind::Requests,
+                    window: "retry_after".to_owned(),
+                    limit: None,
+                    remaining: None,
+                    reset: Some(value.to_owned()),
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_is_absent_for_missing_empty_invalid_or_oversized_values() {
+        assert!(parse_retry_after_rate_limit_headers(&HeaderMap::new()).is_empty());
+        for value in [
+            HeaderValue::from_static(""),
+            HeaderValue::from_static("   "),
+            HeaderValue::from_bytes(&[0xff]).expect("opaque header"),
+            HeaderValue::from_str(&"1".repeat(257)).expect("oversized header"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::RETRY_AFTER, value);
+            assert!(parse_retry_after_rate_limit_headers(&headers).is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_does_not_duplicate_provider_specific_observations() {
+        for (name, value) in [
+            ("anthropic-ratelimit-requests-limit", "100"),
+            ("anthropic-ratelimit-tokens-reset", "2026-10-21T07:28:00Z"),
+            ("x-ratelimit-remaining-requests", "0"),
+            ("x-ratelimit-reset-tokens", "30s"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static("30"));
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+            assert!(parse_retry_after_rate_limit_headers(&headers).is_empty());
+        }
+    }
+
+    #[test]
+    fn retry_after_remains_a_fallback_for_unparseable_provider_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::RETRY_AFTER, HeaderValue::from_static("30"));
+        headers.insert(
+            HeaderName::from_static("x-ratelimit-limit-requests"),
+            HeaderValue::from_static("N/A"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-requests-limit"),
+            HeaderValue::from_static("invalid"),
+        );
+        assert_eq!(parse_retry_after_rate_limit_headers(&headers).len(), 1);
+    }
 
     #[test]
     fn parses_openai_request_and_token_rate_limit_headers() {

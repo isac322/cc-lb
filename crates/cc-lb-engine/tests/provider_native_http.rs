@@ -122,6 +122,43 @@ async fn gm_http_01_posts_generate_content_and_preserves_error_response() {
 }
 
 #[tokio::test]
+async fn gm_http_03_posts_count_tokens_with_api_key() {
+    let upstream = FakeUpstream::start(ResponseSpec {
+        status: 200,
+        content_type: "application/json",
+        body: br#"{"totalTokens":42}"#,
+    })
+    .await;
+    let dispatcher = make_default_dispatcher(0);
+    let request = provider_signed_request(
+        &upstream.base_url(),
+        Upstream::GeminiDirect { base_url: None },
+        "/v1beta/models/gemini-test:countTokens",
+        None,
+        ProviderKeyKind::Gemini,
+        "provider-native-test-key",
+    )
+    .await;
+    let response = dispatcher
+        .dispatch(request)
+        .await
+        .expect("loopback Gemini countTokens dispatch succeeds");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect Gemini countTokens body")
+        .to_bytes();
+    let captured = upstream.finish().await;
+    assert_eq!(body.as_ref(), br#"{"totalTokens":42}"#);
+    assert_eq!(captured.target, "/v1beta/models/gemini-test:countTokens");
+    assert_eq!(
+        captured.header("x-goog-api-key"),
+        Some("provider-native-test-key")
+    );
+}
+#[tokio::test]
 async fn gm_http_02_preserves_stream_generate_content_sse_query() {
     let upstream = FakeUpstream::start(ResponseSpec {
         status: 200,

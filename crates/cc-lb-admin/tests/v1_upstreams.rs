@@ -2,10 +2,11 @@
 
 use crate::admin_test_common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     body::Body,
+    extract::State as AxumState,
     http::{Request, StatusCode, header},
 };
 use cc_lb_admin::{AdminState, router};
@@ -19,6 +20,43 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+type RecordedProbes = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;
+
+async fn provider_probe_server() -> (url::Url, RecordedProbes) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new()
+        .fallback(provider_probe_handler)
+        .with_state(Arc::clone(&seen));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (
+        url::Url::parse(&format!("http://{address}/")).unwrap(),
+        seen,
+    )
+}
+
+async fn provider_probe_handler(
+    AxumState(seen): AxumState<RecordedProbes>,
+    request: Request<Body>,
+) -> (StatusCode, &'static str) {
+    let path = request.uri().path().to_owned();
+    let authorization = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let google_key = request
+        .headers()
+        .get("x-goog-api-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    seen.lock().unwrap().push((path, authorization, google_key));
+    (StatusCode::OK, "")
+}
 
 struct TestResponse {
     status: StatusCode,
@@ -1304,6 +1342,91 @@ async fn openai_and_gemini_api_key_creates_bypass_anthropic_preflight_by_default
 
         assert_eq!(response.status, StatusCode::CREATED);
         assert_eq!(body(&response)["kind"], kind);
+    }
+}
+
+#[tokio::test]
+async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
+    for (index, (kind, expected_path, expected_auth, expected_google_key)) in [
+        (
+            "openai_api_key",
+            "/v1/models",
+            Some("Bearer provider-secret-key"),
+            None,
+        ),
+        (
+            "gemini_api_key",
+            "/v1beta/models",
+            None,
+            Some("provider-secret-key"),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (base_url, seen) = provider_probe_server().await;
+        let (_dir, storage) = new_store().await;
+        let app = router(test_state(storage));
+        let preflight = request(
+            app.clone(),
+            "POST",
+            "/admin/v1/upstreams/preflight",
+            Some(json!({
+                "kind": kind,
+                "api_key_value": "provider-secret-key",
+                "base_url": base_url.as_str()
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(preflight.status, StatusCode::OK, "{kind}");
+        assert_eq!(body(&preflight)["verdict"], "ok", "{kind}");
+        assert_eq!(
+            body(&preflight)["capabilities"]["workspace_list"],
+            "not_applicable",
+            "{kind}"
+        );
+        assert!(body(&preflight)["classification"]["workspace"]["id"].is_null());
+
+        let created = request(
+            app.clone(),
+            "POST",
+            "/admin/v1/upstreams",
+            Some(json!({
+                "name": format!("provider-native-{index}"),
+                "kind": kind,
+                "api_key_value": "provider-secret-key",
+                "base_url": base_url.as_str(),
+                "skip_preflight": true
+            })),
+            None,
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{kind}");
+        let id = body(&created)["id"].as_str().unwrap().to_owned();
+
+        let recheck = request(
+            app.clone(),
+            "POST",
+            &format!("/admin/v1/upstreams/{id}/preflight"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(recheck.status, StatusCode::OK, "{kind}");
+        assert_eq!(body(&recheck)["verdict"], "ok", "{kind}");
+
+        let detail = request(app, "GET", &format!("/admin/v1/upstreams/{id}"), None, None).await;
+        assert_eq!(detail.status, StatusCode::OK, "{kind}");
+        assert_eq!(body(&detail)["api_key_access"]["verified"], true);
+        assert!(body(&detail)["api_key_access"]["workspace"]["id"].is_null());
+        let requests = seen.lock().unwrap();
+        assert_eq!(requests.len(), 2, "{kind}");
+        for (path, authorization, google_key) in requests.iter() {
+            assert_eq!(path, expected_path, "{kind}");
+            assert_eq!(authorization.as_deref(), expected_auth, "{kind}");
+            assert_eq!(google_key.as_deref(), expected_google_key, "{kind}");
+        }
     }
 }
 

@@ -2312,6 +2312,12 @@ fn proxy_route_template(path: &str) -> Option<&'static str> {
         _ if path.starts_with("/v1beta/models/") && path.ends_with(":generateContent") => {
             Some("/v1beta/models/{model}:generateContent")
         }
+        _ if path.starts_with("/v1beta/models/") && path.ends_with(":streamGenerateContent") => {
+            Some("/v1beta/models/{model}:streamGenerateContent")
+        }
+        _ if path.starts_with("/v1beta/models/") && path.ends_with(":countTokens") => {
+            Some("/v1beta/models/{model}:countTokens")
+        }
         "/api/oauth/usage" => Some("/api/oauth/usage"),
         _ if path.starts_with("/api/") => Some("/api/{*path}"),
         _ if path.starts_with("/v1beta/") => Some("/v1beta/{*path}"),
@@ -3685,6 +3691,22 @@ mod tests {
     use super::*;
 
     const TIER_PRICING_TEST_MODEL: &str = "tier-pricing-test-model";
+
+    #[test]
+    fn proxy_route_template_supports_all_gemini_model_operations() {
+        assert_eq!(
+            proxy_route_template("/v1beta/models/gemini-2.5-pro:generateContent"),
+            Some("/v1beta/models/{model}:generateContent")
+        );
+        assert_eq!(
+            proxy_route_template("/v1beta/models/gemini-2.5-pro:streamGenerateContent"),
+            Some("/v1beta/models/{model}:streamGenerateContent")
+        );
+        assert_eq!(
+            proxy_route_template("/v1beta/models/gemini-2.5-pro:countTokens"),
+            Some("/v1beta/models/{model}:countTokens")
+        );
+    }
 
     struct CaptureHandshakeTarget {
         sender: Option<tokio::sync::oneshot::Sender<String>>,

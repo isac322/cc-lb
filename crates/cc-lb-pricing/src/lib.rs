@@ -173,8 +173,12 @@ impl PriceCatalog {
     }
 
     pub fn lookup(&self, model: &str, service_tier: Option<&str>) -> Option<Pricing> {
-        let normalized = normalize_model_id(model);
-        let mut pricing = self.current().models.get(&normalized).cloned()?;
+        let snapshot = self.current();
+        let mut pricing = snapshot
+            .models
+            .get(model)
+            .or_else(|| snapshot.models.get(&normalize_model_id(model)))
+            .cloned()?;
         let tier = canonical_service_tier(service_tier);
         let resolved = resolve_tier_rate(&pricing, tier.as_deref());
         pricing.input_per_million_usd = resolved.input_per_million_usd;
@@ -187,27 +191,26 @@ impl PriceCatalog {
         model: &str,
         service_tier: Option<&str>,
     ) -> Option<RoutingCachePricing> {
-        let normalized = normalize_model_id(model);
         let snapshot = self.current();
-        let pricing = snapshot.models.get(&normalized)?;
+        let (model_key, pricing) = snapshot
+            .models
+            .get_key_value(model)
+            .or_else(|| snapshot.models.get_key_value(&normalize_model_id(model)))?;
         let tier = canonical_service_tier(service_tier);
         let rate = resolve_tier_rate(pricing, tier.as_deref());
         let cache_creation_5m_per_million_usd = resolve_optional_price(
             snapshot
                 .cache_creation_per_million_usd
-                .get(&normalized)
+                .get(model_key)
                 .copied(),
             snapshot
                 .cache_creation_per_million_usd_by_tier
-                .get(&normalized),
+                .get(model_key),
             tier.as_deref(),
         );
         let cache_read_per_million_usd = resolve_optional_price(
-            snapshot
-                .cache_read_per_million_usd
-                .get(&normalized)
-                .copied(),
-            snapshot.cache_read_per_million_usd_by_tier.get(&normalized),
+            snapshot.cache_read_per_million_usd.get(model_key).copied(),
+            snapshot.cache_read_per_million_usd_by_tier.get(model_key),
             tier.as_deref(),
         );
         let cache_creation_1h_per_million_usd = if cache_creation_5m_per_million_usd.is_some() {
@@ -250,6 +253,11 @@ pub fn global_catalog() -> &'static Arc<PriceCatalog> {
 }
 
 pub fn normalize_model_id(model: &str) -> String {
+    let model = model
+        .strip_prefix("openai/")
+        .or_else(|| model.strip_prefix("google/"))
+        .or_else(|| model.strip_prefix("models/"))
+        .unwrap_or(model);
     match model {
         "claude-opus-4-8-20250514" => "claude-opus-4-8".to_owned(),
         _ => model.to_owned(),
@@ -300,6 +308,99 @@ mod tests {
         assert_eq!(
             normalize_model_id("claude-3-5-sonnet-20241022"),
             "claude-3-5-sonnet-20241022"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_known_provider_namespaces_before_aliases() {
+        for (model, expected) in [
+            ("models/gemini-2.5-pro", "gemini-2.5-pro"),
+            ("google/gemini-2.5-pro", "gemini-2.5-pro"),
+            ("openai/gpt-5", "gpt-5"),
+            ("models/claude-opus-4-8-20250514", "claude-opus-4-8"),
+            ("unknown/gpt-5", "unknown/gpt-5"),
+            ("myopenai/gpt-5", "myopenai/gpt-5"),
+            ("gpt-5", "gpt-5"),
+        ] {
+            assert_eq!(normalize_model_id(model), expected);
+        }
+    }
+
+    #[test]
+    fn lookup_resolves_namespaced_standard_catalog_keys() {
+        for (model, namespaced) in [
+            ("gemini-2.5-pro", "models/gemini-2.5-pro"),
+            ("gemini-2.5-pro", "google/gemini-2.5-pro"),
+            ("gpt-5", "openai/gpt-5"),
+        ] {
+            let catalog = PriceCatalog::new_empty();
+            let inserted = pricing(model, 3, 15);
+            catalog.install_snapshot(snapshot_with(model, inserted.clone()));
+            assert_eq!(catalog.lookup(namespaced, None), Some(inserted));
+        }
+    }
+
+    #[test]
+    fn lookup_prefers_exact_namespaced_and_dated_catalog_keys() {
+        for (exact, normalized) in [
+            ("openai/gpt-5", "gpt-5"),
+            ("google/gemini-2.5-pro", "gemini-2.5-pro"),
+            ("models/gemini-2.5-pro", "gemini-2.5-pro"),
+            ("claude-opus-4-8-20250514", "claude-opus-4-8"),
+        ] {
+            let catalog = PriceCatalog::new_empty();
+            let inserted = pricing(exact, 10, 20);
+            let mut snapshot = snapshot_with(exact, inserted.clone());
+            snapshot
+                .models
+                .insert(normalized.to_owned(), pricing(normalized, 1, 2));
+            catalog.install_snapshot(snapshot);
+            assert_eq!(catalog.lookup(exact, None), Some(inserted));
+        }
+    }
+
+    #[test]
+    fn routing_cache_pricing_uses_the_resolved_catalog_key() {
+        let catalog = PriceCatalog::new_empty();
+        let mut snapshot = snapshot_with_cache_prices(
+            "openai/gpt-5",
+            pricing("openai/gpt-5", 10, 20),
+            Some(UsdPerMillion::from_whole_usd(11)),
+            Some(UsdPerMillion::from_whole_usd(12)),
+        );
+        snapshot
+            .models
+            .insert("gpt-5".to_owned(), pricing("gpt-5", 1, 2));
+        catalog.install_snapshot(snapshot);
+
+        let resolved = catalog
+            .routing_cache_pricing("openai/gpt-5", None)
+            .expect("exact namespaced cache pricing");
+        assert_eq!(
+            resolved.input_per_million_usd,
+            UsdPerMillion::from_whole_usd(10)
+        );
+        assert_eq!(
+            resolved.cache_creation_5m_per_million_usd,
+            Some(UsdPerMillion::from_whole_usd(11))
+        );
+        assert_eq!(
+            resolved.cache_read_per_million_usd,
+            Some(UsdPerMillion::from_whole_usd(12))
+        );
+
+        catalog.install_snapshot(snapshot_with_cache_prices(
+            "gemini-2.5-pro",
+            pricing("gemini-2.5-pro", 3, 15),
+            None,
+            Some(UsdPerMillion::from_whole_usd(1)),
+        ));
+        let resolved = catalog
+            .routing_cache_pricing("models/gemini-2.5-pro", None)
+            .expect("normalized cache pricing");
+        assert_eq!(
+            resolved.cache_read_per_million_usd,
+            Some(UsdPerMillion::from_whole_usd(1))
         );
     }
 

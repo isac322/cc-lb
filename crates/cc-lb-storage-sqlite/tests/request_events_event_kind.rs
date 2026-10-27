@@ -133,6 +133,41 @@ async fn event_kind_migration_is_nullable_and_non_destructive() {
 }
 
 #[tokio::test]
+async fn multi_provider_event_kinds_roundtrip_through_storage() {
+    let (_dir, storage) = migrated_storage("request-events-provider-kinds.sqlite").await;
+    for (index, kind) in [
+        RequestEventKind::OpenaiResponses,
+        RequestEventKind::GeminiGenerateContent,
+        RequestEventKind::GeminiCountTokens,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let event = classified_event(index, BASE + index as u64, Some(kind), None);
+        storage
+            .append_request_event(&event)
+            .await
+            .expect("append multi-provider event");
+        let listed = storage
+            .list_request_events(&list_query(Some(kind), None, 100))
+            .await
+            .expect("list multi-provider event");
+        assert_eq!(listed.len(), 1);
+        let item = listed.first().expect("stored multi-provider event");
+        assert_eq!(item.request_id, event.request_id);
+        assert_eq!(item.event_kind, Some(kind));
+
+        let stored: String =
+            sqlx::query_scalar("SELECT event_kind FROM request_events_v1 WHERE request_id = ?")
+                .bind(&event.request_id)
+                .fetch_one(storage.pool())
+                .await
+                .expect("stored event kind");
+        assert_eq!(stored, kind.as_str());
+    }
+}
+
+#[tokio::test]
 async fn event_kind_filter_partitions_list_and_histogram() {
     let (_dir, storage) = migrated_storage("request-events-kind-partition.sqlite").await;
 
@@ -146,6 +181,9 @@ async fn event_kind_filter_partitions_list_and_histogram() {
         (RequestEventKind::Other, None),
         // Renewal precedence: the column says messages, the source wins.
         (RequestEventKind::Messages, Some("renewal")),
+        (RequestEventKind::OpenaiResponses, None),
+        (RequestEventKind::GeminiGenerateContent, None),
+        (RequestEventKind::GeminiCountTokens, None),
     ];
     for (index, (kind, source)) in seeds.iter().enumerate() {
         storage
@@ -167,6 +205,9 @@ async fn event_kind_filter_partitions_list_and_histogram() {
         (RequestEventKind::Models, vec!["req-kind-2"]),
         (RequestEventKind::Files, vec!["req-kind-3"]),
         (RequestEventKind::Other, vec!["req-kind-4"]),
+        (RequestEventKind::OpenaiResponses, vec!["req-kind-6"]),
+        (RequestEventKind::GeminiGenerateContent, vec!["req-kind-7"]),
+        (RequestEventKind::GeminiCountTokens, vec!["req-kind-8"]),
         // Renewal precedence covers both the classified renewal and the
         // legacy renewal whose column is NULL.
         (
@@ -194,6 +235,9 @@ async fn event_kind_filter_partitions_list_and_histogram() {
             "req-kind-2",
             "req-kind-3",
             "req-kind-4",
+            "req-kind-6",
+            "req-kind-7",
+            "req-kind-8",
             "req-legacy-10",
         ],
         "absent event_kind keeps the implicit renewal exclusion"
@@ -231,6 +275,9 @@ async fn event_kind_filter_partitions_list_and_histogram() {
     // Histogram counts the same partition as the list for the same window.
     for (kind, expected_total) in [
         (RequestEventKind::Messages, 1_u64),
+        (RequestEventKind::OpenaiResponses, 1),
+        (RequestEventKind::GeminiGenerateContent, 1),
+        (RequestEventKind::GeminiCountTokens, 1),
         (RequestEventKind::Renewal, 2),
         (RequestEventKind::Unclassified, 1),
     ] {

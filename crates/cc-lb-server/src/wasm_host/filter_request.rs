@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use cc_lb_domain::{Principal, PrincipalKind, UpstreamCandidate};
 use cc_lb_plugin_wire::{
     schema::WireVersion,
@@ -72,7 +74,8 @@ impl FilterWireRequest<'_> {
                 }
             })
             .collect();
-        let query = self.ctx.query.as_deref().map(|value| QueryRef { value });
+        let scrubbed_query = self.ctx.query.as_deref().map(scrub_query_api_key);
+        let query = scrubbed_query.as_deref().map(|value| QueryRef { value });
         let thread_id = self
             .ctx
             .thread_id
@@ -136,13 +139,115 @@ pub(super) fn is_stripped_downstream_header(name: &str, cookie_redaction: bool) 
     let lower = name.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "authorization" | "x-api-key" | "host" | "proxy-authorization"
+        "authorization"
+            | "x-api-key"
+            | "x-goog-api-key"
+            | "api-key"
+            | "host"
+            | "proxy-authorization"
     ) {
         return true;
     }
     cookie_redaction && lower == "cookie"
 }
 
+pub(super) fn scrub_query_api_key(query: &str) -> Cow<'_, str> {
+    let has_api_key = query.split('&').any(|pair| {
+        pair.split_once('=')
+            .map(|(name, _)| name.eq_ignore_ascii_case("key"))
+            .unwrap_or_else(|| pair.eq_ignore_ascii_case("key"))
+    });
+    if !has_api_key {
+        return Cow::Borrowed(query);
+    }
+
+    Cow::Owned(
+        query
+            .split('&')
+            .filter(|pair| {
+                !pair
+                    .split_once('=')
+                    .map(|(name, _)| name.eq_ignore_ascii_case("key"))
+                    .unwrap_or_else(|| pair.eq_ignore_ascii_case("key"))
+            })
+            .collect::<Vec<_>>()
+            .join("&"),
+    )
+}
+
 #[cfg(test)]
 #[path = "filter_request/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn strips_all_provider_credential_headers() {
+        for name in ["Authorization", "x-api-key", "X-Goog-Api-Key", "api-key"] {
+            assert!(is_stripped_downstream_header(name, false), "{name}");
+        }
+    }
+
+    #[test]
+    fn scrubs_key_query_pairs_without_touching_other_parameters() {
+        assert_eq!(
+            scrub_query_api_key("foo=bar&key=secret&KEY=other&baz=qux"),
+            "foo=bar&baz=qux"
+        );
+        assert_eq!(scrub_query_api_key("foo=bar"), "foo=bar");
+    }
+
+    #[test]
+    fn filter_wire_scrubs_provider_headers_and_query_keys() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "x-goog-api-key",
+            http::HeaderValue::from_static("gemini-secret"),
+        );
+        headers.insert("api-key", http::HeaderValue::from_static("provider-secret"));
+        headers.insert("x-request-id", http::HeaderValue::from_static("request"));
+        let context = RoutingContext {
+            request_id: "req-filter".to_owned(),
+            thread_id: None,
+            requested_service_tier: None,
+            downstream_headers: headers,
+            method: http::Method::POST,
+            path: "/v1/responses".to_owned(),
+            query: Some("key=raw-secret&foo=bar&KEY=other".to_owned()),
+            body_bytes: bytes::Bytes::from_static(b"{}"),
+            canonical_model_id: "gpt-5".to_owned(),
+            cache_pricing: cc_lb_domain::CachePricingSummary::default(),
+        };
+        let principal = Principal {
+            id: "principal-filter".to_owned(),
+            kind: PrincipalKind::ApiKey,
+        };
+
+        FilterWireRequest {
+            wire_version: WireVersion::V1,
+            ctx: &context,
+            principal: &principal,
+            candidates: &[],
+            cookie_redaction: false,
+        }
+        .encode(|bytes| {
+            let archived =
+                rkyv::access::<cc_lb_plugin_wire::v1::ArchivedFilterRequest, RkyvError>(bytes)
+                    .expect("filter request");
+            let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+            assert_eq!(query, Some("foo=bar"));
+            let header_names: Vec<&str> = archived
+                .headers
+                .iter()
+                .map(|header| {
+                    let name: &str = &header.name;
+                    name
+                })
+                .collect();
+            assert_eq!(header_names, vec!["x-request-id"]);
+        })
+        .expect("encode filter request");
+    }
+}

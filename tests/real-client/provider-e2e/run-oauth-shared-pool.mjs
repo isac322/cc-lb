@@ -693,6 +693,14 @@ async function runAgyGeminiOAuthScenario({ geminiTap, clientKey, workRoot }) {
   const prompt1 =
     'You are working in a tiny Python project in the current directory. Use your tools: read pricing.py and test_pricing.py, then run `python3 -m unittest -v` to see the failures. Fix pricing.py with the smallest targeted change so every test passes. Do not edit test_pricing.py. Re-run `python3 -m unittest -v` until it passes. Finish with: AGY-OAUTH-TURN1 DONE';
   const agyBin = process.env.AGY_BIN ?? 'agy';
+  const agyCheck = spawnSync(agyBin, ['--version'], { encoding: 'utf8', timeout: 5_000 });
+  if (agyCheck.error || agyCheck.status !== 0) {
+    return {
+      profile: 'agy-gemini-oauth',
+      binary: agyBin,
+      verdict: 'SKIPPED_BINARY_MISSING',
+    };
+  }
   const turn1 = await runCmd(
     agyBin,
     [
@@ -988,6 +996,53 @@ async function main() {
     if (oaCreate.status !== 201) throw new Error(`Create openai_oauth failed: ${oaCreate.text}`);
     const openaiUpstreamId = oaCreate.json.id;
 
+
+    // Verify D2: OAuth status endpoint works for both gemini_oauth and openai_oauth
+    const gemStatusRes = await adminCall(adminToken, 'GET', `/admin/v1/upstreams/${geminiUpstreamId}/oauth/status`);
+    if (gemStatusRes.status !== 200 || gemStatusRes.json?.status !== 'active' || !gemStatusRes.json?.has_credentials) {
+      throw new Error(`gemini_oauth status check failed: ${gemStatusRes.status} ${gemStatusRes.text}`);
+    }
+    const oaStatusRes = await adminCall(adminToken, 'GET', `/admin/v1/upstreams/${openaiUpstreamId}/oauth/status`);
+    if (oaStatusRes.status !== 200 || oaStatusRes.json?.status !== 'active' || !oaStatusRes.json?.has_credentials) {
+      throw new Error(`openai_oauth status check failed: ${oaStatusRes.status} ${oaStatusRes.text}`);
+    }
+
+    // Verify B1/B2/A2: Upload Wasm shape & router plugins and attach to shared principal
+    const uploadedPlugins = [];
+    for (const [slot, filename] of [
+      ['router', 'cache_aware_wasmtime.wasm'],
+      ['shape', 'wasmtime_shape_passthrough.wasm'],
+    ]) {
+      const wasmPath = path.join(REPO_ROOT, 'target/wasm32-unknown-unknown/release', filename);
+      if (existsSync(wasmPath)) {
+        const wasmBytes = readFileSync(wasmPath);
+        const form = new FormData();
+        form.append('bytes', new Blob([wasmBytes], { type: 'application/wasm' }), filename);
+        form.append('original_filename', filename);
+        const upRes = await fetch(`http://127.0.0.1:${PORTS.admin}/admin/v1/plugins/wasm`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${adminToken}` },
+          body: form,
+        });
+        const upJson = await upRes.json();
+        if (upRes.status !== 201 && upRes.status !== 200) {
+          throw new Error(`Wasm upload ${filename} failed: ${upRes.status} ${JSON.stringify(upJson)}`);
+        }
+        const chainRes = await adminCall(
+          adminToken,
+          'POST',
+          `/admin/v1/principals/${principalId}/plugin-chain`,
+          {
+            slot,
+            wasm_registry_id: upJson.id,
+          },
+        );
+        if (chainRes.status !== 201) {
+          throw new Error(`Attach plugin ${filename} (${slot}) failed: ${chainRes.status} ${chainRes.text}`);
+        }
+        uploadedPlugins.push({ slot, filename, registryId: upJson.id, chainEntryId: chainRes.json.id });
+      }
+    }
     const injectDropState = { enabled: false, fired: false };
     geminiTap = await startGeminiOAuthTap({
       listenPort: PORTS.geminiTap,
@@ -1048,15 +1103,61 @@ async function main() {
       { encoding: 'utf8' },
     ).trim();
     const events = JSON.parse(dbEventsRaw || '[]');
+    const oaDeltaEvents = await adminCall(
+      adminToken,
+      'GET',
+      '/admin/v1/events/delta?since_cursor=0&event_kind=openai_responses',
+    );
+    const gmDeltaEvents = await adminCall(
+      adminToken,
+      'GET',
+      '/admin/v1/events/delta?since_cursor=0&event_kind=gemini_generate_content',
+    );
+
+    // Verify C1: Local proxy error format on OpenAI (/v1/responses) and Gemini (:generateContent)
+    const oaLocalErrRes = await fetch(`http://127.0.0.1:${PORTS.proxy}/v1/responses`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${clientKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: 'gpt-5.2', input: 'hi', previous_response_id: 'resp_unbound_local_error_check' }),
+    });
+    const oaLocalErrJson = await oaLocalErrRes.json();
+    const gmLocalErrRes = await fetch(
+      `http://127.0.0.1:${PORTS.proxy}/v1beta/models/gemini-2.5-pro:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': clientKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          cachedContent: 'cachedContents/unbound-local-error-check',
+          contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        }),
+      },
+    );
+    const gmLocalErrJson = await gmLocalErrRes.json();
+
     await collector.close();
     const spansSummary = existsSync(spansFile) ? JSON.parse(readFileSync(spansFile, 'utf8')).stats : null;
 
     const finalReport = {
       status:
         ompGeminiResult.verdict === 'PASS' &&
-        agyGeminiResult.verdict === 'PASS' &&
+        (agyGeminiResult.verdict === 'PASS' || agyGeminiResult.verdict === 'SKIPPED_BINARY_MISSING') &&
         codexOpenaiResult.verdict === 'PASS' &&
-        rereadHistory.length >= 2
+        rereadHistory.length >= 2 &&
+        (oaDeltaEvents.json?.events?.length ?? 0) >= 1 &&
+        (gmDeltaEvents.json?.events?.length ?? 0) >= 1 &&
+        oaLocalErrRes.status === 503 &&
+        oaLocalErrJson.type === undefined &&
+        oaLocalErrJson.error?.code === 'api_error' &&
+        gmLocalErrRes.status === 503 &&
+        gmLocalErrJson.type === undefined &&
+        gmLocalErrJson.error?.code === 503 &&
+        gmLocalErrJson.error?.status === 'UNAVAILABLE'
           ? 'PASS'
           : 'FAIL',
       shared_cc_lb_instance: {
@@ -1072,6 +1173,15 @@ async function main() {
         sqliteNeverRefreshRows: dbCheck.split(/\r?\n/),
       },
       auto_reread_on_invalidation_history: rereadHistory,
+      backend_extensions_verified: {
+        geminiOauthStatus: gemStatusRes.json,
+        openaiOauthStatus: oaStatusRes.json,
+        attachedWasmPlugins: uploadedPlugins,
+        openaiResponsesEventKindCount: oaDeltaEvents.json?.events?.length ?? 0,
+        geminiGenerateContentEventKindCount: gmDeltaEvents.json?.events?.length ?? 0,
+        openaiLocalErrorEnvelope: oaLocalErrJson,
+        geminiLocalErrorEnvelope: gmLocalErrJson,
+      },
       cli_results: {
         omp_gemini_oauth: ompGeminiResult,
         agy_gemini_oauth: agyGeminiResult,

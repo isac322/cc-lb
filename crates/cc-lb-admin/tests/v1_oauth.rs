@@ -1537,6 +1537,71 @@ async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
     );
 }
 
+#[tokio::test]
+async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
+    let fixture = Fixture::new().await;
+    for (index, kind) in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth]
+        .into_iter()
+        .enumerate()
+    {
+        let refreshing = fixture
+            .create_upstream(&format!("provider-refreshing-{index}"), kind)
+            .await;
+        fixture
+            .store_bundle(
+                &refreshing,
+                OAuthTokenBundle {
+                    access_token: format!("provider-access-{index}"),
+                    refresh_token: format!("provider-refresh-{index}"),
+                    expires_at_unix_secs: TEST_NOW_UNIX_SECS + 3_600,
+                    refresh_token_expires_at_unix_secs: Some(TEST_NOW_UNIX_SECS + 86_400),
+                    account_id: None,
+                    project_id: (kind == UpstreamKind::GeminiOauth)
+                        .then(|| "test-project".to_owned()),
+                    scopes: vec!["user:profile".to_owned()],
+                    never_refresh: false,
+                },
+            )
+            .await;
+        let (status, body) = fixture.get_oauth_status(refreshing.id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], kind.as_str());
+        assert_eq!(body["has_credentials"], true);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["mode"], "refreshing");
+        assert_eq!(body["can_refresh"], true);
+        assert_eq!(body["expires_at_unix_secs"], TEST_NOW_UNIX_SECS + 3_600);
+
+        let never_refresh = fixture
+            .create_upstream(&format!("provider-never-refresh-{index}"), kind)
+            .await;
+        fixture
+            .store_bundle(
+                &never_refresh,
+                OAuthTokenBundle {
+                    access_token: format!("provider-long-lived-{index}"),
+                    refresh_token: String::new(),
+                    expires_at_unix_secs: TEST_NOW_UNIX_SECS + 86_400,
+                    refresh_token_expires_at_unix_secs: None,
+                    account_id: None,
+                    project_id: (kind == UpstreamKind::GeminiOauth)
+                        .then(|| "test-project".to_owned()),
+                    scopes: vec!["user:profile".to_owned()],
+                    never_refresh: true,
+                },
+            )
+            .await;
+        let (status, body) = fixture.get_oauth_status(never_refresh.id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], kind.as_str());
+        assert_eq!(body["has_credentials"], true);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["mode"], "long_lived_365d");
+        assert_eq!(body["can_refresh"], false);
+        assert_eq!(body["expires_at_unix_secs"], TEST_NOW_UNIX_SECS + 86_400);
+    }
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn long_lived_upstream_seeds_no_oauth_refresh_task() {
