@@ -52,6 +52,26 @@ pub fn sample_shape_request() -> ShapeRequest {
     }
 }
 
+/// Protocol-valid minimal OpenAI Responses shape request. Starts from the
+/// Anthropic sample defaults so the shared request metadata stays stable.
+pub fn sample_openai_shape_request() -> ShapeRequest {
+    let mut request = sample_shape_request();
+    request.path = Box::from("/v1/responses");
+    request.body = Box::from(&br#"{"model":"gpt-4o-mini","input":"hello"}"#[..]);
+    request.upstream = Upstream::OpenaiDirect { base_url: None };
+    request
+}
+
+/// Protocol-valid minimal Gemini GenerateContent shape request. Starts from
+/// the Anthropic sample defaults so the shared request metadata stays stable.
+pub fn sample_gemini_shape_request() -> ShapeRequest {
+    let mut request = sample_shape_request();
+    request.path = Box::from("/v1beta/models/gemini-2.5-flash:generateContent");
+    request.body = Box::from(&br#"{"contents":[{"parts":[{"text":"hello"}]}]}"#[..]);
+    request.upstream = Upstream::GeminiDirect { base_url: None };
+    request
+}
+
 /// Protocol-valid minimal `FilterRequest` — POST /v1/messages, JSON
 /// content-type header, small JSON body, [`synth_principal`], no
 /// candidates. Returned owned + mutable so authors can push

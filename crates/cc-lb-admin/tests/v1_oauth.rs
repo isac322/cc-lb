@@ -5,6 +5,7 @@
 
 use crate::admin_test_common;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -248,6 +249,9 @@ impl Fixture {
             .expect("request succeeds");
         json_response(response).await
     }
+    async fn create_import(&self, body: Value) -> (StatusCode, Value) {
+        self.post_json("/admin/v1/upstreams", body).await
+    }
 
     async fn get_json(&self, uri: &str) -> (StatusCode, Value) {
         let response = self
@@ -364,6 +368,8 @@ impl Fixture {
                 refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
                 expires_at_unix_secs: expired_at,
                 refresh_token_expires_at_unix_secs: None,
+                account_id: None,
+                project_id: None,
                 scopes: vec!["org:profile".to_owned()],
                 never_refresh: false,
             },
@@ -970,6 +976,151 @@ async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn gemini_oauth_import_seeds_refresh_task_and_persists_project_id() {
+    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
+    let expires_at = TEST_NOW_UNIX_SECS + 3_600;
+    let (status, body) = fixture
+        .create_import(json!({
+            "name": "gemini-import",
+            "kind": "gemini_oauth",
+            "project_id": "gemini-project",
+            "oauth_tokens": {
+                "access_token": "ya29.imported-access",
+                "refresh_token": "1//imported-refresh",
+                "expires_at_unix_secs": expires_at,
+                "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
+                "never_refresh": false
+            }
+        }))
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let upstream_id: Uuid = body["id"]
+        .as_str()
+        .expect("created upstream id")
+        .parse()
+        .expect("upstream id parses");
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert_eq!(bundle.project_id.as_deref(), Some("gemini-project"));
+    assert!(!bundle.never_refresh);
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(upstream_id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "imported refreshable credentials must seed an immediate bootstrap refresh task"
+    );
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn openai_oauth_import_derives_account_id_from_jwt_and_seeds_refresh_task() {
+    let (fixture, scheduler) = Fixture::new_with_scheduler().await;
+    let access_token = test_openai_access_token("acct_imported");
+    let (status, body) = fixture
+        .create_import(json!({
+            "name": "openai-import",
+            "kind": "openai_oauth",
+            "oauth_tokens": {
+                "access_token": access_token,
+                "refresh_token": "rt-imported",
+                "expires_at_unix_secs": TEST_NOW_UNIX_SECS + 3_600,
+                "scopes": ["openid"],
+                "never_refresh": false
+            }
+        }))
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let upstream_id: Uuid = body["id"]
+        .as_str()
+        .expect("created upstream id")
+        .parse()
+        .expect("upstream id parses");
+    let bundle = fixture.decrypt_bundle(upstream_id).await;
+    assert_eq!(bundle.account_id.as_deref(), Some("acct_imported"));
+    assert_eq!(
+        scheduler
+            .next_run_for_upstream(upstream_id, "oauth_refresh")
+            .await
+            .expect("next run query succeeds"),
+        Some(i64::try_from(TEST_NOW_UNIX_SECS).expect("test timestamp fits")),
+        "imported refreshable credentials must seed an immediate bootstrap refresh task"
+    );
+}
+
+#[tokio::test]
+async fn oauth_bundle_import_rejects_anthropic_and_api_key_kinds() {
+    let fixture = Fixture::new().await;
+    let bundle = json!({
+        "access_token": "imported-access",
+        "refresh_token": "imported-refresh",
+        "expires_at_unix_secs": TEST_NOW_UNIX_SECS + 3_600,
+        "scopes": ["openid"],
+        "never_refresh": false
+    });
+
+    for kind in ["anthropic_oauth", "openai_api_key", "gemini_api_key"] {
+        let (status, body) = fixture
+            .create_import(json!({
+                "name": format!("rejected-{kind}"),
+                "kind": kind,
+                "oauth_tokens": bundle.clone()
+            }))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{kind} import must be rejected: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oauth_bundle_import_rejects_never_refresh_credentials() {
+    let fixture = Fixture::new().await;
+    let (status, body) = fixture
+        .create_import(json!({
+            "name": "never-refresh-import",
+            "kind": "gemini_oauth",
+            "project_id": "gemini-project",
+            "oauth_tokens": {
+                "access_token": "imported-access",
+                "refresh_token": "imported-refresh",
+                "expires_at_unix_secs": TEST_NOW_UNIX_SECS + 3_600,
+                "scopes": ["openid"],
+                "never_refresh": true
+            }
+        }))
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn gemini_oauth_import_requires_project_id() {
+    let fixture = Fixture::new().await;
+    let (status, body) = fixture
+        .create_import(json!({
+            "name": "missing-gemini-project",
+            "kind": "gemini_oauth",
+            "oauth_tokens": {
+                "access_token": "imported-access",
+                "refresh_token": "imported-refresh",
+                "expires_at_unix_secs": TEST_NOW_UNIX_SECS + 3_600,
+                "scopes": ["openid"],
+                "never_refresh": false
+            }
+        }))
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"], "missing_project_id");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn oauth_reconnect_seeds_refresh_at_granted_expiry_and_preserves_disabled_state() {
     let (fixture, scheduler) = Fixture::with_oauth_state_and_scheduler(
         MockOAuthState::default().with_expires_in_cap(28_800),
@@ -1366,6 +1517,8 @@ async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
                 refresh_token: "sk-ant-ort01-refreshing".to_owned(),
                 expires_at_unix_secs: now_unix_secs(fixture.clock.as_ref()) + 3600,
                 refresh_token_expires_at_unix_secs: Some(refresh_expires_at),
+                account_id: None,
+                project_id: None,
                 scopes: vec!["org:profile".to_owned()],
                 never_refresh: false,
             },
@@ -1382,6 +1535,71 @@ async fn oauth_status_reports_refreshing_mode_and_refresh_token_expiry() {
         body["refresh_token_expires_at_unix_secs"],
         refresh_expires_at
     );
+}
+
+#[tokio::test]
+async fn oauth_status_supports_openai_and_gemini_oauth_modes() {
+    let fixture = Fixture::new().await;
+    for (index, kind) in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth]
+        .into_iter()
+        .enumerate()
+    {
+        let refreshing = fixture
+            .create_upstream(&format!("provider-refreshing-{index}"), kind)
+            .await;
+        fixture
+            .store_bundle(
+                &refreshing,
+                OAuthTokenBundle {
+                    access_token: format!("provider-access-{index}"),
+                    refresh_token: format!("provider-refresh-{index}"),
+                    expires_at_unix_secs: TEST_NOW_UNIX_SECS + 3_600,
+                    refresh_token_expires_at_unix_secs: Some(TEST_NOW_UNIX_SECS + 86_400),
+                    account_id: None,
+                    project_id: (kind == UpstreamKind::GeminiOauth)
+                        .then(|| "test-project".to_owned()),
+                    scopes: vec!["user:profile".to_owned()],
+                    never_refresh: false,
+                },
+            )
+            .await;
+        let (status, body) = fixture.get_oauth_status(refreshing.id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], kind.as_str());
+        assert_eq!(body["has_credentials"], true);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["mode"], "refreshing");
+        assert_eq!(body["can_refresh"], true);
+        assert_eq!(body["expires_at_unix_secs"], TEST_NOW_UNIX_SECS + 3_600);
+
+        let never_refresh = fixture
+            .create_upstream(&format!("provider-never-refresh-{index}"), kind)
+            .await;
+        fixture
+            .store_bundle(
+                &never_refresh,
+                OAuthTokenBundle {
+                    access_token: format!("provider-long-lived-{index}"),
+                    refresh_token: String::new(),
+                    expires_at_unix_secs: TEST_NOW_UNIX_SECS + 86_400,
+                    refresh_token_expires_at_unix_secs: None,
+                    account_id: None,
+                    project_id: (kind == UpstreamKind::GeminiOauth)
+                        .then(|| "test-project".to_owned()),
+                    scopes: vec!["user:profile".to_owned()],
+                    never_refresh: true,
+                },
+            )
+            .await;
+        let (status, body) = fixture.get_oauth_status(never_refresh.id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["kind"], kind.as_str());
+        assert_eq!(body["has_credentials"], true);
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["mode"], "long_lived_365d");
+        assert_eq!(body["can_refresh"], false);
+        assert_eq!(body["expires_at_unix_secs"], TEST_NOW_UNIX_SECS + 86_400);
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -1521,6 +1739,18 @@ pub(crate) async fn json_response(response: axum::response::Response) -> (Status
         .to_bytes();
     let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
     (status, json)
+}
+
+fn test_openai_access_token(account_id: &str) -> String {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let claims = serde_json::json!({
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id
+        }
+    });
+    let claims =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("OpenAI test claims serialize"));
+    format!("{header}.{claims}.signature")
 }
 
 fn fingerprint(access_token: &str) -> String {

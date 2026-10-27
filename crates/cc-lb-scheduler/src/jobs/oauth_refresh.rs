@@ -138,6 +138,7 @@ where
             return Ok(JobOutcome::Skip);
         }
 
+        let is_anthropic_oauth = upstream.kind == UpstreamKind::AnthropicOauth;
         match refresh(upstream).await {
             Ok(RefreshOutcome::Refreshed(refreshed)) => {
                 let updated = match self
@@ -149,9 +150,11 @@ where
                     Err(error) => return Err(error),
                 };
                 let generation = updated.oauth_token_generation;
-                let mut metadata_job = MetadataRefreshJob::new(job.upstream_id, generation);
-                metadata_job.traceparent = job.traceparent;
-                enqueue_metadata(metadata_job).await?;
+                if is_anthropic_oauth {
+                    let mut metadata_job = MetadataRefreshJob::new(job.upstream_id, generation);
+                    metadata_job.traceparent = job.traceparent;
+                    enqueue_metadata(metadata_job).await?;
+                }
                 schedule_next_refresh(job.upstream_id, refreshed.expires_at_unix_secs).await?;
                 Ok(JobOutcome::Done)
             }
@@ -167,8 +170,10 @@ where
 }
 
 fn is_refreshable(upstream: &UpstreamRecord) -> bool {
-    upstream.kind == UpstreamKind::AnthropicOauth
-        && upstream.deleted_at_unix_secs.is_none()
+    matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
         && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
 }

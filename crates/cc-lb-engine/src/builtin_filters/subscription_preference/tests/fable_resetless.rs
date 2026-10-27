@@ -26,7 +26,7 @@ fn resetless_allowed_fable_counts_as_known_base() {
     let assessment = assess_candidate(
         &candidate,
         0,
-        &relevant_base_windows(FABLE_MODEL),
+        relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
     )
     .expect("resetless Fable candidate is assessable");
@@ -61,14 +61,14 @@ fn resetless_allowed_fable_does_not_increase_combined_urgency() {
     let without_fable_assessment = assess_candidate(
         &without_fable,
         0,
-        &relevant_base_windows(FABLE_MODEL),
+        relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
     )
     .expect("candidate without Fable is assessable");
     let with_resetless_fable_assessment = assess_candidate(
         &with_resetless_fable,
         0,
-        &relevant_base_windows(FABLE_MODEL),
+        relevant_base_windows(FABLE_MODEL),
         &FilterConfig::default(),
     )
     .expect("candidate with resetless Fable is assessable");

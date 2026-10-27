@@ -76,9 +76,8 @@ impl SchedulerDispatch {
         }
         let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
         if bundle.never_refresh {
-            // Refreshing a 365-day token makes Anthropic revoke it and issue an
-            // 8-hour token instead; long-lived credentials must never reach the
-            // token endpoint.
+            // Access-only imports and Anthropic long-lived grants must never
+            // reach a token endpoint, including direct scheduler dispatch.
             return Ok(RefreshOutcome::NotRefreshable);
         }
         if bundle
@@ -92,6 +91,7 @@ impl SchedulerDispatch {
         let response = match request_refresh(
             &self.http,
             self.oauth_cfg.as_ref(),
+            upstream.kind,
             &self.cancel,
             &bundle.refresh_token,
         )
@@ -116,6 +116,7 @@ impl SchedulerDispatch {
             }
             Err(RefreshRequestError::Other(error)) => return Err(error),
         };
+        let account_id = response.account_id.clone().or(bundle.account_id.clone());
         let refreshed = refreshed_token_parts(
             ExistingTokenParts {
                 refresh_token: bundle.refresh_token,
@@ -130,6 +131,8 @@ impl SchedulerDispatch {
             refresh_token: refreshed.refresh_token,
             expires_at_unix_secs: refreshed.expires_at_unix_secs,
             refresh_token_expires_at_unix_secs: refreshed.refresh_token_expires_at_unix_secs,
+            account_id,
+            project_id: bundle.project_id,
             scopes: refreshed.scopes,
             never_refresh: bundle.never_refresh,
         };

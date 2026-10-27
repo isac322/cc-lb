@@ -111,6 +111,8 @@ mod prompt_cache_byte_oracle;
 mod prompt_cache_routing_component;
 #[path = "prompt_cache_structural_properties.rs"]
 mod prompt_cache_structural_properties;
+#[path = "provider_native_http.rs"]
+mod provider_native_http;
 #[path = "queue_full_returns_503.rs"]
 mod queue_full_returns_503;
 #[path = "quota_header_surface_baseline.rs"]

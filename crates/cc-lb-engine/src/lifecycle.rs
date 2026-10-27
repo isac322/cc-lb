@@ -12,13 +12,16 @@ use cc_lb_config::{PromptCacheShadowConfig, UpstreamAffinityConfig};
 #[cfg(test)]
 use cc_lb_control::dynamic_view::DynamicViewBuilder;
 use cc_lb_domain::{
-    CacheBreakpoint, CacheBreakpointSource, CacheLookbackPrefix, CachePricingSummary, CacheScore,
-    InternalError, InternalErrorKind, InternalErrorStage, PrefixBytes, Principal, PrincipalKind,
-    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy, TtlClass, Upstream,
-    UpstreamCandidate, UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, CacheBreakpoint, CacheBreakpointSource,
+    CacheLookbackPrefix, CachePricingSummary, CacheScore, InternalError, InternalErrorKind,
+    InternalErrorStage, PrefixBytes, Principal, PrincipalKind, RoutingTrace, StageDecision,
+    TerminalDecision, TerminalStrategy, TtlClass, Upstream, UpstreamCandidate,
+    UpstreamKind as CandidateUpstreamKind, WarmCacheEntry,
 };
 use cc_lb_quota::build_subscription_quota_samples;
-use cc_lb_quota::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use cc_lb_quota::rate_limit_headers::{
+    parse_anthropic_rate_limit_headers, parse_openai_rate_limit_headers,
+};
 use cc_lb_request_log::{
     HeaderSnapshot, RequestCacheBreakpoint, RequestCacheBreakpointSource,
     RequestCacheLookbackPrefix,
@@ -34,8 +37,8 @@ use cc_lb_storage_api::{
 use cc_lb_upstream::{ApiKeyAwareSignerFactory, SignerFactory};
 use cc_lb_upstream::{
     DialectError, DialectShapeContext, ResponseTransformError, RetryDecision, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, TransformResponseRequest,
-    UpstreamDialect, UpstreamError, shape_request,
+    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SseEventTransformHook,
+    TransformResponseRequest, UpstreamDialect, UpstreamError, shape_request, sign_request,
 };
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
@@ -45,7 +48,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -55,32 +60,41 @@ use crate::attempt_rail::{AttemptIntent, Reserved, ResponseAccountingGuard, Scop
 use crate::body_io_timing::{
     BodyIoPhase, BodyIoTiming, BodyIoTimingObserverGuard, TimedResponseStream, timed_body_frame,
 };
+use crate::builtin_filters::subscription_preference::subscription_hard_blocked;
 use crate::completion_observer::{CompletionObserver, StreamCompletionLog, StreamLatency};
 use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
 };
 use crate::error_format::{
-    anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
+    anthropic_error_body, anthropic_error_response, provider_error_body_with_retry_after,
+    provider_error_response, provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::prompt_cache_simulator::{
     PromptCacheAnalysisExecutor, PromptCacheAnalysisOutput, PromptCacheAnalysisTimings,
-    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheBlockSource, analyze_v3_prompt_cache,
+    V3_TOKEN_ESTIMATE_SOURCE, V3PromptCacheAnalysis, V3PromptCacheBlockSource,
+    analyze_v3_prompt_cache,
+};
+use crate::provider_capability::{
+    ProviderCapability, body_is_consistency_safe, classify as classify_provider_capability,
 };
 use crate::request_classification::classify_client_request_kind;
 use crate::request_context::RequestContext;
 use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
-use crate::sse_error_frame::make_error_frame;
+use crate::responses_websocket::{
+    PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
+};
+use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
-    UpstreamErrorCode, classify_stream_error, error_codes, numeric_attribute,
+    TerminalClassification, UpstreamErrorCode, classify_stream_error, error_codes,
+    numeric_attribute,
 };
 use crate::upstream_affinity::{
-    extract_anthropic_web_search_affinity_keys,
-    extract_anthropic_web_search_affinity_keys_from_sse_event,
-    request_enables_anthropic_web_search,
+    UpstreamAffinityExtractionError, extract_request_affinity_keys, extract_response_affinity_keys,
+    extract_response_affinity_keys_from_sse_event, request_observes_response_affinity,
 };
 use crate::usage_decoder::{UsageDecoder, decode_full_body};
 use crate::usage_parser::{self, UsageCounts, accumulate_sse_usage, parse_sse_event};
@@ -117,6 +131,10 @@ pub const HASH_SCHEMA_VERSION: u8 = 5;
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/";
+const DEFAULT_OPENAI_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/";
+const DEFAULT_GEMINI_CODE_ASSIST_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 const DECOMPRESSION_OUTPUT_BUDGET_BODY_CAP_MULTIPLIER: usize = 4;
 const INCOMPLETE_SSE_EVENT_BUDGET_BODY_CAP_MULTIPLIER: usize = 1;
@@ -133,6 +151,8 @@ const UPSTREAM_AFFINITY_ERROR_TYPE: &str = "upstream_affinity_error";
 const UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE: &str =
     "upstream affinity is unavailable for opaque request content";
 const UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE: &str = "too many upstream affinity keys in request";
+const UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE: &str =
+    "the upstream that owns the referenced provider state is not eligible for this request";
 const UPSTREAM_SSE_INSPECTION_FAILED_MESSAGE: &str =
     "upstream SSE response could not be safely processed";
 const UPSTREAM_BUFFERED_BODY_FAILED_MESSAGE: &str = "upstream response body could not be read";
@@ -306,11 +326,18 @@ impl SseDownstreamBoundaryTracker {
 }
 
 fn make_stream_error_frame(
+    capability: ProviderCapability,
     error_type: &str,
     message: &str,
     separate_from_partial_event: bool,
 ) -> Bytes {
-    let frame = make_error_frame(error_type, message);
+    let frame = make_provider_error_frame(
+        capability,
+        StatusCode::BAD_GATEWAY,
+        error_type,
+        message,
+        None,
+    );
     if !separate_from_partial_event {
         return frame;
     }
@@ -430,15 +457,69 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestKind {
     AnthropicMessages,
+    OpenaiResponses,
+    GeminiGenerateContent,
+    GeminiCountTokens,
 }
 
 impl RequestKind {
     fn matches_upstream(self, kind: StorageUpstreamKind) -> bool {
-        match self {
-            Self::AnthropicMessages => matches!(
-                kind,
-                StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth
-            ),
+        let (protocol, _) = ids_for(kind);
+        matches!(
+            (self, protocol),
+            (Self::AnthropicMessages, ProtocolId::AnthropicMessages)
+                | (Self::OpenaiResponses, ProtocolId::OpenaiResponses)
+                | (
+                    Self::GeminiGenerateContent | Self::GeminiCountTokens,
+                    ProtocolId::GeminiGenerateContent
+                )
+        )
+    }
+}
+
+impl From<ProviderCapability> for RequestKind {
+    fn from(capability: ProviderCapability) -> Self {
+        match capability {
+            ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
+            ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
+            ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
+            ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
+        }
+    }
+}
+
+fn gemini_model_from_path(path: &str) -> Option<String> {
+    let prefix = "/v1beta/models/";
+    let model_path = path.strip_prefix(prefix)?;
+    let model = model_path
+        .strip_suffix(":generateContent")
+        .or_else(|| model_path.strip_suffix(":streamGenerateContent"))
+        .or_else(|| model_path.strip_suffix(":countTokens"))?;
+    (!model.is_empty()).then(|| model.to_owned())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolId {
+    AnthropicMessages,
+    OpenaiResponses,
+    GeminiGenerateContent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportId {
+    Http,
+}
+
+fn ids_for(kind: StorageUpstreamKind) -> (ProtocolId, TransportId) {
+    match kind {
+        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
+            (ProtocolId::AnthropicMessages, TransportId::Http)
+        }
+        StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth => {
+            (ProtocolId::OpenaiResponses, TransportId::Http)
+        }
+        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth => {
+            (ProtocolId::GeminiGenerateContent, TransportId::Http)
         }
     }
 }
@@ -702,8 +783,12 @@ pub(crate) fn build_candidates_with_matches(
 /// Excludes upstreams whose credentials are known dead: OAuth accounts that
 /// need an operator reconnect and any upstream whose last apply failed.
 fn upstream_credentials_routable(view: &DynamicView, upstream: &UpstreamRecord) -> bool {
-    if upstream.kind == StorageUpstreamKind::AnthropicOauth
-        && cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+    if matches!(
+        upstream.kind,
+        StorageUpstreamKind::AnthropicOauth
+            | StorageUpstreamKind::OpenaiOauth
+            | StorageUpstreamKind::GeminiOauth
+    ) && cc_lb_oauth_protocol::refresh_requires_reconnect(upstream.last_apply_error.as_deref())
     {
         return false;
     }
@@ -1980,13 +2065,18 @@ impl AttemptFailure {
     ///
     /// Response status, body, and `Retry-After` semantics are identical to the
     /// previous inline mapping.
-    fn into_response_and_failure(self) -> (Response<Body>, InternalFailure) {
+    fn into_response_and_failure(
+        self,
+        capability: ProviderCapability,
+    ) -> (Response<Body>, InternalFailure) {
         match self {
             Self::RawPassthrough(source) => {
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    capability,
                     StatusCode::BAD_GATEWAY,
                     "api_error",
                     "failed to prepare raw upstream request",
+                    None,
                 );
                 let failure = InternalFailure {
                     status: StatusCode::BAD_GATEWAY,
@@ -2000,10 +2090,12 @@ impl AttemptFailure {
                 (response, failure)
             }
             Self::Sign(source) => {
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    capability,
                     StatusCode::BAD_GATEWAY,
                     "api_error",
                     "failed to sign upstream request",
+                    None,
                 );
                 let failure = InternalFailure {
                     status: StatusCode::BAD_GATEWAY,
@@ -2019,20 +2111,24 @@ impl AttemptFailure {
             Self::Dispatch(source) => {
                 let (response, kind, message) = match &source {
                     DispatchError::BulkheadFull { retry_after } => (
-                        anthropic_error_response_with_retry_after(
+                        provider_error_response_with_retry_after(
+                            capability,
                             StatusCode::SERVICE_UNAVAILABLE,
                             "overloaded_error",
                             "upstream bulkhead queue is full",
+                            None,
                             retry_after.as_secs().max(1),
                         ),
                         InternalErrorKind::Unavailable,
                         source.to_string(),
                     ),
                     DispatchError::InvalidUri { .. } | DispatchError::RequestBuild { .. } => (
-                        anthropic_error_response(
+                        provider_error_response(
+                            capability,
                             StatusCode::BAD_GATEWAY,
                             "api_error",
                             "upstream request failed",
+                            None,
                         ),
                         InternalErrorKind::ConfigError,
                         source.to_string(),
@@ -2043,10 +2139,12 @@ impl AttemptFailure {
                         let chain =
                             crate::bulkhead::transport_error_chain(transport.as_ref()).join(" <- ");
                         (
-                            anthropic_error_response(
+                            provider_error_response(
+                                capability,
                                 StatusCode::BAD_GATEWAY,
                                 "api_error",
                                 "upstream request failed",
+                                None,
                             ),
                             match failure_kind {
                                 crate::bulkhead::TransportFailureKind::Timeout => {
@@ -2141,13 +2239,16 @@ struct RequestAffinityFailure {
 }
 
 impl RequestAffinityFailure {
-    fn response(&self) -> Response<Body> {
-        anthropic_error_response(self.status, self.error_type, self.message)
+    fn response(&self, capability: ProviderCapability) -> Response<Body> {
+        provider_error_response(capability, self.status, self.error_type, self.message, None)
     }
 }
 
 #[derive(Clone)]
 struct ResponseAffinityContext {
+    /// Provider protocol of the routed request; selects which response
+    /// shapes create provider-owned state.
+    capability: ProviderCapability,
     store: Option<Arc<dyn UpstreamAffinityStore>>,
     principal_id: String,
     upstream_id: Uuid,
@@ -2189,6 +2290,90 @@ fn affinity_stream_error() -> cc_lb_lifecycle::StreamError {
     cc_lb_lifecycle::StreamError {
         error_type: UPSTREAM_AFFINITY_ERROR_TYPE.to_owned(),
         error_message: UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE.to_owned(),
+    }
+}
+
+/// Provider-owned state a successful Anthropic SSE event introduces when the
+/// request carried no affinity hint. Only the events that can create state are
+/// inspected, malformed event data carries no usable state, and keys already
+/// bound for this response are skipped, so stateless events keep the exact
+/// ungated passthrough.
+fn unsolicited_anthropic_sse_affinity_keys(
+    event: &usage_parser::ParsedSseEvent<'_>,
+    principal_id: &str,
+    bound_keys: &HashSet<UpstreamAffinityKey>,
+) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
+    if !matches!(
+        event.event_type(),
+        Some("content_block_start" | "message_start" | "message_delta")
+    ) {
+        return Ok(Vec::new());
+    }
+    let keys = match extract_response_affinity_keys_from_sse_event(
+        ProviderCapability::AnthropicMessages,
+        event,
+        principal_id,
+    ) {
+        Ok(keys) => keys,
+        Err(UpstreamAffinityExtractionError::InvalidSseData) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(keys
+        .into_iter()
+        .filter(|key| !bound_keys.contains(key))
+        .collect())
+}
+
+/// JSON key fragments every provider-state field the unsolicited Anthropic
+/// extractor binds must contain: `encrypted_content`, `container` (which also
+/// covers the `container_upload` block type), and `file_id`. `\u` covers keys
+/// spelled with JSON escapes. Event bytes holding none of them cannot introduce
+/// provider state, so they keep the raw chunk passthrough.
+const ANTHROPIC_PROVIDER_STATE_MARKERS: [&[u8]; 4] =
+    [b"encrypted_content", b"container", b"file_id", b"\\u"];
+
+/// Already-forwarded bytes of a partial event re-scanned together with the
+/// next chunk, so a marker split across upstream chunks is detected before
+/// the bytes that follow it are forwarded.
+const ANTHROPIC_PROVIDER_STATE_MARKER_PROBE_BYTES: usize = b"encrypted_content".len() - 1;
+
+/// Whether unforwarded SSE bytes may belong to an event that introduces
+/// unsolicited Anthropic provider state and therefore must be held until the
+/// event completes and its state is bound.
+fn sse_bytes_may_carry_anthropic_provider_state(bytes: &[u8]) -> bool {
+    ANTHROPIC_PROVIDER_STATE_MARKERS
+        .iter()
+        .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+}
+
+/// Whether a successful SSE event is the provider's terminal success event,
+/// before which request-referenced provider state still pending a binding must
+/// be persisted. Gemini streams carry no terminal event, so their pending keys
+/// are bound once the upstream stream completes cleanly.
+fn sse_event_completes_response(
+    capability: ProviderCapability,
+    event: &usage_parser::ParsedSseEvent<'_>,
+    anthropic_message_stop: bool,
+) -> bool {
+    match capability {
+        ProviderCapability::AnthropicMessages => {
+            anthropic_message_stop || event.event_name() == Some(b"message_stop")
+        }
+        ProviderCapability::OpenaiResponses => {
+            event.event_type() == Some("response.completed")
+                || event.event_name() == Some(b"response.completed")
+        }
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
+    }
+}
+
+/// JSON `type` of the provider's terminal success SSE event, used by the #663
+/// accept-with-warning path. Gemini streams have no terminal event.
+const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<&'static str> {
+    match capability {
+        ProviderCapability::AnthropicMessages => Some("message_stop"),
+        ProviderCapability::OpenaiResponses => Some("response.completed"),
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => None,
     }
 }
 
@@ -2635,6 +2820,633 @@ impl Lifecycle {
         result
     }
 
+    /// Build authentication metadata for a WebSocket turn from the proof and
+    /// the current principal view, without touching the client body.
+    pub(crate) fn websocket_auth_info(
+        &self,
+        auth: &crate::Authenticated,
+    ) -> cc_lb_lifecycle::AuthInfo {
+        let principal_kind = self
+            .dynamic_view
+            .load()
+            .principal_view
+            .get(auth.principal_id())
+            .map(|cached| db_principal_kind_as_str(cached.principal_kind()).to_owned());
+        cc_lb_lifecycle::AuthInfo {
+            principal_id: auth.principal_id().to_owned(),
+            key_id: Some(auth.key_id().to_owned()),
+            principal_kind,
+            auth_ms: Some(auth.auth_ms()),
+        }
+    }
+
+    /// Allocate observation state without recording a successful upgrade as a turn.
+    pub(crate) fn websocket_observer(&self) -> (Option<LifecycleContext>, String) {
+        let request_id = next_request_id();
+        let observer = self.event_bus.as_ref().map(|bus| {
+            let observer = LifecycleContext::new(request_id.clone(), Arc::clone(bus), &self.clock);
+            observer.set_event_kind(cc_lb_request_log::RequestEventKind::from_path(
+                "/v1/responses",
+            ));
+            observer
+        });
+        (observer, request_id)
+    }
+
+    pub fn reject_responses_websocket_authentication(
+        &self,
+        error: &BuiltinAuthError,
+    ) -> Response<Body> {
+        let (observer, _) = self.websocket_observer();
+        if let Some(observer) = observer.as_ref() {
+            observer.mark_authn_reached();
+        }
+        crate::authn_rail::reject_unauthenticated(error, observer.as_ref())
+    }
+
+    /// Route and reserve one logical create; never dispatch an HTTP request.
+    /// The gateway records authentication before parsing any client frame.
+    pub(crate) async fn prepare_websocket_turn(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: Arc<Value>,
+        owner: Option<Uuid>,
+        observer: Option<LifecycleContext>,
+        request_id: &str,
+    ) -> Result<PreparedWebSocketTurn, WebSocketError> {
+        let span = tracing::info_span!(
+            "proxy.responses_websocket.turn",
+            cc_lb.request.id = request_id,
+            cc_lb.event.id = observer.as_ref().map(|observer| observer.event_id()),
+            gen_ai.response.id = tracing::field::Empty,
+            cc_lb.responses.stream_id = tracing::field::Empty,
+            cc_lb.responses.connection_id = tracing::field::Empty,
+            cc_lb.upstream.id = tracing::field::Empty,
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.request.stream = true,
+            http.request.method = "GET",
+            url.path = "/v1/responses",
+        );
+        if let Some(observer) = observer.as_ref() {
+            observer.mark_authn_reached();
+            observer.set_request_span(span.clone());
+            observer.emit_request_started(true);
+        }
+        let result = async {
+            let view = self.dynamic_view.load();
+            let cached = view
+                .principal_view
+                .get(auth.principal_id())
+                .ok_or_else(|| {
+                    WebSocketError::new(
+                        403,
+                        error_codes::PRINCIPAL_MISSING,
+                        "authenticated principal is unavailable",
+                    )
+                })?;
+            if let Some(observer) = observer.as_ref() {
+                observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
+                    event_id: observer.event_id().to_owned(),
+                    result: Ok(cc_lb_lifecycle::ParseInfo {
+                        path: "/v1/responses".to_owned(),
+                        method: "GET".to_owned(),
+                        model: body.get("model").and_then(Value::as_str).map(str::to_owned),
+                        stream: true,
+                        body_bytes: ingress.frame.len() as u64,
+                        cache_control_block_count: None,
+                        thinking_budget_tokens: None,
+                        reasoning_effort: body
+                            .pointer("/reasoning/effort")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        cache_breakpoints: Vec::new(),
+                        cache_prefix_hash: None,
+                        matched_v3_cache_key: None,
+                        thread_id: None,
+                        observed_session_id: None,
+                        request_kind: None,
+                        claude_agent_id: None,
+                        claude_parent_agent_id: None,
+                        parent_session_id: None,
+                        client_app: None,
+                        session_id_source: None,
+                        message_id: None,
+                        message_index: None,
+                        message_count: None,
+                        cache_control_message_indices: Vec::new(),
+                    }),
+                });
+            }
+            let route_started = Instant::now();
+            let (ctx, mut pipeline_result) = self
+                .websocket_routing(
+                    &view,
+                    auth,
+                    ingress,
+                    body.as_ref(),
+                    owner,
+                    request_id.to_owned(),
+                )
+                .await
+                .inspect_err(|error| {
+                    if let Some(observer) = observer.as_ref() {
+                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                            event_id: observer.event_id().to_owned(),
+                            result: Err(
+                                if error.code == error_codes::ROUTER_PIPELINE_UNAVAILABLE {
+                                    cc_lb_lifecycle::RouteFailure::RouterPipelineUnavailable
+                                } else {
+                                    cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter
+                                },
+                            ),
+                            routing_trace: None,
+                        });
+                    }
+                })?;
+            if let Some(observer) = observer.as_ref() {
+                for error in pipeline_result.internal_errors.drain(..) {
+                    observer.record_internal_error(error);
+                }
+            }
+            let terminal = self.select_terminal_upstream(
+                cached.resolved_pipeline(None).terminal.clone(),
+                &pipeline_result.candidates,
+            );
+            let selected_id = terminal.upstream_id.ok_or_else(|| {
+                WebSocketError::new(
+                    503,
+                    error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER,
+                    "no eligible Responses upstream",
+                )
+            })?;
+            let record = view
+                .upstreams_snapshot()
+                .iter()
+                .find(|record| record.id == selected_id)
+                .ok_or_else(|| {
+                    WebSocketError::new(
+                        502,
+                        error_codes::ROUTE_NOT_CONFIGURED,
+                        "selected upstream is unavailable",
+                    )
+                })?;
+            let (route, base_url) = route_for_record(record, cached).map_err(|message| {
+                WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
+            })?;
+            let routed = RoutedUpstream::new(
+                record,
+                route,
+                base_url,
+                &pipeline_result,
+                terminal,
+                None,
+                duration_to_ms(route_started.elapsed()),
+            );
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            span.record("gen_ai.request.model", model.as_str());
+            span.record("cc_lb.upstream.id", tracing::field::display(selected_id));
+            let route_info = route_info_for_routed(&routed, Some(&model));
+            if let Some(observer) = observer.as_ref() {
+                observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: observer.event_id().to_owned(),
+                    result: Ok(route_info.clone()),
+                    routing_trace: route_info.routing_trace.clone(),
+                });
+            }
+            let body_view = RequestBodyView {
+                parsed: Ok(body.clone()),
+                json_parse_ms: 0.0,
+            };
+            let principal = Principal {
+                id: auth.principal_id().to_owned(),
+                kind: PrincipalKind::InternalKey,
+            };
+            let reserve_started = Instant::now();
+            let mut active_limit = match self
+                .reserve_limit(
+                    &view.principal_view,
+                    &ctx,
+                    &principal,
+                    record,
+                    auth.success(),
+                    &body_view,
+                )
+                .await
+            {
+                Ok(limit) => limit,
+                Err(LimitRejectionErr { response, info }) => {
+                    if let Some(observer) = observer.as_ref() {
+                        observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                            event_id: observer.event_id().to_owned(),
+                            decision: cc_lb_lifecycle::LimitDecisionKind::Rejected {
+                                reason: info.reason_label.clone(),
+                                subject: info.subject,
+                                request_summary: info.request_summary,
+                                route_summary: info.route_summary,
+                                limit_violation: info.limit_violation,
+                            },
+                        });
+                    }
+                    return Err(WebSocketError::new(
+                        response.status().as_u16(),
+                        error_codes::LIMIT_REJECTED,
+                        info.reason_label,
+                    ));
+                }
+            };
+            if let Some(observer) = observer.as_ref() {
+                observer.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::LimitDecision {
+                    event_id: observer.event_id().to_owned(),
+                    decision: cc_lb_lifecycle::LimitDecisionKind::Reserved {
+                        reservation_id: active_limit
+                            .as_ref()
+                            .and_then(|limit| limit.reservation.as_ref())
+                            .map(|reservation| reservation.id().to_owned())
+                            .unwrap_or_default(),
+                        amount: active_limit
+                            .as_ref()
+                            .map_or(0, |limit| limit.request.max_tokens.max(0) as u64),
+                        limit_reserve_ms: Some(duration_to_ms(reserve_started.elapsed())),
+                    },
+                });
+            }
+            let mut candidates = Vec::with_capacity(pipeline_result.candidates.len());
+            candidates.push(WebSocketCandidate {
+                upstream_id: selected_id,
+                upstream_name: record.name.clone(),
+            });
+            candidates.extend(
+                pipeline_result
+                    .candidates
+                    .into_iter()
+                    .filter(|candidate| candidate.upstream_id != selected_id)
+                    .map(|candidate| WebSocketCandidate {
+                        upstream_id: candidate.upstream_id,
+                        upstream_name: candidate.name,
+                    }),
+            );
+            Ok(PreparedWebSocketTurn {
+                candidates,
+                route_info,
+                observer: observer.clone(),
+                reservation: active_limit
+                    .as_mut()
+                    .and_then(|limit| limit.reservation.take()),
+                limit_engine: self.limit_engine.clone(),
+                principal_id: auth.principal_id().to_owned(),
+                key_id: auth.key_id().to_owned(),
+                model,
+                store: body.get("store").and_then(Value::as_bool).unwrap_or(true),
+                span: span.clone(),
+            })
+        }
+        .instrument(span.clone())
+        .await;
+        if let (Err(error), Some(observer)) = (&result, observer.as_ref()) {
+            observer.terminate_failure(InternalFailure {
+                status: StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                error_code: error.code,
+                error: InternalError {
+                    stage: if error.code == error_codes::PRINCIPAL_MISSING
+                        || error.code == "principal_unavailable"
+                    {
+                        InternalErrorStage::Authn
+                    } else if error.code == "invalid_request_error" {
+                        InternalErrorStage::Ingress
+                    } else {
+                        InternalErrorStage::Router
+                    },
+                    kind: if error.status < 500 {
+                        InternalErrorKind::InvalidInput
+                    } else {
+                        InternalErrorKind::Unavailable
+                    },
+                    message: Some(error.message.clone()),
+                },
+            });
+        }
+        result
+    }
+
+    /// Recheck a retained connection against the current view without reserving again.
+    pub(crate) async fn validate_websocket_turn(
+        &self,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: &Value,
+        upstream_id: Uuid,
+    ) -> Result<(), WebSocketError> {
+        let view = self.dynamic_view.load();
+        self.websocket_routing(
+            &view,
+            auth,
+            ingress,
+            body,
+            Some(upstream_id),
+            next_request_id(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn websocket_routing(
+        &self,
+        view: &DynamicView,
+        auth: &crate::Authenticated,
+        ingress: WebSocketIngress<'_>,
+        body: &Value,
+        owner: Option<Uuid>,
+        request_id: String,
+    ) -> Result<(RequestContext, FilterPipelineResult), WebSocketError> {
+        use cc_lb_control::api_keys::principal_view::PrincipalStatus;
+        if view.principal_view.principal_status(auth.principal_id()) != PrincipalStatus::Active {
+            return Err(WebSocketError::new(
+                403,
+                "principal_unavailable",
+                "authenticated principal is unavailable",
+            ));
+        }
+        let model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|model| !model.is_empty())
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    400,
+                    "invalid_request_error",
+                    "response.create requires a model",
+                )
+            })?;
+        if !view
+            .principal_view
+            .is_model_allowed(auth.principal_id(), model)
+        {
+            return Err(WebSocketError::new(
+                403,
+                "model_not_allowed",
+                "model is not allowed for this principal",
+            ));
+        }
+        let mut keys = extract_request_affinity_keys(
+            ProviderCapability::OpenaiResponses,
+            body,
+            auth.principal_id(),
+        )
+        .map_err(|_| {
+            WebSocketError::new(
+                400,
+                "invalid_request_error",
+                UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
+            )
+        })?;
+        // A response id owned by this live connection need not exist in durable storage.
+        // Other recognized state still has to agree with that connection's owner.
+        if owner.is_some() {
+            keys.retain(|key| {
+                key.kind != cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId
+            });
+        }
+        let affinity = self
+            .resolve_request_affinities(&keys)
+            .await
+            .map_err(|failure| {
+                WebSocketError::new(
+                    failure.status.as_u16(),
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    failure.message,
+                )
+            })?;
+        let target = match (
+            owner,
+            affinity
+                .as_ref()
+                .map(|affinity| affinity.target_upstream_id),
+        ) {
+            (Some(owner), Some(affinity)) if owner != affinity => {
+                return Err(WebSocketError::new(
+                    400,
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    "provider state belongs to a different upstream",
+                ));
+            }
+            (owner, affinity) => owner.or(affinity),
+        };
+        let cached = view
+            .principal_view
+            .get(auth.principal_id())
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    403,
+                    error_codes::PRINCIPAL_MISSING,
+                    "authenticated principal is unavailable",
+                )
+            })?;
+        let pipeline = cached.resolved_pipeline(None);
+        if let Some(error) = pipeline.instantiation_error.as_deref() {
+            return Err(WebSocketError::new(
+                502,
+                error_codes::ROUTER_PIPELINE_UNAVAILABLE,
+                error,
+            ));
+        }
+        let mut downstream_headers = ingress.headers.clone();
+        strip_hop_by_hop(&mut downstream_headers);
+        let canonical_model = canonical_model_id(model).to_owned();
+        let service_tier = body.get("service_tier").and_then(Value::as_str);
+        let ctx = RequestContext::builder()
+            .request_id(request_id)
+            .downstream_headers(downstream_headers)
+            .method(http::Method::GET)
+            .path("/v1/responses".to_owned())
+            .body_bytes(ingress.frame.clone())
+            .canonical_model_id(canonical_model.clone())
+            .requested_service_tier(service_tier.map(str::to_owned))
+            .cache_pricing(cache_pricing_summary_for_model(
+                cc_lb_pricing::global_catalog(),
+                &canonical_model,
+                service_tier,
+            ))
+            .build();
+        let principal = Principal {
+            id: auth.principal_id().to_owned(),
+            kind: PrincipalKind::InternalKey,
+        };
+        let mut candidates = build_candidates(
+            view,
+            auth.principal_id(),
+            RequestKind::OpenaiResponses,
+            &[],
+            &HashMap::new(),
+            &*self.clock,
+        );
+        if let Some(target) = target {
+            candidates.retain(|candidate| candidate.upstream_id == target);
+        }
+        let mut result =
+            execute_filter_pipeline(&pipeline.user_filters, &ctx, &principal, candidates);
+        if let Some(target) = target {
+            result
+                .candidates
+                .retain(|candidate| candidate.upstream_id == target);
+        }
+        if result.candidates.is_empty() {
+            return Err(WebSocketError::new(
+                503,
+                if target.is_some() {
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE
+                } else {
+                    error_codes::ROUTE_NO_UPSTREAM_AFTER_FILTER
+                },
+                if target.is_some() {
+                    UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE
+                } else {
+                    "no upstream candidates remain after routing filters"
+                },
+            ));
+        }
+        Ok((ctx, result))
+    }
+
+    /// Sign only a newly opened upstream connection, using its current credentials.
+    pub(crate) async fn sign_websocket_connection(
+        &self,
+        auth: &crate::Authenticated,
+        headers: &HeaderMap,
+        candidate: &WebSocketCandidate,
+        query: Option<&str>,
+    ) -> Result<(Url, HeaderMap), WebSocketError> {
+        let view = self.dynamic_view.load();
+        let record = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| {
+                record.id == candidate.upstream_id
+                    && record.enabled
+                    && matches!(
+                        record.kind,
+                        StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
+                    )
+            })
+            .ok_or_else(|| {
+                WebSocketError::new(
+                    503,
+                    error_codes::ROUTE_NOT_CONFIGURED,
+                    "upstream is no longer available",
+                )
+            })?;
+        let upstream = upstream_for_record(record).map_err(|message| {
+            WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, message)
+        })?;
+        let mut downstream_headers = headers.clone();
+        strip_hop_by_hop(&mut downstream_headers);
+        let ctx = RequestContext::builder()
+            .request_id(next_request_id())
+            .downstream_headers(downstream_headers)
+            .method(http::Method::GET)
+            .path("/v1/responses".to_owned())
+            .query(query.map(str::to_owned))
+            .build();
+        let principal = Principal {
+            id: auth.principal_id().to_owned(),
+            kind: PrincipalKind::InternalKey,
+        };
+        let shaped = raw_passthrough_request(
+            record.base_url.as_ref(),
+            &ctx,
+            &principal,
+            &upstream,
+            record.kind == StorageUpstreamKind::OpenaiOauth,
+        )
+        .map_err(|error| {
+            WebSocketError::new(502, error_codes::ROUTE_NOT_CONFIGURED, error.to_string())
+        })?;
+        let factory = view.signer_factory.with_router_choice(record.name.clone());
+        let signer = factory.build(&upstream).await.map_err(|error| {
+            WebSocketError::new(502, "upstream_signing_failed", error.to_string())
+        })?;
+        let signed = sign_request(signer.as_ref(), shaped)
+            .await
+            .map_err(|error| {
+                WebSocketError::new(502, "upstream_signing_failed", error.to_string())
+            })?;
+        let mut url = signed.url().clone();
+        let scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            "wss" => "wss",
+            "ws" => "ws",
+            _ => {
+                return Err(WebSocketError::new(
+                    502,
+                    "invalid_upstream_url",
+                    "unsupported upstream WebSocket URL scheme",
+                ));
+            }
+        };
+        url.set_scheme(scheme).map_err(|_| {
+            WebSocketError::new(
+                502,
+                "invalid_upstream_url",
+                "invalid upstream WebSocket URL",
+            )
+        })?;
+        let mut headers = signed.headers().clone();
+        strip_hop_by_hop(&mut headers);
+        Ok((url, headers))
+    }
+
+    /// Persist recognized state before the gateway exposes it to another connection.
+    pub(crate) async fn bind_websocket_response(
+        &self,
+        auth: &crate::Authenticated,
+        upstream_id: Uuid,
+        response: &Value,
+        store: bool,
+    ) -> Result<(), WebSocketError> {
+        let mut keys = extract_response_affinity_keys(
+            ProviderCapability::OpenaiResponses,
+            response,
+            auth.principal_id(),
+        )
+        .map_err(|_| {
+            WebSocketError::new(
+                502,
+                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                "upstream response carries invalid provider state",
+            )
+        })?;
+        if !store {
+            // Only unstored response ids are connection-local; conversations
+            // retain their existing durable ownership across connections.
+            keys.retain(|key| {
+                key.kind != cc_lb_storage_api::UpstreamAffinityKind::OpenaiResponseId
+            });
+        }
+        let context = ResponseAffinityContext {
+            capability: ProviderCapability::OpenaiResponses,
+            store: self.upstream_affinity_store.clone(),
+            principal_id: auth.principal_id().to_owned(),
+            upstream_id,
+            pending_request_keys: Vec::new(),
+            observe_response_keys: true,
+            ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
+        };
+        bind_upstream_affinity_keys(&context, &keys, unix_secs(self.clock.now()))
+            .await
+            .map_err(|_| {
+                WebSocketError::new(
+                    503,
+                    error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
+                )
+            })
+    }
+
     /// Record the authenticated principal identity on the lifecycle context,
     /// resolving the real principal kind from the current view.
     ///
@@ -2711,6 +3523,9 @@ impl Lifecycle {
         let observer_from_ext = req.extensions().get::<LifecycleContext>().cloned();
         let (mut ctx, body_too_large) = self.parse(req);
         let body_view = RequestBodyView::new(&ctx.body_bytes);
+        let path_model = gemini_model_from_path(&ctx.path);
+        let request_model = body_view.model().or(path_model.clone());
+        let request_capability = classify_provider_capability(&ctx.method, &ctx.path);
         let mut setup_timings = cc_lb_lifecycle::RequestSetupTimings {
             json_parse_ms: Some(body_view.json_parse_ms()),
             ..cc_lb_lifecycle::RequestSetupTimings::default()
@@ -2719,8 +3534,8 @@ impl Lifecycle {
         handle_span.record("cc_lb.request.id", ctx.request_id.as_str());
         handle_span.record("http.request.method", ctx.method.as_str());
         handle_span.record("url.path", ctx.path.as_str());
-        if let Some(model) = body_view.model() {
-            handle_span.record("gen_ai.request.model", model.as_str());
+        if let Some(model) = request_model.as_deref() {
+            handle_span.record("gen_ai.request.model", model);
         }
         if body_view.stream() {
             handle_span.record("gen_ai.request.stream", true);
@@ -2798,14 +3613,46 @@ impl Lifecycle {
             id: principal_id,
             kind: PrincipalKind::InternalKey,
         };
+        let Some(request_capability) = request_capability else {
+            let response = anthropic_error_response(
+                StatusCode::NOT_FOUND,
+                "operation_not_supported",
+                "operation is not supported by the consistency-safe proxy boundary",
+            );
+            if let Some(o) = observer.as_ref() {
+                o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
+            }
+            return Ok(response);
+        };
+        if body_view
+            .value()
+            .is_some_and(|body| !body_is_consistency_safe(request_capability, body))
+        {
+            let response = anthropic_error_response(
+                StatusCode::NOT_FOUND,
+                "operation_not_supported",
+                "operation is not supported by the consistency-safe proxy boundary",
+            );
+            if let Some(o) = observer.as_ref() {
+                o.terminate_local(TerminalClassification::OPERATION_NOT_SUPPORTED);
+            }
+            return Ok(response);
+        }
+        let request_kind = RequestKind::from(request_capability);
 
-        if let Some(response) = body_too_large {
+        if body_too_large.is_some() {
             if let Some(o) = observer.as_ref() {
                 o.terminate_body_too_large(body_cap_for_path(&self.config, &ctx.path) as u64);
             }
-            return Ok(*response);
+            return Ok(provider_error_response(
+                request_capability,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+                "request body exceeds configured cap",
+                None,
+            ));
         }
-        if ctx.path == "/v1/messages" && !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
+        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
@@ -2821,14 +3668,29 @@ impl Lifecycle {
                     },
                 });
             }
-            return Ok(anthropic_error_response(
+            return Ok(provider_error_response(
+                request_capability,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 "request body must be valid JSON",
+                None,
             ));
         }
         let prompt_cache_token_scope = prompt_cache_token_scope(&ctx.downstream_headers);
         let prompt_cache_analysis = match body_view.value_arc() {
+            // Prompt-cache tokenization models Anthropic `cache_control`
+            // breakpoints only. OpenAI Responses and Gemini bodies get neutral
+            // cache metadata and are forwarded unchanged.
+            Some(_) if request_capability != ProviderCapability::AnthropicMessages => {
+                Some(PromptCacheAnalysisOutput {
+                    analysis: V3PromptCacheAnalysis {
+                        blocks: Vec::new(),
+                        breakpoints: Vec::new(),
+                    },
+                    cacheable_breakpoint_prefix_keys: Vec::new(),
+                    timings: PromptCacheAnalysisTimings::default(),
+                })
+            }
             Some(value) => {
                 let canonical_model = value
                     .get("model")
@@ -2863,7 +3725,7 @@ impl Lifecycle {
                 result: Ok(cc_lb_lifecycle::ParseInfo {
                     path: ctx.path.clone(),
                     method: ctx.method.to_string(),
-                    model: body_view.model(),
+                    model: request_model.clone(),
                     stream: body_view.stream(),
                     body_bytes: ctx.body_bytes.len() as u64,
                     cache_control_block_count: cache_metadata.cache_control_block_count,
@@ -2890,7 +3752,15 @@ impl Lifecycle {
             });
         }
         ctx.cache_breakpoints = cache_metadata.plugin_cache_breakpoints();
-        ctx.canonical_model_id = cache_metadata.canonical_model_id.clone();
+        ctx.canonical_model_id = if cache_metadata.canonical_model_id.is_empty() {
+            path_model
+                .as_deref()
+                .map(canonical_model_id)
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            cache_metadata.canonical_model_id.clone()
+        };
         ctx.thread_id = cache_metadata.thread_id.clone();
         ctx.requested_service_tier = cache_metadata.requested_service_tier.clone();
         ctx.cache_pricing = cache_pricing_summary_for_model(
@@ -2903,7 +3773,7 @@ impl Lifecycle {
         // above (413 / invalid-JSON 400), so no `AuthCompleted` event here.
         let request_affinity_keys = match body_view
             .value()
-            .map(|value| extract_anthropic_web_search_affinity_keys(value, &principal.id))
+            .map(|value| extract_request_affinity_keys(request_capability, value, &principal.id))
             .transpose()
         {
             Ok(keys) => keys.unwrap_or_default(),
@@ -2919,10 +3789,12 @@ impl Lifecycle {
                         },
                     });
                 }
-                return Ok(anthropic_error_response(
+                return Ok(provider_error_response(
+                    request_capability,
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
+                    None,
                 ));
             }
         };
@@ -2943,7 +3815,7 @@ impl Lifecycle {
                         },
                     });
                 }
-                return Ok(failure.response());
+                return Ok(failure.response(request_capability));
             }
         };
         let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
@@ -2955,10 +3827,12 @@ impl Lifecycle {
 
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
                 "router pipeline is unavailable for this request",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -2987,7 +3861,7 @@ impl Lifecycle {
         let warm_entries = fetch_prompt_cache_warm_entries(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
             &*self.clock,
@@ -3006,7 +3880,7 @@ impl Lifecycle {
         let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
             &view,
             &principal.id,
-            RequestKind::AnthropicMessages,
+            request_kind,
             &ctx.cache_breakpoints,
             &warm_entries,
             &*self.clock,
@@ -3018,6 +3892,16 @@ impl Lifecycle {
         }
         let mut pipeline_result =
             execute_filter_pipeline(&router_pipeline.user_filters, &ctx, &principal, candidates);
+        // Hard affinity: provider-owned state lives on exactly one upstream.
+        // Filters may only narrow the candidate set; if they (or the eligible
+        // candidate set itself) exclude the owner, the request cannot be
+        // served anywhere else, so fail with an explicit affinity error rather
+        // than a generic routing miss.
+        if let Some(affinity) = request_affinity.as_ref() {
+            pipeline_result
+                .candidates
+                .retain(|candidate| candidate.upstream_id == affinity.target_upstream_id);
+        }
         if let Some(o) = observer.as_ref() {
             for error in pipeline_result.internal_errors.drain(..) {
                 o.record_internal_error(error);
@@ -3031,6 +3915,34 @@ impl Lifecycle {
             "cc_lb.route.candidate_count",
             numeric_attribute(Some(pipeline_result.candidates.len() as u64)).as_value(),
         );
+        if request_affinity.is_some() && pipeline_result.candidates.is_empty() {
+            route_span.record("cc_lb.route.outcome", "error");
+            route_span.record("otel.status_code", "ERROR");
+            route_span.record("error.type", error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+            if let Some(o) = observer.as_ref() {
+                o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+                    event_id: o.event_id().to_owned(),
+                    result: Err(cc_lb_lifecycle::RouteFailure::RouteNoUpstreamAfterFilter),
+                    routing_trace: Some(pipeline_result.routing_trace(terminal_decision.clone())),
+                });
+                o.terminate_failure(InternalFailure {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error_code: error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                    error: InternalError {
+                        stage: InternalErrorStage::RouterFilter,
+                        kind: InternalErrorKind::Unavailable,
+                        message: Some(UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE.to_owned()),
+                    },
+                });
+            }
+            return Ok(provider_error_response(
+                request_capability,
+                StatusCode::SERVICE_UNAVAILABLE,
+                error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
+                UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE,
+                None,
+            ));
+        }
         if pipeline_result.candidates.is_empty() {
             route_span.record("cc_lb.route.outcome", "error");
             route_span.record("otel.status_code", "ERROR");
@@ -3041,10 +3953,12 @@ impl Lifecycle {
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some(pipeline_result.routing_trace(terminal_decision.clone())),
             );
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "route_no_upstream_after_filter",
                 message,
+                None,
             );
             return Ok(response);
         }
@@ -3064,10 +3978,12 @@ impl Lifecycle {
             route_span.record("cc_lb.route.outcome", "error");
             route_span.record("otel.status_code", "ERROR");
             route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
                 "no upstream route is configured for this request",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -3100,10 +4016,12 @@ impl Lifecycle {
                 route_span.record("cc_lb.route.outcome", "error");
                 route_span.record("otel.status_code", "ERROR");
                 route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    request_capability,
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
                     "no upstream route is configured for this request",
+                    None,
                 );
                 if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -3140,7 +4058,7 @@ impl Lifecycle {
             selected_cache_matches.remove(&resolved_upstream_id),
             route_ms,
         );
-        emit_route_completed(observer.as_ref(), &routed, &body_view);
+        emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
 
         let limit_reserve_start = Instant::now();
         let mut active_limit = match self
@@ -3223,6 +4141,7 @@ impl Lifecycle {
             ctx: &ctx,
             principal: &principal,
             warm_entries: &warm_entries,
+            request_kind,
             observer: observer.as_ref(),
             handle_span: &handle_span,
             enabled: request_affinity.is_none(),
@@ -3246,7 +4165,7 @@ impl Lifecycle {
                     &mut attempt_timings,
                     first_dispatch.map(|(dispatch_started, _)| dispatch_started),
                 );
-                emit_route_completed(observer.as_ref(), &routed, &body_view);
+                emit_route_completed(observer.as_ref(), &routed, request_model.as_deref());
             }
             let signer_factory = view
                 .signer_factory
@@ -3266,10 +4185,12 @@ impl Lifecycle {
                         routed = next;
                         continue;
                     }
-                    let mut response = anthropic_error_response(
+                    let mut response = provider_error_response(
+                        request_capability,
                         StatusCode::BAD_GATEWAY,
                         "api_error",
                         "failed to prepare upstream credentials",
+                        None,
                     );
                     self.attach_limit_headers(&mut response, active_limit.as_ref());
                     if let Some(o) = observer.as_ref() {
@@ -3321,6 +4242,7 @@ impl Lifecycle {
                     }
                     return Ok(self.relay_attempt_failure(
                         failure,
+                        request_capability,
                         active_limit.as_ref(),
                         observer.as_ref(),
                         &attempt_timings,
@@ -3387,6 +4309,7 @@ impl Lifecycle {
                         }
                         return Ok(self.relay_attempt_failure(
                             failure,
+                            request_capability,
                             active_limit.as_ref(),
                             observer.as_ref(),
                             &attempt_timings,
@@ -3446,6 +4369,7 @@ impl Lifecycle {
             }
         });
         let response_affinity_context = ResponseAffinityContext {
+            capability: request_capability,
             store: self.upstream_affinity_store.clone(),
             principal_id: principal.id.clone(),
             upstream_id: resolved_upstream_id,
@@ -3454,7 +4378,7 @@ impl Lifecycle {
                 .unwrap_or_default(),
             observe_response_keys: body_view
                 .value()
-                .is_some_and(request_enables_anthropic_web_search),
+                .is_some_and(|value| request_observes_response_affinity(request_capability, value)),
             ttl_secs: self.config.upstream_affinity_ttl.as_secs(),
         };
         response = self
@@ -3469,7 +4393,7 @@ impl Lifecycle {
                     request_id: ctx.request_id.clone(),
                     canonical_model_id: ctx.canonical_model_id.clone(),
                     upstream_name: routed.record.name.clone(),
-                    requested_model: body_view.model(),
+                    requested_model: request_model.clone(),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                 },
@@ -3479,6 +4403,7 @@ impl Lifecycle {
                     request_method: ctx.method.clone(),
                     request_path: ctx.path.clone(),
                     dialect: routed.route.dialect.clone(),
+                    gemini_oauth: routed.record.kind == StorageUpstreamKind::GeminiOauth,
                 },
                 prompt_cache_observation_context,
                 response_affinity_context,
@@ -3525,8 +4450,8 @@ impl Lifecycle {
             tracing::Span::current().record("cc_lb.limit.decision", "not_applicable");
             return Ok(None);
         };
-        let limit_request = body_view.limit_request();
-        let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
+        let limit_request = body_view.limit_request(&ctx.canonical_model_id);
+        let max_input_estimate = limit_request.input_tokens_estimate;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             estimator.estimate_max(
                 &limit_request.model,
@@ -3565,6 +4490,8 @@ impl Lifecycle {
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(
+                    crate::provider_capability::classify(&ctx.method, &ctx.path)
+                        .unwrap_or(ProviderCapability::AnthropicMessages),
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
@@ -3744,6 +4671,12 @@ impl Lifecycle {
                 }
             }
         };
+        let gemini_unwrapped_body = transform_ctx
+            .gemini_oauth
+            .then_some(semantic_body.as_ref())
+            .flatten()
+            .and_then(|body| unwrap_gemini_code_assist_body(body).ok().flatten());
+        let semantic_body = gemini_unwrapped_body.clone().or(semantic_body);
         let response_body_json = semantic_body
             .as_ref()
             .and_then(|body| sonic_rs::from_slice::<Value>(body).ok());
@@ -3760,9 +4693,17 @@ impl Lifecycle {
             response_body_json
                 .as_ref()
                 .and_then(usage_parser::observe_http_error_value)
+        } else if response_body_json.as_ref().is_some_and(|value| {
+            value.get("object").and_then(Value::as_str) == Some("response")
+                && value.get("status").and_then(Value::as_str) == Some("failed")
+        }) {
+            observation.canonical_error
         } else {
             None
         };
+        let non_error_status_response_failed = !(status.is_client_error()
+            || status.is_server_error())
+            && canonical_upstream_error.is_some();
         // Provider error text can echo the credential; the parser masks it
         // before its store cap so a secret split by the cap cannot survive.
         // Successful responses never get here.
@@ -3788,6 +4729,16 @@ impl Lifecycle {
         } else {
             body
         };
+        if status.is_success()
+            && let Some(unwrapped) = gemini_unwrapped_body
+        {
+            downstream_body = unwrapped;
+            parts.headers = sanitize_downstream_response_headers(
+                std::mem::take(&mut parts.headers),
+                downstream_body.len(),
+                None,
+            );
+        }
         let mut buffered_transform_error: Option<ResponseTransformError> = None;
         if !body_collect_failed
             && let (Some(hook), Some(semantic_body)) = (
@@ -3831,9 +4782,11 @@ impl Lifecycle {
         if status.is_success() && !body_collect_failed {
             let mut affinity_keys = response_affinity_context.pending_request_keys.clone();
             // Do not gate this scan on request tools: a successful buffered response can
-            // introduce an unsolicited web-search result that later requests must pin.
+            // introduce unsolicited provider state (e.g. an Anthropic web-search result or
+            // an OpenAI response id) that later requests must pin.
             let extraction_failed = if let Some(response_json) = response_body_json.as_ref() {
-                match extract_anthropic_web_search_affinity_keys(
+                match extract_response_affinity_keys(
+                    response_affinity_context.capability,
                     response_json,
                     &response_affinity_context.principal_id,
                 ) {
@@ -3899,6 +4852,8 @@ impl Lifecycle {
             );
             publish_prompt_cache_observations(context, &decode, now_unix_secs);
         }
+        // Hand the reservation to the reconcile subscriber for every buffered outcome:
+        // it reconciles a measured success and refunds errors on `RequestTerminated`.
         if let (Some(limit_engine), Some(active_limit), Some(response_accounting_guard)) = (
             self.limit_engine.as_ref(),
             active_limit.as_ref(),
@@ -3932,6 +4887,15 @@ impl Lifecycle {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
                 })
+            } else if non_error_status_response_failed {
+                Err(cc_lb_lifecycle::StreamError {
+                    error_type: upstream_error_type
+                        .clone()
+                        .unwrap_or_else(|| "response_failed".to_owned()),
+                    error_message: upstream_error_message
+                        .clone()
+                        .unwrap_or_else(|| "The provider response failed".to_owned()),
+                })
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
@@ -3951,7 +4915,10 @@ impl Lifecycle {
                 Some(body_collect_ms),
                 first_body_chunk_ms,
             );
-            if status.is_client_error() || status.is_server_error() {
+            if status.is_client_error()
+                || status.is_server_error()
+                || non_error_status_response_failed
+            {
                 if upstream_error_type.is_some() || upstream_error_message.is_some() {
                     o.emit_lifecycle(
                         cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -3963,8 +4930,10 @@ impl Lifecycle {
                 }
                 let code = if status.is_client_error() {
                     UpstreamErrorCode::Upstream4xx
-                } else {
+                } else if status.is_server_error() {
                     UpstreamErrorCode::Upstream5xx
+                } else {
+                    UpstreamErrorCode::StreamError
                 };
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
@@ -4042,8 +5011,9 @@ impl Lifecycle {
                 ctx,
                 principal,
                 &routed.route,
-                routed.raw_passthrough_base_url.as_ref(),
+                routed.record.kind,
                 signer,
+                routed.raw_passthrough_base_url.as_ref(),
                 observer,
                 attempt_timings,
                 shaped_body_out,
@@ -4058,7 +5028,7 @@ impl Lifecycle {
             o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::UpstreamResponseStarted {
                 event_id: o.event_id().to_owned(),
                 status: response.status().as_u16(),
-                headers: header_snapshot_from(response.headers()),
+                headers: header_snapshot_from(response.headers(), routed.record.kind),
                 bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
                 dns_ms: attempt_timings.dns_ms,
                 connect_ms: attempt_timings.connect_ms,
@@ -4075,11 +5045,12 @@ impl Lifecycle {
     fn relay_attempt_failure(
         &self,
         failure: AttemptFailure,
+        capability: ProviderCapability,
         active_limit: Option<&ActiveLimit>,
         observer: Option<&LifecycleContext>,
         attempt_timings: &AttemptTimings,
     ) -> Response<Body> {
-        let (mut response, failure) = failure.into_response_and_failure();
+        let (mut response, failure) = failure.into_response_and_failure(capability);
         self.attach_limit_headers(&mut response, active_limit);
         if let Some(o) = observer {
             o.set_attempt_timings(
@@ -4276,8 +5247,9 @@ impl Lifecycle {
         ctx: &RequestContext,
         principal: &Principal,
         route: &RouteDecision,
-        raw_passthrough_base_url: Option<&Url>,
+        upstream_kind: StorageUpstreamKind,
         signer: Arc<dyn Signer>,
+        raw_passthrough_base_url: Option<&Url>,
         observer: Option<&LifecycleContext>,
         timings: &mut AttemptTimings,
         shaped_body_out: &mut Option<Bytes>,
@@ -4305,7 +5277,13 @@ impl Lifecycle {
                 tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
                 record_shape_internal_error(observer, &message);
                 (
-                    raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?,
+                    raw_passthrough_request(
+                        raw_passthrough_base_url,
+                        ctx,
+                        principal,
+                        &route.upstream,
+                        upstream_kind == StorageUpstreamKind::OpenaiOauth,
+                    )?,
                     false,
                 )
             }
@@ -4459,9 +5437,28 @@ impl Lifecycle {
             && status.is_success()
             && (response_affinity_context.observe_response_keys
                 || !response_affinity_context.pending_request_keys.is_empty());
-        let transform_requested =
-            upstream_is_sse && transform_ctx.dialect.sse_event_transform_hook().is_some();
+        // Anthropic responses can introduce provider-owned state (container
+        // ids, Files API ids, web-search `encrypted_content`) without any
+        // request-side hint. Those streams skip the request-hinted gate; only
+        // events that actually carry new provider state are bound to the
+        // selected upstream before their raw bytes are forwarded.
+        let unsolicited_sse_affinity_inspection = upstream_is_sse
+            && status.is_success()
+            && !success_sse_affinity_gate
+            && response_affinity_context.capability == ProviderCapability::AnthropicMessages;
+        let transform_requested = upstream_is_sse
+            && (transform_ctx.dialect.sse_event_transform_hook().is_some()
+                || transform_ctx.gemini_oauth);
         let transform_decode_supported = usage_decoder.unsupported_encoding().is_none();
+        // Uncompressed, untransformed unsolicited inspection holds raw chunks
+        // only while the unforwarded bytes may belong to a provider-state event;
+        // such an event is relayed whole only after its state is bound, so a
+        // state-carrying event split across upstream chunks never reaches the
+        // client early. Every other event keeps the raw chunk passthrough, and
+        // compressed and transform streams keep their existing relay paths.
+        let unsolicited_sse_affinity_hold_eligible = unsolicited_sse_affinity_inspection
+            && downstream_stream_is_identity
+            && !(transform_requested && transform_decode_supported);
         let response_headers = (transform_requested && transform_decode_supported)
             .then(|| sanitized_response_headers_for_plugin(&parts.headers));
         if (transform_requested && transform_decode_supported)
@@ -4566,6 +5563,24 @@ impl Lifecycle {
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
         let stream = async_stream::stream! {
+            let custom_sse_hook = transform_ctx.dialect.sse_event_transform_hook();
+            let composed_sse_hook = custom_sse_hook.map(|custom| {
+                ComposedSseResponseTransformHook {
+                    gemini: &GEMINI_OAUTH_RESPONSE_TRANSFORM,
+                    custom,
+                }
+            });
+            let sse_transform_hook: Option<&dyn SseEventTransformHook> =
+                if transform_ctx.gemini_oauth {
+                    composed_sse_hook
+                        .as_ref()
+                        .map(|hook| hook as &dyn SseEventTransformHook)
+                        .or(Some(
+                            &GEMINI_OAUTH_RESPONSE_TRANSFORM as &dyn SseEventTransformHook,
+                        ))
+                } else {
+                    custom_sse_hook
+                };
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
             let mut upstream_diagnostics = upstream_diagnostics;
@@ -4607,7 +5622,18 @@ impl Lifecycle {
             let mut upstream_error_body_decode_failed = false;
             let mut parse_sse_events_active = parse_sse_events;
             let mut raw_before_transform_output: Vec<Bytes> = Vec::new();
-            let mut deferred_terminal_chunk: Option<Bytes> = None;
+            // Downstream bytes produced from the final upstream frame of a
+            // Content-Length body. A client stops polling once the declared
+            // length is satisfied, so these bytes are yielded only after the
+            // lifecycle finalization below; yielding them earlier lets the drop
+            // guard record a completed response as a client cancellation.
+            let mut deferred_terminal_chunks: Vec<Bytes> = Vec::new();
+            // Dynamic unsolicited hold: `unsolicited_hold_pending` is set while
+            // the unforwarded buffered bytes may carry provider state, and
+            // `unsolicited_forwarded_bytes` counts the leading bytes of the
+            // buffered partial event the raw passthrough already relayed.
+            let mut unsolicited_hold_pending = false;
+            let mut unsolicited_forwarded_bytes: usize = 0;
             // #663: true only once the upstream body stream delivered its final
             // frame. A decoder finish failure after cc-lb aborted the loop
             // locally is not upstream evidence.
@@ -4670,6 +5696,19 @@ impl Lifecycle {
                                     }
                                     if parse_sse_events_active {
                                         buffer.extend_from_slice(&plaintext);
+                                        if unsolicited_sse_affinity_hold_eligible
+                                            && !unsolicited_hold_pending
+                                        {
+                                            let probe_start = unsolicited_forwarded_bytes
+                                                .saturating_sub(
+                                                    ANTHROPIC_PROVIDER_STATE_MARKER_PROBE_BYTES,
+                                                )
+                                                .min(buffer.len());
+                                            unsolicited_hold_pending =
+                                                sse_bytes_may_carry_anthropic_provider_state(
+                                                    &buffer[probe_start..],
+                                                );
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -4831,6 +5870,8 @@ impl Lifecycle {
                                     }
                                 }
                             }
+                            let hold_unsolicited_chunk = unsolicited_hold_pending;
+                            let mut unsolicited_event_completed = false;
                                 while !raw_passthrough_current_chunk {
                                     let Some(end) = usage_parser::find_sse_event_end(&buffer) else {
                                         break;
@@ -4880,9 +5921,11 @@ impl Lifecycle {
                                 }
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 let event_name = parsed_event.event_name();
-                                if success_sse_affinity_gate {
+                                let mut affinity_persist_failed = false;
+                                let affinity_binding = if success_sse_affinity_gate {
                                     let response_keys = match
-                                        extract_anthropic_web_search_affinity_keys_from_sse_event(
+                                        extract_response_affinity_keys_from_sse_event(
+                                            response_affinity_context.capability,
                                             &parsed_event,
                                             &response_affinity_context.principal_id,
                                         )
@@ -4920,10 +5963,38 @@ impl Lifecycle {
                                                 StreamTerminationCause::FramingError,
                                                 None,
                                             );
+                                            for chunk in std::mem::take(&mut deferred_terminal_chunks) {
+                                                yield Ok::<Bytes, Infallible>(chunk);
+                                            }
                                             yield Ok::<Bytes, Infallible>(frame);
                                             break 'upstream;
                                         }
                                     };
+                                    let bind_pending_request = sse_event_completes_response(
+                                        response_affinity_context.capability,
+                                        &parsed_event,
+                                        usage_update.message_stop,
+                                    );
+                                    Some((response_keys, bind_pending_request))
+                                } else if unsolicited_sse_affinity_inspection {
+                                    match unsolicited_anthropic_sse_affinity_keys(
+                                        &parsed_event,
+                                        &response_affinity_context.principal_id,
+                                        &bound_response_affinity_keys,
+                                    ) {
+                                        Ok(keys) if keys.is_empty() => None,
+                                        Ok(keys) => Some((keys, false)),
+                                        Err(_) => {
+                                            affinity_persist_failed = true;
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some((response_keys, bind_pending_request)) =
+                                    affinity_binding
+                                {
                                     let mut affinity_keys = response_keys
                                         .iter()
                                         .filter(|key| {
@@ -4931,9 +6002,6 @@ impl Lifecycle {
                                         })
                                         .cloned()
                                         .collect::<Vec<_>>();
-                                    let bind_pending_request =
-                                        usage_update.message_stop
-                                            || event_name == Some(b"message_stop");
                                     if bind_pending_request {
                                         affinity_keys.extend(
                                             pending_request_affinity_keys.iter().cloned(),
@@ -4947,40 +6015,47 @@ impl Lifecycle {
                                     .await
                                     .is_err()
                                     {
-                                        tracing::warn!(
-                                            parent: &stream_span,
-                                            "failed to persist upstream affinity before SSE event"
-                                        );
-                                        stream_affinity_error = Some(affinity_stream_error());
-                                        parse_sse_events_active = false;
-                                        buffer.clear();
-                                        raw_before_transform_output.clear();
-                                        if success_sse_affinity_gate
-                                            || sse_transform_active
-                                            || downstream_stream_is_identity
-                                        {
-                                            let frame = make_error_frame(
-                                                "api_error",
-                                                UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
-                                            );
-                                            batch_index = batch_index.saturating_add(1);
-                                            yield Ok::<Bytes, Infallible>(frame);
+                                        affinity_persist_failed = true;
+                                    } else {
+                                        bound_response_affinity_keys.extend(response_keys);
+                                        if bind_pending_request {
+                                            pending_request_affinity_keys.clear();
                                         }
-                                        if let Some(o) = observer.as_ref() {
-                                            o.set_upstream_error(
-                                                StatusCode::OK,
-                                                UpstreamErrorCode::StreamError,
-                                            );
-                                        }
-                                        downstream_drop_guard.mark_proxy_error(
-                                            StreamTerminationCause::AffinityError,
+                                    }
+                                }
+                                if affinity_persist_failed {
+                                    tracing::warn!(
+                                        parent: &stream_span,
+                                        "failed to persist upstream affinity before SSE event"
+                                    );
+                                    stream_affinity_error = Some(affinity_stream_error());
+                                    parse_sse_events_active = false;
+                                    buffer.clear();
+                                    raw_before_transform_output.clear();
+                                    if success_sse_affinity_gate
+                                        || sse_transform_active
+                                        || downstream_stream_is_identity
+                                    {
+                                        let frame = make_error_frame(
+                                            "api_error",
+                                            UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                                         );
-                                        break 'upstream;
+                                        batch_index = batch_index.saturating_add(1);
+                                        for chunk in std::mem::take(&mut deferred_terminal_chunks) {
+                                            yield Ok::<Bytes, Infallible>(chunk);
+                                        }
+                                        yield Ok::<Bytes, Infallible>(frame);
                                     }
-                                    bound_response_affinity_keys.extend(response_keys);
-                                    if bind_pending_request {
-                                        pending_request_affinity_keys.clear();
+                                    if let Some(o) = observer.as_ref() {
+                                        o.set_upstream_error(
+                                            StatusCode::OK,
+                                            UpstreamErrorCode::StreamError,
+                                        );
                                     }
+                                    downstream_drop_guard.mark_proxy_error(
+                                        StreamTerminationCause::AffinityError,
+                                    );
+                                    break 'upstream;
                                 }
                                 keepalive_response.observe(&parsed_event);
                                 match event_name {
@@ -5050,13 +6125,16 @@ impl Lifecycle {
                                 // Strictly JSON-typed: the usage parser's
                                 // event-name fallback must not enable #663
                                 // accept-with-warning for name-only stops.
-                                semantic_message_stop_seen |= parsed_event
+                                let semantic_event_type = parsed_event
                                     .value()
                                     .ok()
                                     .flatten()
                                     .and_then(|value| value.get("type"))
-                                    .and_then(serde_json::Value::as_str)
-                                    == Some("message_stop");
+                                    .and_then(serde_json::Value::as_str);
+                                semantic_message_stop_seen |= semantic_terminal_event_type(
+                                    response_affinity_context.capability,
+                                )
+                                .is_some_and(|terminal| semantic_event_type == Some(terminal));
                                 if let Some(o) = observer.as_ref() {
                                     if usage_update.message_start_usage {
                                         o.set_usage_counts(&usage, false);
@@ -5100,7 +6178,7 @@ impl Lifecycle {
                                 if sse_transform_active {
                                     let outgoing = if let Some(response_headers) = response_headers.as_ref() {
                                         match transform_sse_event_bytes(
-                                            transform_ctx.dialect.sse_event_transform_hook(),
+                                            sse_transform_hook,
                                             &transform_ctx,
                                             &event_ctx,
                                             status,
@@ -5231,7 +6309,48 @@ impl Lifecycle {
                                 } else if success_sse_affinity_gate {
                                     downstream_sse_boundary.observe(&raw);
                                     batch_index = batch_index.saturating_add(1);
-                                    yield Ok::<Bytes, Infallible>(raw);
+                                    if defer_terminal_raw_chunk {
+                                        deferred_terminal_chunks.push(raw);
+                                    } else {
+                                        yield Ok::<Bytes, Infallible>(raw);
+                                    }
+                                } else if hold_unsolicited_chunk {
+                                    // The raw passthrough already relayed the
+                                    // leading bytes of the first completed event.
+                                    let forwarded = std::mem::take(&mut unsolicited_forwarded_bytes);
+                                    unsolicited_event_completed = true;
+                                    let outgoing = raw.slice(forwarded.min(raw.len())..);
+                                    if !outgoing.is_empty() {
+                                        downstream_sse_boundary.observe(&outgoing);
+                                        batch_index = batch_index.saturating_add(1);
+                                        if defer_terminal_raw_chunk {
+                                            deferred_terminal_chunks.push(outgoing);
+                                        } else {
+                                            yield Ok::<Bytes, Infallible>(outgoing);
+                                        }
+                                    }
+                                }
+                            }
+                            if hold_unsolicited_chunk && unsolicited_event_completed {
+                                // The held candidate completed: re-probe the new
+                                // partial event, which this chunk alone delivered.
+                                unsolicited_hold_pending =
+                                    sse_bytes_may_carry_anthropic_provider_state(&buffer);
+                            }
+                            if hold_unsolicited_chunk && !unsolicited_hold_pending {
+                                // Back to the raw passthrough: relay the held
+                                // remainder, which carries no provider state.
+                                let start = unsolicited_forwarded_bytes.min(buffer.len());
+                                let tail = Bytes::copy_from_slice(&buffer[start..]);
+                                unsolicited_forwarded_bytes = buffer.len();
+                                if !tail.is_empty() {
+                                    downstream_sse_boundary.observe(&tail);
+                                    batch_index = batch_index.saturating_add(1);
+                                    if defer_terminal_raw_chunk {
+                                        deferred_terminal_chunks.push(tail);
+                                    } else {
+                                        yield Ok::<Bytes, Infallible>(tail);
+                                    }
                                 }
                             }
                             if parse_sse_events_active
@@ -5246,7 +6365,8 @@ impl Lifecycle {
                                 );
                                 parse_sse_events_active = false;
                                 buffer.clear();
-                                if success_sse_affinity_gate {
+                                unsolicited_forwarded_bytes = 0;
+                                if success_sse_affinity_gate || unsolicited_hold_pending {
                                     stream_upstream_error =
                                         Some(cc_lb_lifecycle::StreamError {
                                             error_type:
@@ -5268,6 +6388,9 @@ impl Lifecycle {
                                         StreamTerminationCause::FramingError,
                                         None,
                                     );
+                                    for chunk in std::mem::take(&mut deferred_terminal_chunks) {
+                                        yield Ok::<Bytes, Infallible>(chunk);
+                                    }
                                     yield Ok::<Bytes, Infallible>(frame);
                                     break 'upstream;
                                 }
@@ -5311,17 +6434,20 @@ impl Lifecycle {
                                 }
                             }
                             if !sse_transform_active {
-                                if !success_sse_affinity_gate {
+                                if !success_sse_affinity_gate && !hold_unsolicited_chunk {
                                     // Chunk fanout stays inline — high-volume, not bus-worthy.
                                     if upstream_is_sse && downstream_stream_is_identity {
                                         downstream_sse_boundary.observe(&data);
                                     }
                                     batch_index = batch_index.saturating_add(1);
                                     if defer_terminal_raw_chunk {
-                                        debug_assert!(deferred_terminal_chunk.is_none());
-                                        deferred_terminal_chunk = Some(data);
+                                        debug_assert!(deferred_terminal_chunks.is_empty());
+                                        deferred_terminal_chunks.push(data);
                                     } else {
                                         yield Ok::<Bytes, Infallible>(data);
+                                    }
+                                    if unsolicited_sse_affinity_hold_eligible {
+                                        unsolicited_forwarded_bytes = buffer.len();
                                     }
                                 }
                             } else if !transformed_output_started {
@@ -5403,6 +6529,7 @@ impl Lifecycle {
                                 &client_error_message
                             };
                             let frame = make_stream_error_frame(
+                                response_affinity_context.capability,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 client_error_message,
                                 !success_sse_affinity_gate
@@ -5437,10 +6564,11 @@ impl Lifecycle {
                             let raw = split_sse_event(&mut buffer, end);
                             let parsed_event = parse_sse_event(&raw);
                             let usage_update = accumulate_sse_usage(&parsed_event, &mut usage);
-                            let event_name = parsed_event.event_name();
-                            if success_sse_affinity_gate {
+                            let mut affinity_persist_failed = false;
+                            let affinity_binding = if success_sse_affinity_gate {
                                 let response_keys = match
-                                    extract_anthropic_web_search_affinity_keys_from_sse_event(
+                                    extract_response_affinity_keys_from_sse_event(
+                                        response_affinity_context.capability,
                                         &parsed_event,
                                         &response_affinity_context.principal_id,
                                     )
@@ -5475,6 +6603,29 @@ impl Lifecycle {
                                         break;
                                     }
                                 };
+                                let bind_pending_request = sse_event_completes_response(
+                                    response_affinity_context.capability,
+                                    &parsed_event,
+                                    usage_update.message_stop,
+                                );
+                                Some((response_keys, bind_pending_request))
+                            } else if unsolicited_sse_affinity_inspection {
+                                match unsolicited_anthropic_sse_affinity_keys(
+                                    &parsed_event,
+                                    &response_affinity_context.principal_id,
+                                    &bound_response_affinity_keys,
+                                ) {
+                                    Ok(keys) if keys.is_empty() => None,
+                                    Ok(keys) => Some((keys, false)),
+                                    Err(_) => {
+                                        affinity_persist_failed = true;
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some((response_keys, bind_pending_request)) = affinity_binding {
                                 let mut affinity_keys = response_keys
                                     .iter()
                                     .filter(|key| {
@@ -5482,9 +6633,6 @@ impl Lifecycle {
                                     })
                                     .cloned()
                                     .collect::<Vec<_>>();
-                                let bind_pending_request =
-                                    usage_update.message_stop
-                                        || event_name == Some(b"message_stop");
                                 if bind_pending_request {
                                     affinity_keys.extend(
                                         pending_request_affinity_keys.iter().cloned(),
@@ -5498,29 +6646,38 @@ impl Lifecycle {
                                 .await
                                 .is_err()
                                 {
-                                    tracing::warn!(
-                                        parent: &stream_span,
-                                        "failed to persist upstream affinity before final SSE event"
-                                    );
-                                    stream_affinity_error = Some(affinity_stream_error());
-                                    downstream_drop_guard.mark_proxy_error(
-                                        StreamTerminationCause::AffinityError,
-                                    );
-                                    parse_sse_events_active = false;
-                                    buffer.clear();
-                                    raw_before_transform_output.clear();
+                                    affinity_persist_failed = true;
+                                } else {
+                                    bound_response_affinity_keys.extend(response_keys);
+                                    if bind_pending_request {
+                                        pending_request_affinity_keys.clear();
+                                    }
+                                }
+                            }
+                            if affinity_persist_failed {
+                                tracing::warn!(
+                                    parent: &stream_span,
+                                    "failed to persist upstream affinity before final SSE event"
+                                );
+                                stream_affinity_error = Some(affinity_stream_error());
+                                downstream_drop_guard.mark_proxy_error(
+                                    StreamTerminationCause::AffinityError,
+                                );
+                                parse_sse_events_active = false;
+                                buffer.clear();
+                                raw_before_transform_output.clear();
+                                if success_sse_affinity_gate
+                                    || sse_transform_active
+                                    || downstream_stream_is_identity
+                                {
                                     let frame = make_error_frame(
                                         "api_error",
                                         UPSTREAM_AFFINITY_UNAVAILABLE_MESSAGE,
                                     );
                                     batch_index = batch_index.saturating_add(1);
                                     yield Ok::<Bytes, Infallible>(frame);
-                                    break;
                                 }
-                                bound_response_affinity_keys.extend(response_keys);
-                                if bind_pending_request {
-                                    pending_request_affinity_keys.clear();
-                                }
+                                break;
                             }
                             keepalive_response.observe(&parsed_event);
                             if let Some(err) =
@@ -5563,7 +6720,7 @@ impl Lifecycle {
                                 stream_abnormal_stop = Some(stop);
                             }
                             sse_event_count = sse_event_count.saturating_add(1);
-                            if success_sse_affinity_gate {
+                            if success_sse_affinity_gate || unsolicited_hold_pending {
                                 let outgoing = if sse_transform_active {
                                     let Some(response_headers) = response_headers.as_ref() else {
                                         stream_upstream_error =
@@ -5587,7 +6744,7 @@ impl Lifecycle {
                                         break;
                                     };
                                     match transform_sse_event_bytes(
-                                        transform_ctx.dialect.sse_event_transform_hook(),
+                                        sse_transform_hook,
                                         &transform_ctx,
                                         &event_ctx,
                                         status,
@@ -5616,8 +6773,16 @@ impl Lifecycle {
                                             break;
                                         }
                                     }
-                                } else {
+                                } else if success_sse_affinity_gate {
                                     raw
+                                } else {
+                                    let forwarded =
+                                        std::mem::take(&mut unsolicited_forwarded_bytes);
+                                    let outgoing = raw.slice(forwarded.min(raw.len())..);
+                                    if outgoing.is_empty() {
+                                        continue;
+                                    }
+                                    outgoing
                                 };
                                 downstream_sse_boundary.observe(&outgoing);
                                 batch_index = batch_index.saturating_add(1);
@@ -5633,7 +6798,7 @@ impl Lifecycle {
                                 "stopping SSE parsing: final incomplete event exceeds configured body-derived budget"
                             );
                             buffer.clear();
-                            if success_sse_affinity_gate {
+                            if success_sse_affinity_gate || unsolicited_hold_pending {
                                 stream_upstream_error =
                                     Some(cc_lb_lifecycle::StreamError {
                                         error_type:
@@ -5857,12 +7022,13 @@ impl Lifecycle {
                 );
                 // A retained Content-Length cannot carry an extra error frame.
                 // Keep the original final bytes and record the failure below.
-                if deferred_terminal_chunk.is_none()
+                if deferred_terminal_chunks.is_empty()
                     && (success_sse_affinity_gate
                         || sse_transform_active
                         || downstream_stream_is_identity)
                 {
                     let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         &error_message,
                         downstream_stream_is_identity
@@ -5900,7 +7066,7 @@ impl Lifecycle {
                 downstream_drop_guard.mark_proxy_error(
                     StreamTerminationCause::AffinityError,
                 );
-                if deferred_terminal_chunk.is_none()
+                if deferred_terminal_chunks.is_empty()
                     && (success_sse_affinity_gate
                         || sse_transform_active
                         || downstream_stream_is_identity)
@@ -5944,6 +7110,10 @@ impl Lifecycle {
                 }
                 _ => None,
             };
+            // The stream reached its terminal outcome: hand the reservation to the
+            // reconcile subscriber, which reconciles a measured success and refunds
+            // upstream/affinity/transform errors on `RequestTerminated`. A client
+            // cancel drops the stream before this point and refunds via RAII.
             if let Some(response_accounting_guard) = response_accounting_guard {
                 response_accounting_guard.forget();
             }
@@ -6117,7 +7287,7 @@ impl Lifecycle {
                     dispatch,
                 ));
             }
-            if let Some(chunk) = deferred_terminal_chunk {
+            for chunk in deferred_terminal_chunks {
                 yield Ok::<Bytes, Infallible>(chunk);
             }
         };
@@ -6133,8 +7303,9 @@ pub fn observe_rate_limits(
     upstream_id: Uuid,
     observed_at: u64,
 ) -> Vec<UpstreamRateLimitObservationRecord> {
-    parse_anthropic_rate_limit_headers(headers)
+    let mut observations = parse_anthropic_rate_limit_headers(headers)
         .into_iter()
+        .chain(parse_openai_rate_limit_headers(headers))
         .map(|snapshot| UpstreamRateLimitObservationRecord {
             upstream_id,
             window: snapshot.window,
@@ -6144,7 +7315,23 @@ pub fn observe_rate_limits(
             reset: snapshot.reset,
             observed_at_unix_secs: observed_at,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if observations.is_empty() && headers.get(RETRY_AFTER).is_some() {
+        observations.extend(
+            cc_lb_quota::parse_retry_after_rate_limit_headers(headers)
+                .into_iter()
+                .map(|snapshot| UpstreamRateLimitObservationRecord {
+                    upstream_id,
+                    window: snapshot.window,
+                    kind: snapshot.kind,
+                    limit: snapshot.limit,
+                    remaining: snapshot.remaining,
+                    reset: snapshot.reset,
+                    observed_at_unix_secs: observed_at,
+                }),
+        );
+    }
+    observations
 }
 
 struct FilterPipelineResult {
@@ -6445,30 +7632,34 @@ fn record_shape_internal_error(observer: Option<&LifecycleContext>, message: &st
     }
 }
 
-fn default_anthropic_base_url() -> Url {
-    Url::parse(DEFAULT_ANTHROPIC_BASE_URL).expect("default Anthropic base URL parses")
-}
-
 fn raw_passthrough_request(
     base_url: Option<&Url>,
     ctx: &RequestContext,
     principal: &Principal,
+    upstream: &Upstream,
+    openai_oauth: bool,
 ) -> Result<ShapedRequest, RawPassthroughError> {
-    let base_url = match base_url {
-        Some(base_url) => base_url.clone(),
-        None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL).map_err(|source| {
-            tracing::error!(%source, "default raw passthrough base URL failed to parse");
-            RawPassthroughError::BaseUrl(source)
-        })?,
-    };
-    let upstream = Upstream::AnthropicDirect {
-        base_url: Some(base_url.clone()),
-    };
+    let openai_oauth_default = openai_oauth && base_url.is_none();
+    let base_url = base_url.cloned().unwrap_or_else(|| match upstream {
+        Upstream::AnthropicDirect { .. } => default_base_url(StorageUpstreamKind::AnthropicApiKey),
+        Upstream::OpenaiDirect { .. } => {
+            if openai_oauth_default && ctx.path == "/v1/responses" {
+                default_base_url(StorageUpstreamKind::OpenaiOauth)
+            } else {
+                default_base_url(StorageUpstreamKind::OpenaiApiKey)
+            }
+        }
+        Upstream::GeminiDirect { .. } => default_base_url(StorageUpstreamKind::GeminiApiKey),
+    });
     let shape_context = ctx.dialect_shape_context();
     shape_request(
-        &RawPassthroughDialect { base_url },
+        &RawPassthroughDialect {
+            base_url,
+            openai_oauth,
+            openai_oauth_default,
+        },
         &shape_context,
-        &upstream,
+        upstream,
         principal,
     )
     .map_err(|source| {
@@ -6479,6 +7670,8 @@ fn raw_passthrough_request(
 
 struct RawPassthroughDialect {
     base_url: Url,
+    openai_oauth: bool,
+    openai_oauth_default: bool,
 }
 
 impl UpstreamDialect for RawPassthroughDialect {
@@ -6489,11 +7682,20 @@ impl UpstreamDialect for RawPassthroughDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let url = cc_lb_upstream::upstream_request_url(
-            &self.base_url,
-            &context.path,
-            context.query.as_deref(),
-        );
+        let url = if self.openai_oauth && context.path == "/v1/responses" {
+            let mut url = self.base_url.clone();
+            let path = format!("{}/responses", url.path().trim_end_matches('/'));
+            url.set_path(&path);
+            url.set_query(context.query.as_deref());
+            url
+        } else {
+            let base_url = if self.openai_oauth_default {
+                default_base_url(StorageUpstreamKind::OpenaiApiKey)
+            } else {
+                self.base_url.clone()
+            };
+            cc_lb_upstream::upstream_request_url(&base_url, &context.path, context.query.as_deref())
+        };
         Ok(builder.shaped_request(
             url,
             context.method.clone(),
@@ -6522,20 +7724,32 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 /// `UpstreamResponseStarted` lifecycle event.
 ///
 /// Strips `Authorization` and similar credential-bearing headers by pattern
-/// (we only copy the fields we explicitly whitelist). The `anthropic_headers`
-/// map is a flat pass-through of every header whose lowercased name starts
-/// with `anthropic-ratelimit-` OR exactly matches one of the identity slots
-/// (`ANTHROPIC_IDENTITY_HEADERS`). Downstream subscribers reconstruct a
-/// `HeaderMap` and parse into typed rate-limit/subscription-quota records.
-fn header_snapshot_from(headers: &HeaderMap) -> HeaderSnapshot {
+/// (we only copy the fields we explicitly whitelist). For Anthropic routes,
+/// `anthropic_headers` carries `anthropic-ratelimit-*` and identity slots; for
+/// OpenAI routes, it carries `x-ratelimit-*` fields. Downstream subscribers
+/// reconstruct a `HeaderMap` and parse into typed observations.
+fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind) -> HeaderSnapshot {
     let mut anthropic_headers: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+    let is_openai = matches!(
+        upstream_kind,
+        StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
+    );
+    let is_gemini = matches!(
+        upstream_kind,
+        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth
+    );
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
-        if name_lc.starts_with("anthropic-ratelimit-")
-            || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
-        {
+        let should_capture = if is_openai {
+            name_lc.starts_with("x-ratelimit-")
+        } else {
+            name_lc.starts_with("anthropic-ratelimit-")
+                || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
+                || (is_gemini && name_lc == "x-goog-request-id")
+        };
+        if should_capture {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
         }
     }
@@ -6543,7 +7757,8 @@ fn header_snapshot_from(headers: &HeaderMap) -> HeaderSnapshot {
         content_type: header_to_string(headers, "content-type"),
         content_encoding: header_to_string(headers, "content-encoding"),
         request_id: header_to_string(headers, "x-request-id")
-            .or_else(|| header_to_string(headers, "request-id")),
+            .or_else(|| header_to_string(headers, "request-id"))
+            .or_else(|| header_to_string(headers, "x-goog-request-id")),
         retry_after: header_to_string(headers, "retry-after"),
         anthropic_headers,
     }
@@ -6639,8 +7854,8 @@ impl RequestBodyView {
             .map(ToOwned::to_owned)
     }
 
-    fn limit_request(&self) -> LimitRequest {
-        LimitRequest::from_value(self.value())
+    fn limit_request(&self, fallback_model: &str) -> LimitRequest {
+        LimitRequest::from_value(self.value(), fallback_model)
     }
 }
 
@@ -6648,22 +7863,38 @@ impl RequestBodyView {
 struct LimitRequest {
     model: String,
     max_tokens: i64,
+    input_tokens_estimate: i64,
     stream: bool,
     service_tier: Option<String>,
 }
 
 impl LimitRequest {
-    fn from_value(value: Option<&Value>) -> Self {
+    /// `fallback_model` is the request's canonical model id. It is used only
+    /// when the body carries no `model` (e.g. Gemini, where the model lives in
+    /// the request path); a body model always wins verbatim.
+    fn from_value(value: Option<&Value>, fallback_model: &str) -> Self {
         Self {
             model: value
                 .and_then(|v| v.get("model"))
                 .and_then(Value::as_str)
+                .or_else(|| (!fallback_model.is_empty()).then_some(fallback_model))
                 .unwrap_or("unknown")
                 .to_owned(),
             max_tokens: value
-                .and_then(|v| v.get("max_tokens"))
-                .and_then(Value::as_i64)
+                .and_then(|v| {
+                    v.get("max_tokens")
+                        .or_else(|| v.get("max_output_tokens"))
+                        .and_then(Value::as_i64)
+                        .or_else(|| {
+                            v.get("generationConfig")
+                                .and_then(|config| config.get("maxOutputTokens"))
+                                .and_then(Value::as_i64)
+                        })
+                })
                 .unwrap_or(0),
+            input_tokens_estimate: value
+                .map(estimate_input_tokens)
+                .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -6673,6 +7904,60 @@ impl LimitRequest {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
         }
+    }
+}
+
+const INPUT_ESTIMATE_MAX_NODES: usize = 16_384;
+const INPUT_ESTIMATE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn estimate_input_tokens(value: &Value) -> i64 {
+    let mut nodes = 0;
+    let mut bytes = 0;
+    for key in [
+        "system",
+        "messages",
+        "instructions",
+        "input",
+        "systemInstruction",
+        "contents",
+    ] {
+        if let Some(selected) = value.get(key) {
+            collect_input_bytes(selected, &mut nodes, &mut bytes);
+        }
+    }
+    i64::try_from(bytes / 4)
+        .unwrap_or(i64::MAX)
+        .max(DEFAULT_MAX_INPUT_ESTIMATE)
+}
+
+fn collect_input_bytes(value: &Value, nodes: &mut usize, bytes: &mut usize) {
+    if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+        return;
+    }
+    *nodes = (*nodes).saturating_add(1);
+    match value {
+        Value::String(text) => {
+            *bytes = bytes
+                .saturating_add(text.len())
+                .min(INPUT_ESTIMATE_MAX_BYTES);
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_input_bytes(value, nodes, bytes);
+                if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_input_bytes(value, nodes, bytes);
+                if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -6695,9 +7980,11 @@ pub(crate) struct RequestEventContext {
 }
 
 pub(crate) use crate::response_transform::{
-    ResponseTransformContext, SseTransformOutcome, apply_buffered_transform_result,
-    make_response_transform_error_frame, sanitize_downstream_stream_headers,
+    ComposedSseResponseTransformHook, GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext,
+    SseTransformOutcome, apply_buffered_transform_result, make_response_transform_error_frame,
+    sanitize_downstream_response_headers, sanitize_downstream_stream_headers,
     sanitized_response_headers_for_plugin, transform_sse_event_bytes,
+    unwrap_gemini_code_assist_body,
 };
 
 #[derive(Clone, Default)]
@@ -7287,6 +8574,7 @@ fn attach_limit_headers_from_engine(
 }
 
 fn limit_rejection_response(
+    capability: ProviderCapability,
     reason: RejectReason,
     model: &str,
     principal_id: &str,
@@ -7367,19 +8655,13 @@ fn limit_rejection_response(
         ),
     };
 
-    let mut error = json!({
-        "type": error_type,
-        "message": message,
-    });
-    if let Some(limit_kind) = limit_kind {
-        error["limit_kind"] = json!(limit_kind);
-    }
-    if let Some(retry_after_seconds) = retry_after_seconds {
-        error["retry_after_seconds"] = json!(retry_after_seconds);
-    }
-
-    let mut response = Response::new(Body::from(Bytes::from(
-        json!({"type":"error","error":error}).to_string(),
+    let mut response = Response::new(Body::from(provider_error_body_with_retry_after(
+        capability,
+        status,
+        error_type,
+        &message,
+        limit_kind,
+        retry_after_seconds,
     )));
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -7445,19 +8727,44 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 }
 
 fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
+    let base_url = record
+        .base_url
+        .clone()
+        .or_else(|| Some(default_base_url(record.kind)));
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            Ok(Upstream::AnthropicDirect {
-                base_url: record.base_url.clone(),
-            })
+            Ok(Upstream::AnthropicDirect { base_url })
+        }
+        StorageUpstreamKind::OpenaiOauth | StorageUpstreamKind::OpenaiApiKey => {
+            Ok(Upstream::OpenaiDirect { base_url })
+        }
+        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth => {
+            Ok(Upstream::GeminiDirect { base_url })
         }
     }
+}
+
+fn default_base_url(kind: StorageUpstreamKind) -> Url {
+    let value = match kind {
+        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
+            DEFAULT_ANTHROPIC_BASE_URL
+        }
+        StorageUpstreamKind::OpenaiOauth => DEFAULT_OPENAI_CODEX_BASE_URL,
+        StorageUpstreamKind::OpenaiApiKey => DEFAULT_OPENAI_BASE_URL,
+        StorageUpstreamKind::GeminiApiKey => DEFAULT_GEMINI_BASE_URL,
+        StorageUpstreamKind::GeminiOauth => DEFAULT_GEMINI_CODE_ASSIST_BASE_URL,
+    };
+    Url::parse(value).expect("provider base URL parses")
 }
 
 fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKind {
     match kind {
         StorageUpstreamKind::AnthropicApiKey => CandidateUpstreamKind::AnthropicApiKey,
         StorageUpstreamKind::AnthropicOauth => CandidateUpstreamKind::AnthropicOauth,
+        StorageUpstreamKind::OpenaiOauth => CandidateUpstreamKind::OpenaiOauth,
+        StorageUpstreamKind::OpenaiApiKey => CandidateUpstreamKind::OpenaiApiKey,
+        StorageUpstreamKind::GeminiApiKey => CandidateUpstreamKind::GeminiApiKey,
+        StorageUpstreamKind::GeminiOauth => CandidateUpstreamKind::GeminiOauth,
     }
 }
 
@@ -7465,6 +8772,10 @@ fn storage_upstream_kind_label(kind: StorageUpstreamKind) -> &'static str {
     match kind {
         StorageUpstreamKind::AnthropicApiKey => "anthropic_key",
         StorageUpstreamKind::AnthropicOauth => "anthropic_oauth",
+        StorageUpstreamKind::OpenaiOauth => "openai_oauth",
+        StorageUpstreamKind::OpenaiApiKey => "openai_api_key",
+        StorageUpstreamKind::GeminiApiKey => "gemini_api_key",
+        StorageUpstreamKind::GeminiOauth => "gemini_oauth",
     }
 }
 
@@ -7537,11 +8848,16 @@ fn route_for_record(
     record: &UpstreamRecord,
     cached: &PrincipalSpecCached,
 ) -> Result<(RouteDecision, Option<Url>), String> {
-    let raw_passthrough_base_url = record.base_url.clone();
+    let raw_passthrough_base_url = record.base_url.clone().or_else(|| {
+        (record.kind == StorageUpstreamKind::GeminiOauth).then(|| default_base_url(record.kind))
+    });
     let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
         base_url: raw_passthrough_base_url
             .clone()
-            .unwrap_or_else(default_anthropic_base_url),
+            .unwrap_or_else(|| default_base_url(record.kind)),
+        openai_oauth: record.kind == StorageUpstreamKind::OpenaiOauth,
+        openai_oauth_default: record.kind == StorageUpstreamKind::OpenaiOauth
+            && record.base_url.is_none(),
     });
     let upstream = upstream_for_record(record)?;
     let dialect = cached.resolved_dialect(&route_dialect).clone();
@@ -7560,61 +8876,66 @@ fn route_for_record(
 fn emit_route_completed(
     observer: Option<&LifecycleContext>,
     routed: &RoutedUpstream<'_>,
-    body_view: &RequestBodyView,
+    model: Option<&str>,
 ) {
     let Some(o) = observer else {
         return;
     };
+    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
+        event_id: o.event_id().to_owned(),
+        result: Ok(route_info_for_routed(routed, model)),
+        routing_trace: Some(routed.routing_trace.clone()),
+    });
+}
+
+fn route_info_for_routed(
+    routed: &RoutedUpstream<'_>,
+    model: Option<&str>,
+) -> cc_lb_lifecycle::RouteInfo {
     let upstream_id = routed.route.upstream_id;
     let selected_cache_score = routed.selected_cache_score.as_ref();
     let selected_quota_candidate = resolved_candidate_urgency(&routed.routing_trace, upstream_id);
     let subscription_trace = subscription_preference_trace(&routed.routing_trace);
-    o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
-        event_id: o.event_id().to_owned(),
-        result: Ok(cc_lb_lifecycle::RouteInfo {
-            upstream_id,
-            upstream_name: routed.record.name.clone(),
-            model: body_view.model(),
-            upstream_kind: Some(storage_upstream_kind_label(routed.record.kind).to_owned()),
-            route_ms: Some(routed.route_ms),
-            routing_trace: Some(routed.routing_trace.clone()),
-            predicted_cache_read_tokens: Some(
-                selected_cache_score.map_or(0, |score| score.predicted_cache_read_tokens),
-            ),
-            matched_v3_cache_key: selected_cache_score
-                .and_then(|score| score.matched_v3_cache_key.clone()),
-            breakpoint_content_block_index: selected_cache_score
-                .and_then(|score| score.breakpoint_content_block_index),
-            matched_content_block_index: selected_cache_score
-                .and_then(|score| score.matched_content_block_index),
-            lookback_distance: selected_cache_score.and_then(|score| score.lookback_distance),
-            predicted_cache_creation_tokens_5m: selected_cache_score
-                .map(|score| score.predicted_cache_creation_tokens_5m),
-            predicted_cache_creation_tokens_1h: selected_cache_score
-                .map(|score| score.predicted_cache_creation_tokens_1h),
-            token_estimate_source: selected_cache_score
-                .and_then(|score| score.token_estimate_source.clone()),
-            cache_value_micros: subscription_trace.and_then(|trace| {
-                trace
-                    .candidates
-                    .iter()
-                    .find(|candidate| candidate.upstream_id == upstream_id)
-                    .and_then(|candidate| candidate.cache_value_micros)
-            }),
-            formula_winner_upstream_id: subscription_trace
-                .and_then(|trace| trace.formula_winner_upstream_id),
-            kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
-            quota_urgency_5h: selected_quota_candidate
-                .and_then(|candidate| candidate.quota_urgency_5h),
-            quota_urgency_7d: selected_quota_candidate
-                .and_then(|candidate| candidate.quota_urgency_7d),
-            quota_urgency_combined: selected_quota_candidate
-                .and_then(|candidate| candidate.quota_urgency_combined),
-            quota_warning_multiplier: selected_quota_candidate
-                .map(|candidate| candidate.warning_multiplier),
-        }),
+    cc_lb_lifecycle::RouteInfo {
+        upstream_id,
+        upstream_name: routed.record.name.clone(),
+        model: model.map(ToOwned::to_owned),
+        upstream_kind: Some(storage_upstream_kind_label(routed.record.kind).to_owned()),
+        route_ms: Some(routed.route_ms),
         routing_trace: Some(routed.routing_trace.clone()),
-    });
+        predicted_cache_read_tokens: Some(
+            selected_cache_score.map_or(0, |score| score.predicted_cache_read_tokens),
+        ),
+        matched_v3_cache_key: selected_cache_score
+            .and_then(|score| score.matched_v3_cache_key.clone()),
+        breakpoint_content_block_index: selected_cache_score
+            .and_then(|score| score.breakpoint_content_block_index),
+        matched_content_block_index: selected_cache_score
+            .and_then(|score| score.matched_content_block_index),
+        lookback_distance: selected_cache_score.and_then(|score| score.lookback_distance),
+        predicted_cache_creation_tokens_5m: selected_cache_score
+            .map(|score| score.predicted_cache_creation_tokens_5m),
+        predicted_cache_creation_tokens_1h: selected_cache_score
+            .map(|score| score.predicted_cache_creation_tokens_1h),
+        token_estimate_source: selected_cache_score
+            .and_then(|score| score.token_estimate_source.clone()),
+        cache_value_micros: subscription_trace.and_then(|trace| {
+            trace
+                .candidates
+                .iter()
+                .find(|candidate| candidate.upstream_id == upstream_id)
+                .and_then(|candidate| candidate.cache_value_micros)
+        }),
+        formula_winner_upstream_id: subscription_trace
+            .and_then(|trace| trace.formula_winner_upstream_id),
+        kept_upstream_id: subscription_trace.and_then(|trace| trace.kept_upstream_id),
+        quota_urgency_5h: selected_quota_candidate.and_then(|candidate| candidate.quota_urgency_5h),
+        quota_urgency_7d: selected_quota_candidate.and_then(|candidate| candidate.quota_urgency_7d),
+        quota_urgency_combined: selected_quota_candidate
+            .and_then(|candidate| candidate.quota_urgency_combined),
+        quota_warning_multiplier: selected_quota_candidate
+            .map(|candidate| candidate.warning_multiplier),
+    }
 }
 
 /// Re-routes a request after a failover-eligible failure. Re-runs the
@@ -7628,6 +8949,7 @@ struct FailoverRouter<'a> {
     ctx: &'a RequestContext,
     principal: &'a Principal,
     warm_entries: &'a HashMap<Uuid, Vec<WarmCacheEntry>>,
+    request_kind: RequestKind,
     observer: Option<&'a LifecycleContext>,
     handle_span: &'a tracing::Span,
     /// False when request affinity pins the upstream (web-search continuity
@@ -7657,7 +8979,7 @@ impl<'a> FailoverRouter<'a> {
         let (mut candidates, mut selected_cache_matches) = build_candidates_with_matches(
             self.view,
             &self.principal.id,
-            RequestKind::AnthropicMessages,
+            self.request_kind,
             &self.ctx.cache_breakpoints,
             self.warm_entries,
             &*lifecycle.clock,
@@ -7665,13 +8987,16 @@ impl<'a> FailoverRouter<'a> {
         candidates.retain(|candidate| !self.excluded.contains(&candidate.upstream_id));
         // The last allowed attempt goes to an API key when one remains, so
         // the attempt cap never strands a request on exhausted OAuth accounts.
-        let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
-        if last_attempt
-            && candidates
-                .iter()
-                .any(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey)
-        {
-            candidates.retain(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey);
+        if self.request_kind == RequestKind::AnthropicMessages {
+            let last_attempt = self.upstream_attempts + 1 == MAX_UPSTREAM_ATTEMPTS;
+            if last_attempt
+                && candidates
+                    .iter()
+                    .any(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey)
+            {
+                candidates
+                    .retain(|candidate| candidate.kind == CandidateUpstreamKind::AnthropicApiKey);
+            }
         }
         if candidates.is_empty() {
             return None;
@@ -7691,12 +9016,25 @@ impl<'a> FailoverRouter<'a> {
             self.router_pipeline.terminal.clone(),
             &pipeline_result.candidates,
         );
-        let upstream_id = terminal_decision.upstream_id.filter(|upstream_id| {
+        let selected = terminal_decision.upstream_id.and_then(|upstream_id| {
             pipeline_result
                 .candidates
                 .iter()
-                .any(|candidate| candidate.upstream_id == *upstream_id)
+                .find(|candidate| candidate.upstream_id == upstream_id)
         })?;
+        // The subscription filter keeps a lone survivor even when its quota is
+        // proven exhausted; on failover that would revive an account already
+        // known to be spent, so relay the current failure instead.
+        if self
+            .router_pipeline
+            .user_filters
+            .iter()
+            .any(|filter| filter.plugin_id() == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+            && subscription_hard_blocked(self.ctx.canonical_model_id.as_str(), selected)
+        {
+            return None;
+        }
+        let upstream_id = selected.upstream_id;
         let record = self
             .view
             .upstreams_snapshot()
@@ -7837,6 +9175,145 @@ mod tests {
 
     use super::*;
     use crate::prompt_cache_simulator::V3_TOKEN_ESTIMATE_SOURCE;
+
+    #[test]
+    fn anthropic_upstream_kinds_map_to_messages_over_http() {
+        let expected = (ProtocolId::AnthropicMessages, TransportId::Http);
+
+        assert_eq!(ids_for(StorageRecordKind::AnthropicApiKey), expected);
+        assert_eq!(ids_for(StorageRecordKind::AnthropicOauth), expected);
+    }
+
+    fn provider_signed_path(
+        kind: StorageRecordKind,
+        base_url: Option<&str>,
+        method: http::Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> Url {
+        let record = UpstreamRecord {
+            id: Uuid::from_u128(8_537),
+            name: "provider-url-regression".to_owned(),
+            kind,
+            base_url: base_url.map(|base| Url::parse(base).expect("test base URL parses")),
+            enabled: true,
+            ..Default::default()
+        };
+        let principal_view = failure_principal_view("principal-test", default_artifacts());
+        let cached = principal_view
+            .get("principal-test")
+            .expect("test principal exists");
+        let (route, _) = route_for_record(&record, cached).expect("provider route resolves");
+        let context = RequestContext::builder()
+            .request_id("provider-url-regression".to_owned())
+            .method(method)
+            .path(path.to_owned())
+            .query(query.map(str::to_owned))
+            .build();
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: PrincipalKind::InternalKey,
+        };
+        shape_request(
+            route.dialect.as_ref(),
+            &context.dialect_shape_context(),
+            &route.upstream,
+            &principal,
+        )
+        .expect("provider request shapes")
+        .url()
+        .clone()
+    }
+
+    #[test]
+    fn openai_codex_default_http_and_websocket_use_responses_without_v1() {
+        for method in [http::Method::POST, http::Method::GET] {
+            let url = provider_signed_path(
+                StorageRecordKind::OpenaiOauth,
+                None,
+                method.clone(),
+                "/v1/responses",
+                Some("trace=a%2Fb&beta=1"),
+            );
+            assert_eq!(
+                url.as_str(),
+                "https://chatgpt.com/backend-api/codex/responses?trace=a%2Fb&beta=1",
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_codex_custom_http_and_websocket_preserve_base_prefix() {
+        for base in [
+            "https://gateway.example/codex-proxy",
+            "https://gateway.example/codex-proxy/",
+            "https://gateway.example/codex-proxy/?stale=1",
+        ] {
+            for method in [http::Method::POST, http::Method::GET] {
+                let url = provider_signed_path(
+                    StorageRecordKind::OpenaiOauth,
+                    Some(base),
+                    method.clone(),
+                    "/v1/responses",
+                    Some("trace=a%2Fb&beta=1"),
+                );
+                assert_eq!(
+                    url.as_str(),
+                    "https://gateway.example/codex-proxy/responses?trace=a%2Fb&beta=1",
+                    "{method} {base}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openai_codex_custom_base_query_is_removed_without_request_query() {
+        let url = provider_signed_path(
+            StorageRecordKind::OpenaiOauth,
+            Some("https://gateway.example/codex-proxy?stale=1"),
+            http::Method::POST,
+            "/v1/responses",
+            None,
+        );
+        assert_eq!(
+            url.as_str(),
+            "https://gateway.example/codex-proxy/responses"
+        );
+    }
+
+    #[test]
+    fn provider_signed_paths_outside_codex_responses_are_unchanged() {
+        for (kind, base, path, expected) in [
+            (
+                StorageRecordKind::OpenaiApiKey,
+                None,
+                "/v1/responses",
+                "https://api.openai.com/v1/responses?beta=1",
+            ),
+            (
+                StorageRecordKind::OpenaiApiKey,
+                Some("https://gateway.example/old-prefix?stale=1"),
+                "/v1/responses",
+                "https://gateway.example/v1/responses?beta=1",
+            ),
+            (
+                StorageRecordKind::AnthropicApiKey,
+                Some("https://gateway.example/old-prefix?stale=1"),
+                "/v1/messages",
+                "https://gateway.example/v1/messages?beta=1",
+            ),
+            (
+                StorageRecordKind::GeminiApiKey,
+                Some("https://gateway.example/old-prefix?stale=1"),
+                "/v1beta/models/gemini-test:generateContent",
+                "https://gateway.example/v1beta/models/gemini-test:generateContent?beta=1",
+            ),
+        ] {
+            let url = provider_signed_path(kind, base, http::Method::POST, path, Some("beta=1"));
+            assert_eq!(url.as_str(), expected, "{kind:?} {base:?} {path}");
+        }
+    }
 
     const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
 
@@ -11218,6 +12695,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sse_completion_follows_each_provider_terminal_event() {
+        let message_stop = usage_parser::parse_sse_event(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let response_completed = usage_parser::parse_sse_event(
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+        );
+        let response_delta = usage_parser::parse_sse_event(
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+        );
+        let gemini_chunk = usage_parser::parse_sse_event(
+            b"data: {\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"hi\",\"thoughtSignature\":\"sig\"}]}}]}\n\n",
+        );
+
+        assert!(sse_event_completes_response(
+            ProviderCapability::AnthropicMessages,
+            &message_stop,
+            false,
+        ));
+        assert!(!sse_event_completes_response(
+            ProviderCapability::AnthropicMessages,
+            &response_completed,
+            false,
+        ));
+        assert!(sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_completed,
+            false,
+        ));
+        assert!(!sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &message_stop,
+            false,
+        ));
+        assert!(!sse_event_completes_response(
+            ProviderCapability::OpenaiResponses,
+            &response_delta,
+            false,
+        ));
+        // Gemini has no terminal event; pending keys bind at clean stream end.
+        assert!(!sse_event_completes_response(
+            ProviderCapability::GeminiGenerateContent,
+            &gemini_chunk,
+            false,
+        ));
+    }
+
     /// QA-STOR-01: the affinity store fails while resolving request keys.
     #[tokio::test]
     async fn affinity_store_failure_records_storage_stage() {
@@ -11869,5 +13394,615 @@ mod tests {
                 "dispatch variant reason must be preserved"
             );
         }
+    }
+
+    /// WS-RED-01: WebSocket setup must honor the resolved terminal strategy
+    /// instead of silently falling back to list order.
+    #[tokio::test]
+    async fn responses_websocket_uses_resolved_terminal_strategy() {
+        let pipeline = cc_lb_control::api_keys::principal_view::RouterPipelineCache {
+            user_filters: Vec::new(),
+            terminal: TerminalStrategy::Random,
+            instantiation_error: None,
+        };
+        let first_id = Uuid::from_u128(1);
+        let second_id = Uuid::from_u128(2);
+        let records = vec![
+            UpstreamRecord {
+                id: first_id,
+                name: "first-openai".to_owned(),
+                kind: StorageRecordKind::OpenaiApiKey,
+                base_url: Some(Url::parse("http://first.invalid/").expect("test URL parses")),
+                enabled: true,
+                revision: 1,
+                ..UpstreamRecord::default()
+            },
+            UpstreamRecord {
+                id: second_id,
+                name: "second-openai".to_owned(),
+                kind: StorageRecordKind::OpenaiApiKey,
+                base_url: Some(Url::parse("http://second.invalid/").expect("test URL parses")),
+                enabled: true,
+                revision: 1,
+                ..UpstreamRecord::default()
+            },
+        ];
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    Some(Arc::new(pipeline)),
+                    cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            records,
+        );
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+        let mut events = subscribe_lifecycle(&bus);
+        let request = failure_request(Bytes::new());
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let auth_info = lifecycle.websocket_auth_info(&auth);
+        assert_eq!(auth_info.principal_id, auth.principal_id());
+        assert_eq!(auth_info.key_id.as_deref(), Some(auth.key_id()));
+        assert_eq!(auth_info.auth_ms, Some(auth.auth_ms()));
+        assert_eq!(auth_info.principal_kind.as_deref(), Some("machine"));
+
+        // Pick a fixed seed whose first Random draw is the second candidate,
+        // then install that same seed in the lifecycle's private test state.
+        // This keeps the assertion deterministic without adding a test API.
+        let seed = (0_u64..1024)
+            .find(|seed| {
+                let mut rng = StdRng::seed_from_u64(*seed);
+                rng.random_range(0..2) == 1
+            })
+            .expect("a deterministic seed must select the second candidate");
+        *lifecycle.rng.lock().expect("terminal rng lock") = StdRng::seed_from_u64(seed);
+
+        let body = Arc::new(json!({"model": "gpt-test", "store": false}));
+        let frame = Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
+        let (observer, request_id) = lifecycle.websocket_observer();
+        assert!(
+            drain_events(&mut events).is_empty(),
+            "allocating an observer is not a turn"
+        );
+        let turn = lifecycle
+            .prepare_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &frame,
+                },
+                body.clone(),
+                None,
+                observer,
+                &request_id,
+            )
+            .await
+            .expect("an eligible OpenAI upstream should be selected");
+        assert_eq!(
+            turn.candidates[0].upstream_id, second_id,
+            "the resolved Random strategy is honored"
+        );
+        assert_eq!(
+            turn.candidates[1].upstream_id, first_id,
+            "unattempted fallback candidates remain available"
+        );
+        assert!(!turn.store);
+        let (url, _) = lifecycle
+            .sign_websocket_connection(&auth, request.headers(), &turn.candidates[0], None)
+            .await
+            .expect("only the selected connection is signed");
+        assert_eq!(url.as_str(), "ws://second.invalid/v1/responses");
+        let first_events = drain_events(&mut events);
+        assert_eq!(
+            first_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RequestStarted { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            first_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::AuthCompleted { .. }
+                ))
+                .count(),
+            0,
+            "authentication observations belong to the gateway, not turn preparation"
+        );
+        assert_eq!(
+            first_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RouteCompleted { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            first_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::LimitDecision { .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(first_events.iter().any(|event| matches!(event,
+            cc_lb_lifecycle::LifecycleEvent::ParseCompleted { result: Ok(info), .. }
+                if info.method == "GET" && info.path == "/v1/responses" && info.stream && info.body_bytes == frame.len() as u64
+        )));
+        let (observer, next_request_id) = lifecycle.websocket_observer();
+        assert_ne!(request_id, next_request_id);
+        let local_body = Arc::new(
+            json!({"model": "gpt-test", "store": false, "previous_response_id": "resp_local"}),
+        );
+        let local_frame =
+            Bytes::from(serde_json::to_vec(local_body.as_ref()).expect("test frame serializes"));
+        let pinned = lifecycle
+            .prepare_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &local_frame,
+                },
+                local_body.clone(),
+                Some(first_id),
+                observer,
+                &next_request_id,
+            )
+            .await
+            .expect("a locally owned store:false response does not require durable lookup");
+        assert_eq!(
+            pinned.candidates.len(),
+            1,
+            "owner-constrained turns cannot fall back"
+        );
+        assert_eq!(pinned.candidates[0].upstream_id, first_id);
+        drain_events(&mut events);
+        lifecycle
+            .validate_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &local_frame,
+                },
+                local_body.as_ref(),
+                first_id,
+            )
+            .await
+            .expect("retained connection is still eligible");
+        assert!(
+            drain_events(&mut events).is_empty(),
+            "retained validation emits no extra lifecycle events"
+        );
+        lifecycle
+            .bind_websocket_response(&auth, first_id, &json!({"id":"resp_local"}), false)
+            .await
+            .expect("store:false response ids stay local to the gateway");
+        assert!(
+            lifecycle
+                .bind_websocket_response(
+                    &auth,
+                    first_id,
+                    &json!({"id":"resp_local","conversation":{"id":"conv_durable"}}),
+                    false,
+                )
+                .await
+                .is_err(),
+            "store:false conversations still require durable affinity storage"
+        );
+        assert!(
+            lifecycle
+                .bind_websocket_response(&auth, first_id, &json!({"id":"resp_stored"}), true)
+                .await
+                .is_err(),
+            "stored response state fails closed without durable affinity storage"
+        );
+        let records = lifecycle.dynamic_view.load().upstreams_snapshot().to_vec();
+        lifecycle.dynamic_view.store(provenance_view(
+            Arc::new(PrincipalView::for_tests(
+                "principal-test",
+                false,
+                vec!["*".to_owned()],
+                Vec::new(),
+                HashMap::new(),
+            )),
+            Arc::new(TestSignerFactory),
+            records.clone(),
+        ));
+        assert!(
+            lifecycle
+                .validate_websocket_turn(
+                    &auth,
+                    WebSocketIngress {
+                        headers: request.headers(),
+                        frame: &frame
+                    },
+                    body.as_ref(),
+                    first_id,
+                )
+                .await
+                .is_err(),
+            "a retained connection cannot bypass a disabled principal"
+        );
+        lifecycle.dynamic_view.store(provenance_view(
+            Arc::new(PrincipalView::for_tests(
+                "principal-test",
+                true,
+                vec!["other-model".to_owned()],
+                Vec::new(),
+                HashMap::new(),
+            )),
+            Arc::new(TestSignerFactory),
+            records,
+        ));
+        let error = lifecycle
+            .validate_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &frame,
+                },
+                body.as_ref(),
+                first_id,
+            )
+            .await
+            .expect_err("a retained connection cannot bypass a changed model allowlist");
+        assert_eq!(error.status, 403);
+        lifecycle.dynamic_view.store(provenance_view(
+            failure_principal_view("other-principal", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+        ));
+        let missing_info = lifecycle.websocket_auth_info(&auth);
+        assert_eq!(missing_info.principal_id, auth.principal_id());
+        assert_eq!(missing_info.key_id.as_deref(), Some(auth.key_id()));
+        assert_eq!(missing_info.auth_ms, Some(auth.auth_ms()));
+        assert_eq!(
+            missing_info.principal_kind, None,
+            "a missing principal kind is never fabricated"
+        );
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "WebSocket helpers never use HTTP dispatch"
+        );
+    }
+
+    struct WebSocketEligibilityFilter {
+        allow: AtomicBool,
+        seen: Mutex<Vec<Vec<Uuid>>>,
+        frame: Bytes,
+    }
+
+    impl FilterPlugin for WebSocketEligibilityFilter {
+        fn filter(
+            &self,
+            ctx: &cc_lb_routing::RoutingContext,
+            _principal: &Principal,
+            candidates: &[UpstreamCandidate],
+        ) -> Result<FilterOutput, FilterError> {
+            assert_eq!(ctx.method, http::Method::GET);
+            assert_eq!(ctx.path, "/v1/responses");
+            assert_eq!(ctx.canonical_model_id, "gpt-test");
+            assert_eq!(
+                ctx.body_bytes, self.frame,
+                "filters receive original frame whitespace and key order"
+            );
+            assert_eq!(
+                ctx.body_bytes.as_ptr(),
+                self.frame.as_ptr(),
+                "routing shares the original frame allocation"
+            );
+            self.seen.lock().expect("filter observations").push(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.upstream_id)
+                    .collect(),
+            );
+            Ok(FilterOutput {
+                kept_upstream_ids: candidates
+                    .iter()
+                    .filter(|_| self.allow.load(Ordering::SeqCst))
+                    .map(|candidate| candidate.upstream_id)
+                    .collect(),
+                reason: "current WebSocket eligibility".to_owned(),
+                per_candidate_reasons: Vec::new(),
+                subscription_preference: None,
+            })
+        }
+
+        fn plugin_id(&self) -> Uuid {
+            Uuid::from_u128(13_084)
+        }
+        fn plugin_name(&self) -> &str {
+            "websocket-eligibility"
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_applies_filters_after_owner_constraint_and_revalidates() {
+        let owner = Uuid::from_u128(71);
+        let frame = Bytes::from_static(br#"{ "store" : false, "model" : "gpt-test" }"#);
+        let filter = Arc::new(WebSocketEligibilityFilter {
+            allow: AtomicBool::new(true),
+            seen: Mutex::new(Vec::new()),
+            frame: frame.clone(),
+        });
+        let pipeline = RouterPipelineCache {
+            user_filters: vec![filter.clone()],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+        };
+        let records = [owner, Uuid::from_u128(72)]
+            .into_iter()
+            .map(|id| UpstreamRecord {
+                id,
+                name: format!("openai-{id}"),
+                kind: StorageRecordKind::OpenaiApiKey,
+                enabled: true,
+                ..Default::default()
+            })
+            .collect();
+        let view = provenance_view(
+            failure_principal_view(
+                "principal-test",
+                (
+                    Some(Arc::new(pipeline)),
+                    cc_lb_control::api_keys::principal_view::DialectCache::Inherit,
+                ),
+            ),
+            Arc::new(TestSignerFactory),
+            records,
+        );
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let dispatcher = Arc::new(QueueDispatch::new(Vec::new()));
+        let lifecycle = provenance_lifecycle(view, dispatcher.clone(), &bus);
+        let request = failure_request(Bytes::new());
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("request authenticates");
+        let body =
+            Arc::new(serde_json::from_slice::<Value>(&frame).expect("original frame parses"));
+        let (observer, request_id) = lifecycle.websocket_observer();
+        let turn = lifecycle
+            .prepare_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &frame,
+                },
+                body.clone(),
+                Some(owner),
+                observer,
+                &request_id,
+            )
+            .await
+            .expect("owner passes the current filters");
+        assert_eq!(turn.candidates.len(), 1);
+        assert_eq!(
+            *filter.seen.lock().expect("filter observations"),
+            vec![vec![owner]]
+        );
+        filter.allow.store(false, Ordering::SeqCst);
+        let mut events = subscribe_lifecycle(&bus);
+        let error = lifecycle
+            .validate_websocket_turn(
+                &auth,
+                WebSocketIngress {
+                    headers: request.headers(),
+                    frame: &frame,
+                },
+                body.as_ref(),
+                owner,
+            )
+            .await
+            .expect_err("a retained connection does not bypass changed filter eligibility");
+        assert_eq!(error.code, error_codes::UPSTREAM_AFFINITY_UNAVAILABLE);
+        assert!(drain_events(&mut events).is_empty());
+        let (observer, request_id) = lifecycle.websocket_observer();
+        assert!(
+            lifecycle
+                .prepare_websocket_turn(
+                    &auth,
+                    WebSocketIngress {
+                        headers: request.headers(),
+                        frame: &frame
+                    },
+                    body,
+                    Some(owner),
+                    observer,
+                    &request_id,
+                )
+                .await
+                .is_err(),
+            "an excluded owner cannot fall back"
+        );
+        let rejected = drain_events(&mut events);
+        assert_eq!(
+            rejected
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                ))
+                .count(),
+            1,
+            "a failed create terminates exactly once"
+        );
+        assert_eq!(dispatcher.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_signs_native_codex_connection_urls() {
+        for (base_url, expected) in [
+            (None, "wss://chatgpt.com/backend-api/codex/responses"),
+            (
+                Some("http://gateway.invalid/codex-proxy/?stale=1"),
+                "ws://gateway.invalid/codex-proxy/responses",
+            ),
+        ] {
+            let id = Uuid::from_u128(73);
+            let view = provenance_view(
+                failure_principal_view("principal-test", default_artifacts()),
+                Arc::new(TestSignerFactory),
+                vec![UpstreamRecord {
+                    id,
+                    name: "codex-native".to_owned(),
+                    kind: StorageRecordKind::OpenaiOauth,
+                    base_url: base_url.map(|value| Url::parse(value).expect("test URL parses")),
+                    enabled: true,
+                    ..Default::default()
+                }],
+            );
+            let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+            let lifecycle =
+                provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+            let request = failure_request(Bytes::new());
+            let auth = lifecycle
+                .authenticate(request.headers())
+                .await
+                .expect("request authenticates");
+            let body = Arc::new(json!({"model":"gpt-test","store":false}));
+            let frame =
+                Bytes::from(serde_json::to_vec(body.as_ref()).expect("test frame serializes"));
+            let (observer, request_id) = lifecycle.websocket_observer();
+            let prepared = lifecycle
+                .prepare_websocket_turn(
+                    &auth,
+                    WebSocketIngress {
+                        headers: request.headers(),
+                        frame: &frame,
+                    },
+                    body,
+                    None,
+                    observer,
+                    &request_id,
+                )
+                .await
+                .expect("Codex candidate is eligible");
+            for query in [None, Some("trace=a%2Fb&beta=1")] {
+                let (url, _) = lifecycle
+                    .sign_websocket_connection(
+                        &auth,
+                        request.headers(),
+                        &prepared.candidates[0],
+                        query,
+                    )
+                    .await
+                    .expect("Codex connection signs");
+                let expected = query.map_or_else(
+                    || expected.to_owned(),
+                    |query| format!("{expected}?{query}"),
+                );
+                assert_eq!(url.as_str(), expected);
+            }
+            let records = lifecycle.dynamic_view.load().upstreams_snapshot().to_vec();
+            lifecycle.dynamic_view.store(provenance_view(
+                failure_principal_view("principal-test", default_artifacts()),
+                Arc::new(FailingSignerFactory(|| SignerError::MissingCredentials {
+                    reason: "rotated credential is unavailable".to_owned(),
+                })),
+                records,
+            ));
+            let (observer, request_id) = lifecycle.websocket_observer();
+            let turn = lifecycle
+                .prepare_websocket_turn(
+                    &auth,
+                    WebSocketIngress {
+                        headers: request.headers(),
+                        frame: &frame,
+                    },
+                    Arc::new(json!({"model":"gpt-test","store":false})),
+                    None,
+                    observer,
+                    &request_id,
+                )
+                .await
+                .expect("turn preparation does not sign any connection");
+            assert!(
+                lifecycle
+                    .sign_websocket_connection(&auth, request.headers(), &turn.candidates[0], None)
+                    .await
+                    .is_err(),
+                "opening a new connection uses the fresh signer factory, not cached credentials"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_authentication_rejection_emits_one_terminal() {
+        let bus = Arc::new(cc_lb_control::event_bus::InMemoryBus::new());
+        let view = provenance_view(
+            failure_principal_view("principal-test", default_artifacts()),
+            Arc::new(TestSignerFactory),
+            Vec::new(),
+        );
+        let lifecycle = provenance_lifecycle(view, Arc::new(QueueDispatch::new(Vec::new())), &bus);
+        let mut events = subscribe_lifecycle(&bus);
+        let response =
+            lifecycle.reject_responses_websocket_authentication(&BuiltinAuthError::InvalidFormat);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let rejected = drain_events(&mut events);
+        assert_eq!(
+            rejected
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::RequestTerminated { .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rejected
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    cc_lb_lifecycle::LifecycleEvent::AuthCompleted { result: Err(_), .. }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn provider_state_marker_probe_detects_split_keys_and_skips_stateless_events() {
+        for stateless in [
+            &b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\""[..],
+            b"event: ping\ndata: {",
+            b"data: xxxxxxxxxxxxxxxx",
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"content\":[]}}\n\n",
+        ] {
+            assert!(!sse_bytes_may_carry_anthropic_provider_state(stateless));
+        }
+        for marker in ANTHROPIC_PROVIDER_STATE_MARKERS {
+            assert!(sse_bytes_may_carry_anthropic_provider_state(marker));
+        }
+        // A key split across chunks is found inside the probe window that
+        // re-scans the tail of the already-forwarded partial event.
+        let forwarded = b"data: {\"type\":\"content_block_start\",\"content\":[{\"encrypted_con";
+        let mut buffer = forwarded.to_vec();
+        buffer.extend_from_slice(b"tent\":\"opaque\"}]}");
+        let probe_start = forwarded.len() - ANTHROPIC_PROVIDER_STATE_MARKER_PROBE_BYTES;
+        assert!(!sse_bytes_may_carry_anthropic_provider_state(forwarded));
+        assert!(sse_bytes_may_carry_anthropic_provider_state(
+            &buffer[probe_start..]
+        ));
     }
 }

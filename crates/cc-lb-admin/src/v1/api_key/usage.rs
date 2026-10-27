@@ -24,12 +24,12 @@ use cc_lb_control::anthropic_api_key::{
 use cc_lb_storage_api::{
     ApiKeyClass, ApiKeyOrgCapability, ApiUsageAttribution, RemediationCode, Storage,
     UpstreamApiKeyDetailsRecord, UpstreamApiUsageBucketQuery, UpstreamApiUsageBucketRecord,
-    UpstreamRecord, UsageRollupResolution,
+    UpstreamKind, UpstreamRecord, UsageRollupResolution,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::recheck::load_api_key_upstream;
+use super::recheck::load_api_key_or_provider_upstream;
 use crate::AdminState;
 use crate::dashboard::{
     DashboardBuildError, DashboardRange, DashboardUsageResponse, UsageBucket, UsageGroupBy,
@@ -77,12 +77,19 @@ pub(crate) async fn get_upstream_usage(
         None => auto_step(range),
     };
     let storage = storage(&state)?;
-    let record = load_api_key_upstream(storage, &id).await?;
+    let record = load_api_key_or_provider_upstream(storage, &id).await?;
     let details = storage.get_api_key_details(record.id).await?;
-    let on_org_origin = state
-        .anthropic_org_api
-        .applies_to(&upstream_base_url(&record)?);
-    let provenance = derive_provenance(on_org_origin, &record, details.as_ref());
+    let provenance = if matches!(
+        record.kind,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
+        Provenance::estimated(None)
+    } else {
+        let on_org_origin = state
+            .anthropic_org_api
+            .applies_to(&upstream_base_url(&record)?);
+        derive_provenance(on_org_origin, &record, details.as_ref())
+    };
 
     let now_unix_secs = cc_lb_clock::unix_secs(state.clock.now());
     let (month_start_unix_secs, month_end_unix_secs) = utc_month_bounds(now_unix_secs);

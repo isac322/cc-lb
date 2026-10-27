@@ -99,7 +99,9 @@ pub use passthrough::{shape, transform_response, transform_sse_event};
 
 fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
     match upstream {
-        ArchivedUpstream::AnthropicDirect { base_url } => base_url.as_ref().map(|b| {
+        ArchivedUpstream::AnthropicDirect { base_url }
+        | ArchivedUpstream::OpenaiDirect { base_url }
+        | ArchivedUpstream::GeminiDirect { base_url } => base_url.as_ref().map(|b| {
             let s: &str = b;
             s.to_string()
         }),
@@ -108,8 +110,13 @@ fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
 
 fn build_url(base: &str, path: &str, query: Option<&str>) -> String {
     let trimmed = base.trim_end_matches('/');
+    let effective_path = if trimmed.ends_with("/backend-api/codex") && path == "/v1/responses" {
+        "/responses"
+    } else {
+        path
+    };
     match query {
-        Some(q) if !q.is_empty() => format!("{trimmed}{path}?{q}"),
-        _ => format!("{trimmed}{path}"),
+        Some(q) if !q.is_empty() => format!("{trimmed}{effective_path}?{q}"),
+        _ => format!("{trimmed}{effective_path}"),
     }
 }

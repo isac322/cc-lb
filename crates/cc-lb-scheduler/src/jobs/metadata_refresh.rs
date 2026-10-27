@@ -7,6 +7,7 @@ use cc_lb_control::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_control::anthropic_metadata::MetadataHttpClient;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, Storage, StorageError, UpstreamRecord, UpstreamStore,
 };
@@ -78,6 +79,10 @@ where
             record_metadata_refresh_status("upstream_removed");
             return Ok(MetadataRefreshJobOutcome::UpstreamRemoved);
         };
+        if upstream.kind != UpstreamKind::AnthropicOauth {
+            record_metadata_refresh_status("skipped");
+            return Ok(MetadataRefreshJobOutcome::Stale);
+        }
         if upstream.oauth_token_generation > job.credential_generation {
             record_metadata_refresh_status("stale");
             return Ok(MetadataRefreshJobOutcome::Stale);
@@ -150,6 +155,9 @@ impl MetadataRefreshRunner for CoreMetadataRefreshRunner {
     }
 
     async fn run_metadata_refresh(&self, upstream: &UpstreamRecord) -> Result<()> {
+        if upstream.kind != UpstreamKind::AnthropicOauth {
+            return Ok(());
+        }
         let access_token = upstream
             .oauth_credentials
             .as_ref()

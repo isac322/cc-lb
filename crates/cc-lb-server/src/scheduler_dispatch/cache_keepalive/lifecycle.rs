@@ -171,6 +171,8 @@ fn upstream_kind_label(kind: UpstreamKind) -> &'static str {
     match kind {
         UpstreamKind::AnthropicApiKey => "anthropic_key",
         UpstreamKind::AnthropicOauth => "anthropic_oauth",
+        UpstreamKind::OpenaiApiKey | UpstreamKind::OpenaiOauth => "openai_key",
+        UpstreamKind::GeminiApiKey | UpstreamKind::GeminiOauth => "gemini_key",
     }
 }
 

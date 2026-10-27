@@ -7,6 +7,34 @@ All notable changes to this project will be documented in this file.
 
 - Subscription-quota aggregate reads now deduplicate identical token intervals before storage lookup while preserving the existing response and inclusive-range semantics.
 
+### Changed
+
+- PostgreSQL request-event retention now deletes bounded batches through stable sequence IDs with `ANY(ARRAY(...))`, preserving cutoff and batch ordering semantics.
+- Supported Anthropic Messages, OpenAI Responses, and Gemini generation requests now preserve provider-owned continuation, file, container, cache, and response state through upstream affinity instead of rejecting supported generation bodies to protect cross-upstream load balancing. Stateless requests retain normal routing and failover; pinned requests stay on their owning upstream. Anthropic prompt-cache analysis remains provider-specific. SQLite provider storage preserves historical migration checksums and adds provider kinds through migration `0099`.
+- OpenAI and Gemini OAuth imports accept access-only bundles with `never_refresh: true`, an empty refresh-token string, and no refresh-token expiry. Updating the bundle replaces the stored credentials atomically. cc-lb never refreshes these tokens and rejects expired tokens before new signing operations; existing provider WebSocket connections are not closed just because the token expires. Refreshing credentials and Anthropic long-lived credentials are unchanged.
+- Responses WebSockets now apply current client authorization, owner routing, quota reservation, usage accounting, and request telemetry per supported turn, with lazy provider connections and bounded FIFO lanes. Ordinary `response.create` messages require an explicit model; steering auto-successors inherit the parent model. Independent full-history turns may reselect an upstream, while connection-local continuations stay on their exact provider connection. WebSocket `store: false` response ids remain connection-local, conversation ownership remains durable, and HTTP response-id behavior is unchanged. Closing or disconnecting cancels active work without adding a `response.cancel` operation.
+
+### Security
+
+- Updated `rustls-webpki` to `0.103.16`, `webpki-roots` to `1.0.11`, and Wasmtime to `49.0.4` to address dependency security advisories.
+- TLS trust intentionally changes: `webpki-roots` removes the emSign ECC Root CA G3 and the C1/C3 roots, and `rustls-webpki` rejects distrusted emSign intermediate keys. Affected certificate chains can fail TLS validation.
+- Updated `ctutils` from `0.4.2` to `0.4.5` to address RUSTSEC-2026-0385 with constant-time mask generation and comparison hardening.
+- Removed the unused Wasmtime global disk-cache feature and updated Tokio and zstd dependencies to their RustSec-fixed release lines; cc-lb's in-process compiled-module cache and zstd payload behavior remain unchanged.
+
+### Fixed
+
+- `POST /v1/messages/count_tokens` now uses the Anthropic Messages capability path, restoring count-tokens routing.
+
+- Outbound dispatch no longer forwards the client's `Host` header, so HTTP/2 requests use only the upstream URL's `:authority`.
+- Identity SSE responses with a retained `Content-Length` now finalize lifecycle, usage, and terminal telemetry before yielding the final bytes, so a normally completed response is not recorded as a `499 client_closed_request`.
+- Limit reservations are now reconciled or refunded exactly once on successful, failed, and cancelled terminal paths, so upstream stream errors cannot hold a concurrent slot until TTL expiry.
+- Limit cost estimates for Gemini requests now use the model from the request URL and `generationConfig.maxOutputTokens`, so valid requests under a USD limit are no longer rejected as an unknown model.
+- Failover no longer sends a request to an Anthropic OAuth upstream that the subscription-preference filter has judged hard-exhausted; the request keeps the existing upstream error instead.
+- Gemini output usage now includes candidate and thought tokens once, so stored usage, cost, and limit reconciliation include billable reasoning output. Cumulative snapshots replace earlier counts; cache-input subtraction and the existing OpenAI and Anthropic reasoning subsets are unchanged.
+- Documentation source sync accepts implemented OpenAI and Gemini facts in the runtime reference while retaining unsupported-provider, endorsement, private-path, and availability-claim checks. Selecting a nested heading no longer drops later sibling sections from an already-selected ancestor.
+- OpenAI OAuth Responses requests now use the default Codex base `https://chatgpt.com/backend-api/codex` plus `/responses` for HTTP and WebSocket transport. Custom base URL prefixes and downstream queries are preserved; other provider URL construction is unchanged.
+- Responses WebSocket turns reconcile measured usage once even when they fail or are interrupted, release concurrent slots immediately at termination, and refund once when no usage was observed. A numeric zero is measured usage; `null` and empty usage objects are not. The existing HTTP error-refund policy is unchanged.
+
 ## [2.0.2] - 2026-10-16
 
 ### Fixed

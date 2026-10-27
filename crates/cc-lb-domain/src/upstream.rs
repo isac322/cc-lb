@@ -14,6 +14,40 @@ pub enum Upstream {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<Url>,
     },
+    /// Direct OpenAI API endpoint.
+    OpenaiDirect {
+        /// Operator-configured base URL override for this upstream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<Url>,
+    },
+    /// Direct Gemini API endpoint.
+    GeminiDirect {
+        /// Operator-configured base URL override for this upstream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<Url>,
+    },
+}
+
+/// Provider implemented by an upstream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    /// Anthropic API provider.
+    Anthropic,
+    /// OpenAI API provider.
+    Openai,
+    /// Gemini API provider.
+    Gemini,
+}
+
+/// Credential kind used by an upstream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    /// Anthropic API key credential.
+    ApiKey,
+    /// Anthropic OAuth credential.
+    Oauth,
 }
 
 /// Upstream record kind exposed to router plugins for candidate selection.
@@ -24,14 +58,44 @@ pub enum UpstreamKind {
     AnthropicApiKey,
     /// Anthropic OAuth upstream.
     AnthropicOauth,
+    /// OpenAI API-key upstream.
+    OpenaiApiKey,
+    /// OpenAI OAuth subscription upstream.
+    OpenaiOauth,
+    /// Gemini API-key upstream.
+    GeminiApiKey,
+    /// Gemini OAuth subscription upstream.
+    GeminiOauth,
 }
-
 impl UpstreamKind {
+    /// Returns the provider implemented by this upstream.
+    pub const fn provider(self) -> Provider {
+        match self {
+            Self::AnthropicApiKey | Self::AnthropicOauth => Provider::Anthropic,
+            Self::OpenaiApiKey | Self::OpenaiOauth => Provider::Openai,
+            Self::GeminiApiKey | Self::GeminiOauth => Provider::Gemini,
+        }
+    }
+
+    /// Returns the credential kind used by this upstream.
+    pub const fn credential_kind(self) -> CredentialKind {
+        match self {
+            Self::AnthropicApiKey | Self::OpenaiApiKey | Self::GeminiApiKey => {
+                CredentialKind::ApiKey
+            }
+            Self::AnthropicOauth | Self::OpenaiOauth | Self::GeminiOauth => CredentialKind::Oauth,
+        }
+    }
+
     /// Returns the stable snake_case wire name.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::AnthropicOauth => "anthropic_oauth",
+            Self::OpenaiApiKey => "openai_api_key",
+            Self::OpenaiOauth => "openai_oauth",
+            Self::GeminiApiKey => "gemini_api_key",
+            Self::GeminiOauth => "gemini_oauth",
         }
     }
 }
@@ -84,3 +148,46 @@ pub const ANTHROPIC_IDENTITY_HEADERS: &[&str] = &[
     "anthropic-account-uuid",
     ANTHROPIC_WORKSPACE_ID_HEADER,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::UpstreamKind;
+    use crate::{CredentialKind, Provider};
+
+    #[test]
+    fn anthropic_api_key_has_provider_neutral_classification() {
+        assert_eq!(
+            UpstreamKind::AnthropicApiKey.provider(),
+            Provider::Anthropic
+        );
+        assert_eq!(
+            UpstreamKind::AnthropicApiKey.credential_kind(),
+            CredentialKind::ApiKey
+        );
+    }
+
+    #[test]
+    fn anthropic_oauth_has_provider_neutral_classification() {
+        assert_eq!(UpstreamKind::AnthropicOauth.provider(), Provider::Anthropic);
+        assert_eq!(
+            UpstreamKind::AnthropicOauth.credential_kind(),
+            CredentialKind::Oauth
+        );
+    }
+
+    #[test]
+    fn gemini_oauth_has_gemini_oauth_classification() {
+        assert_eq!(UpstreamKind::GeminiOauth.provider(), Provider::Gemini);
+        assert_eq!(
+            UpstreamKind::GeminiOauth.credential_kind(),
+            CredentialKind::Oauth
+        );
+        assert_eq!(UpstreamKind::GeminiOauth.as_str(), "gemini_oauth");
+    }
+
+    #[test]
+    fn upstream_kind_wire_names_remain_exact() {
+        assert_eq!(UpstreamKind::AnthropicApiKey.as_str(), "anthropic_api_key");
+        assert_eq!(UpstreamKind::AnthropicOauth.as_str(), "anthropic_oauth");
+    }
+}

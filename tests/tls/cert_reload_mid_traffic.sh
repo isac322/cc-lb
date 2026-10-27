@@ -288,7 +288,7 @@ wait_command "cc-lb-metrics" curl --fail --silent --show-error "http://127.0.0.1
 seed_runtime
 log "plain_http_admin=true plain_http_metrics=true proxy_tls_health=true"
 
-pre_status=$(curl --fail --silent --show-error --write-out '%{http_code}' --output "$TMP_DIR/pre.json" --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" -H "x-api-key: $API_KEY" "https://localhost:$proxy_port/v1/models")
+pre_status=$(curl --fail --silent --show-error --write-out '%{http_code}' --output "$TMP_DIR/pre.json" --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" -X POST -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" --data '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"ping"}]}' "https://localhost:$proxy_port/v1/messages/count_tokens")
 [ "$pre_status" = "200" ] || fail "pre-reload request returned $pre_status"
 observed_old_fp=$(served_fingerprint)
 [ "$observed_old_fp" = "$old_fp" ] || fail "expected old cert before reload observed=$observed_old_fp"
@@ -315,7 +315,7 @@ cp "$key_b" "$active_key"
 kill -HUP "$PROXY_PID"
 wait_served_fingerprint "$new_fp"
 
-post_status=$(curl --fail --silent --show-error --write-out '%{http_code}' --output "$TMP_DIR/post.json" --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" -H "x-api-key: $API_KEY" "https://localhost:$proxy_port/v1/models")
+post_status=$(curl --fail --silent --show-error --write-out '%{http_code}' --output "$TMP_DIR/post.json" --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" -X POST -H "x-api-key: $API_KEY" -H "anthropic-version: 2023-06-01" -H "content-type: application/json" --data '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"ping"}]}' "https://localhost:$proxy_port/v1/messages/count_tokens")
 [ "$post_status" = "200" ] || fail "post-reload request returned $post_status"
 log "post_reload request_status=$post_status observed_fingerprint=$new_fp"
 

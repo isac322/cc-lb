@@ -389,7 +389,7 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: cc-lb-4
     container:
-      image: ghcr.io/isac322/cc-lb-actions-runner:2.337.0-cclb-fe7ac6d6df4f@sha256:c2f09887524d6616d0b97be3316822b47466f5633409f743d6e1bab277deefb4
+      image: ghcr.io/isac322/cc-lb-actions-runner:2.338.0-cclb-a65132b3c9d7@sha256:d319c98e776daac3a8fb00c19780dd896c3e828675b1c8a77273a22373f57b55
 
     services:
       postgres:
@@ -448,7 +448,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rustup-home
+      - name: Export isolated Rustup home
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"
+      - name: Verify baked Rustup bootstrap
+        working-directory: ${{ runner.temp }}
+        run: |
+          command -v rustup
+          rustup --version
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
@@ -457,12 +463,41 @@ jobs:
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       # Unlike clippy, coverage executes fixture-backed WASM tests, so retain
       # both targets installed above.
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          stable-build-metadata: "true"
+      - name: Setup Rust cache
+        run: |
+          {
+            echo "CARGO_INCREMENTAL=0"
+            echo "GIT_SHA=0000000"
+            echo "SOURCE_DATE_EPOCH=0"
+          } >> "$GITHUB_ENV"
+          export SCCACHE_BASEDIRS="$GITHUB_WORKSPACE"
+          sccache_path="$(command -v sccache || true)"
+          rustc_path="$(command -v rustc || true)"
+          if [ -n "$sccache_path" ] && [ -n "$rustc_path" ]; then
+            "$sccache_path" --stop-server >/dev/null 2>&1 || true
+            if "$sccache_path" "$rustc_path" -vV >/dev/null 2>&1; then
+              {
+                echo "SCCACHE_PATH=$sccache_path"
+                echo "RUSTC_WRAPPER=sccache"
+                echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE"
+              } >> "$GITHUB_ENV"
+            else
+              "$sccache_path" --stop-server >/dev/null 2>&1 || true
+              echo "::warning::sccache compiler-wrapper probe failed; continuing with uncached rustc"
+            fi
+          else
+            echo "::warning::sccache is unavailable; continuing without compiler caching"
+          fi
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-nextest,sqlx-cli
+          tool: cargo-llvm-cov,cargo-nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.9.0
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - name: Verify test tools
+        run: command -v cargo-llvm-cov cargo-nextest sqlx
 
       - name: Preflight - CI_POSTGRES_URL must be set
         run: |

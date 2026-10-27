@@ -140,6 +140,14 @@ impl Reservation {
         &self.id
     }
 
+    /// Whether the engine still owns this reservation after orphan sweeping.
+    pub fn is_active(&self) -> bool {
+        self.engine.upgrade().is_some_and(|engine| {
+            let reservations = engine.reservations.lock();
+            reservations.contains_key(&self.id)
+        })
+    }
+
     /// Suppress the RAII refund on drop.
     ///
     /// The handler hands `id` off to the reconcile subscriber
@@ -148,6 +156,24 @@ impl Reservation {
     /// handle would race the subscriber and full-refund. The TTL sweeper is
     /// the safety net when neither the subscriber nor `forget` ever runs.
     pub fn forget(mut self) {
+        self.forgotten = true;
+    }
+
+    /// Hand a finished response's usage/cost liability to its subscriber.
+    ///
+    /// Concurrency ends at the response boundary, not when asynchronous pricing
+    /// arrives. Keep token/cost reservations alive, but release only this
+    /// response's concurrent guards before another turn can be admitted.
+    pub fn handoff_after_response(mut self) {
+        let guards = self.engine.upgrade().and_then(|engine| {
+            let mut reservations = engine.reservations.lock();
+            reservations
+                .get_mut(&self.id)
+                .map(|record| std::mem::take(&mut record.concurrent_guards))
+        });
+        // Durable hold destruction may enqueue its existing storage cleanup.
+        // Do not run it while holding the reservation map lock.
+        drop(guards);
         self.forgotten = true;
     }
 }
@@ -162,8 +188,8 @@ struct ReservationRecord {
     key_id: String,
     reserved: Vec<ReservedAmount>,
     durable_bucket_widths: Vec<u64>,
-    /// Held here to keep the concurrent-request slot occupied until refund
-    /// or reconcile removes the record.
+    /// Held until refund/reconcile removes the record, or an explicit response
+    /// handoff releases concurrency while retaining token/cost liability.
     concurrent_guards: Vec<ConcurrentSlot>,
     created_at: Instant,
 }
@@ -1608,6 +1634,80 @@ mod tests {
             ..StoredApiKeyRecord::default()
         };
         (engine, view, record)
+    }
+
+    #[test]
+    fn swept_reservation_cannot_authorize_a_queued_dispatch() {
+        let (engine, view, record) = engine_with_output_token_limit(1_000);
+        let reservation = engine
+            .reserve(&view, &record, "principal-a", "claude-3-opus", 100, 0, None)
+            .unwrap();
+        assert!(reservation.is_active());
+        sweep_expired(&engine, Duration::ZERO);
+        assert!(!reservation.is_active());
+        assert!(
+            !engine.refund_by_id(reservation.id()),
+            "the sweeper already released this reservation"
+        );
+    }
+
+    #[test]
+    fn finished_response_handoff_releases_only_its_concurrency_before_pricing() {
+        let concurrency = Arc::new(KeyConcurrencyManager::new());
+        let engine = LimitEngine::new(concurrency.clone(), Arc::new(cc_lb_clock::SystemClock));
+        let view = PrincipalView::for_tests(
+            "principal-a",
+            true,
+            vec!["gpt-test".to_owned()],
+            vec![
+                Limit {
+                    kind: LimitKind::Concurrent,
+                    window_secs: 0,
+                    cap_micros: 1,
+                },
+                Limit {
+                    kind: LimitKind::OutputTokens,
+                    window_secs: 60,
+                    cap_micros: 1_000,
+                },
+            ],
+            HashMap::new(),
+        );
+        let record = StoredApiKeyRecord {
+            key_hash_b64: "handoff-key".to_owned(),
+            ..Default::default()
+        };
+        let first = engine
+            .reserve(&view, &record, "principal-a", "gpt-test", 100, 0, None)
+            .unwrap();
+        let first_id = first.id().to_owned();
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+
+        first.handoff_after_response();
+
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        let now = unix_secs(engine.inner.clock.now());
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::OutputTokens, 60, now),
+            100
+        );
+        let next = engine
+            .reserve(&view, &record, "principal-a", "gpt-test", 100, 0, None)
+            .unwrap();
+        assert_eq!(concurrency.current(&record.key_hash_b64), 1);
+        assert!(engine.reconcile_by_id(&first_id, 0, 40, 0));
+        assert_eq!(
+            concurrency.current(&record.key_hash_b64),
+            1,
+            "late pricing cannot release another turn's slot"
+        );
+        assert!(!engine.refund_by_id(&first_id));
+        drop(next);
+        assert_eq!(concurrency.current(&record.key_hash_b64), 0);
+        assert_eq!(
+            engine.current_total(&record.key_hash_b64, LimitKind::OutputTokens, 60, now),
+            40
+        );
     }
 
     #[test]

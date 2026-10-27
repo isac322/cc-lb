@@ -1,0 +1,8 @@
+{
+  "name": "cc-lb-codex-qa-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

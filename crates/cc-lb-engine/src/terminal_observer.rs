@@ -229,6 +229,7 @@ pub(crate) mod error_codes {
     pub(crate) const ROUTE_NOT_CONFIGURED: &str = "route_not_configured";
     pub(crate) const ROUTE_NOT_FOUND: &str = "route_not_found";
     pub(crate) const METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+    pub(crate) const OPERATION_NOT_SUPPORTED: &str = "operation_not_supported";
     pub(crate) const DRAIN_REJECTED: &str = "drain_rejected";
     pub(crate) const UPSTREAM_AFFINITY_UNAVAILABLE: &str = "upstream_affinity_unavailable";
     pub(crate) const LIMIT_REJECTED: &str = "limit_rejected";
@@ -276,6 +277,12 @@ impl TerminalClassification {
     pub const ROUTE_NOT_FOUND: Self = Self {
         status: StatusCode::NOT_FOUND,
         error_code: Some(error_codes::ROUTE_NOT_FOUND),
+    };
+    /// A registered, authenticated operation outside the consistency-safe
+    /// provider capability boundary.
+    pub const OPERATION_NOT_SUPPORTED: Self = Self {
+        status: StatusCode::NOT_FOUND,
+        error_code: Some(error_codes::OPERATION_NOT_SUPPORTED),
     };
     /// Method-not-allowed fallback on an otherwise registered path.
     pub const METHOD_NOT_ALLOWED: Self = Self {

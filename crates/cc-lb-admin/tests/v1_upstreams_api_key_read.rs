@@ -920,6 +920,100 @@ async fn acc_04_legacy_usage_reads_never_checked() {
     assert_eq!(body["group_by"], "model");
 }
 
+#[tokio::test]
+async fn usg_provider_api_keys_use_local_estimated_request_events() {
+    let h = spawn_api_key_harness().await;
+    for (index, kind) in [UpstreamKind::OpenaiApiKey, UpstreamKind::GeminiApiKey]
+        .into_iter()
+        .enumerate()
+    {
+        let created = UpstreamStore::create(
+            h.storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: format!("provider-{index}"),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("seed provider API-key upstream");
+        let ciphertext = h
+            .state
+            .aead
+            .encrypt(b"provider-key", created.id.as_bytes())
+            .expect("seal provider API key");
+        h.storage
+            .update_api_key_secret(created.id, Some(ciphertext))
+            .await
+            .expect("store provider API key");
+        append_and_roll_up(
+            &h,
+            &[usage_event(
+                created.id,
+                NOW - 600,
+                &format!("provider-{index}"),
+                73,
+            )],
+        )
+        .await;
+
+        let body = usage(&h, created.id, "range=24h&step=hour").await.body;
+        assert_eq!(body["source"], "estimated", "{kind:?}");
+        assert_eq!(body["attribution"], "api_key", "{kind:?}");
+        assert_eq!(series_input_tokens(&body), 73, "{kind:?}");
+        assert!(body["attribution_workspace_id"].is_null(), "{kind:?}");
+    }
+}
+
+#[tokio::test]
+async fn usg_all_oauth_kinds_remain_not_api_key_upstream() {
+    let h = spawn_api_key_harness().await;
+    for (index, kind) in [
+        UpstreamKind::AnthropicOauth,
+        UpstreamKind::OpenaiOauth,
+        UpstreamKind::GeminiOauth,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = UpstreamStore::create(
+            h.storage.as_ref(),
+            UpstreamCreate {
+                id: Uuid::new_v4(),
+                name: format!("oauth-{index}"),
+                kind,
+                base_url: None,
+                api_key_ciphertext: None,
+                oauth_tokens: None,
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                workspace_id: None,
+                api_key_access: None,
+            },
+        )
+        .await
+        .expect("seed OAuth upstream")
+        .id;
+        let response = h
+            .request(
+                "GET",
+                &format!("{UPSTREAMS}/{id}/usage?range=24h"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST, "{kind:?}");
+        assert_eq!(response.body["error"], "not_api_key_upstream", "{kind:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // USG: `GET /usage`
 

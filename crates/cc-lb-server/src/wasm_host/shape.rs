@@ -18,7 +18,7 @@ use rkyv::util::AlignedVec;
 
 use super::{
     access_archived_scoped_or_copy,
-    filter_request::{is_stripped_downstream_header, principal_kind_to_wire},
+    filter_request::{is_stripped_downstream_header, principal_kind_to_wire, scrub_query_api_key},
     serialize_with_input_scratch,
 };
 
@@ -203,13 +203,20 @@ fn with_wire_shape_request<R>(
             value: value.as_bytes(),
         })
         .collect();
-    let base_url_str = match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.as_ref().map(|u| u.to_string()),
+    let base_url_str = upstream_base_url(upstream).map(|u| u.to_string());
+    let upstream_ref = match upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
+        },
     };
-    let upstream_ref = UpstreamRef::AnthropicDirect {
-        base_url: base_url_str.as_deref().map(|s| QueryRef { value: s }),
-    };
-    let query_ref = context.query.as_deref().map(|s| QueryRef { value: s });
+    let scrubbed_query = context.query.as_deref().map(scrub_query_api_key);
+    let query_ref = scrubbed_query.as_deref().map(|s| QueryRef { value: s });
     let request = cc_lb_plugin_wire::ShapeRequestRef {
         request_id: context.request_id.as_str(),
         method: context.method.as_str(),
@@ -227,9 +234,27 @@ fn with_wire_shape_request<R>(
     serialize_with_input_scratch(&request, with_bytes)
 }
 
+fn canonical_base_url(value: &str) -> url::Url {
+    match url::Url::parse(value) {
+        Ok(url) => url,
+        Err(_) => unreachable!("canonical upstream base URL must parse"),
+    }
+}
+
 fn upstream_base_url(upstream: &Upstream) -> Option<url::Url> {
+    let default = match upstream {
+        Upstream::AnthropicDirect { .. } => "https://api.anthropic.com",
+        Upstream::OpenaiDirect { .. } => "https://api.openai.com",
+        Upstream::GeminiDirect { .. } => "https://generativelanguage.googleapis.com",
+    };
     match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.clone(),
+        Upstream::AnthropicDirect { base_url }
+        | Upstream::OpenaiDirect { base_url }
+        | Upstream::GeminiDirect { base_url } => Some(
+            base_url
+                .clone()
+                .unwrap_or_else(|| canonical_base_url(default)),
+        ),
     }
 }
 
@@ -249,6 +274,8 @@ fn is_stripped_shape_output_header(name: &str) -> bool {
             | "content-length"
             | "authorization"
             | "x-api-key"
+            | "x-goog-api-key"
+            | "api-key"
     ) || lower.starts_with("x-anthropic-")
 }
 
@@ -348,8 +375,16 @@ fn host_to_wire_transform_response(
     let principal_kind = principal_kind_to_wire(&request.principal);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
-    let upstream = UpstreamRef::AnthropicDirect {
-        base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+    let upstream = match &request.upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
     };
     let wire = TransformResponseRequestRef {
         request_id: request.request_id.as_str(),
@@ -375,8 +410,16 @@ fn host_to_wire_transform_sse_event(
     let principal_kind = principal_kind_to_wire(&request.principal);
     let header_refs = header_refs_from_map(&request.response_headers);
     let upstream_base_url = upstream_base_url_str(&request.upstream);
-    let upstream = UpstreamRef::AnthropicDirect {
-        base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+    let upstream = match &request.upstream {
+        Upstream::AnthropicDirect { .. } => UpstreamRef::AnthropicDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::OpenaiDirect { .. } => UpstreamRef::OpenaiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
+        Upstream::GeminiDirect { .. } => UpstreamRef::GeminiDirect {
+            base_url: upstream_base_url.as_deref().map(|value| QueryRef { value }),
+        },
     };
     let event = SseEventRef {
         event: request.event.event.as_str(),
@@ -484,9 +527,7 @@ fn header_refs_from_map(headers: &http::HeaderMap) -> Vec<HeaderRef<'_>> {
 }
 
 fn upstream_base_url_str(upstream: &Upstream) -> Option<String> {
-    match upstream {
-        Upstream::AnthropicDirect { base_url } => base_url.as_ref().map(ToString::to_string),
-    }
+    upstream_base_url(upstream).map(|url| url.to_string())
 }
 
 fn headers_from_wire(
@@ -535,4 +576,96 @@ fn runtime_error_to_response_transform(err: WasmtimeRuntimeError) -> ResponseTra
 
 fn response_runtime_error(reason: String) -> ResponseTransformError {
     ResponseTransformError::Runtime { reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cc_lb_domain::{PrincipalKind, Upstream};
+    use cc_lb_plugin_wire::ArchivedShapeRequest;
+    use cc_lb_upstream::DialectShapeContext;
+    use http::{HeaderMap, HeaderValue, Method};
+
+    use super::*;
+
+    fn principal() -> Principal {
+        Principal {
+            id: "principal-shape".to_owned(),
+            kind: PrincipalKind::ApiKey,
+        }
+    }
+
+    #[test]
+    fn default_provider_base_urls_are_exposed_to_shape_and_transforms() {
+        for (upstream, expected) in [
+            (
+                Upstream::OpenaiDirect { base_url: None },
+                "https://api.openai.com/",
+            ),
+            (
+                Upstream::GeminiDirect { base_url: None },
+                "https://generativelanguage.googleapis.com/",
+            ),
+        ] {
+            assert_eq!(
+                upstream_base_url(&upstream).as_ref().map(url::Url::as_str),
+                Some(expected)
+            );
+            assert_eq!(upstream_base_url_str(&upstream).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn shape_wire_scrubs_provider_credentials_and_query_keys() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-api-key", HeaderValue::from_static("gemini-secret"));
+        headers.insert("api-key", HeaderValue::from_static("provider-secret"));
+        headers.insert("x-request-id", HeaderValue::from_static("request"));
+        let context = DialectShapeContext {
+            request_id: "req-shape".to_owned(),
+            downstream_headers: headers,
+            method: Method::POST,
+            path: "/v1beta/models/gemini-2.5-pro:generateContent".to_owned(),
+            query: Some("key=raw-secret&foo=bar&KEY=other".to_owned()),
+            body_bytes: Bytes::from_static(b"{}"),
+        };
+
+        with_wire_shape_request(
+            &context,
+            &Upstream::GeminiDirect { base_url: None },
+            &principal(),
+            false,
+            |bytes| {
+                let archived =
+                    rkyv::access::<ArchivedShapeRequest, RkyvError>(bytes).expect("shape request");
+                let query: Option<&str> = archived.query.as_ref().map(|value| &**value);
+                assert_eq!(query, Some("foo=bar"));
+                let header_names: Vec<&str> = archived
+                    .headers
+                    .iter()
+                    .map(|header| {
+                        let name: &str = &header.name;
+                        name
+                    })
+                    .collect();
+                assert_eq!(header_names, vec!["x-request-id"]);
+                match &archived.upstream {
+                    cc_lb_plugin_wire::ArchivedUpstream::GeminiDirect { base_url } => {
+                        let base_url = base_url.as_ref().expect("default base URL");
+                        let base_url: &str = base_url;
+                        assert_eq!(base_url, "https://generativelanguage.googleapis.com/");
+                    }
+                    other => panic!("unexpected upstream variant: {other:?}"),
+                }
+            },
+        )
+        .expect("encode shape request");
+    }
+
+    #[test]
+    fn shape_output_scrubs_provider_credentials() {
+        for name in ["Authorization", "x-api-key", "x-goog-api-key", "api-key"] {
+            assert!(is_stripped_shape_output_header(name), "{name}");
+        }
+    }
 }

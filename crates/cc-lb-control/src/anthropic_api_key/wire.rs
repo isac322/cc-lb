@@ -6,7 +6,7 @@ use std::fmt;
 
 use cc_lb_storage_api::{
     ApiKeyClass, ApiKeyOrgCapability, ApiKeyResolution, ApiKeyType, ApiKeyWorkspace,
-    ApiUsageAttribution, RemediationCode,
+    ApiUsageAttribution, RemediationCode, UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,8 @@ pub struct PreflightRequest {
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub kind: Option<UpstreamKind>,
 }
 
 impl fmt::Debug for PreflightRequest {
@@ -33,6 +35,7 @@ impl fmt::Debug for PreflightRequest {
             )
             .field("workspace_id", &self.workspace_id)
             .field("base_url", &self.base_url)
+            .field("kind", &self.kind)
             .finish()
     }
 }
@@ -370,6 +373,7 @@ mod tests {
             api_key_value: Some("sk-ant-api03-SECRETVALUE1234".to_owned()),
             workspace_id: Some("wrkspc_1".to_owned()),
             base_url: None,
+            kind: None,
         };
         let rendered = format!("{request:?}");
         assert!(!rendered.contains("SECRETVALUE"), "{rendered}");

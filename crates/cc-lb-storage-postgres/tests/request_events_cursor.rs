@@ -98,6 +98,205 @@ fn request_event_event_kind_filters_match_effective_kind() {
         .expect("postgres request-event event_kind regression");
 }
 
+#[test]
+fn request_event_prune_preserves_cutoff_order_and_batch_boundaries() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        eprintln!(
+            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
+        );
+        return Ok(());
+    };
+
+    tokio::runtime::Runtime::new()?.block_on(async move {
+        let fixture = Fixture::create(&url).await?;
+        let result = assert_request_event_prune_boundaries(&fixture.pool).await;
+        fixture
+            .drop_schema()
+            .await
+            .context("drop isolated request-event prune schema")?;
+        result
+    })
+}
+
+#[test]
+fn request_event_prune_deletes_selected_seq_after_concurrent_update() -> Result<()> {
+    let Some(url) = postgres_url() else {
+        eprintln!(
+            "skip: CI_POSTGRES_URL or PG_URL not set; requires isolated local/test postgres DSN"
+        );
+        return Ok(());
+    };
+
+    tokio::runtime::Runtime::new()?.block_on(async move {
+        let fixture = Fixture::create(&url).await?;
+        let result = assert_request_event_prune_after_update(&fixture.pool).await;
+        fixture
+            .drop_schema()
+            .await
+            .context("drop isolated concurrent request-event prune schema")?;
+        result
+    })
+}
+
+async fn assert_request_event_prune_boundaries(pool: &PgPool) -> Result<()> {
+    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    let cutoff_ms = BASE_TS_SECS * 1_000;
+    let cutoff_ms_x_1m = cutoff_ms * 1_000_000 + 999_999;
+    for (ts_ms, event_id) in [
+        (cutoff_ms + 1_000, "prune-future"),
+        (cutoff_ms - 1_000, "prune-first-seq"),
+        (cutoff_ms - 2_000, "prune-second-seq"),
+        (cutoff_ms, "prune-at-cutoff"),
+        (cutoff_ms - 3_000, "prune-third-seq"),
+    ] {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: ts_ms / 1_000,
+                ts_ms: Some(ts_ms),
+                request_id: event_id.to_owned(),
+                event_id: Some(event_id.to_owned()),
+                status: 200,
+                ..Default::default()
+            })
+            .await?;
+    }
+
+    ensure!(
+        storage.prune_request_events_before(u64::MAX, 0).await? == 0,
+        "zero batch must remove no rows even with the maximal cutoff"
+    );
+    ensure!(
+        storage.prune_request_events_before(0, 10).await? == 0,
+        "a cutoff before every event must remove no rows"
+    );
+    ensure!(
+        storage
+            .prune_request_events_before(cutoff_ms_x_1m, 1)
+            .await?
+            == 1,
+        "the first batch must report exactly one deleted row"
+    );
+    let remaining =
+        sqlx::query_scalar::<_, String>("SELECT event_id FROM request_events_v1 ORDER BY seq ASC")
+            .fetch_all(pool)
+            .await?;
+    ensure!(
+        remaining
+            == [
+                "prune-future",
+                "prune-second-seq",
+                "prune-at-cutoff",
+                "prune-third-seq",
+            ],
+        "pruning must select the lowest eligible seq, not the oldest timestamp: {remaining:?}"
+    );
+    ensure!(
+        storage
+            .prune_request_events_before(cutoff_ms_x_1m, 10)
+            .await?
+            == 2,
+        "the final partial batch must report only its two eligible rows"
+    );
+    ensure!(
+        storage
+            .prune_request_events_before(cutoff_ms_x_1m, 10)
+            .await?
+            == 0,
+        "a fully pruned cutoff must remove no further rows"
+    );
+    let remaining =
+        sqlx::query_scalar::<_, String>("SELECT event_id FROM request_events_v1 ORDER BY seq ASC")
+            .fetch_all(pool)
+            .await?;
+    ensure!(
+        remaining == ["prune-future", "prune-at-cutoff"],
+        "the scaled millisecond cutoff must preserve equal and newer timestamps: {remaining:?}"
+    );
+    Ok(())
+}
+
+async fn assert_request_event_prune_after_update(pool: &PgPool) -> Result<()> {
+    let storage = PostgresStorage::new(pool.clone(), Arc::new(cc_lb_clock::SystemClock));
+    storage.initialize().await?;
+    for event_id in ["prune-update-selected", "prune-update-retained"] {
+        storage
+            .append_request_event(&RequestEvent {
+                ts: BASE_TS_SECS,
+                ts_ms: Some(BASE_TS_SECS * 1_000),
+                request_id: event_id.to_owned(),
+                event_id: Some(event_id.to_owned()),
+                status: 200,
+                ..Default::default()
+            })
+            .await?;
+    }
+
+    let mut updater = pool.begin().await?;
+    let updater_pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        .fetch_one(&mut *updater)
+        .await?;
+    sqlx::query("UPDATE request_events_v1 SET request_id = 'prune-updated' WHERE event_id = $1")
+        .bind("prune-update-selected")
+        .execute(&mut *updater)
+        .await?;
+    let mut updater = Some(updater);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::try_join!(
+            async {
+                Ok::<_, anyhow::Error>(
+                    storage
+                        .prune_request_events_before((BASE_TS_SECS * 1_000 + 1) * 1_000_000, 1)
+                        .await?,
+                )
+            },
+            async {
+                loop {
+                    let blocked = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                         WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(updater_pid)
+                    .fetch_one(pool)
+                    .await?;
+                    if blocked {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                updater
+                    .take()
+                    .context("concurrent updater transaction missing")?
+                    .commit()
+                    .await?;
+                Ok::<(), anyhow::Error>(())
+            }
+        )
+    })
+    .await;
+    if let Some(updater) = updater {
+        updater
+            .rollback()
+            .await
+            .context("release concurrent updater after failed prune observation")?;
+    }
+    let (removed, ()) =
+        outcome.context("observe and release the blocked request-event prune")??;
+    ensure!(
+        removed == 1,
+        "the selected stable seq must still be deleted after its row is updated"
+    );
+    let remaining =
+        sqlx::query_scalar::<_, String>("SELECT event_id FROM request_events_v1 ORDER BY seq ASC")
+            .fetch_all(pool)
+            .await?;
+    ensure!(
+        remaining == ["prune-update-retained"],
+        "the concurrent update must not replace or expand the selected batch: {remaining:?}"
+    );
+    Ok(())
+}
+
 const UUID_PRINCIPAL_COST_PLAN_SQL: &str =
     include_str!("../src/adapter/request_event_principal_cost_uuid.sql");
 const FILTERED_UUID_PRINCIPAL_COST_PLAN_SQL: &str =

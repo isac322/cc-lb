@@ -140,6 +140,8 @@ impl ProxyHarness {
             &OAuthTokenBundle {
                 access_token: OAUTH_ACCESS_TOKEN.to_owned(),
                 refresh_token: "oauth-refresh".to_owned(),
+                account_id: None,
+                project_id: None,
                 expires_at_unix_secs: u64::MAX / 2,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],

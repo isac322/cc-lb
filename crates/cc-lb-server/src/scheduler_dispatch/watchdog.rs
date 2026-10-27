@@ -64,20 +64,25 @@ enum WatchdogUpstreamFilter {
 
 impl WatchdogUpstreamFilter {
     fn matches(self, upstream: &UpstreamRecord) -> bool {
-        if upstream.kind != UpstreamKind::AnthropicOauth
-            || upstream.deleted_at_unix_secs.is_some()
-            || upstream.oauth_credentials.is_none()
-        {
+        if upstream.deleted_at_unix_secs.is_some() || upstream.oauth_credentials.is_none() {
             return false;
         }
         match self {
-            Self::Warmup => upstream.warmup_enabled,
+            Self::Warmup => {
+                upstream.kind == UpstreamKind::AnthropicOauth && upstream.warmup_enabled
+            }
             Self::OAuth => {
-                !upstream.oauth_never_refresh
+                matches!(
+                    upstream.kind,
+                    UpstreamKind::AnthropicOauth
+                        | UpstreamKind::OpenaiOauth
+                        | UpstreamKind::GeminiOauth
+                ) && !upstream.oauth_never_refresh
                     && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
             }
             Self::OAuthUsagePoll => {
-                !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
+                upstream.kind == UpstreamKind::AnthropicOauth
+                    && !refresh_requires_reconnect(upstream.last_apply_error.as_deref())
             }
         }
     }
@@ -115,6 +120,60 @@ mod tests {
         upstream.kind = UpstreamKind::AnthropicApiKey;
 
         assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+    }
+
+    #[test]
+    fn oauth_filter_includes_openai_and_gemini_oauth_upstreams() {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let upstream = oauth_upstream(kind);
+
+            assert!(
+                WatchdogUpstreamFilter::OAuth.matches(&upstream),
+                "{kind:?} OAuth upstream should be refresh-watchdog eligible"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_filter_rejects_openai_and_gemini_never_refresh_upstreams() {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let mut upstream = oauth_upstream(kind);
+            upstream.oauth_never_refresh = true;
+
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+        }
+    }
+
+    #[test]
+    fn oauth_filter_rejects_openai_and_gemini_deleted_or_missing_credentials() {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let mut deleted = oauth_upstream(kind);
+            deleted.deleted_at_unix_secs = Some(1_800_000_000);
+            let mut missing_credentials = oauth_upstream(kind);
+            missing_credentials.oauth_credentials = None;
+
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&deleted));
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&missing_credentials));
+        }
+    }
+
+    #[test]
+    fn oauth_filter_rejects_openai_and_gemini_api_key_upstreams() {
+        for kind in [UpstreamKind::OpenaiApiKey, UpstreamKind::GeminiApiKey] {
+            let upstream = oauth_upstream(kind);
+
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+        }
+    }
+
+    #[test]
+    fn oauth_filter_rejects_openai_and_gemini_reconnect_required_upstreams() {
+        for kind in [UpstreamKind::OpenaiOauth, UpstreamKind::GeminiOauth] {
+            let mut upstream = oauth_upstream(kind);
+            upstream.last_apply_error = Some("status_401".to_owned());
+
+            assert!(!WatchdogUpstreamFilter::OAuth.matches(&upstream));
+        }
     }
 
     /// OAU-03: no OAuth refresh, warmup-watchdog, or OAuth usage job is ever
@@ -168,10 +227,14 @@ mod tests {
     }
 
     fn registered_oauth_upstream() -> UpstreamRecord {
+        oauth_upstream(UpstreamKind::AnthropicOauth)
+    }
+
+    fn oauth_upstream(kind: UpstreamKind) -> UpstreamRecord {
         UpstreamRecord {
             id: Uuid::new_v4(),
             name: "oauth-upstream".to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
+            kind,
             base_url: None,
             enabled: true,
             oauth_credentials: Some(EncryptedOAuthTokens::from_ciphertext(vec![1])),

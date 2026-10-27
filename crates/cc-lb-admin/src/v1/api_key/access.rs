@@ -25,13 +25,16 @@ pub(crate) struct ApiKeyAccessResponse {
     pub(crate) last_error: Option<String>,
 }
 
-/// Maps a spec and its details row to `api_key_access`. OAuth upstreams and
-/// API-key upstreams without a details row (never checked) yield `None`.
+/// OAuth upstreams and API-key upstreams without a details row (never
+/// checked) yield `None`.
 pub(crate) fn api_key_access_response(
     record: &UpstreamRecord,
     details: Option<&UpstreamApiKeyDetailsRecord>,
 ) -> Option<ApiKeyAccessResponse> {
-    if record.kind != UpstreamKind::AnthropicApiKey {
+    if !matches!(
+        record.kind,
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
         return None;
     }
     let details = details?;

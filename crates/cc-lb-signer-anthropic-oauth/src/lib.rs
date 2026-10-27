@@ -1396,6 +1396,8 @@ mod tests {
             &OAuthTokenBundle {
                 access_token: access_token.to_owned(),
                 refresh_token: "refresh-token".to_owned(),
+                account_id: None,
+                project_id: None,
                 expires_at_unix_secs,
                 refresh_token_expires_at_unix_secs: None,
                 scopes: vec!["messages".to_owned()],
