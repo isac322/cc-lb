@@ -43,4 +43,4 @@ A pull request should include:
 
 The pull request template contains a short checklist for these items.
 
-For release changes, follow [the server release runbook](../docs/runbook/server-release.md). Do not publish packages, images, or charts from a development branch.
+For release changes, follow [the server release runbook](../docs/runbook/server-release.md). Do not publish release packages, server images, or charts from a development branch. The runner-image workflow may publish trusted, manually requested immutable candidates from canonical-repository branches without updating moving aliases.
