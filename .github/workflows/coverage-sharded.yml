@@ -173,7 +173,14 @@ jobs:
           stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-nextest,sqlx-cli
+          tool: cargo-llvm-cov,cargo-nextest
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.9.0
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - name: Verify test tools
+        run: command -v cargo-llvm-cov cargo-nextest sqlx
       - uses: actions/download-artifact@v8
         with:
           name: coverage-nextest-archive

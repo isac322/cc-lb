@@ -117,7 +117,11 @@ jobs:
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: sqlx-cli
+          tool: sqlx-cli@0.9.0
+      - name: Export cargo-installed tools
+        run: echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - name: Verify sqlx-cli
+        run: command -v sqlx
 
       - name: Run Postgres migrations
         run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
