@@ -250,25 +250,13 @@ enum ProviderProbeResult {
 }
 
 fn provider_probe_url(base_url: &Url, kind: UpstreamKind) -> Url {
-    let mut url = base_url.clone();
-    url.set_query(None);
+    let probe_path = match kind {
+        UpstreamKind::OpenaiApiKey => "/v1/models",
+        UpstreamKind::GeminiApiKey => "/v1beta/models",
+        _ => "/",
+    };
+    let mut url = cc_lb_upstream::upstream_request_url(base_url, probe_path, None);
     url.set_fragment(None);
-    let mut path = url.path().trim_end_matches('/').to_owned();
-    match kind {
-        UpstreamKind::OpenaiApiKey => {
-            if path.ends_with("/v1") {
-                path.push_str("/models");
-            } else {
-                path.push_str("/v1/models");
-            }
-        }
-        UpstreamKind::GeminiApiKey => path.push_str("/v1beta/models"),
-        _ => {}
-    }
-    if path.is_empty() {
-        path.push('/');
-    }
-    url.set_path(&path);
     url
 }
 
@@ -836,5 +824,18 @@ mod tests {
         assert_eq!(check.verdict, None);
         assert_eq!(check.usage_reported_at(), None);
         assert_eq!(check.remediation_labels(), vec!["usage_never_checked"]);
+    }
+
+    #[test]
+    fn provider_probe_url_replaces_base_path_like_upstream_request_url() {
+        let base = Url::parse("https://proxy.example/prefix/v1?ignored=1#frag").unwrap();
+        assert_eq!(
+            provider_probe_url(&base, UpstreamKind::OpenaiApiKey).as_str(),
+            "https://proxy.example/v1/models"
+        );
+        assert_eq!(
+            provider_probe_url(&base, UpstreamKind::GeminiApiKey).as_str(),
+            "https://proxy.example/v1beta/models"
+        );
     }
 }

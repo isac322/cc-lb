@@ -133,14 +133,14 @@ evidence:
       proof_page: /docs/trust/
   proof_inventory:
     claimable:
-      - Anthropic API-key and OAuth upstream kinds — crates/cc-lb-domain/src/upstream.rs:19-27
+      - Anthropic, OpenAI, and Gemini API-key and OAuth upstream kinds with bounded generation and token-count routing — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs:8-44
       - Best-effort prompt-cache keepalive scheduler — crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30
       - Cost-first subscription preference routing — crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40
       - Filter and shape Wasmtime plugin runtime — crates/cc-lb-runtime-wasmtime/src/lib.rs:1-60
       - Database-backed runtime management — docs/runtime-management.md:1-30
       - Internal deployment with 10 connected accounts — owner confirmation
     not_claimable:
-      - Universal multi-provider gateway — current working-tree source includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds, but routes only Messages, Responses, and generateContent/streamGenerateContent generation operations; Bedrock, Vertex, and full provider APIs remain unsupported
+      - Universal multi-provider gateway — current working-tree source includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds, but routes only Messages, Responses, and generateContent/streamGenerateContent/countTokens operations; Bedrock, Vertex, and full provider APIs remain unsupported
       - 100% cache-hit or zero-overhead guarantee — scheduler is best effort
       - Enterprise HA, SLA, global scale, or battle-tested maturity — no public evidence at that scope
       - Official Anthropic/Claude partnership or certification — no such relationship is evidenced
@@ -151,8 +151,8 @@ anti_claims:
     because: cc-lb is an independent project with no evidenced endorsement, partnership, or certification.
     evidence: assets/brand/README.md:3-6
   - never_say: Universal multi-provider LLM gateway
-    because: current working-tree UpstreamKind includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds, with bounded Messages, Responses, and generateContent/streamGenerateContent operations rather than full provider APIs; Bedrock and Vertex remain unsupported.
-    evidence: current working-tree sources (not meta.pinned_commit) — crates/cc-lb-domain/src/upstream.rs:56-68; crates/cc-lb-engine/src/provider_capability.rs:8-43; docs/runtime-management.md
+    because: current working-tree UpstreamKind includes Anthropic, OpenAI, and Gemini API-key/OAuth kinds, with bounded Messages, Responses, and generateContent/streamGenerateContent/countTokens operations rather than full provider APIs; Bedrock and Vertex remain unsupported.
+    evidence: current working-tree sources (not meta.pinned_commit) — crates/cc-lb-domain/src/upstream.rs:53-99; crates/cc-lb-engine/src/provider_capability.rs:8-44; docs/runtime-management.md
   - never_say: Zero-config, instant drop-in replacement
     because: startup requires secrets, admin authentication, database state, upstreams, principals, and proxy keys.
     evidence: README.md:12-29; docs/runtime-management.md:1-25
@@ -257,8 +257,8 @@ objections:
     evidence: ["docs/runtime-management.md:1-30", "crates/cc-lb-engine/src/cache_keepalive/mod.rs:1-30", "crates/cc-lb-engine/src/builtin_filters/subscription_preference.rs:1-40"]
     source_threads: []
   - question: Does cc-lb support every major LLM provider?
-    answer: No. The current supported upstream kinds are Anthropic API key and Anthropic OAuth; removed provider claims are not part of the public contract.
-    evidence: ["crates/cc-lb-domain/src/upstream.rs:19-27", "CHANGELOG.md:36"]
+    answer: No. The supported upstream kinds are Anthropic, OpenAI, and Gemini API key and OAuth for bounded generation and token-count operations (`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`, `GET /v1/responses` WebSocket, and `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`); Bedrock, Vertex, and full provider management APIs are out of scope.
+    evidence: ["crates/cc-lb-domain/src/upstream.rs:53-99", "crates/cc-lb-engine/src/provider_capability.rs:8-44", "docs/runtime-management.md:22-35"]
     source_threads: []
 
 brand:

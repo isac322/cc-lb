@@ -15,12 +15,14 @@ cc-lb is an operator-managed endpoint for Anthropic-compatible traffic. It keeps
 
 ## Supported scope
 
-The current public upstream contract supports:
+The current public upstream contract supports six upstream kinds across bounded consistency-safe generation and token-count operations (`POST /v1/messages`, `POST /v1/messages/count_tokens`, `POST /v1/responses`, `GET /v1/responses` WebSocket, and `POST /v1beta/models/{model}:generateContent` / `:streamGenerateContent` / `:countTokens`):
 
 - `anthropic_api_key`: an operator-configured Anthropic API-key upstream. Standard Console keys (workspace keys `sk-ant-api03-…` and personal or service-account keys `sk-ant-usr-…`) are checked before they are saved; Admin keys, Enterprise management keys, and OAuth tokens are rejected. Per-key usage is Anthropic's reported figures when the key's access allows it and cc-lb's estimates otherwise. Costs are list-price estimates, and the credit balance is not available through Anthropic's API.
 - `anthropic_oauth`: an Anthropic OAuth upstream managed through the admin surface.
+- `openai_api_key` and `openai_oauth`: OpenAI API-key and OAuth upstreams for `/v1/responses` HTTP and WebSocket routing.
+- `gemini_api_key` and `gemini_oauth`: Gemini API-key and OAuth upstreams for `/v1beta/models/{model}:generateContent`, `:streamGenerateContent`, and `:countTokens`.
 
-Other provider kinds are not part of the current supported scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
+Bedrock, Vertex, and account-bound provider management APIs (files, uploads, model/account catalogs, stored-response or conversation management) are not part of the supported proxy scope. cc-lb is an independent project and is not affiliated with or endorsed by Anthropic.
 
 ## Request flow
 

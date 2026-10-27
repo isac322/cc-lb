@@ -1365,6 +1365,7 @@ async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
     .enumerate()
     {
         let (base_url, seen) = provider_probe_server().await;
+        let prefixed_base_url = format!("{}prefix", base_url.as_str());
         let (_dir, storage) = new_store().await;
         let app = router(test_state(storage));
         let preflight = request(
@@ -1374,7 +1375,7 @@ async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
             Some(json!({
                 "kind": kind,
                 "api_key_value": "provider-secret-key",
-                "base_url": base_url.as_str()
+                "base_url": prefixed_base_url
             })),
             None,
         )
@@ -1396,7 +1397,7 @@ async fn provider_api_key_preflight_and_recheck_use_native_models_probe() {
                 "name": format!("provider-native-{index}"),
                 "kind": kind,
                 "api_key_value": "provider-secret-key",
-                "base_url": base_url.as_str(),
+                "base_url": prefixed_base_url,
                 "skip_preflight": true
             })),
             None,
