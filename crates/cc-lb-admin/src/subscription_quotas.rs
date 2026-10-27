@@ -976,12 +976,16 @@ pub async fn build_cc_lb_aggregate_response(
             (window, ids)
         })
         .collect::<HashMap<_, _>>();
-    let token_sums = storage
-        .sum_usage_tokens_for_intervals(&intervals)
+    let (canonical_intervals, canonical_ids_by_key) =
+        canonicalize_usage_token_intervals(&intervals);
+    let canonical_token_sums = storage
+        .sum_usage_tokens_for_intervals(&canonical_intervals)
         .await?
         .into_iter()
         .map(|sum| (sum.interval_id, sum.tokens))
         .collect::<HashMap<_, _>>();
+    let token_sums =
+        scatter_usage_token_sums(&intervals, &canonical_ids_by_key, &canonical_token_sums);
 
     let mut aggregate_windows = Vec::new();
     for window in duration_windows {
@@ -1369,6 +1373,53 @@ fn provider_lot_input_from_storage<'a>(
         utilization: Some(lot.utilization),
         capacity_ratio,
     }
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct UsageTokenIntervalKey {
+    upstream_id: Uuid,
+    start_unix_secs: u64,
+    end_unix_secs: u64,
+}
+
+fn usage_token_interval_key(interval: &UsageTokenInterval) -> UsageTokenIntervalKey {
+    UsageTokenIntervalKey {
+        upstream_id: interval.upstream_id,
+        start_unix_secs: interval.start_unix_secs,
+        end_unix_secs: interval.end_unix_secs,
+    }
+}
+
+fn canonicalize_usage_token_intervals(
+    intervals: &[UsageTokenInterval],
+) -> (Vec<UsageTokenInterval>, HashMap<UsageTokenIntervalKey, u64>) {
+    let mut canonical_intervals = Vec::with_capacity(intervals.len());
+    let mut canonical_ids_by_key = HashMap::with_capacity(intervals.len());
+    for interval in intervals {
+        let key = usage_token_interval_key(interval);
+        if let std::collections::hash_map::Entry::Vacant(entry) = canonical_ids_by_key.entry(key) {
+            canonical_intervals.push(*interval);
+            entry.insert(interval.interval_id);
+        }
+    }
+    (canonical_intervals, canonical_ids_by_key)
+}
+
+fn scatter_usage_token_sums(
+    intervals: &[UsageTokenInterval],
+    canonical_ids_by_key: &HashMap<UsageTokenIntervalKey, u64>,
+    canonical_token_sums: &HashMap<u64, u64>,
+) -> HashMap<u64, u64> {
+    let mut token_sums = HashMap::with_capacity(intervals.len());
+    for interval in intervals {
+        let tokens = canonical_ids_by_key
+            .get(&usage_token_interval_key(interval))
+            .and_then(|canonical_id| canonical_token_sums.get(canonical_id))
+            .copied()
+            .unwrap_or(0);
+        token_sums.insert(interval.interval_id, tokens);
+    }
+    token_sums
 }
 
 #[derive(Clone, Copy)]
@@ -1988,6 +2039,113 @@ fn now_unix_millis(clock: &dyn Clock) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_token_intervals_deduplicate_exact_full_keys_and_scatter() {
+        let upstream_a = Uuid::from_u128(1);
+        let upstream_b = Uuid::from_u128(2);
+        let intervals = vec![
+            UsageTokenInterval {
+                interval_id: 10,
+                upstream_id: upstream_a,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 11,
+                upstream_id: upstream_a,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 12,
+                upstream_id: upstream_a,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 13,
+                upstream_id: upstream_a,
+                start_unix_secs: 100,
+                end_unix_secs: 201,
+            },
+            UsageTokenInterval {
+                interval_id: 14,
+                upstream_id: upstream_b,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 15,
+                upstream_id: upstream_a,
+                start_unix_secs: 99,
+                end_unix_secs: 200,
+            },
+        ];
+
+        let (canonical, canonical_ids_by_key) = canonicalize_usage_token_intervals(&intervals);
+        assert_eq!(
+            canonical
+                .iter()
+                .map(|interval| interval.interval_id)
+                .collect::<Vec<_>>(),
+            vec![10, 13, 14, 15]
+        );
+
+        let canonical_sums = vec![(15, 3), (14, 7), (13, 11), (10, 42)]
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let scattered =
+            scatter_usage_token_sums(&intervals, &canonical_ids_by_key, &canonical_sums);
+
+        assert_eq!(scattered.len(), intervals.len());
+        assert_eq!(scattered.get(&10), Some(&42));
+        assert_eq!(scattered.get(&11), Some(&42));
+        assert_eq!(scattered.get(&12), Some(&42));
+        assert_eq!(scattered.get(&13), Some(&11));
+        assert_eq!(scattered.get(&14), Some(&7));
+        assert_eq!(scattered.get(&15), Some(&3));
+    }
+
+    #[test]
+    fn usage_token_intervals_scatter_zero_for_no_match_and_empty_input() {
+        let upstream_id = Uuid::from_u128(3);
+        let intervals = vec![
+            UsageTokenInterval {
+                interval_id: 20,
+                upstream_id,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 21,
+                upstream_id,
+                start_unix_secs: 100,
+                end_unix_secs: 200,
+            },
+            UsageTokenInterval {
+                interval_id: 22,
+                upstream_id,
+                start_unix_secs: 100,
+                end_unix_secs: 201,
+            },
+        ];
+        let (canonical, canonical_ids_by_key) = canonicalize_usage_token_intervals(&intervals);
+        let scattered =
+            scatter_usage_token_sums(&intervals, &canonical_ids_by_key, &HashMap::new());
+
+        assert_eq!(canonical.len(), 2);
+        assert_eq!(
+            scattered,
+            vec![(20, 0), (21, 0), (22, 0)]
+                .into_iter()
+                .collect::<HashMap<_, _>>()
+        );
+
+        let (canonical, canonical_ids_by_key) = canonicalize_usage_token_intervals(&[]);
+        assert!(canonical.is_empty());
+        assert!(scatter_usage_token_sums(&[], &canonical_ids_by_key, &HashMap::new()).is_empty());
+    }
 
     fn snapshot_for_deadband() -> PoolQuotaSnapshotRecord {
         PoolQuotaSnapshotRecord {
