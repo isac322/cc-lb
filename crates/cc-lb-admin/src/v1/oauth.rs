@@ -1069,7 +1069,10 @@ async fn get_oauth_status(
         Err(error) => return storage_error_response(&error),
     };
 
-    if upstream.kind != UpstreamKind::AnthropicOauth {
+    if !matches!(
+        upstream.kind,
+        UpstreamKind::AnthropicOauth | UpstreamKind::OpenaiOauth | UpstreamKind::GeminiOauth
+    ) {
         return Json(UpstreamOAuthStatusResponse {
             upstream_id: upstream.id.to_string(),
             kind: upstream.kind,

@@ -8,20 +8,24 @@
 use axum::{
     Extension, Json,
     extract::{State, rejection::JsonRejection},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 use cc_lb_control::AuditPayload;
 use cc_lb_control::anthropic_api_key::{
-    KeyInputError, NormalizedApiKey, PreflightInput, PreflightMode, PreflightOutcome,
-    PreflightRequest, PreflightVerdict, endpoint_operator_message, http_status, key_hint,
-    normalize_api_key, operator_message, prefix_gate, run_preflight, validate_base_url,
-    validate_workspace_id,
+    KeyInputError, NormalizedApiKey, PreflightCapabilities, PreflightClassification,
+    PreflightInput, PreflightMode, PreflightOutcome, PreflightRequest, PreflightVerdict,
+    PreflightWireResponse, PreflightWorkspaces, ProbeTransport, WireInference,
+    endpoint_operator_message, http_status, key_hint, normalize_api_key, operator_message,
+    prefix_gate, run_preflight, validate_base_url, validate_workspace_id,
 };
 use cc_lb_storage_api::{
-    ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyOrgCapability, ApiKeyWorkspace,
-    ApiKeyWorkspaceMode, RemediationCode, UpstreamKind, UpstreamRecord,
+    ApiKeyAccessWrite, ApiKeyCapabilities, ApiKeyClass, ApiKeyInference, ApiKeyOrgCapability,
+    ApiKeyResolution, ApiKeyWorkspace, ApiKeyWorkspaceMode, RemediationCode, UpstreamKind,
+    UpstreamRecord,
 };
+use http_body_util::{BodyExt, Full, Limited};
 use serde_json::json;
 use url::Url;
 
@@ -71,6 +75,13 @@ async fn preflight(
     identity: &AdminIdentity,
     body: PreflightRequest,
 ) -> Result<Response, UpstreamError> {
+    let kind = body.kind.unwrap_or(UpstreamKind::AnthropicApiKey);
+    if !matches!(
+        kind,
+        UpstreamKind::AnthropicApiKey | UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
+        return Err(UpstreamError::NotApiKeyUpstream);
+    }
     let key = normalize_key_input(body.api_key_value.as_deref())?;
     let base_url = match body
         .base_url
@@ -86,20 +97,28 @@ async fn preflight(
             validate_base_url_input(&url)?;
             url
         }
-        None => effective_base_url(None, UpstreamKind::AnthropicApiKey)?,
+        None => effective_base_url(None, kind)?,
     };
     let workspace_id = body.workspace_id.as_deref().filter(|id| !id.is_empty());
-    let outcome = run_preflight(
-        &state.anthropic_org_api,
-        PreflightInput {
-            key: &key,
-            base_url: &base_url,
-            workspace_id,
-            mode: PreflightMode::Candidate,
-            now_unix_secs: now_unix_secs(state),
-        },
-    )
-    .await;
+    let now_unix_secs = now_unix_secs(state);
+    let outcome = if matches!(
+        kind,
+        UpstreamKind::OpenaiApiKey | UpstreamKind::GeminiApiKey
+    ) {
+        provider_native_preflight(state, &key, &base_url, kind, now_unix_secs).await
+    } else {
+        run_preflight(
+            &state.anthropic_org_api,
+            PreflightInput {
+                key: &key,
+                base_url: &base_url,
+                workspace_id,
+                mode: PreflightMode::Candidate,
+                now_unix_secs,
+            },
+        )
+        .await
+    };
     let wire = outcome.wire;
     let payload = AuditPayload::UpstreamPreflight {
         key_hint: wire.key_hint.clone(),
@@ -120,6 +139,233 @@ async fn preflight(
     )
     .await?;
     Ok(Json(wire).into_response())
+}
+
+pub(crate) async fn provider_native_preflight(
+    state: &AdminState,
+    key: &NormalizedApiKey,
+    base_url: &Url,
+    kind: UpstreamKind,
+    now_unix_secs: u64,
+) -> PreflightOutcome {
+    let url = provider_probe_url(base_url, kind);
+    let header_value = match kind {
+        UpstreamKind::OpenaiApiKey => format!("Bearer {}", key.as_str()),
+        UpstreamKind::GeminiApiKey => key.as_str().to_owned(),
+        _ => {
+            return provider_outcome(
+                key,
+                now_unix_secs,
+                ProviderProbeResult::Rejected {
+                    code: RemediationCode::KeyInvalid,
+                },
+            );
+        }
+    };
+    let header_name = match kind {
+        UpstreamKind::OpenaiApiKey => "authorization",
+        UpstreamKind::GeminiApiKey => "x-goog-api-key",
+        _ => {
+            return provider_outcome(
+                key,
+                now_unix_secs,
+                ProviderProbeResult::Rejected {
+                    code: RemediationCode::KeyInvalid,
+                },
+            );
+        }
+    };
+    let header_value = match HeaderValue::from_str(&header_value) {
+        Ok(value) => value,
+        Err(_) => {
+            return provider_outcome(
+                key,
+                now_unix_secs,
+                ProviderProbeResult::Unreachable { timed_out: false },
+            );
+        }
+    };
+    let request = match axum::http::Request::builder()
+        .method(Method::GET)
+        .uri(url.as_str())
+        .header(header_name, header_value)
+        .body(Full::new(Bytes::new()))
+    {
+        Ok(request) => request,
+        Err(_) => {
+            return provider_outcome(
+                key,
+                now_unix_secs,
+                ProviderProbeResult::Unreachable { timed_out: false },
+            );
+        }
+    };
+    let exchange = async {
+        let response = state
+            .anthropic_org_api
+            .http()
+            .request(request)
+            .await
+            .map_err(|_| ())?;
+        let status = response.status();
+        Limited::new(
+            response.into_body(),
+            state.anthropic_org_api.limits().max_body_bytes,
+        )
+        .collect()
+        .await
+        .map_err(|_| ())?;
+        Ok::<StatusCode, ()>(status)
+    };
+    let result =
+        match tokio::time::timeout(state.anthropic_org_api.limits().per_probe, exchange).await {
+            Ok(Ok(status)) if status == StatusCode::OK => ProviderProbeResult::Ok,
+            Ok(Ok(status)) if status == StatusCode::UNAUTHORIZED => ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid,
+            },
+            Ok(Ok(status)) if status == StatusCode::FORBIDDEN => ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyForbidden,
+            },
+            Ok(Ok(status)) if status == StatusCode::TOO_MANY_REQUESTS => {
+                ProviderProbeResult::RateLimited
+            }
+            Ok(Ok(status)) if status.is_server_error() => {
+                ProviderProbeResult::Unreachable { timed_out: false }
+            }
+            Ok(Ok(_)) => ProviderProbeResult::Rejected {
+                code: RemediationCode::KeyInvalid,
+            },
+            Ok(Err(())) => ProviderProbeResult::Unreachable { timed_out: false },
+            Err(_) => ProviderProbeResult::Unreachable { timed_out: true },
+        };
+    provider_outcome(key, now_unix_secs, result)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProviderProbeResult {
+    Ok,
+    Rejected { code: RemediationCode },
+    RateLimited,
+    Unreachable { timed_out: bool },
+}
+
+fn provider_probe_url(base_url: &Url, kind: UpstreamKind) -> Url {
+    let probe_path = match kind {
+        UpstreamKind::OpenaiApiKey => "/v1/models",
+        UpstreamKind::GeminiApiKey => "/v1beta/models",
+        _ => "/",
+    };
+    let mut url = cc_lb_upstream::upstream_request_url(base_url, probe_path, None);
+    url.set_fragment(None);
+    url
+}
+
+fn provider_outcome(
+    key: &NormalizedApiKey,
+    now_unix_secs: u64,
+    result: ProviderProbeResult,
+) -> PreflightOutcome {
+    let hint = key_hint(key.as_str());
+    let (verdict, inference, remediation, last_error, checked, transport) = match result {
+        ProviderProbeResult::Ok => (
+            PreflightVerdict::Ok,
+            WireInference::Ok,
+            Vec::new(),
+            None,
+            true,
+            None,
+        ),
+        ProviderProbeResult::Rejected { code } => (
+            PreflightVerdict::Rejected,
+            WireInference::Denied,
+            vec![code],
+            Some(match code {
+                RemediationCode::KeyForbidden => "provider denied this API key".to_owned(),
+                _ => "provider rejected this API key".to_owned(),
+            }),
+            true,
+            None,
+        ),
+        ProviderProbeResult::RateLimited => (
+            PreflightVerdict::Ok,
+            WireInference::OkLimited,
+            Vec::new(),
+            None,
+            true,
+            None,
+        ),
+        ProviderProbeResult::Unreachable { timed_out } => (
+            PreflightVerdict::Unreachable,
+            WireInference::Unverified,
+            vec![RemediationCode::ProbeUnreachable],
+            Some(if timed_out {
+                "API-key probe timed out".to_owned()
+            } else {
+                "could not reach the provider API".to_owned()
+            }),
+            false,
+            Some(ProbeTransport { timed_out }),
+        ),
+    };
+    let workspace = ApiKeyWorkspace {
+        mode: ApiKeyWorkspaceMode::Required,
+        id: None,
+        name: None,
+    };
+    let capabilities = ApiKeyCapabilities {
+        inference: match inference {
+            WireInference::Ok | WireInference::OkLimited => ApiKeyInference::Ok,
+            WireInference::Denied => ApiKeyInference::Denied,
+            WireInference::Unverified => ApiKeyInference::Unverified,
+        },
+        workspace: workspace.clone(),
+        workspace_list: ApiKeyOrgCapability::NotApplicable,
+        api_key_resolution: ApiKeyResolution::NotApplicable,
+        key_type: None,
+    };
+    let wire = PreflightWireResponse {
+        verdict,
+        key_hint: hint.clone(),
+        classification: PreflightClassification {
+            key_class: ApiKeyClass::Unknown,
+            needs_workspace: false,
+            workspace,
+            key_type: None,
+        },
+        workspaces: PreflightWorkspaces {
+            state: ApiKeyOrgCapability::NotApplicable,
+            items: Vec::new(),
+        },
+        capabilities: PreflightCapabilities {
+            inference,
+            workspace_list: ApiKeyOrgCapability::NotApplicable,
+            usage_report: ApiKeyOrgCapability::NotApplicable,
+            api_key_resolution: ApiKeyResolution::NotApplicable,
+        },
+        remediation: remediation
+            .iter()
+            .copied()
+            .map(|code| cc_lb_control::anthropic_api_key::Remediation { code })
+            .collect(),
+        checked_at: now_unix_secs,
+    };
+    PreflightOutcome {
+        wire,
+        access: ApiKeyAccessWrite {
+            verified: verdict == PreflightVerdict::Ok,
+            key_class: ApiKeyClass::Unknown,
+            key_hint: hint.unwrap_or_default(),
+            api_key_id: None,
+            needs_workspace: false,
+            capabilities,
+            remediation,
+            usage_report_state: Some(ApiKeyOrgCapability::NotApplicable),
+            last_error,
+            checked_at_unix_secs: checked.then_some(now_unix_secs),
+            last_attempt_at_unix_secs: now_unix_secs,
+        },
+        transport,
+    }
 }
 
 /// Result of checking a key before it is stored.
@@ -578,5 +824,18 @@ mod tests {
         assert_eq!(check.verdict, None);
         assert_eq!(check.usage_reported_at(), None);
         assert_eq!(check.remediation_labels(), vec!["usage_never_checked"]);
+    }
+
+    #[test]
+    fn provider_probe_url_replaces_base_path_like_upstream_request_url() {
+        let base = Url::parse("https://proxy.example/prefix/v1?ignored=1#frag").unwrap();
+        assert_eq!(
+            provider_probe_url(&base, UpstreamKind::OpenaiApiKey).as_str(),
+            "https://proxy.example/v1/models"
+        );
+        assert_eq!(
+            provider_probe_url(&base, UpstreamKind::GeminiApiKey).as_str(),
+            "https://proxy.example/v1beta/models"
+        );
     }
 }

@@ -393,6 +393,11 @@ fn accumulate_sse_usage_value(
     }
     usage.present = true;
     merge_usage_value(usage, reported);
+    if usage.service_tier.is_none()
+        && let Some(tier) = service_tier_from_envelope(value)
+    {
+        usage.service_tier = Some(tier.to_owned());
+    }
 }
 
 #[cfg(test)]
@@ -432,7 +437,24 @@ fn usage_from_value(value: &Value) -> UsageCounts {
         ..UsageCounts::default()
     };
     merge_usage_value(&mut usage, usage_value);
+    if usage.service_tier.is_none()
+        && let Some(tier) = service_tier_from_envelope(value)
+    {
+        usage.service_tier = Some(tier.to_owned());
+    }
     usage
+}
+
+fn service_tier_from_envelope(value: &Value) -> Option<&str> {
+    value
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("service_tier"))
+                .and_then(Value::as_str)
+        })
 }
 
 fn merge_usage_value(usage: &mut UsageCounts, reported: &Value) {
@@ -1444,6 +1466,24 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 17);
         assert_eq!(usage.thinking_tokens, 12);
         assert!(usage.thinking_tokens <= usage.output_tokens);
+    }
+    #[test]
+    fn service_tier_falls_back_to_response_envelope() {
+        let value = serde_json::json!({
+            "service_tier": "priority",
+            "usage": {"input_tokens": 3, "output_tokens": 5}
+        });
+        let usage = observe_non_stream_json_value(&value).usage;
+        assert_eq!(usage.service_tier.as_deref(), Some("priority"));
+
+        let nested = serde_json::json!({
+            "response": {
+                "service_tier": "scale",
+                "usage": {"input_tokens": 7, "output_tokens": 11}
+            }
+        });
+        let usage = observe_non_stream_json_value(&nested).usage;
+        assert_eq!(usage.service_tier.as_deref(), Some("scale"));
     }
 
     #[test]

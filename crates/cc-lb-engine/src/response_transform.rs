@@ -92,6 +92,72 @@ pub(crate) fn unwrap_gemini_code_assist_body(
 pub(crate) static GEMINI_OAUTH_RESPONSE_TRANSFORM: GeminiOauthResponseTransform =
     GeminiOauthResponseTransform;
 
+pub(crate) struct ComposedSseResponseTransformHook<'a> {
+    pub(crate) gemini: &'a dyn SseEventTransformHook,
+    pub(crate) custom: &'a dyn SseEventTransformHook,
+}
+
+impl SseEventTransformHook for ComposedSseResponseTransformHook<'_> {
+    fn transform_sse_event(
+        &self,
+        request: TransformSseEventRequest,
+    ) -> Result<TransformSseEventResult, ResponseTransformError> {
+        let TransformSseEventRequest {
+            request_id,
+            principal,
+            upstream,
+            request_method,
+            request_path,
+            canonical_model_id,
+            response_status,
+            response_headers,
+            event,
+        } = request;
+        let gemini_result = self.gemini.transform_sse_event(TransformSseEventRequest {
+            request_id: request_id.clone(),
+            principal: principal.clone(),
+            upstream: upstream.clone(),
+            request_method: request_method.clone(),
+            request_path: request_path.clone(),
+            canonical_model_id: canonical_model_id.clone(),
+            response_status,
+            response_headers: response_headers.clone(),
+            event: event.clone(),
+        })?;
+        let events = match gemini_result {
+            TransformSseEventResult::Unchanged => vec![event],
+            TransformSseEventResult::Replace { events } => events,
+            TransformSseEventResult::Drop => return Ok(TransformSseEventResult::Drop),
+        };
+        let mut transformed = Vec::new();
+        for event in events {
+            match self.custom.transform_sse_event(TransformSseEventRequest {
+                request_id: request_id.clone(),
+                principal: principal.clone(),
+                upstream: upstream.clone(),
+                request_method: request_method.clone(),
+                request_path: request_path.clone(),
+                canonical_model_id: canonical_model_id.clone(),
+                response_status,
+                response_headers: response_headers.clone(),
+                event: event.clone(),
+            })? {
+                TransformSseEventResult::Unchanged => {
+                    transformed.push(event);
+                }
+                TransformSseEventResult::Replace { events } => transformed.extend(events),
+                TransformSseEventResult::Drop => {}
+            }
+        }
+        if transformed.is_empty() {
+            Ok(TransformSseEventResult::Drop)
+        } else {
+            Ok(TransformSseEventResult::Replace {
+                events: transformed,
+            })
+        }
+    }
+}
 pub(crate) fn apply_buffered_transform_result(
     upstream_status: StatusCode,
     upstream_headers: HeaderMap,

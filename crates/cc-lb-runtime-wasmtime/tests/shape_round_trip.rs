@@ -62,6 +62,48 @@ fn fixture_wire_request() -> ShapeRequest {
     }
 }
 
+fn provider_fixture_wire_request(upstream: WireUpstream, path: &str, body: &[u8]) -> ShapeRequest {
+    use cc_lb_plugin_wire::{Header, Principal as WirePrincipal};
+    ShapeRequest {
+        request_id: Box::from("req-provider-shape"),
+        method: Box::from("POST"),
+        path: Box::from(path),
+        query: None,
+        headers: Box::new([Header {
+            name: Box::from("content-type"),
+            value: Box::from(b"application/json".as_slice()),
+        }]),
+        body: Box::from(body),
+        principal: WirePrincipal {
+            id: Box::from("tenant-shape"),
+            kind: Box::from("api_key"),
+            claims: Box::new([]),
+        },
+        upstream,
+    }
+}
+
+fn dispatch_shape_request(request: ShapeRequest) -> Option<ShapeResponse> {
+    let wasm_bytes = load_wasm_or_skip()?;
+    let runtime = Arc::new(WasmtimeRuntime::with_defaults().expect("engine build"));
+    let slot = runtime
+        .register_shape(
+            RuntimeSlotKey::global("test-shape-provider"),
+            "test-shape-provider",
+            &wasm_bytes,
+        )
+        .expect("register_shape OK");
+    let dispatch = WasmPluginWireDispatch::from_slot(slot, runtime.config_arc());
+    let in_bytes = rkyv::to_bytes::<RkyvError>(&request).expect("rkyv encode ShapeRequest");
+    let out_bytes = dispatch
+        .call_shape_scoped(in_bytes.as_slice(), <[u8]>::to_vec)
+        .expect("shape call succeeds");
+    let mut aligned = AlignedVec::<16>::with_capacity(out_bytes.len());
+    aligned.extend_from_slice(&out_bytes);
+    let archived = rkyv::access::<ArchivedShapeResponse, RkyvError>(&aligned).expect("rkyv access");
+    Some(rkyv::deserialize::<ShapeResponse, RkyvError>(archived).expect("rkyv deserialize"))
+}
+
 #[test]
 fn shape_passthrough_echoes_request_via_wire_dispatch() {
     let Some(wasm_bytes) = load_wasm_or_skip() else {
@@ -109,4 +151,48 @@ fn shape_passthrough_echoes_request_via_wire_dispatch() {
         name == "x-trace-id"
     });
     assert!(has_trace, "x-trace-id must be forwarded");
+}
+
+#[test]
+fn shape_passthrough_round_trips_openai_direct_responses() {
+    let Some(response) = dispatch_shape_request(provider_fixture_wire_request(
+        WireUpstream::OpenaiDirect {
+            base_url: Some(Box::from("https://api.openai.com")),
+        },
+        "/v1/responses",
+        br#"{"model":"gpt-5","input":"hi"}"#,
+    )) else {
+        return;
+    };
+
+    let url: &str = &response.url;
+    assert_eq!(url, "https://api.openai.com/v1/responses");
+    let method: &str = &response.method;
+    assert_eq!(method, "POST");
+    assert_eq!(&*response.body, br#"{"model":"gpt-5","input":"hi"}"#);
+}
+
+#[test]
+fn shape_passthrough_round_trips_gemini_direct_generate_content() {
+    let Some(response) = dispatch_shape_request(provider_fixture_wire_request(
+        WireUpstream::GeminiDirect {
+            base_url: Some(Box::from("https://generativelanguage.googleapis.com")),
+        },
+        "/v1beta/models/gemini-2.5-pro:generateContent",
+        br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#,
+    )) else {
+        return;
+    };
+
+    let url: &str = &response.url;
+    assert_eq!(
+        url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
+    );
+    let method: &str = &response.method;
+    assert_eq!(method, "POST");
+    assert_eq!(
+        &*response.body,
+        br#"{"contents":[{"parts":[{"text":"hi"}]}]}"#
+    );
 }

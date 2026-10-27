@@ -30,7 +30,9 @@ pub(crate) const fn affinity_provider(capability: ProviderCapability) -> &'stati
     match capability {
         ProviderCapability::AnthropicMessages => ANTHROPIC_PROVIDER,
         ProviderCapability::OpenaiResponses => OPENAI_PROVIDER,
-        ProviderCapability::GeminiGenerateContent => GEMINI_PROVIDER,
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {
+            GEMINI_PROVIDER
+        }
     }
 }
 
@@ -67,7 +69,7 @@ pub(crate) fn request_observes_response_affinity(
         ProviderCapability::OpenaiResponses => true,
         // generateContent never creates `cachedContents`; `thoughtSignature`
         // is forwarded without affinity.
-        ProviderCapability::GeminiGenerateContent => false,
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
     }
 }
 
@@ -99,6 +101,7 @@ pub(crate) fn extract_request_affinity_keys(
                 value.get("cachedContent"),
             )?;
         }
+        ProviderCapability::GeminiCountTokens => {}
     }
     Ok(collector.keys)
 }
@@ -113,7 +116,7 @@ pub(crate) fn extract_response_affinity_keys(
     match capability {
         ProviderCapability::AnthropicMessages => collector.anthropic_message(value)?,
         ProviderCapability::OpenaiResponses => collector.openai_response(value)?,
-        ProviderCapability::GeminiGenerateContent => {}
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => {}
     }
     Ok(collector.keys)
 }
@@ -124,7 +127,10 @@ pub(crate) fn extract_response_affinity_keys_from_sse_event(
     event: &ParsedSseEvent<'_>,
     principal_id: &str,
 ) -> Result<Vec<UpstreamAffinityKey>, UpstreamAffinityExtractionError> {
-    if capability == ProviderCapability::GeminiGenerateContent {
+    if matches!(
+        capability,
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens
+    ) {
         return Ok(Vec::new());
     }
     let Some(value) = event

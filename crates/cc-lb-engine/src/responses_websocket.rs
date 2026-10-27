@@ -19,13 +19,14 @@ use uuid::Uuid;
 
 use crate::authn_rail::{Authenticated, reject_unauthenticated};
 use crate::lifecycle::Lifecycle;
-use crate::terminal_observer::{InternalFailure, LifecycleContext};
+use crate::terminal_observer::{InternalFailure, LifecycleContext, UpstreamErrorCode};
 use crate::usage_parser::{UsageCounts, observe_non_stream_json_value};
 
 #[derive(Clone, Debug)]
 pub struct WebSocketError {
     pub status: u16,
     pub code: &'static str,
+    pub native_code: Option<String>,
     pub message: String,
     pub stream_id: Option<String>,
 }
@@ -35,9 +36,15 @@ impl WebSocketError {
         Self {
             status,
             code,
+            native_code: None,
             message: message.into(),
             stream_id: None,
         }
+    }
+
+    pub fn with_native_code(mut self, code: impl Into<String>) -> Self {
+        self.native_code = Some(code.into());
+        self
     }
 
     pub fn with_stream(mut self, stream_id: Option<String>) -> Self {
@@ -46,6 +53,7 @@ impl WebSocketError {
     }
 
     pub fn to_bytes(&self) -> Bytes {
+        let code = self.native_code.as_deref().unwrap_or(self.code);
         let mut error = serde_json::json!({
             "type": "error",
             "status": self.status,
@@ -54,7 +62,7 @@ impl WebSocketError {
                     else if self.status == 429 { "rate_limit_error" }
                     else if self.status < 500 { "invalid_request_error" }
                     else { "server_error" },
-                "code": self.code,
+                "code": code,
                 "message": self.message,
                 "param": null,
             },
@@ -1089,18 +1097,8 @@ impl ResponsesWebSocketGateway {
             ..Default::default()
         };
         if terminal {
-            let failure = (kind != "response.completed").then(|| {
-                WebSocketError::new(
-                    value
-                        .get("status")
-                        .and_then(Value::as_u64)
-                        .and_then(|value| u16::try_from(value).ok())
-                        .unwrap_or(502),
-                    "upstream_stream_error",
-                    "The provider response did not complete successfully",
-                )
-                .with_stream(lane.clone())
-            });
+            let failure =
+                (kind != "response.completed").then(|| native_terminal_error(&value, &lane));
             self.finish_turn(turn_id, failure.as_ref());
             if let Some(dispatch) = self.next_in_lane(&lane) {
                 result.dispatches.push(dispatch);
@@ -1294,6 +1292,19 @@ impl ResponsesWebSocketGateway {
                 reservation.handoff_after_response();
             }
             if let Some(error) = error {
+                if let Some(native_code) = error.native_code.as_deref() {
+                    observer.emit_lifecycle(LifecycleEvent::StreamCompleted {
+                        event_id: observer.event_id().to_owned(),
+                        result: Err(cc_lb_lifecycle::StreamError {
+                            error_type: native_code.to_owned(),
+                            error_message: error.message.clone(),
+                        }),
+                    });
+                    observer.set_upstream_error(
+                        StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY),
+                        UpstreamErrorCode::StreamError,
+                    );
+                }
                 terminate_error(observer, error);
             } else {
                 observer.set_success_status(http::StatusCode::OK);
@@ -1440,6 +1451,32 @@ impl Drop for ResponsesWebSocketGateway {
     }
 }
 
+fn native_terminal_error(value: &Value, lane: &Option<String>) -> WebSocketError {
+    let status = value
+        .get("status")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .unwrap_or(502);
+    let native_code = value
+        .pointer("/response/error/code")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/response/error/type")
+                .and_then(Value::as_str)
+        });
+    let message = value
+        .pointer("/response/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("The provider response did not complete successfully");
+    let mut error =
+        WebSocketError::new(status, "upstream_stream_error", message).with_stream(lane.clone());
+    if let Some(code) = native_code {
+        error = error.with_native_code(code.to_owned());
+    }
+    error
+}
+
 fn stream_id(value: &Value) -> Result<Option<String>, WebSocketError> {
     match value.get("stream_id") {
         None => Ok(None),
@@ -1568,14 +1605,30 @@ fn steering_id_bytes(id: &str) -> usize {
 }
 
 fn observed_response_usage(response: &Value) -> Option<(UsageCounts, bool)> {
-    let reported = response.get("usage")?.as_object()?;
+    let reported = response
+        .get("usage")
+        .or_else(|| {
+            response
+                .get("response")
+                .and_then(|value| value.get("usage"))
+        })?
+        .as_object()?;
     let input = reported.get("input_tokens").and_then(Value::as_u64);
     let output = reported.get("output_tokens").and_then(Value::as_u64);
     if input.is_none() && output.is_none() {
         return None;
     }
     let mut usage = observe_non_stream_json_value(response).usage;
-    if let Some(tier) = response.get("service_tier").and_then(Value::as_str) {
+    if let Some(tier) = response
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            response
+                .get("response")
+                .and_then(|value| value.get("service_tier"))
+                .and_then(Value::as_str)
+        })
+    {
         usage.service_tier = Some(tier.to_owned());
     }
     Some((usage, input.is_some() && output.is_some()))
@@ -1640,6 +1693,27 @@ mod tests {
                 "invalid_stream_id"
             );
         }
+    }
+
+    #[test]
+    fn response_failed_uses_native_error_details() {
+        let error = native_terminal_error(
+            &serde_json::json!({
+                "type": "response.failed",
+                "status": 200,
+                "response": {
+                    "error": {
+                        "code": "server_error",
+                        "message": "native failure"
+                    }
+                }
+            }),
+            &Some("main".to_owned()),
+        );
+        assert_eq!(error.code, "upstream_stream_error");
+        assert_eq!(error.native_code.as_deref(), Some("server_error"));
+        assert_eq!(error.message, "native failure");
+        assert_eq!(error.stream_id.as_deref(), Some("main"));
     }
 
     #[test]

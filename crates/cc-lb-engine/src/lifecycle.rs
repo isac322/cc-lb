@@ -48,7 +48,9 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use thiserror::Error;
 use tracing::Instrument as _;
 use url::Url;
@@ -64,7 +66,8 @@ use crate::downstream_stream_drop_guard::{
     DownstreamStreamDropGuard, StreamTerminationAttribution,
 };
 use crate::error_format::{
-    anthropic_error_body, anthropic_error_response, anthropic_error_response_with_retry_after,
+    anthropic_error_body, anthropic_error_response, provider_error_body_with_retry_after,
+    provider_error_response, provider_error_response_with_retry_after,
 };
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
@@ -82,7 +85,7 @@ use crate::request_timing::{REQUEST_STAGE_TIMINGS, RequestStageTimings};
 use crate::responses_websocket::{
     PreparedWebSocketTurn, WebSocketCandidate, WebSocketError, WebSocketIngress,
 };
-use crate::sse_error_frame::make_error_frame;
+use crate::sse_error_frame::{make_error_frame, make_provider_error_frame};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::terminal_observer::{
     InternalFailure, LifecycleContext, StreamErrorClassification, StreamTerminationCause,
@@ -323,11 +326,18 @@ impl SseDownstreamBoundaryTracker {
 }
 
 fn make_stream_error_frame(
+    capability: ProviderCapability,
     error_type: &str,
     message: &str,
     separate_from_partial_event: bool,
 ) -> Bytes {
-    let frame = make_error_frame(error_type, message);
+    let frame = make_provider_error_frame(
+        capability,
+        StatusCode::BAD_GATEWAY,
+        error_type,
+        message,
+        None,
+    );
     if !separate_from_partial_event {
         return frame;
     }
@@ -449,6 +459,7 @@ pub enum RequestKind {
     AnthropicMessages,
     OpenaiResponses,
     GeminiGenerateContent,
+    GeminiCountTokens,
 }
 
 impl RequestKind {
@@ -459,7 +470,7 @@ impl RequestKind {
             (Self::AnthropicMessages, ProtocolId::AnthropicMessages)
                 | (Self::OpenaiResponses, ProtocolId::OpenaiResponses)
                 | (
-                    Self::GeminiGenerateContent,
+                    Self::GeminiGenerateContent | Self::GeminiCountTokens,
                     ProtocolId::GeminiGenerateContent
                 )
         )
@@ -472,6 +483,7 @@ impl From<ProviderCapability> for RequestKind {
             ProviderCapability::AnthropicMessages => Self::AnthropicMessages,
             ProviderCapability::OpenaiResponses => Self::OpenaiResponses,
             ProviderCapability::GeminiGenerateContent => Self::GeminiGenerateContent,
+            ProviderCapability::GeminiCountTokens => Self::GeminiCountTokens,
         }
     }
 }
@@ -481,7 +493,8 @@ fn gemini_model_from_path(path: &str) -> Option<String> {
     let model_path = path.strip_prefix(prefix)?;
     let model = model_path
         .strip_suffix(":generateContent")
-        .or_else(|| model_path.strip_suffix(":streamGenerateContent"))?;
+        .or_else(|| model_path.strip_suffix(":streamGenerateContent"))
+        .or_else(|| model_path.strip_suffix(":countTokens"))?;
     (!model.is_empty()).then(|| model.to_owned())
 }
 
@@ -2052,13 +2065,18 @@ impl AttemptFailure {
     ///
     /// Response status, body, and `Retry-After` semantics are identical to the
     /// previous inline mapping.
-    fn into_response_and_failure(self) -> (Response<Body>, InternalFailure) {
+    fn into_response_and_failure(
+        self,
+        capability: ProviderCapability,
+    ) -> (Response<Body>, InternalFailure) {
         match self {
             Self::RawPassthrough(source) => {
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    capability,
                     StatusCode::BAD_GATEWAY,
                     "api_error",
                     "failed to prepare raw upstream request",
+                    None,
                 );
                 let failure = InternalFailure {
                     status: StatusCode::BAD_GATEWAY,
@@ -2072,10 +2090,12 @@ impl AttemptFailure {
                 (response, failure)
             }
             Self::Sign(source) => {
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    capability,
                     StatusCode::BAD_GATEWAY,
                     "api_error",
                     "failed to sign upstream request",
+                    None,
                 );
                 let failure = InternalFailure {
                     status: StatusCode::BAD_GATEWAY,
@@ -2091,20 +2111,24 @@ impl AttemptFailure {
             Self::Dispatch(source) => {
                 let (response, kind, message) = match &source {
                     DispatchError::BulkheadFull { retry_after } => (
-                        anthropic_error_response_with_retry_after(
+                        provider_error_response_with_retry_after(
+                            capability,
                             StatusCode::SERVICE_UNAVAILABLE,
                             "overloaded_error",
                             "upstream bulkhead queue is full",
+                            None,
                             retry_after.as_secs().max(1),
                         ),
                         InternalErrorKind::Unavailable,
                         source.to_string(),
                     ),
                     DispatchError::InvalidUri { .. } | DispatchError::RequestBuild { .. } => (
-                        anthropic_error_response(
+                        provider_error_response(
+                            capability,
                             StatusCode::BAD_GATEWAY,
                             "api_error",
                             "upstream request failed",
+                            None,
                         ),
                         InternalErrorKind::ConfigError,
                         source.to_string(),
@@ -2115,10 +2139,12 @@ impl AttemptFailure {
                         let chain =
                             crate::bulkhead::transport_error_chain(transport.as_ref()).join(" <- ");
                         (
-                            anthropic_error_response(
+                            provider_error_response(
+                                capability,
                                 StatusCode::BAD_GATEWAY,
                                 "api_error",
                                 "upstream request failed",
+                                None,
                             ),
                             match failure_kind {
                                 crate::bulkhead::TransportFailureKind::Timeout => {
@@ -2213,8 +2239,8 @@ struct RequestAffinityFailure {
 }
 
 impl RequestAffinityFailure {
-    fn response(&self) -> Response<Body> {
-        anthropic_error_response(self.status, self.error_type, self.message)
+    fn response(&self, capability: ProviderCapability) -> Response<Body> {
+        provider_error_response(capability, self.status, self.error_type, self.message, None)
     }
 }
 
@@ -2337,7 +2363,7 @@ fn sse_event_completes_response(
             event.event_type() == Some("response.completed")
                 || event.event_name() == Some(b"response.completed")
         }
-        ProviderCapability::GeminiGenerateContent => false,
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => false,
     }
 }
 
@@ -2347,7 +2373,7 @@ const fn semantic_terminal_event_type(capability: ProviderCapability) -> Option<
     match capability {
         ProviderCapability::AnthropicMessages => Some("message_stop"),
         ProviderCapability::OpenaiResponses => Some("response.completed"),
-        ProviderCapability::GeminiGenerateContent => None,
+        ProviderCapability::GeminiGenerateContent | ProviderCapability::GeminiCountTokens => None,
     }
 }
 
@@ -3614,13 +3640,19 @@ impl Lifecycle {
         }
         let request_kind = RequestKind::from(request_capability);
 
-        if let Some(response) = body_too_large {
+        if body_too_large.is_some() {
             if let Some(o) = observer.as_ref() {
                 o.terminate_body_too_large(body_cap_for_path(&self.config, &ctx.path) as u64);
             }
-            return Ok(*response);
+            return Ok(provider_error_response(
+                request_capability,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+                "request body exceeds configured cap",
+                None,
+            ));
         }
-        if ctx.path == "/v1/messages" && !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
+        if !ctx.body_bytes.is_empty() && !body_view.is_valid_json() {
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::ParseCompleted {
                     event_id: o.event_id().to_owned(),
@@ -3636,10 +3668,12 @@ impl Lifecycle {
                     },
                 });
             }
-            return Ok(anthropic_error_response(
+            return Ok(provider_error_response(
+                request_capability,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 "request body must be valid JSON",
+                None,
             ));
         }
         let prompt_cache_token_scope = prompt_cache_token_scope(&ctx.downstream_headers);
@@ -3755,10 +3789,12 @@ impl Lifecycle {
                         },
                     });
                 }
-                return Ok(anthropic_error_response(
+                return Ok(provider_error_response(
+                    request_capability,
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     UPSTREAM_AFFINITY_KEY_LIMIT_MESSAGE,
+                    None,
                 ));
             }
         };
@@ -3779,7 +3815,7 @@ impl Lifecycle {
                         },
                     });
                 }
-                return Ok(failure.response());
+                return Ok(failure.response(request_capability));
             }
         };
         let track_keepalive_response = self.cache_keepalive_enqueuer.is_some()
@@ -3791,10 +3827,12 @@ impl Lifecycle {
 
         let router_pipeline = cached.resolved_pipeline(None);
         if let Some(error) = router_pipeline.instantiation_error.as_deref() {
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
                 "router pipeline is unavailable for this request",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -3897,10 +3935,12 @@ impl Lifecycle {
                     },
                 });
             }
-            return Ok(anthropic_error_response(
+            return Ok(provider_error_response(
+                request_capability,
                 StatusCode::SERVICE_UNAVAILABLE,
                 error_codes::UPSTREAM_AFFINITY_UNAVAILABLE,
                 UPSTREAM_AFFINITY_TARGET_INELIGIBLE_MESSAGE,
+                None,
             ));
         }
         if pipeline_result.candidates.is_empty() {
@@ -3913,10 +3953,12 @@ impl Lifecycle {
                 StatusCode::SERVICE_UNAVAILABLE,
                 Some(pipeline_result.routing_trace(terminal_decision.clone())),
             );
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::SERVICE_UNAVAILABLE,
                 "route_no_upstream_after_filter",
                 message,
+                None,
             );
             return Ok(response);
         }
@@ -3936,10 +3978,12 @@ impl Lifecycle {
             route_span.record("cc_lb.route.outcome", "error");
             route_span.record("otel.status_code", "ERROR");
             route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
-            let response = anthropic_error_response(
+            let response = provider_error_response(
+                request_capability,
                 StatusCode::BAD_GATEWAY,
                 "route_not_configured",
                 "no upstream route is configured for this request",
+                None,
             );
             if let Some(o) = observer.as_ref() {
                 o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -3972,10 +4016,12 @@ impl Lifecycle {
                 route_span.record("cc_lb.route.outcome", "error");
                 route_span.record("otel.status_code", "ERROR");
                 route_span.record("error.type", error_codes::ROUTE_NOT_CONFIGURED);
-                let response = anthropic_error_response(
+                let response = provider_error_response(
+                    request_capability,
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
                     "no upstream route is configured for this request",
+                    None,
                 );
                 if let Some(o) = observer.as_ref() {
                     o.emit_lifecycle(cc_lb_lifecycle::LifecycleEvent::RouteCompleted {
@@ -4139,10 +4185,12 @@ impl Lifecycle {
                         routed = next;
                         continue;
                     }
-                    let mut response = anthropic_error_response(
+                    let mut response = provider_error_response(
+                        request_capability,
                         StatusCode::BAD_GATEWAY,
                         "api_error",
                         "failed to prepare upstream credentials",
+                        None,
                     );
                     self.attach_limit_headers(&mut response, active_limit.as_ref());
                     if let Some(o) = observer.as_ref() {
@@ -4194,6 +4242,7 @@ impl Lifecycle {
                     }
                     return Ok(self.relay_attempt_failure(
                         failure,
+                        request_capability,
                         active_limit.as_ref(),
                         observer.as_ref(),
                         &attempt_timings,
@@ -4260,6 +4309,7 @@ impl Lifecycle {
                         }
                         return Ok(self.relay_attempt_failure(
                             failure,
+                            request_capability,
                             active_limit.as_ref(),
                             observer.as_ref(),
                             &attempt_timings,
@@ -4401,7 +4451,7 @@ impl Lifecycle {
             return Ok(None);
         };
         let limit_request = body_view.limit_request(&ctx.canonical_model_id);
-        let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
+        let max_input_estimate = limit_request.input_tokens_estimate;
         let cost_estimate = self.limit_cost_estimator.as_ref().and_then(|estimator| {
             estimator.estimate_max(
                 &limit_request.model,
@@ -4440,6 +4490,8 @@ impl Lifecycle {
                 let retry_after_seconds = limit_retry_after_secs(reason.clone());
                 let reason_label = "limit_rejected".to_owned();
                 let mut response = limit_rejection_response(
+                    crate::provider_capability::classify(&ctx.method, &ctx.path)
+                        .unwrap_or(ProviderCapability::AnthropicMessages),
                     reason,
                     &limit_request.model,
                     &subject.principal_id,
@@ -4641,9 +4693,17 @@ impl Lifecycle {
             response_body_json
                 .as_ref()
                 .and_then(usage_parser::observe_http_error_value)
+        } else if response_body_json.as_ref().is_some_and(|value| {
+            value.get("object").and_then(Value::as_str) == Some("response")
+                && value.get("status").and_then(Value::as_str) == Some("failed")
+        }) {
+            observation.canonical_error
         } else {
             None
         };
+        let non_error_status_response_failed = !(status.is_client_error()
+            || status.is_server_error())
+            && canonical_upstream_error.is_some();
         // Provider error text can echo the credential; the parser masks it
         // before its store cap so a secret split by the cap cannot survive.
         // Successful responses never get here.
@@ -4827,6 +4887,15 @@ impl Lifecycle {
                     error_type: "response_transform_error".to_owned(),
                     error_message: error.to_string(),
                 })
+            } else if non_error_status_response_failed {
+                Err(cc_lb_lifecycle::StreamError {
+                    error_type: upstream_error_type
+                        .clone()
+                        .unwrap_or_else(|| "response_failed".to_owned()),
+                    error_message: upstream_error_message
+                        .clone()
+                        .unwrap_or_else(|| "The provider response failed".to_owned()),
+                })
             } else {
                 Ok(cc_lb_lifecycle::StreamSuccess {
                     usage: to_usage_snapshot(&usage),
@@ -4846,7 +4915,10 @@ impl Lifecycle {
                 Some(body_collect_ms),
                 first_body_chunk_ms,
             );
-            if status.is_client_error() || status.is_server_error() {
+            if status.is_client_error()
+                || status.is_server_error()
+                || non_error_status_response_failed
+            {
                 if upstream_error_type.is_some() || upstream_error_message.is_some() {
                     o.emit_lifecycle(
                         cc_lb_lifecycle::LifecycleEvent::RequestLogUpstreamErrorObserved {
@@ -4858,8 +4930,10 @@ impl Lifecycle {
                 }
                 let code = if status.is_client_error() {
                     UpstreamErrorCode::Upstream4xx
-                } else {
+                } else if status.is_server_error() {
                     UpstreamErrorCode::Upstream5xx
+                } else {
+                    UpstreamErrorCode::StreamError
                 };
                 o.set_upstream_error(status, code);
             } else if body_collect_failed {
@@ -4971,11 +5045,12 @@ impl Lifecycle {
     fn relay_attempt_failure(
         &self,
         failure: AttemptFailure,
+        capability: ProviderCapability,
         active_limit: Option<&ActiveLimit>,
         observer: Option<&LifecycleContext>,
         attempt_timings: &AttemptTimings,
     ) -> Response<Body> {
-        let (mut response, failure) = failure.into_response_and_failure();
+        let (mut response, failure) = failure.into_response_and_failure(capability);
         self.attach_limit_headers(&mut response, active_limit);
         if let Some(o) = observer {
             o.set_attempt_timings(
@@ -5488,14 +5563,24 @@ impl Lifecycle {
         let stream_body_io_timing = response_body_timing.clone();
         let downstream_poll_timing = response_body_timing;
         let stream = async_stream::stream! {
-            let sse_transform_hook = transform_ctx
-                .dialect
-                .sse_event_transform_hook()
-                .or_else(|| {
-                    transform_ctx
-                        .gemini_oauth
-                        .then_some(&GEMINI_OAUTH_RESPONSE_TRANSFORM as &dyn SseEventTransformHook)
-                });
+            let custom_sse_hook = transform_ctx.dialect.sse_event_transform_hook();
+            let composed_sse_hook = custom_sse_hook.map(|custom| {
+                ComposedSseResponseTransformHook {
+                    gemini: &GEMINI_OAUTH_RESPONSE_TRANSFORM,
+                    custom,
+                }
+            });
+            let sse_transform_hook: Option<&dyn SseEventTransformHook> =
+                if transform_ctx.gemini_oauth {
+                    composed_sse_hook
+                        .as_ref()
+                        .map(|hook| hook as &dyn SseEventTransformHook)
+                        .or(Some(
+                            &GEMINI_OAUTH_RESPONSE_TRANSFORM as &dyn SseEventTransformHook,
+                        ))
+                } else {
+                    custom_sse_hook
+                };
             let mut downstream_drop_guard = downstream_drop_guard;
             let mut usage_decoder = usage_decoder;
             let mut upstream_diagnostics = upstream_diagnostics;
@@ -6444,6 +6529,7 @@ impl Lifecycle {
                                 &client_error_message
                             };
                             let frame = make_stream_error_frame(
+                                response_affinity_context.capability,
                                 UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                                 client_error_message,
                                 !success_sse_affinity_gate
@@ -6942,6 +7028,7 @@ impl Lifecycle {
                         || downstream_stream_is_identity)
                 {
                     let frame = make_stream_error_frame(
+                        response_affinity_context.capability,
                         UPSTREAM_RESPONSE_CLIENT_ERROR_TYPE,
                         &error_message,
                         downstream_stream_is_identity
@@ -7216,7 +7303,7 @@ pub fn observe_rate_limits(
     upstream_id: Uuid,
     observed_at: u64,
 ) -> Vec<UpstreamRateLimitObservationRecord> {
-    parse_anthropic_rate_limit_headers(headers)
+    let mut observations = parse_anthropic_rate_limit_headers(headers)
         .into_iter()
         .chain(parse_openai_rate_limit_headers(headers))
         .map(|snapshot| UpstreamRateLimitObservationRecord {
@@ -7228,7 +7315,23 @@ pub fn observe_rate_limits(
             reset: snapshot.reset,
             observed_at_unix_secs: observed_at,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if observations.is_empty() && headers.get(RETRY_AFTER).is_some() {
+        observations.extend(
+            cc_lb_quota::parse_retry_after_rate_limit_headers(headers)
+                .into_iter()
+                .map(|snapshot| UpstreamRateLimitObservationRecord {
+                    upstream_id,
+                    window: snapshot.window,
+                    kind: snapshot.kind,
+                    limit: snapshot.limit,
+                    remaining: snapshot.remaining,
+                    reset: snapshot.reset,
+                    observed_at_unix_secs: observed_at,
+                }),
+        );
+    }
+    observations
 }
 
 struct FilterPipelineResult {
@@ -7632,6 +7735,10 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
         upstream_kind,
         StorageUpstreamKind::OpenaiApiKey | StorageUpstreamKind::OpenaiOauth
     );
+    let is_gemini = matches!(
+        upstream_kind,
+        StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth
+    );
     for (name, value) in headers.iter() {
         let name_lc = name.as_str();
         let Ok(val) = value.to_str() else { continue };
@@ -7640,6 +7747,7 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
         } else {
             name_lc.starts_with("anthropic-ratelimit-")
                 || cc_lb_domain::ANTHROPIC_IDENTITY_HEADERS.contains(&name_lc)
+                || (is_gemini && name_lc == "x-goog-request-id")
         };
         if should_capture {
             anthropic_headers.insert(name_lc.to_owned(), val.to_owned());
@@ -7649,7 +7757,8 @@ fn header_snapshot_from(headers: &HeaderMap, upstream_kind: StorageUpstreamKind)
         content_type: header_to_string(headers, "content-type"),
         content_encoding: header_to_string(headers, "content-encoding"),
         request_id: header_to_string(headers, "x-request-id")
-            .or_else(|| header_to_string(headers, "request-id")),
+            .or_else(|| header_to_string(headers, "request-id"))
+            .or_else(|| header_to_string(headers, "x-goog-request-id")),
         retry_after: header_to_string(headers, "retry-after"),
         anthropic_headers,
     }
@@ -7754,6 +7863,7 @@ impl RequestBodyView {
 struct LimitRequest {
     model: String,
     max_tokens: i64,
+    input_tokens_estimate: i64,
     stream: bool,
     service_tier: Option<String>,
 }
@@ -7782,6 +7892,9 @@ impl LimitRequest {
                         })
                 })
                 .unwrap_or(0),
+            input_tokens_estimate: value
+                .map(estimate_input_tokens)
+                .unwrap_or(DEFAULT_MAX_INPUT_ESTIMATE),
             stream: value
                 .and_then(|v| v.get("stream"))
                 .and_then(Value::as_bool)
@@ -7791,6 +7904,60 @@ impl LimitRequest {
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
         }
+    }
+}
+
+const INPUT_ESTIMATE_MAX_NODES: usize = 16_384;
+const INPUT_ESTIMATE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn estimate_input_tokens(value: &Value) -> i64 {
+    let mut nodes = 0;
+    let mut bytes = 0;
+    for key in [
+        "system",
+        "messages",
+        "instructions",
+        "input",
+        "systemInstruction",
+        "contents",
+    ] {
+        if let Some(selected) = value.get(key) {
+            collect_input_bytes(selected, &mut nodes, &mut bytes);
+        }
+    }
+    i64::try_from(bytes / 4)
+        .unwrap_or(i64::MAX)
+        .max(DEFAULT_MAX_INPUT_ESTIMATE)
+}
+
+fn collect_input_bytes(value: &Value, nodes: &mut usize, bytes: &mut usize) {
+    if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+        return;
+    }
+    *nodes = (*nodes).saturating_add(1);
+    match value {
+        Value::String(text) => {
+            *bytes = bytes
+                .saturating_add(text.len())
+                .min(INPUT_ESTIMATE_MAX_BYTES);
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_input_bytes(value, nodes, bytes);
+                if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_input_bytes(value, nodes, bytes);
+                if *nodes >= INPUT_ESTIMATE_MAX_NODES || *bytes >= INPUT_ESTIMATE_MAX_BYTES {
+                    break;
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -7813,8 +7980,8 @@ pub(crate) struct RequestEventContext {
 }
 
 pub(crate) use crate::response_transform::{
-    GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext, SseTransformOutcome,
-    apply_buffered_transform_result, make_response_transform_error_frame,
+    ComposedSseResponseTransformHook, GEMINI_OAUTH_RESPONSE_TRANSFORM, ResponseTransformContext,
+    SseTransformOutcome, apply_buffered_transform_result, make_response_transform_error_frame,
     sanitize_downstream_response_headers, sanitize_downstream_stream_headers,
     sanitized_response_headers_for_plugin, transform_sse_event_bytes,
     unwrap_gemini_code_assist_body,
@@ -8407,6 +8574,7 @@ fn attach_limit_headers_from_engine(
 }
 
 fn limit_rejection_response(
+    capability: ProviderCapability,
     reason: RejectReason,
     model: &str,
     principal_id: &str,
@@ -8487,19 +8655,13 @@ fn limit_rejection_response(
         ),
     };
 
-    let mut error = json!({
-        "type": error_type,
-        "message": message,
-    });
-    if let Some(limit_kind) = limit_kind {
-        error["limit_kind"] = json!(limit_kind);
-    }
-    if let Some(retry_after_seconds) = retry_after_seconds {
-        error["retry_after_seconds"] = json!(retry_after_seconds);
-    }
-
-    let mut response = Response::new(Body::from(Bytes::from(
-        json!({"type":"error","error":error}).to_string(),
+    let mut response = Response::new(Body::from(provider_error_body_with_retry_after(
+        capability,
+        status,
+        error_type,
+        &message,
+        limit_kind,
+        retry_after_seconds,
     )));
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -8565,21 +8727,19 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 }
 
 fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
+    let base_url = record
+        .base_url
+        .clone()
+        .or_else(|| Some(default_base_url(record.kind)));
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            Ok(Upstream::AnthropicDirect {
-                base_url: record.base_url.clone(),
-            })
+            Ok(Upstream::AnthropicDirect { base_url })
         }
         StorageUpstreamKind::OpenaiOauth | StorageUpstreamKind::OpenaiApiKey => {
-            Ok(Upstream::OpenaiDirect {
-                base_url: record.base_url.clone(),
-            })
+            Ok(Upstream::OpenaiDirect { base_url })
         }
         StorageUpstreamKind::GeminiApiKey | StorageUpstreamKind::GeminiOauth => {
-            Ok(Upstream::GeminiDirect {
-                base_url: record.base_url.clone(),
-            })
+            Ok(Upstream::GeminiDirect { base_url })
         }
     }
 }

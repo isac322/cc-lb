@@ -110,8 +110,13 @@ fn upstream_base_url(upstream: &ArchivedUpstream) -> Option<String> {
 
 fn build_url(base: &str, path: &str, query: Option<&str>) -> String {
     let trimmed = base.trim_end_matches('/');
+    let effective_path = if trimmed.ends_with("/backend-api/codex") && path == "/v1/responses" {
+        "/responses"
+    } else {
+        path
+    };
     match query {
-        Some(q) if !q.is_empty() => format!("{trimmed}{path}?{q}"),
-        _ => format!("{trimmed}{path}"),
+        Some(q) if !q.is_empty() => format!("{trimmed}{effective_path}?{q}"),
+        _ => format!("{trimmed}{effective_path}"),
     }
 }

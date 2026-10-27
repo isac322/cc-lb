@@ -38,6 +38,9 @@ export const REQUEST_EVENT_KINDS: readonly RequestEventKind[] =
 export const REQUEST_EVENT_KIND_LABELS: Record<RequestEventKind, string> = {
   messages: 'Messages',
   count_tokens: 'Token count',
+  openai_responses: 'OpenAI Responses',
+  gemini_generate_content: 'Gemini generateContent',
+  gemini_count_tokens: 'Gemini countTokens',
   models: 'Models',
   files: 'Files',
   other: 'Other proxy requests',
