@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -94,10 +97,15 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) downstream_headers: HeaderMap,
 }
 
+const SESSION_SHARD_COUNT: usize = 64;
+const MAX_TRACKED_SESSIONS_PER_SHARD: usize = 512;
+
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepalive {
     enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
     dynamic_view: Arc<DynamicViewHolder>,
+    next_completion_seq: Arc<AtomicU64>,
+    session_shards: Arc<[tokio::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
 }
 
 impl LifecycleKeepalive {
@@ -108,7 +116,45 @@ impl LifecycleKeepalive {
         Self {
             enqueuer,
             dynamic_view,
+            next_completion_seq: Arc::new(AtomicU64::new(0)),
+            session_shards: Arc::new(std::array::from_fn(|_| {
+                tokio::sync::Mutex::new(HashMap::new())
+            })),
         }
+    }
+
+    fn session_shard(
+        &self,
+        session_key: &SessionKey,
+    ) -> &tokio::sync::Mutex<HashMap<SessionKey, u64>> {
+        let mut hasher = DefaultHasher::new();
+        session_key.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % SESSION_SHARD_COUNT;
+        &self.session_shards[idx]
+    }
+
+    fn advance_session_seq(
+        shard: &mut HashMap<SessionKey, u64>,
+        session_key: &SessionKey,
+        completion_seq: u64,
+    ) -> bool {
+        if shard
+            .get(session_key)
+            .is_some_and(|&last_seq| completion_seq <= last_seq)
+        {
+            return false;
+        }
+        if !shard.contains_key(session_key)
+            && shard.len() >= MAX_TRACKED_SESSIONS_PER_SHARD
+            && let Some(oldest_key) = shard
+                .iter()
+                .min_by_key(|(_, seq)| **seq)
+                .map(|(key, _)| key.clone())
+        {
+            shard.remove(&oldest_key);
+        }
+        shard.insert(session_key.clone(), completion_seq);
+        true
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
@@ -140,6 +186,7 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        let completion_seq = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
@@ -147,6 +194,7 @@ impl LifecycleKeepalive {
         let downstream_headers = downstream_headers.clone();
         tokio::spawn(async move {
             this.persist_completion(
+                completion_seq,
                 &response_body_json,
                 &principal,
                 accounting_key_id,
@@ -164,6 +212,7 @@ impl LifecycleKeepalive {
     #[allow(clippy::too_many_arguments)]
     async fn persist_completion(
         &self,
+        completion_seq: u64,
         response_body_json: &serde_json::Value,
         principal: &Principal,
         accounting_key_id: String,
@@ -195,6 +244,8 @@ impl LifecycleKeepalive {
             return;
         };
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
+        let mut shard = self.session_shard(&session_key).lock().await;
+        let is_latest = Self::advance_session_seq(&mut shard, &session_key, completion_seq);
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
@@ -224,9 +275,11 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::SnapshotTooLarge.to_string(),
                 )
                 .await;
-                self.cancel_session(&session_key, principal, CancelReason::SnapshotTooLarge)
-                    .await;
-                super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
+                if is_latest {
+                    self.cancel_session(&session_key, principal, CancelReason::SnapshotTooLarge)
+                        .await;
+                    super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
+                }
                 return;
             }
             Err(error) => {
@@ -257,13 +310,21 @@ impl LifecycleKeepalive {
                         &reason,
                     )
                     .await;
-                    self.cancel_session(
-                        &session_key,
-                        principal,
-                        CancelReason::CachedPrefixTooSmall,
-                    )
-                    .await;
-                    super::record_cancelled(&principal_name, CancelReason::CachedPrefixTooSmall);
+                    if is_latest {
+                        self.cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::CachedPrefixTooSmall,
+                        )
+                        .await;
+                        super::record_cancelled(
+                            &principal_name,
+                            CancelReason::CachedPrefixTooSmall,
+                        );
+                    }
+                    return;
+                }
+                if !is_latest {
                     return;
                 }
                 let params =
@@ -308,8 +369,10 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::user_turn(response_body_json).to_string(),
                 )
                 .await;
-                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
-                    .await;
+                if is_latest {
+                    self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                        .await;
+                }
             }
             super::TurnDecision::Ambiguous => {
                 self.record_not_tracked(
@@ -321,8 +384,10 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::AmbiguousTurn.to_string(),
                 )
                 .await;
-                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
-                    .await;
+                if is_latest {
+                    self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                        .await;
+                }
             }
         }
     }
@@ -634,5 +699,19 @@ mod tests {
                 cache_keepalive_principal_uuid("principal-test")
             )
         );
+    }
+
+    #[test]
+    fn advance_session_seq_rejects_stale_or_duplicate_completions() {
+        let mut shard = HashMap::new();
+        let key = SessionKey::from_thread_id(Uuid::from_u128(1), "thread-1");
+        assert!(LifecycleKeepalive::advance_session_seq(&mut shard, &key, 2));
+        assert!(!LifecycleKeepalive::advance_session_seq(
+            &mut shard, &key, 1
+        ));
+        assert!(!LifecycleKeepalive::advance_session_seq(
+            &mut shard, &key, 2
+        ));
+        assert!(LifecycleKeepalive::advance_session_seq(&mut shard, &key, 3));
     }
 }

@@ -26,7 +26,8 @@ The feature is best effort. A keepalive can miss because the cache changed, cred
     "refresh_lead_time_1h_secs": 300,
     "max_refreshes_per_session": 12,
     "max_total_duration_secs": 14400,
-    "snapshot_max_bytes": 524288
+    "snapshot_max_bytes": 8388608,
+    "min_cache_tokens": 10000
   }
 }
 ```
