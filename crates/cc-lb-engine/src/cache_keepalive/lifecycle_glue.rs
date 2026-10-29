@@ -131,6 +131,9 @@ impl LifecycleKeepalive {
         if self.enqueuer.is_none() {
             return;
         }
+        if !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref()) {
+            return;
+        }
         let view = self.dynamic_view.load();
         let Some(config) = view
             .principal_view
@@ -180,6 +183,9 @@ impl LifecycleKeepalive {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
         };
+        if !is_keepalive_eligible_request_kind(cache_metadata.request_kind.as_deref()) {
+            return;
+        }
         let view = self.dynamic_view.load();
         let Some(cached) = view.principal_view.get(&principal.id) else {
             return;
@@ -431,19 +437,38 @@ fn keepalive_forward_headers(headers: &HeaderMap) -> HeaderMap {
     out
 }
 
+fn is_keepalive_eligible_request_kind(request_kind: Option<&str>) -> bool {
+    !matches!(
+        request_kind,
+        Some(
+            "recap"
+                | "compaction"
+                | "session_title"
+                | "auto_thinking"
+                | "notification"
+                | "side"
+                | "look_at"
+        )
+    )
+}
+
 fn cache_keepalive_session_key(
     principal: &Principal,
     cache_metadata: &RequestCacheMetadata,
 ) -> Option<SessionKey> {
     let principal_id = uuid::Uuid::parse_str(&principal.id)
         .unwrap_or_else(|_| cache_keepalive_principal_uuid(&principal.id));
+    let agent_scope = cache_metadata.claude_agent_id.clone().or_else(|| {
+        (cache_metadata.request_kind.as_deref() == Some("subagent")).then(|| "subagent".to_owned())
+    });
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
-        return Some(SessionKey::from_thread_id(principal_id, thread_id));
+        return Some(
+            SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
+        );
     }
-    cache_metadata
-        .cache_prefix_hash
-        .clone()
-        .map(|prefix_hash| SessionKey::from_cache_prefix_hash(principal_id, prefix_hash))
+    cache_metadata.cache_prefix_hash.clone().map(|prefix_hash| {
+        SessionKey::from_cache_prefix_hash(principal_id, prefix_hash).with_agent_scope(agent_scope)
+    })
 }
 
 fn cache_keepalive_principal_uuid(principal_id: &str) -> Uuid {
@@ -505,5 +530,78 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(2)
         );
+    }
+    #[test]
+    fn keepalive_session_keys_isolate_agent_scopes() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut main = RequestCacheMetadata::default();
+        main.thread_id = Some("session-1".to_owned());
+        let mut claude_subagent = RequestCacheMetadata::default();
+        claude_subagent.thread_id = Some("session-1".to_owned());
+        claude_subagent.claude_agent_id = Some("a70f-agent".to_owned());
+        let mut generic_subagent = RequestCacheMetadata::default();
+        generic_subagent.thread_id = Some("session-1".to_owned());
+        generic_subagent.request_kind = Some("subagent".to_owned());
+        let main_key = cache_keepalive_session_key(&principal, &main)
+            .expect("main session key")
+            .to_string();
+        let claude_key = cache_keepalive_session_key(&principal, &claude_subagent)
+            .expect("Claude subagent session key")
+            .to_string();
+        let generic_key = cache_keepalive_session_key(&principal, &generic_subagent)
+            .expect("generic subagent session key")
+            .to_string();
+
+        assert_eq!(
+            main_key,
+            format!(
+                "{}/thread:session-1",
+                cache_keepalive_principal_uuid(&principal.id)
+            )
+        );
+        assert_eq!(
+            claude_key,
+            format!(
+                "{}/thread:session-1/agent:a70f-agent",
+                cache_keepalive_principal_uuid(&principal.id)
+            )
+        );
+        assert_eq!(
+            generic_key,
+            format!(
+                "{}/thread:session-1/agent:subagent",
+                cache_keepalive_principal_uuid(&principal.id)
+            )
+        );
+        assert_ne!(main_key, claude_key);
+        assert_ne!(main_key, generic_key);
+        assert_ne!(claude_key, generic_key);
+    }
+
+    #[test]
+    fn auxiliary_request_kinds_are_not_keepalive_eligible() {
+        for kind in [
+            "recap",
+            "compaction",
+            "session_title",
+            "auto_thinking",
+            "notification",
+            "side",
+            "look_at",
+        ] {
+            assert!(!is_keepalive_eligible_request_kind(Some(kind)), "{kind}");
+        }
+        for kind in [
+            Some("main"),
+            Some("subagent"),
+            Some("advisor"),
+            Some("unknown"),
+            None,
+        ] {
+            assert!(is_keepalive_eligible_request_kind(kind), "{kind:?}");
+        }
     }
 }

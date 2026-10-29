@@ -8,6 +8,36 @@ const CLAUDE_NOTIFICATION_SYSTEM_PREFIX: &str =
     "A user kicked off a Claude Code agent to do a coding task and walked away";
 const CLAUDE_SIDE_QUESTION_PREFIX: &str = "<system-reminder>This is a side question from the user.";
 const CLAUDE_TITLE_SCHEMA_POINTER: &str = "/output_config/format/schema/properties/title";
+const CLAUDE_NAMING_SYSTEM_PREFIX: &str =
+    "You are naming a coding session so the user can pick it out of a long list of sessions.";
+
+pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequestKind> {
+    if !view.has_provenance() {
+        return None;
+    }
+    if view.last_user_starts_with(CLAUDE_SIDE_QUESTION_PREFIX) {
+        return Some(ClientRequestKind::Side);
+    }
+    if ((view.any_system_contains(CLAUDE_SESSION_TITLE_SYSTEM_MARKER)
+        || view.any_system_contains(CLAUDE_NAMING_SYSTEM_PREFIX))
+        && view.pointer(CLAUDE_TITLE_SCHEMA_POINTER).is_some())
+        || view.any_system_starts_with(CLAUDE_NAMING_SYSTEM_PREFIX)
+        || view.any_system_starts_with(
+            "Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation.",
+        )
+    {
+        return Some(ClientRequestKind::SessionTitle);
+    }
+    if view.any_system_starts_with(CLAUDE_NOTIFICATION_SYSTEM_PREFIX) {
+        return Some(ClientRequestKind::Notification);
+    }
+    if view.any_system_starts_with(
+        "You are a helpful AI assistant tasked with summarizing conversations.",
+    ) {
+        return Some(ClientRequestKind::Compaction);
+    }
+    None
+}
 
 pub(crate) fn classify(view: &RequestView<'_>) -> Option<ClientRequestKind> {
     if view.billing().is_some_and(|billing| billing.is_subagent) {
@@ -17,20 +47,27 @@ pub(crate) fn classify(view: &RequestView<'_>) -> Option<ClientRequestKind> {
         return None;
     }
 
-    // Side questions retain the main system prompt and tools, so this
-    // auxiliary marker must be checked before either main rule.
-    if view.last_user_starts_with(CLAUDE_SIDE_QUESTION_PREFIX) {
-        return Some(ClientRequestKind::Side);
+    if let Some(kind) = classify_auxiliary(view) {
+        return Some(kind);
     }
-    if view.system_contains(CLAUDE_SESSION_TITLE_SYSTEM_MARKER)
-        && view.pointer(CLAUDE_TITLE_SCHEMA_POINTER).is_some()
+    if view.any_system_contains(
+        "You are an agent for Claude Code, Anthropic's official CLI for Claude.",
+    ) {
+        return Some(ClientRequestKind::Subagent);
+    }
+    // These tool-bearing helper calls can retain billing and main context.
+    // Do not let either main marker or the bare-mode tools fallback claim them.
+    if view.any_system_starts_with(
+        "You run a web search for another Claude model, which is waiting on the result",
+    ) || view.any_system_contains("Reply with ONLY the suggestion, no quotes or explanation.")
+        || (view.user_contains("<exchanges>") && view.user_contains("</exchanges>"))
     {
-        return Some(ClientRequestKind::SessionTitle);
+        return None;
     }
-    if view.system_starts_with(CLAUDE_NOTIFICATION_SYSTEM_PREFIX) {
-        return Some(ClientRequestKind::Notification);
-    }
-    if view.system_contains(CLAUDE_MAIN_SYSTEM_MARKER) {
+    if view.any_system_contains(CLAUDE_MAIN_SYSTEM_MARKER)
+        || view
+            .any_system_contains("You are a Claude agent, built on Anthropic's Claude Agent SDK.")
+    {
         return Some(ClientRequestKind::Main);
     }
 
@@ -204,5 +241,109 @@ mod tests {
         });
 
         assert_eq!(classify(&RequestView::new(&value, None, None)), None);
+    }
+
+    #[test]
+    fn current_claude_markers_support_top_level_and_leading_system() {
+        let cases = [
+            (
+                "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                "main",
+            ),
+            (
+                "You are an interactive agent that helps users with software engineering tasks.",
+                "main",
+            ),
+            (
+                "You are an agent for Claude Code, Anthropic's official CLI for Claude.",
+                "subagent",
+            ),
+            (
+                "You are naming a coding session so the user can pick it out of a long list of sessions.",
+                "session_title",
+            ),
+            (
+                "Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation.",
+                "session_title",
+            ),
+            (
+                "You are a helpful AI assistant tasked with summarizing conversations.",
+                "compaction",
+            ),
+        ];
+        for (system, expected) in cases {
+            for leading in [false, true] {
+                let value = if leading {
+                    json!({"messages": [{"role": "system", "content": system}]})
+                } else {
+                    json!({"system": system})
+                };
+                assert_eq!(
+                    crate::request_classification::classify_client_request_kind(
+                        Some(&value),
+                        Some("claude-session"),
+                        None,
+                        false,
+                    ),
+                    Some(expected),
+                    "system={system}, leading={leading}"
+                );
+                assert_eq!(classify(&RequestView::new(&value, None, None)), None);
+            }
+        }
+    }
+
+    #[test]
+    fn title_schema_refines_embedded_naming_marker() {
+        let mut value = json!({
+            "system": format!("Naming helper:\n{CLAUDE_NAMING_SYSTEM_PREFIX}"),
+            "output_config": {"format": {"schema": {"properties": {"title": {"type": "string"}}}}}
+        });
+        assert_eq!(
+            classify_auxiliary(&RequestView::new(&value, Some("session"), None)),
+            Some(ClientRequestKind::SessionTitle)
+        );
+        value.as_object_mut().unwrap().remove("output_config");
+        assert_eq!(
+            classify_auxiliary(&RequestView::new(&value, Some("session"), None)),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_bearing_auxiliary_calls_do_not_fall_through_to_main() {
+        for (system, user) in [
+            (
+                "You run a web search for another Claude model, which is waiting on the result",
+                "search",
+            ),
+            (
+                "Reply with ONLY the suggestion, no quotes or explanation.",
+                "suggest",
+            ),
+            (
+                CLAUDE_MAIN_SYSTEM_MARKER,
+                "<exchanges>conversation</exchanges>",
+            ),
+        ] {
+            let value = json!({
+                "system": [
+                    {"text": "x-anthropic-billing-header: cc_version=2.1.312; cc_entrypoint=cli;"},
+                    {"text": system},
+                    {"text": CLAUDE_MAIN_SYSTEM_MARKER}
+                ],
+                "messages": [{"role": "user", "content": user}],
+                "tools": [{"name": "web_search_tool"}]
+            });
+            assert_eq!(
+                crate::request_classification::classify_client_request_kind(
+                    Some(&value),
+                    Some("session"),
+                    None,
+                    false,
+                ),
+                Some("unknown")
+            );
+        }
     }
 }

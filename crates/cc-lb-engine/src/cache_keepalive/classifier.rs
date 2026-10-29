@@ -30,6 +30,7 @@ const BUILTIN_WAIT_FOR_USER_TOOLS: &[&str] = &[
     "ask_question",
     "cursor_ask_question",
     "question",
+    "ask",
     "attempt_completion",
     "submit_and_exit",
     "finish",
@@ -363,6 +364,18 @@ mod tests {
             json!({
                 "stop_reason": "tool_use",
                 "content": [{"type": "tool_use", "name": "attempt_completion", "id": "t1", "input": {}}],
+            }),
+        );
+        assert_eq!(d, TurnDecision::UserTurn);
+    }
+    #[test]
+    fn tool_use_with_ask_is_user_turn() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "ask", "id": "t1", "input": {}}],
             }),
         );
         assert_eq!(d, TurnDecision::UserTurn);

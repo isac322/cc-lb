@@ -1,6 +1,11 @@
 use super::{ClientRequestKind, RequestView};
 
-const SENPI_MAIN_SYSTEM_PREFIXES: [&str; 2] = ["You are senpi,", "You are senpi on "];
+const SENPI_MAIN_SYSTEM_PREFIXES: [&str; 4] = [
+    "You are senpi,",
+    "You are senpi on ",
+    "You are OmO,",
+    "You are OmO on ",
+];
 const SENPI_SESSION_TITLE_SYSTEM_PREFIX: &str =
     "Generate a concise title for this coding-agent session.";
 const SENPI_COMPACTION_SYSTEM_PREFIX: &str = "You are a context summarization assistant.";
@@ -16,7 +21,7 @@ const SENPI_SIDE_SYSTEM_SUFFIX: &str = concat!(
 fn is_main(view: &RequestView<'_>) -> bool {
     SENPI_MAIN_SYSTEM_PREFIXES
         .iter()
-        .any(|prefix| view.system_starts_with(prefix))
+        .any(|prefix| view.any_system_starts_with(prefix))
 }
 
 pub(crate) fn classify_main(view: &RequestView<'_>) -> Option<ClientRequestKind> {
@@ -27,12 +32,20 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     if view
         .session_id()
         .is_some_and(|session_id| session_id.contains(SENPI_SIDE_SESSION_MARKER))
-        || view.system_ends_with(SENPI_SIDE_SYSTEM_SUFFIX)
+        || view.any_system_ends_with(SENPI_SIDE_SYSTEM_SUFFIX)
     {
         return Some(ClientRequestKind::Side);
     }
-    if view.system_starts_with(SENPI_LOOK_AT_SYSTEM_PREFIX) {
+    if view.any_system_starts_with(SENPI_LOOK_AT_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::LookAt);
+    }
+    if view.any_system_starts_with("You are running as an omo senpi-task child ")
+        || view.any_system_contains("\nYou are running as an omo senpi-task child ")
+        || view.first_user_starts_with(
+            "Extract durable facts from this payload and record each accepted fact with record_fact.",
+        )
+    {
+        return Some(ClientRequestKind::Subagent);
     }
     // Senpi's shipped opt-in subagent example launches a fresh
     // `senpi --no-session` process and encodes the delegated prompt as the
@@ -44,10 +57,10 @@ pub(crate) fn classify_auxiliary(view: &RequestView<'_>) -> Option<ClientRequest
     if is_main(view) && view.first_user_starts_with(SENPI_SUBAGENT_USER_PREFIX) {
         return Some(ClientRequestKind::Subagent);
     }
-    if view.system_starts_with(SENPI_SESSION_TITLE_SYSTEM_PREFIX) {
+    if view.any_system_starts_with(SENPI_SESSION_TITLE_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::SessionTitle);
     }
-    if view.system_starts_with(SENPI_COMPACTION_SYSTEM_PREFIX) {
+    if view.any_system_starts_with(SENPI_COMPACTION_SYSTEM_PREFIX) {
         return Some(ClientRequestKind::Compaction);
     }
 
@@ -235,5 +248,70 @@ mod tests {
         });
 
         assert_eq!(classify(&value, None), None);
+    }
+
+    #[test]
+    fn omo_main_and_task_children_support_both_wire_formats() {
+        let cases = [
+            ("You are OmO, a coding agent.", "hello", "main"),
+            (
+                "You are OmO on Grok 4.5, acting as CEO and orchestrator.",
+                "hello",
+                "main",
+            ),
+            (
+                "You are running as an omo senpi-task child reviewer.",
+                "review",
+                "subagent",
+            ),
+            (
+                "You are OmO, a coding agent.\nYou are running as an omo senpi-task child reviewer.",
+                "review",
+                "subagent",
+            ),
+            (
+                "You are OmO, a coding agent.",
+                "Extract durable facts from this payload and record each accepted fact with record_fact.",
+                "subagent",
+            ),
+            (
+                "You are OmO, a coding agent.",
+                "Task: Review the change",
+                "subagent",
+            ),
+        ];
+        for (system, user, expected) in cases {
+            for leading in [false, true] {
+                let value = if leading {
+                    json!({"messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ]})
+                } else {
+                    json!({"system": system, "messages": [{"role": "user", "content": user}]})
+                };
+                assert_eq!(
+                    classify(&value, None),
+                    Some(expected),
+                    "system={system}, leading={leading}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn leading_system_auxiliaries_match_top_level_system() {
+        for (system, expected) in [
+            (SENPI_SESSION_TITLE_SYSTEM_PREFIX, "session_title"),
+            (SENPI_COMPACTION_SYSTEM_PREFIX, "compaction"),
+            (SENPI_LOOK_AT_SYSTEM_PREFIX, "look_at"),
+            (SENPI_SIDE_SYSTEM_SUFFIX, "side"),
+        ] {
+            let value = json!({"messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": "work"}
+            ]});
+            assert_eq!(classify(&value, None), Some(expected));
+        }
     }
 }
