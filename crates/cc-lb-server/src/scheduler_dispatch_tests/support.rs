@@ -342,6 +342,7 @@ impl Fixture {
             principal_id: "principal".to_owned(),
             accounting_key_id: None,
             cache_anchor_age: Duration::ZERO,
+            expected_generation: None,
             params: ScheduleParams {
                 delay: Duration::from_secs(1),
                 max_refreshes: 3,

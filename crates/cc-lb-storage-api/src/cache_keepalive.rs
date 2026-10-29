@@ -46,9 +46,15 @@ pub struct CacheKeepaliveConfig {
     pub max_total_duration_secs: u64,
 
     /// Maximum shaped body size (bytes) captured per snapshot. Requests
-    /// exceeding this bound are not tracked. Default 512 KiB.
+    /// exceeding this bound are not tracked. Default 8 MiB.
     #[serde(default = "default_snapshot_max_bytes")]
     pub snapshot_max_bytes: u32,
+
+    /// Minimum cached input tokens (`cache_read_input_tokens +
+    /// cache_creation_input_tokens`) required on an `AgentInTurn` response
+    /// before scheduling keep-alive renewals. Default 10,000 tokens.
+    #[serde(default = "default_min_cache_tokens")]
+    pub min_cache_tokens: u64,
 
     /// Classifier tuning.
     #[serde(default)]
@@ -159,7 +165,10 @@ fn default_max_duration() -> u64 {
     14400
 }
 fn default_snapshot_max_bytes() -> u32 {
-    524_288
+    8_388_608
+}
+pub fn default_min_cache_tokens() -> u64 {
+    10_000
 }
 fn default_last_n_messages() -> usize {
     4
@@ -237,7 +246,8 @@ mod tests {
         assert_eq!(cfg.refresh_lead_time_1h_secs, 300);
         assert_eq!(cfg.max_refreshes_per_session, 12);
         assert_eq!(cfg.max_total_duration_secs, 14400);
-        assert_eq!(cfg.snapshot_max_bytes, 524_288);
+        assert_eq!(cfg.snapshot_max_bytes, 8_388_608);
+        assert_eq!(cfg.min_cache_tokens, 10_000);
         assert!(cfg.classifier.extra_wait_for_user_tools.is_empty());
         assert!(!cfg.classifier.treat_end_turn_as_ambiguous);
         assert!(cfg.classifier.llm_judge.is_none());
@@ -251,7 +261,8 @@ mod tests {
             refresh_lead_time_1h_secs: 300,
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14400,
-            snapshot_max_bytes: 524_288,
+            snapshot_max_bytes: 8_388_608,
+            min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         };
         assert_eq!(cfg.refresh_delay_secs(CacheTtl::Ttl5m), 270);
@@ -266,7 +277,8 @@ mod tests {
             refresh_lead_time_1h_secs: 4000,
             max_refreshes_per_session: 12,
             max_total_duration_secs: 14400,
-            snapshot_max_bytes: 524_288,
+            snapshot_max_bytes: 8_388_608,
+            min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         };
         assert_eq!(cfg.refresh_delay_secs(CacheTtl::Ttl5m), 1);

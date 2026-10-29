@@ -122,6 +122,10 @@ Sessions are keyed by `(principal_id, session_id)`:
   `x-session-affinity`, `x-session-id`. (These are the same headers WRH
   already uses for replica affinity, so the keep-alive session naturally
   hashes to the same replica as the real traffic.)
+- Subagent isolation: when `x-claude-code-agent-id` is present and is not
+  empty or `main`, the key is `(principal_id, thread_id, agent_id)`. This
+  prevents a Claude Code subagent from sharing the main agent's keep-alive
+  session.
 - Fallback: `session_id` is the first cache breakpoint's v3 prefix key from
   request cache metadata.
 
@@ -138,11 +142,18 @@ credentials). Content:
 - `method: Method` — always POST for `/v1/messages`,
 - `headers: HeaderMap` — client headers minus hop-by-hop,
 - `body: Bytes` — shaped body (validated as JSON object; rejected if
-  larger than `snapshot_max_bytes`, default 512 KiB),
+  larger than `snapshot_max_bytes`, default 8 MiB),
 - `upstream_id: Uuid` — so the scheduler can re-fetch a fresh signer at
   fire time,
 - `ttl: CacheTtl` — `Ttl5m` or `Ttl1h`, extracted from the request's
   `cache_control` breakpoint.
+
+When top-level automatic `cache_control` is absent, snapshot shaping trims
+uncached trailing messages and content blocks after the last explicit
+breakpoint. An assistant breakpoint preserves the following user
+`tool_result` message when present; otherwise the snapshot ends with a minimal
+user continuation. If the only explicit breakpoint is in `system` or `tools`,
+uncached multi-turn history is replaced with a minimal user turn.
 
 `build_keepalive_body()` produces the fire-time body with `max_tokens = 0`.
 Anthropic rejects that pre-warm form when `stream: true`, extended thinking
@@ -169,10 +180,8 @@ mapping table. Key rules:
   are server-side "keep going" signals).
 - `stop_reason == "refusal"` or `"model_context_window_exceeded"` →
   **UserTurn**.
-- `stop_reason == "tool_use"` with at least one *client* `tool_use` block
-  whose name is not on the wait-for-user list → **AgentInTurn**.
-- `stop_reason == "tool_use"` with only wait-for-user tools
-  (`attempt_completion`, `ExitPlanMode`, `ask_followup_question`, …) or
+  `tool_use` with only wait-for-user tools
+  (`attempt_completion`, `ExitPlanMode`, `ask_followup_question`, `ask`, …) or
   only `server_tool_use` → **UserTurn**.
 - `stop_reason == "end_turn"` with a `compaction` content block or with a
   completion-tool defined-but-not-invoked → **AgentInTurn**.
@@ -279,8 +288,10 @@ config surface is JSON persisted through the admin API):
 - `max_refreshes_per_session: u32` (default `12`) — hard cap; then the
   session self-cancels with `reason=MaxRefreshes`.
 - `max_total_duration_secs: u64` (default `14400` = 4 h) — wall-clock cap.
-- `snapshot_max_bytes: u32` (default `524288`) — snapshot rejected if
-  shaped body exceeds this.
+- `snapshot_max_bytes: u32` (default `8388608` = 8 MiB) — snapshot rejected
+  if the shaped and trimmed body exceeds this.
+- `min_cache_tokens: u64` (default `10000`) — an `AgentInTurn` response must
+  report at least this many cached input tokens before a renewal is scheduled.
 - `classifier: ClassifierConfig`
   - `extra_wait_for_user_tools: Vec<String>` (default `[]`).
   - `treat_end_turn_as_ambiguous: bool` (default `false`).
@@ -296,11 +307,7 @@ Admin API additions: `POST /admin/v1/principals` and
 
 Prometheus metrics (all labelled by `principal_id` at minimum):
 
-- `cc_lb_cache_keepalive_scheduled_total{principal_id, ttl}`
-- `cc_lb_cache_keepalive_fired_total{principal_id, ttl, result=hit|miss|error}`
-- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason=new_request|no_cache_control|max_refreshes|max_duration|user_turn_detected|shutdown|upstream_gone|snapshot_too_large}`
-- `cc_lb_cache_keepalive_classifier_decisions_total{decision, source=heuristic}` (`source=llm` reserved)
-- `cc_lb_cache_keepalive_llm_latency_seconds` (reserved histogram; zero samples in this release)
+- `cc_lb_cache_keepalive_cancelled_total{principal_id, reason=new_request|no_cache_control|max_refreshes|max_duration|user_turn_detected|shutdown|upstream_gone|snapshot_too_large|cached_prefix_too_small}`
 - `cc_lb_cache_keepalive_active_sessions{principal_id}` (gauge)
 
 Existing per-request `cache_read_input_tokens` telemetry naturally
@@ -309,8 +316,8 @@ reflects success without new event schema.
 ## Risks & mitigations
 
 1. **Body size blowup.** Snapshots hold `Bytes` for every active session.
-   Mitigation: `snapshot_max_bytes` cap (default 512 KiB) rejects
-   pathologically large requests; DashMap size tracked by the
+   Mitigation: message trimming plus the `snapshot_max_bytes` cap (default
+   8 MiB) rejects pathologically large requests; DashMap size tracked by the
    `active_sessions` gauge with an operator alert.
 2. **Concurrent-write cache misses.** Two real requests with the same
    prefix but fresh cache writes can race; a keep-alive fired during the

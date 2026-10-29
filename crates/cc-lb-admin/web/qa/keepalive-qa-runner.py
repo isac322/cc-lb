@@ -67,11 +67,12 @@ CONFIG_SNAPSHOT = {
     "refresh_lead_time_1h_secs": 300,
     "max_refreshes_per_session": 12,
     "max_total_duration_secs": 14_400,
-    "snapshot_max_bytes": 524_288,
+    "snapshot_max_bytes": 8_388_608,
 }
 KEEPALIVE_CONFIG = {
     "enabled": True,
     **CONFIG_SNAPSHOT,
+    "min_cache_tokens": 10_000,
     "classifier": {
         "extra_wait_for_user_tools": [],
         "treat_end_turn_as_ambiguous": False,

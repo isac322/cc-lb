@@ -51,7 +51,7 @@ The amended scheduling invariants are:
 
 The durable implementation keeps the engine/scheduler module boundary intact. `cc-lb-engine` defines a scheduling port and owns classification, snapshot construction, and cache-anchor extraction; it must not depend on `cc-lb-scheduler`, Apalis, SQLx pools, or storage adapters. Storage record/operation traits live in `cc-lb-storage-api`; SQLite/Postgres adapters implement them; `cc-lb-scheduler` owns `CacheKeepaliveJob` and workers; `cc-lb-server` wires the dependencies.
 
-The amended decision preserves the feature/configuration surface: per-principal opt-in, cache-control-only tracking, 5 m / 1 h TTLs, `refresh_lead_time_5m_secs = 30`, `refresh_lead_time_1h_secs = 300`, `max_refreshes_per_session = 12`, `max_total_duration_secs = 14400`, `snapshot_max_bytes = 524288`, session identity from `x-claude-code-session-id`, `x-claude-session-id`, `x-session-affinity`, `x-session-id`, then cache-prefix-hash fallback, unchanged v1 classifier behavior, and reserved/rejected `llm_judge`.
+The amended decision preserves the feature/configuration surface: per-principal opt-in, cache-control-only tracking, 5 m / 1 h TTLs, `refresh_lead_time_5m_secs = 30`, `refresh_lead_time_1h_secs = 300`, `max_refreshes_per_session = 12`, `max_total_duration_secs = 14400`, `snapshot_max_bytes = 8388608` (8 MiB), `min_cache_tokens = 10000`, session identity from `x-claude-code-session-id`, `x-claude-session-id`, `x-session-affinity`, `x-session-id`, then cache-prefix-hash fallback, with `x-claude-code-agent-id` isolating non-main subagent sessions by `(thread_id, agent_id)`. The v1 classifier behavior remains unchanged apart from the built-in `ask` wait-for-user tool, and `llm_judge` remains reserved/rejected.
 
 Observability must remain secret-safe. Keepalive metrics should report scheduled/fired/cancelled/stale/noop/hit/miss/error/decrypt_failed outcomes. Scheduler/admin failure views may show job type, status, sanitized reason, hashed session/idempotency summaries, and bounded non-secret metadata only; they must not expose plaintext prompts, downstream auth, or raw encrypted payload blobs.
 
@@ -77,6 +77,7 @@ Unchanged by the Section 1' amendment.
 - **Disable `thinking`.** Set `thinking.type = "disabled"` and remove `budget_tokens`. Extended thinking with `max_tokens: 0` is a documented 400.
 - **Remove `output_config.format`.** Structured output is a documented 400 with `max_tokens: 0`.
 - **Downgrade `tool_choice: {tool|any}` -> `{auto}`.** Forced tool invocation is a documented 400 with `max_tokens: 0`. `auto` is legal.
+- **Trim uncached history.** When top-level automatic `cache_control` is absent, retain messages and content blocks only through the last explicit breakpoint. Preserve the matching user `tool_result` after an assistant `tool_use`; otherwise end with a minimal user continuation. If only `system` or `tools` has a breakpoint, replace the message history with a minimal user turn.
 - **Reject non-Anthropic upstreams.** OpenRouter's schema requires `max_tokens >= 1`; Bedrock and Vertex have not been verified. v1 hard-gates on the upstream `kind` in the dispatcher.
 
 Alternatives rejected:
@@ -93,7 +94,7 @@ Unchanged by the Section 1' amendment.
 
 - **`tool_use` + any regular client `tool_use` block -> AgentInTurn.** Even for `Bash` / `Browser` / `Computer` tools, whose semantics are opaque to us. The Anthropic protocol requires the client to send back a `tool_result` message before the model can continue; if the user cancels, the next request will simply not include our keep-alive window because the session key is stale. Accepting the ~cents cost of a false-positive fire is preferable to missing every genuine long tool call.
 - **`tool_use` with only `server_tool_use` blocks -> UserTurn.** The server already handled it.
-- **`tool_use` where every client `tool_use` block name is on the wait-for-user list -> UserTurn.** Built-in list: `AskUserQuestion`, `ExitPlanMode`, `ask_followup_question`, `ask_question`, `cursor_ask_question`, `question`, `attempt_completion`, `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`, `report_bug`. Cross-verified across the client set above. Extendable per-principal via `extra_wait_for_user_tools`.
+- **`tool_use` where every client `tool_use` block name is on the wait-for-user list -> UserTurn.** Built-in list: `AskUserQuestion`, `ExitPlanMode`, `ask_followup_question`, `ask_question`, `ask`, `cursor_ask_question`, `question`, `attempt_completion`, `submit_and_exit`, `finish`, `plan_mode_respond`, `act_mode_respond`, `report_bug`. Cross-verified across the client set above. Extendable per-principal via `extra_wait_for_user_tools`.
 - **`end_turn` with a completion tool defined-but-not-invoked -> AgentInTurn.** e.g. Cline's `attempt_completion`, OpenHands' `finish`, OpenCode's `ExitPlanMode`. Convention: if the framework declared the tool and the model did not call it, the model is not done.
 - **`end_turn` with a `compaction` content block -> AgentInTurn.** The documented `pause_after_compaction=true` context-management beta.
 - **`pause_turn` / `compaction` stop_reason -> AgentInTurn.**
@@ -102,6 +103,13 @@ Unchanged by the Section 1' amendment.
 - **`null` / unknown -> UserTurn** (fail-safe).
 
 `Ambiguous` responses default to `UserTurn` in this release (fail-safe: better to lose a warm-cache and re-write than to spend money on a wasted fire). The `llm_judge` config field is reserved for a future provider-agnostic judge and is rejected by the admin API while it is unimplemented.
+
+Before scheduling an `AgentInTurn` renewal, the response usage must report at
+least `min_cache_tokens` cached input tokens, computed as
+`cache_read_input_tokens + cache_creation_input_tokens`. Responses below the
+default 10,000-token threshold cancel the session with
+`reason=cached_prefix_too_small`; `UserTurn` and `Ambiguous` decisions still
+cancel regardless of usage.
 
 ### 4. Refresh timing anchor: cache creation / response begin, not response completion
 

@@ -61,7 +61,7 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
         "kind": "machine",
         "cache_keepalive": {
             "enabled": true,
-            "refresh_lead_time_5m_secs": 42,
+            "refresh_lead_time_5m_secs": 42
         }
     });
     let (created, etag) = create_principal(state.clone(), create_body).await;
@@ -80,6 +80,14 @@ async fn cache_keepalive_survives_create_get_and_put_clear() {
     assert_eq!(
         get_body["cache_keepalive"]["refresh_lead_time_5m_secs"],
         Value::from(42)
+    );
+    assert_eq!(
+        get_body["cache_keepalive"]["snapshot_max_bytes"],
+        Value::from(8_388_608)
+    );
+    assert_eq!(
+        get_body["cache_keepalive"]["min_cache_tokens"],
+        Value::from(10_000)
     );
 
     let (put_status, put_body) = authed_put_json(
@@ -118,7 +126,8 @@ async fn cache_keepalive_omitted_on_update_remains_unchanged() {
             "cache_keepalive": {
                 "enabled": true,
                 "refresh_lead_time_5m_secs": 42,
-                "max_refreshes_per_session": 5
+                "max_refreshes_per_session": 5,
+                "min_cache_tokens": 12_345
             }
         }),
     )
@@ -138,6 +147,7 @@ async fn cache_keepalive_omitted_on_update_remains_unchanged() {
     assert_eq!(put_body["cache_keepalive"]["enabled"], Value::Bool(true));
     assert_eq!(put_body["cache_keepalive"]["refresh_lead_time_5m_secs"], 42);
     assert_eq!(put_body["cache_keepalive"]["max_refreshes_per_session"], 5);
+    assert_eq!(put_body["cache_keepalive"]["min_cache_tokens"], 12_345);
 }
 
 #[tokio::test]

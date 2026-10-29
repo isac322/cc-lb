@@ -46,7 +46,7 @@ function getDraftSnapshot(principal: Principal): CacheKeepaliveDraftSnapshot {
     lead1h: config?.refresh_lead_time_1h_secs ?? 300,
     maxRenewals: config?.max_refreshes_per_session ?? 12,
     maxDuration: config?.max_total_duration_secs ?? 14400,
-    snapshotBytes: config?.snapshot_max_bytes ?? 524288,
+    snapshotBytes: config?.snapshot_max_bytes ?? 8_388_608,
     extraTools: [...(config?.classifier?.extra_wait_for_user_tools ?? [])],
     treatAmbiguous: config?.classifier?.treat_end_turn_as_ambiguous ?? false,
   };
@@ -79,7 +79,7 @@ export function CacheKeepaliveSettingsDrawer({
   const [lead1h, setLead1h] = useState(300);
   const [maxRenewals, setMaxRenewals] = useState(12);
   const [maxDuration, setMaxDuration] = useState(14400);
-  const [snapshotBytes, setSnapshotBytes] = useState(524288);
+  const [snapshotBytes, setSnapshotBytes] = useState(8_388_608);
   const [extraTools, setExtraTools] = useState<string[]>([]);
   const [treatAmbiguous, setTreatAmbiguous] = useState(false);
   const [newTool, setNewTool] = useState('');
@@ -153,6 +153,8 @@ export function CacheKeepaliveSettingsDrawer({
           max_refreshes_per_session: maxRenewals,
           max_total_duration_secs: maxDuration,
           snapshot_max_bytes: snapshotBytes,
+          min_cache_tokens:
+            principal.cache_keepalive?.min_cache_tokens ?? 10_000,
           classifier: {
             extra_wait_for_user_tools: extraTools,
             treat_end_turn_as_ambiguous: treatAmbiguous,

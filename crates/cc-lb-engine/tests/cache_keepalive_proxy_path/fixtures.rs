@@ -81,7 +81,11 @@ impl UpstreamDispatch for AgentTurnDispatch {
             "id": "msg_agent_turn",
             "content": [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {}}],
             "stop_reason": "tool_use",
-            "usage": {"input_tokens": 10, "output_tokens": 2}
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 12_000,
+                "output_tokens": 2
+            }
         })))
     }
 }
@@ -107,6 +111,7 @@ pub(crate) fn principal_with_keepalive() -> PrincipalRecord {
             max_refreshes_per_session: 3,
             max_total_duration_secs: 60,
             snapshot_max_bytes: 524_288,
+            min_cache_tokens: 10_000,
             classifier: ClassifierConfig::default(),
         }),
     }

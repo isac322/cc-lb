@@ -31,6 +31,7 @@ fn principal_with_cache_keepalive(enabled: bool) -> PrincipalRecord {
             max_refreshes_per_session: 7,
             max_total_duration_secs: 3_600,
             snapshot_max_bytes: 128_000,
+            min_cache_tokens: 10_000,
             classifier: Default::default(),
         }),
     }

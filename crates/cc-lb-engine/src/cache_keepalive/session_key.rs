@@ -24,6 +24,19 @@ impl SessionKey {
         }
     }
 
+    pub fn from_thread_and_agent(
+        principal_id: Uuid,
+        thread_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self::from_thread_id(principal_id, thread_id).with_agent_scope(Some(agent_id.into()))
+    }
+
+    pub fn normalize_agent_id(raw: Option<&str>) -> Option<&str> {
+        let trimmed = raw?.trim();
+        (!trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("main")).then_some(trimmed)
+    }
+
     pub fn from_cache_prefix_hash(principal_id: Uuid, prefix_hash: impl Into<String>) -> Self {
         Self {
             principal_id,
@@ -33,7 +46,7 @@ impl SessionKey {
     }
 
     pub fn with_agent_scope(mut self, agent_scope: Option<String>) -> Self {
-        self.agent_scope = agent_scope.filter(|scope| !scope.is_empty());
+        self.agent_scope = Self::normalize_agent_id(agent_scope.as_deref()).map(ToOwned::to_owned);
         self
     }
 }
@@ -96,5 +109,28 @@ mod tests {
         assert_eq!(pre_escaped, format!("{principal_id}/thread:a%252Fagent:b"));
         assert_ne!(unscoped_with_delimiter, scoped);
         assert_ne!(unscoped_with_delimiter, pre_escaped);
+    }
+
+    #[test]
+    fn normalize_agent_id_ignores_main_and_blank_values() {
+        assert_eq!(SessionKey::normalize_agent_id(None), None);
+        assert_eq!(SessionKey::normalize_agent_id(Some("")), None);
+        assert_eq!(SessionKey::normalize_agent_id(Some("  ")), None);
+        assert_eq!(SessionKey::normalize_agent_id(Some("main")), None);
+        assert_eq!(SessionKey::normalize_agent_id(Some("MAIN")), None);
+        assert_eq!(
+            SessionKey::normalize_agent_id(Some("subagent-1")),
+            Some("subagent-1")
+        );
+    }
+
+    #[test]
+    fn session_key_display_includes_agent_identity() {
+        let principal_id = Uuid::from_u128(1);
+        let key = SessionKey::from_thread_and_agent(principal_id, "thread-a", "agent-a");
+        assert_eq!(
+            key.to_string(),
+            "00000000-0000-0000-0000-000000000001/thread:thread-a/agent:agent-a"
+        );
     }
 }

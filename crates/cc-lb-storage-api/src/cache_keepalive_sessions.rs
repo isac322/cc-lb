@@ -229,6 +229,35 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         request: &CacheKeepaliveReplaceRequest,
     ) -> StorageResult<CacheKeepaliveSessionRecord>;
 
+    async fn allocate_cache_keepalive_completion_ticket(
+        &self,
+        session_key_hash: &str,
+    ) -> StorageResult<u64> {
+        let _ = session_key_hash;
+        Ok(0)
+    }
+
+    async fn replace_from_real_request_fenced(
+        &self,
+        request: &CacheKeepaliveReplaceRequest,
+        expected_ticket: Option<u64>,
+    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
+        let _ = expected_ticket;
+        self.replace_from_real_request(request).await.map(Some)
+    }
+
+    async fn cancel_cache_keepalive_fenced(
+        &self,
+        session_key_hash: &str,
+        expected_ticket: Option<u64>,
+        cancel_anchor_at_unix_secs: u64,
+        reason: CacheKeepaliveTerminalReason,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        let _ = (expected_ticket, cancel_anchor_at_unix_secs);
+        self.mark_latest_cache_keepalive_terminal(session_key_hash, reason, now_unix_secs)
+            .await
+    }
     async fn get_cache_keepalive_session(
         &self,
         session_key_hash: &str,
@@ -301,6 +330,26 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
 
 pub fn cache_keepalive_job_key(session_key_hash: &str, generation: u64) -> String {
     format!("cache_keepalive:{session_key_hash}:{generation}")
+}
+
+pub fn cache_keepalive_order_meta_key(session_key_hash: &str) -> String {
+    format!("keepalive_order:{session_key_hash}")
+}
+
+pub fn parse_keepalive_order_meta(value: Option<&str>) -> (u64, u64) {
+    let Some(raw) = value else {
+        return (0, 0);
+    };
+    let Some((issued_raw, applied_raw)) = raw.split_once(':') else {
+        return (0, 0);
+    };
+    let issued = issued_raw.parse::<u64>().unwrap_or(0);
+    let applied = applied_raw.parse::<u64>().unwrap_or(0);
+    (issued, applied)
+}
+
+pub fn format_keepalive_order_meta(issued: u64, applied: u64) -> String {
+    format!("{issued}:{applied}")
 }
 
 #[cfg(test)]

@@ -3,10 +3,11 @@ use metrics::counter;
 pub const CANCELLED_TOTAL: &str = "cc_lb_cache_keepalive_cancelled_total";
 pub const CLASSIFIER_DECISIONS_TOTAL: &str = "cc_lb_cache_keepalive_classifier_decisions_total";
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CancelReason {
     UserTurnDetected,
     SnapshotTooLarge,
+    CachedPrefixTooSmall,
 }
 
 impl CancelReason {
@@ -14,6 +15,7 @@ impl CancelReason {
         match self {
             Self::UserTurnDetected => "user_turn_detected",
             Self::SnapshotTooLarge => "snapshot_too_large",
+            Self::CachedPrefixTooSmall => "cached_prefix_too_small",
         }
     }
 }

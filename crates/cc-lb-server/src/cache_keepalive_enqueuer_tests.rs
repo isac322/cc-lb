@@ -121,10 +121,16 @@ async fn cancel_terminalizes_active_session_without_deleting_pending_job() {
         .await
         .expect("enqueue cache keepalive");
 
+    let observed = enqueuer
+        .observe_session_generation("session-hash")
+        .await
+        .expect("observe generation");
     enqueuer
         .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
             session_key_hash: "session-hash".to_owned(),
             reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+            expected_generation: observed,
+            cache_anchor_age: std::time::Duration::ZERO,
         })
         .await
         .expect("cancel cache keepalive");
@@ -263,6 +269,7 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
         principal_id: "principal".to_owned(),
         accounting_key_id: Some("key-live-123".to_owned()),
         cache_anchor_age: std::time::Duration::from_secs(30),
+        expected_generation: None,
         params: ScheduleParams {
             delay: std::time::Duration::from_secs(240),
             max_refreshes: 3,
@@ -289,4 +296,224 @@ fn enqueue_request() -> CacheKeepaliveEnqueueRequest {
         )
         .expect("snapshot captures"),
     }
+}
+
+#[tokio::test]
+async fn multi_replica_stale_enqueue_and_cancel_do_not_overwrite_newer_session_state() {
+    let fixture = Fixture::new().await;
+    let backend = crate::scheduler_factory::open_scheduler_storage(
+        &StorageConfig::Sqlite {
+            path: fixture.sqlite_path.clone(),
+        },
+        &SchedulerConfig::default(),
+        Arc::new(SystemClock),
+    )
+    .await
+    .expect("open scheduler storage");
+    let replica_a = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: Arc::new(backend.backend.clone()),
+        aead: fixture.aead.clone(),
+        clock: Arc::new(SystemClock),
+    });
+    let replica_b = ServerCacheKeepaliveEnqueuer::new(ServerCacheKeepaliveEnqueuerDeps {
+        storage: fixture.storage.clone(),
+        pusher: Arc::new(backend.backend.clone()),
+        aead: fixture.aead.clone(),
+        clock: Arc::new(SystemClock),
+    });
+
+    replica_a
+        .enqueue_cache_keepalive(enqueue_request())
+        .await
+        .expect("initial enqueue");
+
+    let replica_a_observed = replica_a
+        .observe_session_generation("session-hash")
+        .await
+        .expect("replica a observes active generation 1");
+    let replica_b_observed = replica_b
+        .observe_session_generation("session-hash")
+        .await
+        .expect("replica b observes active generation 1");
+
+    replica_b
+        .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+            expected_generation: replica_b_observed,
+            cache_anchor_age: std::time::Duration::ZERO,
+        })
+        .await
+        .expect("replica b cancels");
+
+    let mut stale_enqueue = enqueue_request();
+    stale_enqueue.cache_anchor_age = std::time::Duration::ZERO;
+    stale_enqueue.expected_generation = replica_a_observed;
+    replica_a
+        .enqueue_cache_keepalive(stale_enqueue)
+        .await
+        .expect("stale enqueue with pre-cancel token is ignored");
+    let after_stale_enqueue = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(after_stale_enqueue.generation, 1);
+    assert_eq!(
+        after_stale_enqueue.status,
+        CacheKeepaliveSessionStatus::Terminal
+    );
+
+    let fresh_observed = replica_b
+        .observe_session_generation("session-hash")
+        .await
+        .expect("replica b observes terminal generation 1");
+    let mut fresh_enqueue = enqueue_request();
+    fresh_enqueue.cache_anchor_age = std::time::Duration::ZERO;
+    fresh_enqueue.expected_generation = fresh_observed;
+    replica_b
+        .enqueue_cache_keepalive(fresh_enqueue)
+        .await
+        .expect("fresh enqueue advances to generation 2");
+
+    replica_a
+        .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+            session_key_hash: "session-hash".to_owned(),
+            reason: cc_lb_engine::cache_keepalive::CancelReason::CachedPrefixTooSmall,
+            expected_generation: replica_a_observed,
+            cache_anchor_age: std::time::Duration::ZERO,
+        })
+        .await
+        .expect("stale cancel is ignored");
+    let after_stale_cancel = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(after_stale_cancel.generation, 2);
+    assert_eq!(
+        after_stale_cancel.status,
+        CacheKeepaliveSessionStatus::Active
+    );
+
+    let replica_a = Arc::new(replica_a);
+    let replica_b = Arc::new(replica_b);
+    let start_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let cancel_done_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let a_task = {
+        let replica_a = Arc::clone(&replica_a);
+        let start_barrier = Arc::clone(&start_barrier);
+        let cancel_done_barrier = Arc::clone(&cancel_done_barrier);
+        tokio::spawn(async move {
+            let observed = replica_a
+                .observe_session_generation("session-hash")
+                .await
+                .expect("observe active generation 2");
+            start_barrier.wait().await;
+            cancel_done_barrier.wait().await;
+            let mut req = enqueue_request();
+            req.cache_anchor_age = std::time::Duration::ZERO;
+            req.expected_generation = observed;
+            replica_a
+                .enqueue_cache_keepalive(req)
+                .await
+                .expect("fenced enqueue after barrier");
+        })
+    };
+    let b_task = {
+        let replica_b = Arc::clone(&replica_b);
+        let start_barrier = Arc::clone(&start_barrier);
+        let cancel_done_barrier = Arc::clone(&cancel_done_barrier);
+        tokio::spawn(async move {
+            let observed = replica_b
+                .observe_session_generation("session-hash")
+                .await
+                .expect("observe active generation 2");
+            start_barrier.wait().await;
+            replica_b
+                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                    session_key_hash: "session-hash".to_owned(),
+                    reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+                    expected_generation: observed,
+                    cache_anchor_age: std::time::Duration::ZERO,
+                })
+                .await
+                .expect("barrier cancel");
+            cancel_done_barrier.wait().await;
+        })
+    };
+    a_task.await.expect("replica a task completes");
+    b_task.await.expect("replica b task completes");
+    let after_barrier_race = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(after_barrier_race.generation, 2);
+    assert_eq!(
+        after_barrier_race.status,
+        CacheKeepaliveSessionStatus::Terminal
+    );
+
+    let inv_start_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let enqueue_done_barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let older_enqueue_ticket = replica_a
+        .observe_session_generation("session-hash")
+        .await
+        .expect("older enqueue allocates ticket first");
+    let newer_cancel_ticket = replica_b
+        .observe_session_generation("session-hash")
+        .await
+        .expect("newer cancel allocates ticket second");
+    let a_inv_task = {
+        let replica_a = Arc::clone(&replica_a);
+        let inv_start_barrier = Arc::clone(&inv_start_barrier);
+        let enqueue_done_barrier = Arc::clone(&enqueue_done_barrier);
+        tokio::spawn(async move {
+            inv_start_barrier.wait().await;
+            let mut req = enqueue_request();
+            req.cache_anchor_age = std::time::Duration::ZERO;
+            req.expected_generation = older_enqueue_ticket;
+            replica_a
+                .enqueue_cache_keepalive(req)
+                .await
+                .expect("older enqueue commits first");
+            enqueue_done_barrier.wait().await;
+        })
+    };
+    let b_inv_task = {
+        let replica_b = Arc::clone(&replica_b);
+        let inv_start_barrier = Arc::clone(&inv_start_barrier);
+        let enqueue_done_barrier = Arc::clone(&enqueue_done_barrier);
+        tokio::spawn(async move {
+            inv_start_barrier.wait().await;
+            enqueue_done_barrier.wait().await;
+            replica_b
+                .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
+                    session_key_hash: "session-hash".to_owned(),
+                    reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+                    expected_generation: newer_cancel_ticket,
+                    cache_anchor_age: std::time::Duration::ZERO,
+                })
+                .await
+                .expect("newer cancel runs second and cancels generation 3");
+        })
+    };
+    a_inv_task.await.expect("older enqueue task completes");
+    b_inv_task.await.expect("newer cancel task completes");
+    let after_inverse_race = fixture
+        .storage
+        .get_cache_keepalive_session("session-hash")
+        .await
+        .expect("load session")
+        .expect("session exists");
+    assert_eq!(after_inverse_race.generation, 3);
+    assert_eq!(
+        after_inverse_race.status,
+        CacheKeepaliveSessionStatus::Terminal
+    );
 }

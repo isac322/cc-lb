@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,6 +29,7 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub cache_anchor_age: Duration,
+    pub expected_generation: Option<u64>,
     pub params: super::ScheduleParams,
     pub display_reason: String,
     pub config_snapshot: CacheKeepaliveConfigSnapshot,
@@ -36,6 +40,8 @@ pub struct CacheKeepaliveEnqueueRequest {
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
     pub reason: CancelReason,
+    pub expected_generation: Option<u64>,
+    pub cache_anchor_age: Duration,
 }
 
 #[derive(Clone)]
@@ -82,6 +88,14 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
         &self,
         request: CacheKeepaliveNotTrackedRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError>;
+
+    async fn observe_session_generation(
+        &self,
+        session_key_hash: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let _ = session_key_hash;
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -94,10 +108,16 @@ pub(crate) struct LifecycleKeepaliveContext {
     pub(crate) downstream_headers: HeaderMap,
 }
 
+const SESSION_SHARD_COUNT: usize = 64;
+const MAX_TRACKED_SESSIONS_PER_SHARD: usize = 512;
+
 #[derive(Clone)]
 pub(crate) struct LifecycleKeepalive {
     enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
     dynamic_view: Arc<DynamicViewHolder>,
+    next_completion_seq: Arc<AtomicU64>,
+    issued_shards: Arc<[std::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
+    session_shards: Arc<[tokio::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
 }
 
 impl LifecycleKeepalive {
@@ -108,14 +128,95 @@ impl LifecycleKeepalive {
         Self {
             enqueuer,
             dynamic_view,
+            next_completion_seq: Arc::new(AtomicU64::new(0)),
+            issued_shards: Arc::new(std::array::from_fn(|_| {
+                std::sync::Mutex::new(HashMap::new())
+            })),
+            session_shards: Arc::new(std::array::from_fn(|_| {
+                tokio::sync::Mutex::new(HashMap::new())
+            })),
         }
+    }
+
+    pub(crate) fn with_enqueuer(&self, enqueuer: Arc<dyn CacheKeepaliveEnqueuer>) -> Self {
+        Self {
+            enqueuer: Some(enqueuer),
+            dynamic_view: Arc::clone(&self.dynamic_view),
+            next_completion_seq: Arc::clone(&self.next_completion_seq),
+            issued_shards: Arc::clone(&self.issued_shards),
+            session_shards: Arc::clone(&self.session_shards),
+        }
+    }
+
+    fn shard_index(session_key: &SessionKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        session_key.hash(&mut hasher);
+        (hasher.finish() as usize) % SESSION_SHARD_COUNT
+    }
+
+    fn session_shard(
+        &self,
+        session_key: &SessionKey,
+    ) -> &tokio::sync::Mutex<HashMap<SessionKey, u64>> {
+        &self.session_shards[Self::shard_index(session_key)]
+    }
+
+    fn record_issued_seq(&self, session_key: &SessionKey, completion_seq: u64) {
+        let mut issued = self.issued_shards[Self::shard_index(session_key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::advance_session_seq(&mut issued, session_key, completion_seq);
+    }
+
+    fn latest_issued_seq(&self, session_key: &SessionKey) -> u64 {
+        self.issued_shards[Self::shard_index(session_key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn claim_completion_seq(
+        &self,
+        shard: &mut HashMap<SessionKey, u64>,
+        session_key: &SessionKey,
+        completion_seq: u64,
+    ) -> bool {
+        if completion_seq < self.latest_issued_seq(session_key) {
+            return false;
+        }
+        Self::advance_session_seq(shard, session_key, completion_seq)
+    }
+
+    fn advance_session_seq(
+        shard: &mut HashMap<SessionKey, u64>,
+        session_key: &SessionKey,
+        completion_seq: u64,
+    ) -> bool {
+        if shard
+            .get(session_key)
+            .is_some_and(|&last_seq| completion_seq <= last_seq)
+        {
+            return false;
+        }
+        if !shard.contains_key(session_key)
+            && shard.len() >= MAX_TRACKED_SESSIONS_PER_SHARD
+            && let Some(oldest_key) = shard
+                .iter()
+                .min_by_key(|(_, seq)| **seq)
+                .map(|(key, _)| key.clone())
+        {
+            shard.remove(&oldest_key);
+        }
+        shard.insert(session_key.clone(), completion_seq);
+        true
     }
 
     /// Detaches classification and the serial keep-alive storage writes onto a
     /// background task so the client response path never awaits them. Loads the
-    /// principal's config and rejects an over-cap (or disabled) snapshot on the
-    /// borrowed inputs first, so an oversized request never pays for the deep
-    /// JSON clones the detached task would otherwise need.
+    /// principal's config and rejects disabled principals before cloning the
+    /// borrowed inputs for the detached task.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_response_completed(
         &self,
@@ -127,6 +228,7 @@ impl LifecycleKeepalive {
         shaped_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
+        cached_tokens: u64,
     ) {
         if self.enqueuer.is_none() {
             return;
@@ -135,7 +237,7 @@ impl LifecycleKeepalive {
             return;
         }
         let view = self.dynamic_view.load();
-        let Some(config) = view
+        let Some(_config) = view
             .principal_view
             .get(&principal.id)
             .and_then(|cached| cached.cache_keepalive())
@@ -143,11 +245,11 @@ impl LifecycleKeepalive {
         else {
             return;
         };
-        if shaped_body.len() > config.snapshot_max_bytes as usize {
-            let principal_name: Arc<str> = Arc::from(principal.id.as_str());
-            super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
             return;
-        }
+        };
+        let completion_seq = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.record_issued_seq(&session_key, completion_seq);
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
@@ -155,6 +257,7 @@ impl LifecycleKeepalive {
         let downstream_headers = downstream_headers.clone();
         tokio::spawn(async move {
             this.persist_completion(
+                completion_seq,
                 &response_body_json,
                 &principal,
                 accounting_key_id,
@@ -163,6 +266,7 @@ impl LifecycleKeepalive {
                 shaped_body,
                 &downstream_headers,
                 cache_anchor_age,
+                cached_tokens,
             )
             .await;
         });
@@ -171,6 +275,7 @@ impl LifecycleKeepalive {
     #[allow(clippy::too_many_arguments)]
     async fn persist_completion(
         &self,
+        completion_seq: u64,
         response_body_json: &serde_json::Value,
         principal: &Principal,
         accounting_key_id: String,
@@ -179,6 +284,7 @@ impl LifecycleKeepalive {
         shaped_body: Bytes,
         downstream_headers: &HeaderMap,
         cache_anchor_age: Duration,
+        cached_tokens: u64,
     ) {
         let Some(enqueuer) = self.enqueuer.as_ref() else {
             return;
@@ -204,6 +310,22 @@ impl LifecycleKeepalive {
             return;
         };
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
+        let session_key_hash = session_key.to_string();
+        let mut shard = self.session_shard(&session_key).lock().await;
+        let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
+        let expected_generation = match enqueuer.observe_session_generation(&session_key_hash).await
+        {
+            Ok(expected) => expected,
+            Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    principal_id = principal.id.as_str(),
+                    %error,
+                    "skipping cache keep-alive completion: failed to observe session generation"
+                );
+                return;
+            }
+        };
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
@@ -233,7 +355,17 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::SnapshotTooLarge.to_string(),
                 )
                 .await;
-                super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
+                if is_latest {
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::SnapshotTooLarge,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
+                    .await;
+                    super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
+                }
                 return;
             }
             Err(error) => {
@@ -249,6 +381,40 @@ impl LifecycleKeepalive {
         let classifier = HeuristicClassifier::new(&config.classifier);
         match classifier.classify(request_json, response_body_json) {
             super::TurnDecision::AgentInTurn => {
+                if cached_tokens < config.min_cache_tokens {
+                    let reason = CacheKeepaliveDisplayReason::CachedPrefixTooSmall {
+                        cached_tokens,
+                        min_cache_tokens: config.min_cache_tokens,
+                    }
+                    .to_string();
+                    self.record_not_tracked(
+                        &session_key,
+                        principal,
+                        upstream_id,
+                        ttl,
+                        config,
+                        &reason,
+                    )
+                    .await;
+                    if is_latest {
+                        self.cancel_session(
+                            &session_key,
+                            principal,
+                            CancelReason::CachedPrefixTooSmall,
+                            expected_generation,
+                            cache_anchor_age,
+                        )
+                        .await;
+                        super::record_cancelled(
+                            &principal_name,
+                            CancelReason::CachedPrefixTooSmall,
+                        );
+                    }
+                    return;
+                }
+                if !is_latest {
+                    return;
+                }
                 let params =
                     super::ScheduleParams::from_cache_anchor_age(config, ttl, cache_anchor_age);
                 let display_reason =
@@ -256,10 +422,11 @@ impl LifecycleKeepalive {
                         .to_string();
                 if let Err(error) = enqueuer
                     .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
-                        session_key_hash: session_key.to_string(),
+                        session_key_hash,
                         principal_id: principal.id.clone(),
                         accounting_key_id: Some(accounting_key_id),
                         cache_anchor_age,
+                        expected_generation,
                         params,
                         display_reason,
                         config_snapshot: CacheKeepaliveConfigSnapshot {
@@ -291,8 +458,16 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::user_turn(response_body_json).to_string(),
                 )
                 .await;
-                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                if is_latest {
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::UserTurnDetected,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
                     .await;
+                }
             }
             super::TurnDecision::Ambiguous => {
                 self.record_not_tracked(
@@ -304,8 +479,16 @@ impl LifecycleKeepalive {
                     &CacheKeepaliveDisplayReason::AmbiguousTurn.to_string(),
                 )
                 .await;
-                self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
+                if is_latest {
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::UserTurnDetected,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
                     .await;
+                }
             }
         }
     }
@@ -315,12 +498,16 @@ impl LifecycleKeepalive {
         session_key: &SessionKey,
         principal: &Principal,
         reason: CancelReason,
+        expected_generation: Option<u64>,
+        cache_anchor_age: Duration,
     ) {
         if let Some(enqueuer) = self.enqueuer.as_ref()
             && let Err(error) = enqueuer
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: session_key.to_string(),
                     reason,
+                    expected_generation,
+                    cache_anchor_age,
                 })
                 .await
         {
@@ -397,6 +584,20 @@ impl StreamingKeepaliveResponse {
                 }
             }
             Some(b"message_delta") => {
+                if let Some(delta_usage) = value.get("usage").and_then(Value::as_object)
+                    && let Some(message) = self.message.as_mut().and_then(Value::as_object_mut)
+                {
+                    let usage = message
+                        .entry("usage".to_owned())
+                        .or_insert_with(|| Value::Object(Default::default()));
+                    if let Some(existing_usage) = usage.as_object_mut() {
+                        for (key, value) in delta_usage {
+                            existing_usage.insert(key.clone(), value.clone());
+                        }
+                    } else {
+                        *usage = Value::Object(delta_usage.clone());
+                    }
+                }
                 if let Some(stop_reason) = value
                     .get("delta")
                     .and_then(|delta| delta.get("stop_reason"))
@@ -458,9 +659,11 @@ fn cache_keepalive_session_key(
 ) -> Option<SessionKey> {
     let principal_id = uuid::Uuid::parse_str(&principal.id)
         .unwrap_or_else(|_| cache_keepalive_principal_uuid(&principal.id));
-    let agent_scope = cache_metadata.claude_agent_id.clone().or_else(|| {
-        (cache_metadata.request_kind.as_deref() == Some("subagent")).then(|| "subagent".to_owned())
-    });
+    let agent_scope = match cache_metadata.claude_agent_id.as_deref() {
+        Some(raw) => SessionKey::normalize_agent_id(Some(raw)).map(ToOwned::to_owned),
+        None => (cache_metadata.request_kind.as_deref() == Some("subagent"))
+            .then(|| "subagent".to_owned()),
+    };
     if let Some(thread_id) = cache_metadata.thread_id.clone() {
         return Some(
             SessionKey::from_thread_id(principal_id, thread_id).with_agent_scope(agent_scope),
@@ -514,7 +717,7 @@ mod tests {
             b"event: message_start\ndata: {\"message\":{\"id\":\"m\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"cache_read_input_tokens\":2}}}\n\n",
         ));
         response.observe(&crate::usage_parser::parse_sse_event(
-            b"event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
+            b"event: message_delta\ndata: {\"usage\":{\"cache_creation_input_tokens\":3},\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
         ));
 
         let value = response.into_value().expect("message_start captured");
@@ -530,6 +733,105 @@ mod tests {
                 .and_then(Value::as_i64),
             Some(2)
         );
+        assert_eq!(
+            value
+                .get("usage")
+                .and_then(|usage| usage.get("cache_creation_input_tokens"))
+                .and_then(Value::as_i64),
+            Some(3)
+        );
+    }
+    #[test]
+    fn session_key_uses_agent_identity_when_present() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = Some("agent-a".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread:thread-1/agent:agent-a",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
+    fn session_key_ignores_main_agent_identity() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = Some(" main ".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread:thread-1",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+    #[test]
+    fn session_key_without_agent_identity_uses_thread() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.thread_id = Some("thread-1".to_owned());
+        metadata.claude_agent_id = None;
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/thread:thread-1",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
+    fn session_key_falls_back_to_prefix_without_thread() {
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: cc_lb_domain::PrincipalKind::InternalKey,
+        };
+        let mut metadata = RequestCacheMetadata::default();
+        metadata.cache_prefix_hash = Some("prefix-1".to_owned());
+        metadata.claude_agent_id = Some("agent-a".to_owned());
+        assert_eq!(
+            cache_keepalive_session_key(&principal, &metadata)
+                .unwrap()
+                .to_string(),
+            format!(
+                "{}/prefix:prefix-1/agent:agent-a",
+                cache_keepalive_principal_uuid("principal-test")
+            )
+        );
+    }
+
+    #[test]
+    fn advance_session_seq_rejects_stale_or_duplicate_completions() {
+        let mut shard = HashMap::new();
+        let key = SessionKey::from_thread_id(Uuid::from_u128(1), "thread-1");
+        assert!(LifecycleKeepalive::advance_session_seq(&mut shard, &key, 2));
+        assert!(!LifecycleKeepalive::advance_session_seq(
+            &mut shard, &key, 1
+        ));
+        assert!(!LifecycleKeepalive::advance_session_seq(
+            &mut shard, &key, 2
+        ));
+        assert!(LifecycleKeepalive::advance_session_seq(&mut shard, &key, 3));
     }
     #[test]
     fn keepalive_session_keys_isolate_agent_scopes() {

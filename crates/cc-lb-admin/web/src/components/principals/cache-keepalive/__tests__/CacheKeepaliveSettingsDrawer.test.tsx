@@ -38,6 +38,7 @@ const mockPrincipal: queries.Principal = {
     max_refreshes_per_session: 10,
     max_total_duration_secs: 7200,
     snapshot_max_bytes: 256000,
+    min_cache_tokens: 12345,
     classifier: {
       extra_wait_for_user_tools: ['custom_tool'],
       treat_end_turn_as_ambiguous: true,
@@ -184,7 +185,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
     expect(inputs[1].value).toBe('300');
     expect(inputs[2].value).toBe('12');
     expect(inputs[3].value).toBe('14400');
-    expect(inputs[4].value).toBe('524288');
+    expect(inputs[4].value).toBe('8388608');
   });
 
   it('calls update mutation on save', async () => {
@@ -213,6 +214,7 @@ describe('CacheKeepaliveSettingsDrawer', () => {
           max_refreshes_per_session: 10,
           max_total_duration_secs: 7200,
           snapshot_max_bytes: 256000,
+          min_cache_tokens: 12345,
           classifier: {
             extra_wait_for_user_tools: ['custom_tool'],
             treat_end_turn_as_ambiguous: true,

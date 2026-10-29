@@ -62,6 +62,19 @@ impl ServerCacheKeepaliveEnqueuer {
 
 #[async_trait]
 impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        session_key_hash: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let ticket = CacheKeepaliveSessionStore::allocate_cache_keepalive_completion_ticket(
+            self.storage.as_ref(),
+            session_key_hash,
+        )
+        .await
+        .map_err(cache_keepalive_enqueue_error)?;
+        Ok(Some(ticket))
+    }
+
     async fn enqueue_cache_keepalive(
         &self,
         request: CacheKeepaliveEnqueueRequest,
@@ -72,7 +85,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let run_at_unix_secs = now_unix_secs.saturating_add(request.params.delay.as_secs());
         let expires_at_unix_secs =
             cache_anchor_at_unix_secs.saturating_add(request.snapshot.ttl.as_secs());
-        let record = CacheKeepaliveSessionStore::replace_from_real_request(
+        let Some(record) = CacheKeepaliveSessionStore::replace_from_real_request_fenced(
             self.storage.as_ref(),
             &CacheKeepaliveReplaceRequest {
                 session_key_hash: request.session_key_hash.clone(),
@@ -88,9 +101,13 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
                 config_snapshot: request.config_snapshot,
                 now_unix_secs,
             },
+            request.expected_generation,
         )
         .await
-        .map_err(cache_keepalive_enqueue_error)?;
+        .map_err(cache_keepalive_enqueue_error)?
+        else {
+            return Ok(());
+        };
         let encrypted_payload = encrypt_cache_keepalive_payload(
             self.aead.as_ref(),
             &record.principal_id,
@@ -165,11 +182,16 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         &self,
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
-        CacheKeepaliveSessionStore::mark_latest_cache_keepalive_terminal(
+        let now_unix_secs = unix_secs(self.clock.now());
+        let cancel_anchor_at_unix_secs =
+            now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
+        CacheKeepaliveSessionStore::cancel_cache_keepalive_fenced(
             self.storage.as_ref(),
             &request.session_key_hash,
+            request.expected_generation,
+            cancel_anchor_at_unix_secs,
             terminal_reason_from_cancel(request.reason),
-            unix_secs(self.clock.now()),
+            now_unix_secs,
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
@@ -207,9 +229,9 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
 
 fn terminal_reason_from_cancel(reason: CancelReason) -> CacheKeepaliveTerminalReason {
     match reason {
-        CancelReason::UserTurnDetected | CancelReason::SnapshotTooLarge => {
-            CacheKeepaliveTerminalReason::Cancelled
-        }
+        CancelReason::UserTurnDetected
+        | CancelReason::SnapshotTooLarge
+        | CancelReason::CachedPrefixTooSmall => CacheKeepaliveTerminalReason::Cancelled,
     }
 }
 

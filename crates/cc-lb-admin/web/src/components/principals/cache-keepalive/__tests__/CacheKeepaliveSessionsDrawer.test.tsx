@@ -30,6 +30,7 @@ const mockPrincipal: queries.Principal = {
     max_refreshes_per_session: 10,
     max_total_duration_secs: 7200,
     snapshot_max_bytes: 256000,
+    min_cache_tokens: 10000,
     classifier: {
       extra_wait_for_user_tools: [],
       treat_end_turn_as_ambiguous: true,
@@ -123,7 +124,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
           lead_1h: 300,
           max_renewals: 12,
           max_duration: 14400,
-          snapshot_bytes: 524288,
+          snapshot_bytes: 8_388_608,
         },
         raw_record: {
           session_key_hash: 'a1f39c2b7e04',
@@ -240,7 +241,7 @@ describe('CacheKeepaliveSessionsDrawer', () => {
           lead_1h: 300,
           max_renewals: 12,
           max_duration: 14400,
-          snapshot_bytes: 524288,
+          snapshot_bytes: 8_388_608,
         },
         raw_record: {
           session_key_hash: 'a1f39c2b7e04',

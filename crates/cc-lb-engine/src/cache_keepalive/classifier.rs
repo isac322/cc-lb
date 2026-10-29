@@ -368,18 +368,6 @@ mod tests {
         );
         assert_eq!(d, TurnDecision::UserTurn);
     }
-    #[test]
-    fn tool_use_with_ask_is_user_turn() {
-        let d = classify(
-            &default_config(),
-            json!({}),
-            json!({
-                "stop_reason": "tool_use",
-                "content": [{"type": "tool_use", "name": "ask", "id": "t1", "input": {}}],
-            }),
-        );
-        assert_eq!(d, TurnDecision::UserTurn);
-    }
 
     #[test]
     fn tool_use_mixed_wait_for_user_and_regular_is_agent_in_turn() {
@@ -410,6 +398,63 @@ mod tests {
         assert_eq!(d, TurnDecision::UserTurn);
     }
 
+    #[test]
+    fn tool_use_with_ask_is_user_turn() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "ask", "id": "t1", "input": {}}],
+            }),
+        );
+        assert_eq!(d, TurnDecision::UserTurn);
+    }
+
+    #[test]
+    fn tool_use_with_ask_and_another_wait_tool_is_user_turn() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "ask", "id": "a", "input": {}},
+                    {"type": "tool_use", "name": "attempt_completion", "id": "b", "input": {}}
+                ],
+            }),
+        );
+        assert_eq!(d, TurnDecision::UserTurn);
+    }
+
+    #[test]
+    fn tool_use_with_ask_and_bash_is_agent_in_turn() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "ask", "id": "a", "input": {}},
+                    {"type": "tool_use", "name": "bash", "id": "b", "input": {}}
+                ],
+            }),
+        );
+        assert_eq!(d, TurnDecision::AgentInTurn);
+    }
+
+    #[test]
+    fn tool_use_with_case_sensitive_ask_is_agent_in_turn() {
+        let d = classify(
+            &default_config(),
+            json!({}),
+            json!({
+                "stop_reason": "tool_use",
+                "content": [{"type": "tool_use", "name": "Ask", "id": "t1", "input": {}}],
+            }),
+        );
+        assert_eq!(d, TurnDecision::AgentInTurn);
+    }
     #[test]
     fn extra_wait_for_user_tools_are_honored() {
         let cfg = ClassifierConfig {
