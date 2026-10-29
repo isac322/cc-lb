@@ -1457,6 +1457,8 @@ async fn cache_keepalive_durable_cancel_makes_queued_old_generation_noop() {
         .cancel_cache_keepalive(cc_lb_engine::cache_keepalive::CacheKeepaliveCancelRequest {
             session_key_hash: "session-hash".to_owned(),
             reason: cc_lb_engine::cache_keepalive::CancelReason::UserTurnDetected,
+            expected_generation: None,
+            cache_anchor_age: Duration::ZERO,
         })
         .await
         .expect("cancel durable keepalive");

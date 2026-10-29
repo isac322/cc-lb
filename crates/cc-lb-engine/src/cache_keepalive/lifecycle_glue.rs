@@ -29,6 +29,7 @@ pub struct CacheKeepaliveEnqueueRequest {
     pub principal_id: String,
     pub accounting_key_id: Option<String>,
     pub cache_anchor_age: Duration,
+    pub expected_generation: Option<u64>,
     pub params: super::ScheduleParams,
     pub display_reason: String,
     pub config_snapshot: CacheKeepaliveConfigSnapshot,
@@ -39,6 +40,8 @@ pub struct CacheKeepaliveEnqueueRequest {
 pub struct CacheKeepaliveCancelRequest {
     pub session_key_hash: String,
     pub reason: CancelReason,
+    pub expected_generation: Option<u64>,
+    pub cache_anchor_age: Duration,
 }
 
 #[derive(Clone)]
@@ -85,6 +88,14 @@ pub trait CacheKeepaliveEnqueuer: Send + Sync {
         &self,
         request: CacheKeepaliveNotTrackedRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError>;
+
+    async fn observe_session_generation(
+        &self,
+        session_key_hash: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let _ = session_key_hash;
+        Ok(None)
+    }
 }
 
 #[derive(Clone)]
@@ -293,8 +304,14 @@ impl LifecycleKeepalive {
             return;
         };
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
+        let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
         let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
+        let expected_generation = enqueuer
+            .observe_session_generation(&session_key_hash)
+            .await
+            .ok()
+            .flatten();
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
@@ -325,8 +342,14 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(&session_key, principal, CancelReason::SnapshotTooLarge)
-                        .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::SnapshotTooLarge,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
+                    .await;
                     super::record_cancelled(&principal_name, CancelReason::SnapshotTooLarge);
                 }
                 return;
@@ -364,6 +387,8 @@ impl LifecycleKeepalive {
                             &session_key,
                             principal,
                             CancelReason::CachedPrefixTooSmall,
+                            expected_generation,
+                            cache_anchor_age,
                         )
                         .await;
                         super::record_cancelled(
@@ -383,10 +408,11 @@ impl LifecycleKeepalive {
                         .to_string();
                 if let Err(error) = enqueuer
                     .enqueue_cache_keepalive(CacheKeepaliveEnqueueRequest {
-                        session_key_hash: session_key.to_string(),
+                        session_key_hash,
                         principal_id: principal.id.clone(),
                         accounting_key_id: Some(accounting_key_id),
                         cache_anchor_age,
+                        expected_generation,
                         params,
                         display_reason,
                         config_snapshot: CacheKeepaliveConfigSnapshot {
@@ -419,8 +445,14 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
-                        .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::UserTurnDetected,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
+                    .await;
                 }
             }
             super::TurnDecision::Ambiguous => {
@@ -434,8 +466,14 @@ impl LifecycleKeepalive {
                 )
                 .await;
                 if is_latest {
-                    self.cancel_session(&session_key, principal, CancelReason::UserTurnDetected)
-                        .await;
+                    self.cancel_session(
+                        &session_key,
+                        principal,
+                        CancelReason::UserTurnDetected,
+                        expected_generation,
+                        cache_anchor_age,
+                    )
+                    .await;
                 }
             }
         }
@@ -446,12 +484,16 @@ impl LifecycleKeepalive {
         session_key: &SessionKey,
         principal: &Principal,
         reason: CancelReason,
+        expected_generation: Option<u64>,
+        cache_anchor_age: Duration,
     ) {
         if let Some(enqueuer) = self.enqueuer.as_ref()
             && let Err(error) = enqueuer
                 .cancel_cache_keepalive(CacheKeepaliveCancelRequest {
                     session_key_hash: session_key.to_string(),
                     reason,
+                    expected_generation,
+                    cache_anchor_age,
                 })
                 .await
         {

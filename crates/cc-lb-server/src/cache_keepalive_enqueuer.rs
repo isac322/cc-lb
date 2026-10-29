@@ -62,6 +62,21 @@ impl ServerCacheKeepaliveEnqueuer {
 
 #[async_trait]
 impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
+    async fn observe_session_generation(
+        &self,
+        session_key_hash: &str,
+    ) -> Result<Option<u64>, CacheKeepaliveEnqueueError> {
+        let check = CacheKeepaliveSessionStore::check_cache_keepalive_generation(
+            self.storage.as_ref(),
+            session_key_hash,
+        )
+        .await
+        .map_err(cache_keepalive_enqueue_error)?;
+        Ok(Some(durable_state_version(
+            check.map(|record| (record.generation, record.status)),
+        )))
+    }
+
     async fn enqueue_cache_keepalive(
         &self,
         request: CacheKeepaliveEnqueueRequest,
@@ -69,6 +84,32 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let now_unix_secs = unix_secs(self.clock.now());
         let cache_anchor_at_unix_secs =
             now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
+        let existing = CacheKeepaliveSessionStore::get_cache_keepalive_session(
+            self.storage.as_ref(),
+            &request.session_key_hash,
+        )
+        .await
+        .map_err(cache_keepalive_enqueue_error)?;
+        if let Some(expected) = request.expected_generation {
+            let current_version = durable_state_version(
+                existing
+                    .as_ref()
+                    .map(|record| (record.generation, record.status)),
+            );
+            if current_version != expected {
+                return Ok(());
+            }
+        }
+        if let Some(existing) = existing.as_ref() {
+            if existing.cache_anchor_at_unix_secs > cache_anchor_at_unix_secs {
+                return Ok(());
+            }
+            if existing.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Terminal
+                && existing.updated_at_unix_secs > cache_anchor_at_unix_secs
+            {
+                return Ok(());
+            }
+        }
         let run_at_unix_secs = now_unix_secs.saturating_add(request.params.delay.as_secs());
         let expires_at_unix_secs =
             cache_anchor_at_unix_secs.saturating_add(request.snapshot.ttl.as_secs());
@@ -166,23 +207,37 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
         let now_unix_secs = unix_secs(self.clock.now());
-        if let Some(check) = CacheKeepaliveSessionStore::check_cache_keepalive_generation(
+        let cancel_anchor_at_unix_secs =
+            now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
+        if let Some(existing) = CacheKeepaliveSessionStore::get_cache_keepalive_session(
             self.storage.as_ref(),
             &request.session_key_hash,
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?
-            && check.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Active
         {
-            CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
-                self.storage.as_ref(),
-                &request.session_key_hash,
-                check.generation,
-                terminal_reason_from_cancel(request.reason),
-                now_unix_secs,
-            )
-            .await
-            .map_err(cache_keepalive_enqueue_error)?;
+            let current_version =
+                durable_state_version(Some((existing.generation, existing.status)));
+            if request
+                .expected_generation
+                .is_some_and(|expected| current_version != expected)
+            {
+                return Ok(());
+            }
+            if existing.cache_anchor_at_unix_secs > cancel_anchor_at_unix_secs {
+                return Ok(());
+            }
+            if existing.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Active {
+                CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
+                    self.storage.as_ref(),
+                    &request.session_key_hash,
+                    existing.generation,
+                    terminal_reason_from_cancel(request.reason),
+                    now_unix_secs,
+                )
+                .await
+                .map_err(cache_keepalive_enqueue_error)?;
+            }
         }
         Ok(())
     }
@@ -213,6 +268,20 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         .await
         .map_err(cache_keepalive_enqueue_error)?;
         Ok(())
+    }
+}
+
+fn durable_state_version(
+    state: Option<(u64, cc_lb_storage_api::CacheKeepaliveSessionStatus)>,
+) -> u64 {
+    match state {
+        None => 0,
+        Some((generation, cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)) => {
+            generation.saturating_mul(2)
+        }
+        Some((generation, cc_lb_storage_api::CacheKeepaliveSessionStatus::Terminal)) => {
+            generation.saturating_mul(2).saturating_add(1)
+        }
     }
 }
 
