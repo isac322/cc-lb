@@ -112,6 +112,170 @@ impl CacheKeepaliveSessionStore for PostgresStorage {
         row_to_record(row)
     }
 
+    async fn replace_from_real_request_fenced(
+        &self,
+        request: &CacheKeepaliveReplaceRequest,
+        expected_state_version: Option<u64>,
+    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
+        let config_snapshot = serde_json::to_string(&request.config_snapshot)?;
+        let last_message_at_ms = request
+            .cache_anchor_at_unix_secs
+            .checked_mul(1_000)
+            .ok_or_else(|| StorageError::InvalidInput {
+                field: "cache_keepalive_last_message_at_ms".to_owned(),
+                reason: "value exceeds u64 milliseconds range".to_owned(),
+            })?;
+        let row = match expected_state_version {
+            Some(0) => {
+                sqlx::query(
+                    "INSERT INTO cache_keepalive_sessions
+                     (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
+                      first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
+                      current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, 1, 0, $5, $6, $7, $8, 'active', 'pending', NULL, $9, $10, $11, NULL, $12, $13, NULL, $14, $15, $16)
+                     ON CONFLICT(session_key_hash) DO NOTHING
+                     RETURNING *",
+                )
+                .bind(&request.session_key_hash)
+                .bind(&request.principal_id)
+                .bind(&request.accounting_key_id)
+                .bind(request.upstream_id)
+                .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive first_scheduled_at")?)
+                .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?)
+                .bind(u64_to_i64(request.run_at_unix_secs, "cache keepalive run_at")?)
+                .bind(ttl_to_db(request.ttl))
+                .bind(cache_keepalive_job_key(&request.session_key_hash, 1))
+                .bind(&request.encrypted_payload)
+                .bind(&request.display_reason)
+                .bind(&config_snapshot)
+                .bind(u64_to_i64(last_message_at_ms, "cache keepalive last_message_at_ms")?)
+                .bind(u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?)
+                .bind(u64_to_i64(request.now_unix_secs, "cache keepalive created_at")?)
+                .bind(u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?
+            }
+            Some(expected) => {
+                let expected_generation = expected / 2;
+                let expected_status = if expected % 2 == 0 {
+                    CacheKeepaliveSessionStatus::Active
+                } else {
+                    CacheKeepaliveSessionStatus::Terminal
+                };
+                let next_generation = expected_generation.checked_add(1).ok_or_else(|| {
+                    StorageError::Fatal {
+                        message: "cache keepalive generation overflow".to_owned(),
+                    }
+                })?;
+                sqlx::query(
+                    "UPDATE cache_keepalive_sessions SET
+                      principal_id = $2,
+                      accounting_key_id = $3,
+                      upstream_id = $4,
+                      generation = $5,
+                      refresh_count = 0,
+                      first_scheduled_at = $6,
+                      cache_anchor_at = $6,
+                      run_at = $7,
+                      ttl = $8,
+                      status = 'active',
+                      enqueue_state = 'pending',
+                      running_since_unix_secs = NULL,
+                      current_job_key = $9,
+                      encrypted_payload = $10,
+                      display_reason = $11,
+                      error = NULL,
+                      config_snapshot = $12,
+                      last_message_at_ms = $13,
+                      terminal_reason = NULL,
+                      expires_at = $14,
+                      updated_at = $15
+                     WHERE session_key_hash = $1
+                       AND generation = $16
+                       AND status = $17
+                       AND cache_anchor_at <= $6
+                       AND (status != 'terminal' OR updated_at <= $6)
+                     RETURNING *",
+                )
+                .bind(&request.session_key_hash)
+                .bind(&request.principal_id)
+                .bind(&request.accounting_key_id)
+                .bind(request.upstream_id)
+                .bind(u64_to_i64(next_generation, "cache keepalive generation")?)
+                .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?)
+                .bind(u64_to_i64(request.run_at_unix_secs, "cache keepalive run_at")?)
+                .bind(ttl_to_db(request.ttl))
+                .bind(cache_keepalive_job_key(&request.session_key_hash, next_generation))
+                .bind(&request.encrypted_payload)
+                .bind(&request.display_reason)
+                .bind(&config_snapshot)
+                .bind(u64_to_i64(last_message_at_ms, "cache keepalive last_message_at_ms")?)
+                .bind(u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?)
+                .bind(u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?)
+                .bind(u64_to_i64(expected_generation, "cache keepalive expected generation")?)
+                .bind(expected_status.as_str())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO cache_keepalive_sessions
+                     (session_key_hash, principal_id, accounting_key_id, upstream_id, generation, refresh_count,
+                      first_scheduled_at, cache_anchor_at, run_at, ttl, status, enqueue_state, running_since_unix_secs,
+                      current_job_key, encrypted_payload, display_reason, error, config_snapshot, last_message_at_ms, terminal_reason, expires_at, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, 1, 0, $5, $6, $7, $8, 'active', 'pending', NULL, $9, $10, $11, NULL, $12, $13, NULL, $14, $15, $16)
+                     ON CONFLICT(session_key_hash) DO UPDATE SET
+                      principal_id = EXCLUDED.principal_id,
+                      accounting_key_id = EXCLUDED.accounting_key_id,
+                      upstream_id = EXCLUDED.upstream_id,
+                      generation = cache_keepalive_sessions.generation + 1,
+                      refresh_count = 0,
+                      first_scheduled_at = EXCLUDED.first_scheduled_at,
+                      cache_anchor_at = EXCLUDED.cache_anchor_at,
+                      run_at = EXCLUDED.run_at,
+                      ttl = EXCLUDED.ttl,
+                      status = 'active',
+                      enqueue_state = 'pending',
+                      running_since_unix_secs = NULL,
+                      current_job_key = 'cache_keepalive:' || EXCLUDED.session_key_hash || ':' || (cache_keepalive_sessions.generation + 1),
+                      encrypted_payload = EXCLUDED.encrypted_payload,
+                      display_reason = EXCLUDED.display_reason,
+                      error = NULL,
+                      config_snapshot = EXCLUDED.config_snapshot,
+                      last_message_at_ms = EXCLUDED.last_message_at_ms,
+                      terminal_reason = NULL,
+                      expires_at = EXCLUDED.expires_at,
+                      updated_at = EXCLUDED.updated_at
+                     WHERE cache_keepalive_sessions.cache_anchor_at <= EXCLUDED.cache_anchor_at
+                       AND (cache_keepalive_sessions.status != 'terminal' OR cache_keepalive_sessions.updated_at <= EXCLUDED.cache_anchor_at)
+                     RETURNING *",
+                )
+                .bind(&request.session_key_hash)
+                .bind(&request.principal_id)
+                .bind(&request.accounting_key_id)
+                .bind(request.upstream_id)
+                .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive first_scheduled_at")?)
+                .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?)
+                .bind(u64_to_i64(request.run_at_unix_secs, "cache keepalive run_at")?)
+                .bind(ttl_to_db(request.ttl))
+                .bind(cache_keepalive_job_key(&request.session_key_hash, 1))
+                .bind(&request.encrypted_payload)
+                .bind(&request.display_reason)
+                .bind(&config_snapshot)
+                .bind(u64_to_i64(last_message_at_ms, "cache keepalive last_message_at_ms")?)
+                .bind(u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?)
+                .bind(u64_to_i64(request.now_unix_secs, "cache keepalive created_at")?)
+                .bind(u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?
+            }
+        };
+        row.map(row_to_record).transpose()
+    }
+
     async fn get_cache_keepalive_session(
         &self,
         session_key_hash: &str,

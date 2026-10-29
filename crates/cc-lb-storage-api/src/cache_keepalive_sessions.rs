@@ -229,6 +229,14 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
         request: &CacheKeepaliveReplaceRequest,
     ) -> StorageResult<CacheKeepaliveSessionRecord>;
 
+    async fn replace_from_real_request_fenced(
+        &self,
+        request: &CacheKeepaliveReplaceRequest,
+        expected_state_version: Option<u64>,
+    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
+        let _ = expected_state_version;
+        self.replace_from_real_request(request).await.map(Some)
+    }
     async fn get_cache_keepalive_session(
         &self,
         session_key_hash: &str,
@@ -301,6 +309,18 @@ pub trait CacheKeepaliveSessionStore: Send + Sync {
 
 pub fn cache_keepalive_job_key(session_key_hash: &str, generation: u64) -> String {
     format!("cache_keepalive:{session_key_hash}:{generation}")
+}
+
+pub const fn cache_keepalive_state_version(
+    state: Option<(u64, CacheKeepaliveSessionStatus)>,
+) -> u64 {
+    match state {
+        None => 0,
+        Some((generation, CacheKeepaliveSessionStatus::Active)) => generation.saturating_mul(2),
+        Some((generation, CacheKeepaliveSessionStatus::Terminal)) => {
+            generation.saturating_mul(2).saturating_add(1)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use cc_lb_storage_api::{
     CacheKeepaliveEnqueueState, CacheKeepaliveGenerationCheck, CacheKeepaliveHitRefreshRequest,
     CacheKeepaliveReplaceRequest, CacheKeepaliveSessionRecord, CacheKeepaliveSessionStatus,
     CacheKeepaliveSessionStore, CacheKeepaliveTerminalReason, CacheTtl, StorageError,
-    StorageResult, cache_keepalive_job_key,
+    StorageResult, cache_keepalive_job_key, cache_keepalive_state_version,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -57,6 +57,16 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         &self,
         request: &CacheKeepaliveReplaceRequest,
     ) -> StorageResult<CacheKeepaliveSessionRecord> {
+        self.replace_from_real_request_fenced(request, None)
+            .await?
+            .ok_or_else(missing_after_write)
+    }
+
+    async fn replace_from_real_request_fenced(
+        &self,
+        request: &CacheKeepaliveReplaceRequest,
+        expected_state_version: Option<u64>,
+    ) -> StorageResult<Option<CacheKeepaliveSessionRecord>> {
         let config_snapshot = serde_json::to_string(&request.config_snapshot)?;
         let last_message_at_ms = request
             .cache_anchor_at_unix_secs
@@ -66,24 +76,50 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
                 reason: "value exceeds u64 milliseconds range".to_owned(),
             })?;
         let mut tx = self.begin_immediate().await?;
-        let existing = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT generation, created_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
+        let existing = sqlx::query_as::<_, (i64, i64, String, i64, i64)>(
+            "SELECT generation, created_at, status, cache_anchor_at, updated_at FROM cache_keepalive_sessions WHERE session_key_hash = ?",
         )
         .bind(&request.session_key_hash)
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        let generation = existing
-            .map(|(generation, _)| i64_to_u64(generation, "cache keepalive generation"))
-            .transpose()?
+        let parsed_existing = match existing {
+            Some((generation, created_at, status, cache_anchor_at, updated_at)) => Some((
+                i64_to_u64(generation, "cache keepalive generation")?,
+                i64_to_u64(created_at, "cache keepalive created_at")?,
+                status_from_db(&status)?,
+                i64_to_u64(cache_anchor_at, "cache keepalive cache_anchor_at")?,
+                i64_to_u64(updated_at, "cache keepalive updated_at")?,
+            )),
+            None => None,
+        };
+        if let Some(expected) = expected_state_version {
+            let current_version = cache_keepalive_state_version(
+                parsed_existing.map(|(generation, _, status, _, _)| (generation, status)),
+            );
+            if current_version != expected {
+                return Ok(None);
+            }
+        }
+        if let Some((_, _, status, existing_anchor, existing_updated)) = parsed_existing {
+            if existing_anchor > request.cache_anchor_at_unix_secs {
+                return Ok(None);
+            }
+            if status == CacheKeepaliveSessionStatus::Terminal
+                && existing_updated > request.cache_anchor_at_unix_secs
+            {
+                return Ok(None);
+            }
+        }
+        let generation = parsed_existing
+            .map(|(generation, _, _, _, _)| generation)
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| StorageError::Fatal {
                 message: "cache keepalive generation overflow".to_owned(),
             })?;
-        let created_at = existing
-            .map(|(_, created_at)| i64_to_u64(created_at, "cache keepalive created_at"))
-            .transpose()?
+        let created_at = parsed_existing
+            .map(|(_, created_at, _, _, _)| created_at)
             .unwrap_or(request.now_unix_secs);
         let job_key = cache_keepalive_job_key(&request.session_key_hash, generation);
         sqlx::query(
@@ -96,12 +132,12 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
               principal_id = excluded.principal_id,
               accounting_key_id = excluded.accounting_key_id,
               upstream_id = excluded.upstream_id,
-	              generation = excluded.generation,
-	              refresh_count = 0,
-	              first_scheduled_at = excluded.first_scheduled_at,
-	              cache_anchor_at = excluded.cache_anchor_at,
-	              run_at = excluded.run_at,
-	              ttl = excluded.ttl,
+              generation = excluded.generation,
+              refresh_count = 0,
+              first_scheduled_at = excluded.first_scheduled_at,
+              cache_anchor_at = excluded.cache_anchor_at,
+              run_at = excluded.run_at,
+              ttl = excluded.ttl,
               status = 'active',
               enqueue_state = 'pending',
               running_since_unix_secs = NULL,
@@ -119,10 +155,19 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
         .bind(&request.principal_id)
         .bind(&request.accounting_key_id)
         .bind(request.upstream_id.to_string())
-	        .bind(u64_to_i64(generation, "cache keepalive generation")?)
-	        .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive first_scheduled_at")?)
-	        .bind(u64_to_i64(request.cache_anchor_at_unix_secs, "cache keepalive cache_anchor_at")?)
-	        .bind(u64_to_i64(request.run_at_unix_secs, "cache keepalive run_at")?)
+        .bind(u64_to_i64(generation, "cache keepalive generation")?)
+        .bind(u64_to_i64(
+            request.cache_anchor_at_unix_secs,
+            "cache keepalive first_scheduled_at",
+        )?)
+        .bind(u64_to_i64(
+            request.cache_anchor_at_unix_secs,
+            "cache keepalive cache_anchor_at",
+        )?)
+        .bind(u64_to_i64(
+            request.run_at_unix_secs,
+            "cache keepalive run_at",
+        )?)
         .bind(ttl_to_db(request.ttl))
         .bind(&job_key)
         .bind(&request.encrypted_payload)
@@ -132,16 +177,24 @@ impl CacheKeepaliveSessionStore for SqliteStorage {
             last_message_at_ms,
             "cache keepalive last_message_at_ms",
         )?)
-        .bind(u64_to_i64(request.expires_at_unix_secs, "cache keepalive expires_at")?)
+        .bind(u64_to_i64(
+            request.expires_at_unix_secs,
+            "cache keepalive expires_at",
+        )?)
         .bind(u64_to_i64(created_at, "cache keepalive created_at")?)
-        .bind(u64_to_i64(request.now_unix_secs, "cache keepalive updated_at")?)
+        .bind(u64_to_i64(
+            request.now_unix_secs,
+            "cache keepalive updated_at",
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        self.get_cache_keepalive_session(&request.session_key_hash)
+        let record = self
+            .get_cache_keepalive_session(&request.session_key_hash)
             .await?
-            .ok_or_else(missing_after_write)
+            .ok_or_else(missing_after_write)?;
+        Ok(Some(record))
     }
 
     async fn get_cache_keepalive_session(

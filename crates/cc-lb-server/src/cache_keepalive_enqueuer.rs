@@ -72,7 +72,7 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         )
         .await
         .map_err(cache_keepalive_enqueue_error)?;
-        Ok(Some(durable_state_version(
+        Ok(Some(cc_lb_storage_api::cache_keepalive_state_version(
             check.map(|record| (record.generation, record.status)),
         )))
     }
@@ -84,36 +84,10 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         let now_unix_secs = unix_secs(self.clock.now());
         let cache_anchor_at_unix_secs =
             now_unix_secs.saturating_sub(request.cache_anchor_age.as_secs());
-        let existing = CacheKeepaliveSessionStore::get_cache_keepalive_session(
-            self.storage.as_ref(),
-            &request.session_key_hash,
-        )
-        .await
-        .map_err(cache_keepalive_enqueue_error)?;
-        if let Some(expected) = request.expected_generation {
-            let current_version = durable_state_version(
-                existing
-                    .as_ref()
-                    .map(|record| (record.generation, record.status)),
-            );
-            if current_version != expected {
-                return Ok(());
-            }
-        }
-        if let Some(existing) = existing.as_ref() {
-            if existing.cache_anchor_at_unix_secs > cache_anchor_at_unix_secs {
-                return Ok(());
-            }
-            if existing.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Terminal
-                && existing.updated_at_unix_secs > cache_anchor_at_unix_secs
-            {
-                return Ok(());
-            }
-        }
         let run_at_unix_secs = now_unix_secs.saturating_add(request.params.delay.as_secs());
         let expires_at_unix_secs =
             cache_anchor_at_unix_secs.saturating_add(request.snapshot.ttl.as_secs());
-        let record = CacheKeepaliveSessionStore::replace_from_real_request(
+        let Some(record) = CacheKeepaliveSessionStore::replace_from_real_request_fenced(
             self.storage.as_ref(),
             &CacheKeepaliveReplaceRequest {
                 session_key_hash: request.session_key_hash.clone(),
@@ -129,9 +103,13 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
                 config_snapshot: request.config_snapshot,
                 now_unix_secs,
             },
+            request.expected_generation,
         )
         .await
-        .map_err(cache_keepalive_enqueue_error)?;
+        .map_err(cache_keepalive_enqueue_error)?
+        else {
+            return Ok(());
+        };
         let encrypted_payload = encrypt_cache_keepalive_payload(
             self.aead.as_ref(),
             &record.principal_id,
@@ -216,8 +194,10 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         .await
         .map_err(cache_keepalive_enqueue_error)?
         {
-            let current_version =
-                durable_state_version(Some((existing.generation, existing.status)));
+            let current_version = cc_lb_storage_api::cache_keepalive_state_version(Some((
+                existing.generation,
+                existing.status,
+            )));
             if request
                 .expected_generation
                 .is_some_and(|expected| current_version != expected)
@@ -268,20 +248,6 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         .await
         .map_err(cache_keepalive_enqueue_error)?;
         Ok(())
-    }
-}
-
-fn durable_state_version(
-    state: Option<(u64, cc_lb_storage_api::CacheKeepaliveSessionStatus)>,
-) -> u64 {
-    match state {
-        None => 0,
-        Some((generation, cc_lb_storage_api::CacheKeepaliveSessionStatus::Active)) => {
-            generation.saturating_mul(2)
-        }
-        Some((generation, cc_lb_storage_api::CacheKeepaliveSessionStatus::Terminal)) => {
-            generation.saturating_mul(2).saturating_add(1)
-        }
     }
 }
 
