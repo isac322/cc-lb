@@ -307,11 +307,19 @@ impl LifecycleKeepalive {
         let session_key_hash = session_key.to_string();
         let mut shard = self.session_shard(&session_key).lock().await;
         let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
-        let expected_generation = enqueuer
-            .observe_session_generation(&session_key_hash)
-            .await
-            .ok()
-            .flatten();
+        let expected_generation = match enqueuer.observe_session_generation(&session_key_hash).await
+        {
+            Ok(expected) => expected,
+            Err(error) => {
+                tracing::warn!(
+                    target: "cache_keepalive",
+                    principal_id = principal.id.as_str(),
+                    %error,
+                    "skipping cache keep-alive completion: failed to observe session generation"
+                );
+                return;
+            }
+        };
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(
