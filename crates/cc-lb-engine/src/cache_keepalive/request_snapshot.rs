@@ -261,13 +261,11 @@ fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
                 messages.truncate(last_msg_idx + 1);
                 changed = true;
             }
-            let (has_prev_tool_use, mut required_ids) = assistant_tool_use_spec(
+            let mut required_ids = assistant_tool_use_ids(
                 last_msg_idx
                     .checked_sub(1)
                     .and_then(|idx| messages.get(idx)),
             );
-            let allow_any_tool_result =
-                last_msg_idx == 0 || (has_prev_tool_use && required_ids.is_empty());
             let message = &mut messages[last_msg_idx];
             if message.get("cache_control").is_none()
                 && let Some(content) = message.get_mut("content").and_then(Value::as_array_mut)
@@ -288,8 +286,7 @@ fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
                 }
                 let tail = content.split_off(last_blk_idx + 1);
                 let tail_len = tail.len();
-                let kept_tail =
-                    retain_matching_tool_results(tail, allow_any_tool_result, &mut required_ids);
+                let kept_tail = retain_matching_tool_results(tail, &mut required_ids);
                 if kept_tail.len() != tail_len {
                     changed = true;
                 }
@@ -297,10 +294,8 @@ fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
             }
         }
         Some("assistant") => {
-            let (has_tool_use, mut required_ids) =
-                assistant_tool_use_spec(messages.get(last_msg_idx));
-            let allow_any_tool_result = has_tool_use && required_ids.is_empty();
-            if has_tool_use
+            let mut required_ids = assistant_tool_use_ids(messages.get(last_msg_idx));
+            if !required_ids.is_empty()
                 && messages
                     .get(last_msg_idx + 1)
                     .and_then(|message| message.get("role").and_then(Value::as_str))
@@ -316,11 +311,7 @@ fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
                     .map(|content| {
                         let old_len = content.len();
                         let drained = std::mem::take(content);
-                        let kept = retain_matching_tool_results(
-                            drained,
-                            allow_any_tool_result,
-                            &mut required_ids,
-                        );
+                        let kept = retain_matching_tool_results(drained, &mut required_ids);
                         if kept.len() != old_len {
                             changed = true;
                         }
@@ -349,42 +340,32 @@ fn trim_uncached_messages_for_keepalive(map: &mut Map<String, Value>) -> bool {
     changed
 }
 
-fn assistant_tool_use_spec(message: Option<&Value>) -> (bool, Vec<String>) {
+fn assistant_tool_use_ids(message: Option<&Value>) -> Vec<String> {
     let Some(message) = message else {
-        return (false, Vec::new());
+        return Vec::new();
     };
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
-        return (false, Vec::new());
+        return Vec::new();
     }
     let Some(content) = message.get("content").and_then(Value::as_array) else {
-        return (false, Vec::new());
+        return Vec::new();
     };
-    let mut has_tool_use = false;
     let mut ids = Vec::new();
     for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-            has_tool_use = true;
-            if let Some(id) = block.get("id").and_then(Value::as_str) {
-                ids.push(id.to_owned());
-            }
+        if block.get("type").and_then(Value::as_str) == Some("tool_use")
+            && let Some(id) = block.get("id").and_then(Value::as_str)
+        {
+            ids.push(id.to_owned());
         }
     }
-    (has_tool_use, ids)
+    ids
 }
 
-fn retain_matching_tool_results(
-    blocks: Vec<Value>,
-    allow_any_tool_result: bool,
-    required_ids: &mut Vec<String>,
-) -> Vec<Value> {
+fn retain_matching_tool_results(blocks: Vec<Value>, required_ids: &mut Vec<String>) -> Vec<Value> {
     let mut kept = Vec::new();
     for block in blocks {
-        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-            continue;
-        }
-        if allow_any_tool_result {
-            kept.push(block);
-        } else if let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
+        if block.get("type").and_then(Value::as_str) == Some("tool_result")
+            && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
             && let Some(pos) = required_ids.iter().position(|req| req == id)
         {
             required_ids.swap_remove(pos);
@@ -602,7 +583,7 @@ mod tests {
             "messages": [
                 {
                     "role": "assistant",
-                    "content": [{"type": "tool_use", "name": "bash", "cache_control": {"type": "ephemeral"}}]
+                    "content": [{"type": "tool_use", "id": "t1", "name": "bash", "cache_control": {"type": "ephemeral"}}]
                 },
                 {
                     "role": "user",
@@ -622,7 +603,7 @@ mod tests {
             json!([
                 {
                     "role": "assistant",
-                    "content": [{"type": "tool_use", "name": "bash", "cache_control": {"type": "ephemeral"}}]
+                    "content": [{"type": "tool_use", "id": "t1", "name": "bash", "cache_control": {"type": "ephemeral"}}]
                 },
                 {
                     "role": "user",
@@ -692,6 +673,57 @@ mod tests {
         assert_eq!(
             round["messages"][1]["content"],
             json!([{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+        );
+
+        let first_user_unrelated_tool_result = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}},
+                    {"type": "tool_result", "tool_use_id": "t_orphan", "content": "x".repeat(2_048)},
+                    {"type": "text", "text": "x".repeat(2_048)}
+                ]
+            }]
+        });
+        let round: Value = serde_json::from_slice(
+            &empty_snapshot(Bytes::from(
+                serde_json::to_vec(&first_user_unrelated_tool_result).unwrap(),
+            ))
+            .build_keepalive_body()
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            round["messages"][0]["content"],
+            json!([{"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}}])
+        );
+
+        let consumed_in_prefix_drops_trailing_tool_result = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "cache_control": {"type": "ephemeral"}},
+                        {"type": "tool_result", "tool_use_id": "t2", "content": "x".repeat(2_048)}
+                    ]
+                }
+            ]
+        });
+        let round: Value = serde_json::from_slice(
+            &empty_snapshot(Bytes::from(
+                serde_json::to_vec(&consumed_in_prefix_drops_trailing_tool_result).unwrap(),
+            ))
+            .build_keepalive_body()
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            round["messages"][1]["content"],
+            json!([{"type": "tool_result", "tool_use_id": "t1", "cache_control": {"type": "ephemeral"}}])
         );
     }
 

@@ -2470,6 +2470,7 @@ pub struct Lifecycle {
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     cache_keepalive_enqueuer: Option<Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>>,
+    cache_keepalive: crate::cache_keepalive::LifecycleKeepalive,
     prompt_cache_analysis_executor: PromptCacheAnalysisExecutor,
     completion_observer: Arc<CompletionObserver>,
     clock: ClockHandle,
@@ -2486,7 +2487,7 @@ impl Lifecycle {
     ) -> Self {
         Self {
             authn,
-            dynamic_view,
+            dynamic_view: Arc::clone(&dynamic_view),
             dispatcher,
             upstream_affinity_store: None,
             config,
@@ -2497,6 +2498,10 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            cache_keepalive: crate::cache_keepalive::LifecycleKeepalive::new(
+                None,
+                Arc::clone(&dynamic_view),
+            ),
             cache_keepalive_enqueuer: None,
             prompt_cache_analysis_executor: PromptCacheAnalysisExecutor::default(),
             completion_observer: Arc::new(CompletionObserver::new()),
@@ -2509,6 +2514,7 @@ impl Lifecycle {
         mut self,
         enqueuer: Arc<dyn crate::cache_keepalive::CacheKeepaliveEnqueuer>,
     ) -> Self {
+        self.cache_keepalive = self.cache_keepalive.with_enqueuer(Arc::clone(&enqueuer));
         self.cache_keepalive_enqueuer = Some(enqueuer);
         self
     }
@@ -4858,11 +4864,7 @@ impl Lifecycle {
             && let (Some(context), Some(response_json)) =
                 (keepalive_completion, response_body_json.as_ref())
         {
-            crate::cache_keepalive::LifecycleKeepalive::new(
-                self.cache_keepalive_enqueuer.clone(),
-                Arc::clone(&self.dynamic_view),
-            )
-            .on_response_completed(
+            self.cache_keepalive.on_response_completed(
                 response_json,
                 &context.principal,
                 context.accounting_key_id,
@@ -5523,10 +5525,7 @@ impl Lifecycle {
             );
         }
         let relay_start = Instant::now();
-        let keepalive = crate::cache_keepalive::LifecycleKeepalive::new(
-            self.cache_keepalive_enqueuer.clone(),
-            Arc::clone(&self.dynamic_view),
-        );
+        let keepalive = self.cache_keepalive.clone();
         let affinity_clock = self.clock.clone();
         let upstream_error_status = status.is_client_error() || status.is_server_error();
         let response_has_content_length = parts.headers.contains_key(CONTENT_LENGTH);

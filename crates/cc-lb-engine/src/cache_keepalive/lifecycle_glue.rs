@@ -105,6 +105,7 @@ pub(crate) struct LifecycleKeepalive {
     enqueuer: Option<Arc<dyn CacheKeepaliveEnqueuer>>,
     dynamic_view: Arc<DynamicViewHolder>,
     next_completion_seq: Arc<AtomicU64>,
+    issued_shards: Arc<[std::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
     session_shards: Arc<[tokio::sync::Mutex<HashMap<SessionKey, u64>>; SESSION_SHARD_COUNT]>,
 }
 
@@ -117,20 +118,64 @@ impl LifecycleKeepalive {
             enqueuer,
             dynamic_view,
             next_completion_seq: Arc::new(AtomicU64::new(0)),
+            issued_shards: Arc::new(std::array::from_fn(|_| {
+                std::sync::Mutex::new(HashMap::new())
+            })),
             session_shards: Arc::new(std::array::from_fn(|_| {
                 tokio::sync::Mutex::new(HashMap::new())
             })),
         }
     }
 
+    pub(crate) fn with_enqueuer(&self, enqueuer: Arc<dyn CacheKeepaliveEnqueuer>) -> Self {
+        Self {
+            enqueuer: Some(enqueuer),
+            dynamic_view: Arc::clone(&self.dynamic_view),
+            next_completion_seq: Arc::clone(&self.next_completion_seq),
+            issued_shards: Arc::clone(&self.issued_shards),
+            session_shards: Arc::clone(&self.session_shards),
+        }
+    }
+
+    fn shard_index(session_key: &SessionKey) -> usize {
+        let mut hasher = DefaultHasher::new();
+        session_key.hash(&mut hasher);
+        (hasher.finish() as usize) % SESSION_SHARD_COUNT
+    }
+
     fn session_shard(
         &self,
         session_key: &SessionKey,
     ) -> &tokio::sync::Mutex<HashMap<SessionKey, u64>> {
-        let mut hasher = DefaultHasher::new();
-        session_key.hash(&mut hasher);
-        let idx = (hasher.finish() as usize) % SESSION_SHARD_COUNT;
-        &self.session_shards[idx]
+        &self.session_shards[Self::shard_index(session_key)]
+    }
+
+    fn record_issued_seq(&self, session_key: &SessionKey, completion_seq: u64) {
+        let mut issued = self.issued_shards[Self::shard_index(session_key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::advance_session_seq(&mut issued, session_key, completion_seq);
+    }
+
+    fn latest_issued_seq(&self, session_key: &SessionKey) -> u64 {
+        self.issued_shards[Self::shard_index(session_key)]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn claim_completion_seq(
+        &self,
+        shard: &mut HashMap<SessionKey, u64>,
+        session_key: &SessionKey,
+        completion_seq: u64,
+    ) -> bool {
+        if completion_seq < self.latest_issued_seq(session_key) {
+            return false;
+        }
+        Self::advance_session_seq(shard, session_key, completion_seq)
     }
 
     fn advance_session_seq(
@@ -186,7 +231,11 @@ impl LifecycleKeepalive {
         else {
             return;
         };
+        let Some(session_key) = cache_keepalive_session_key(principal, cache_metadata) else {
+            return;
+        };
         let completion_seq = self.next_completion_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        self.record_issued_seq(&session_key, completion_seq);
         let this = self.clone();
         let response_body_json = response_body_json.clone();
         let principal = principal.clone();
@@ -245,7 +294,7 @@ impl LifecycleKeepalive {
         };
         let principal_name: Arc<str> = Arc::from(principal.id.as_str());
         let mut shard = self.session_shard(&session_key).lock().await;
-        let is_latest = Self::advance_session_seq(&mut shard, &session_key, completion_seq);
+        let is_latest = self.claim_completion_seq(&mut shard, &session_key, completion_seq);
         let url =
             Url::parse(KEEPALIVE_SNAPSHOT_URL).expect("cache keep-alive snapshot URL is valid");
         let snapshot = match RequestSnapshot::capture(

@@ -321,6 +321,107 @@ async fn cache_keepalive_small_cached_prefix_cancels_without_enqueue_json_and_ss
     }
 }
 
+#[tokio::test]
+async fn cache_keepalive_shared_lifecycle_serializes_buffered_and_streaming_completions() {
+    struct SequenceDispatch {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl UpstreamDispatch for SequenceDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            let idx = self.calls.fetch_add(1, Ordering::Relaxed);
+            if idx == 0 {
+                let mut response =
+                    Response::new(Body::from(agent_turn_body("msg_1", "bash", 10_000)));
+                *response.status_mut() = StatusCode::OK;
+                response.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/json"),
+                );
+                Ok(response)
+            } else {
+                let sse = streaming_body_from_message(&end_turn_body("msg_2"));
+                let mut response = Response::new(Body::from(sse));
+                *response.status_mut() = StatusCode::OK;
+                response.headers_mut().insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("text/event-stream"),
+                );
+                Ok(response)
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct SlowEnqueueEnqueuer {
+        events: Mutex<Vec<&'static str>>,
+    }
+
+    #[async_trait]
+    impl CacheKeepaliveEnqueuer for SlowEnqueueEnqueuer {
+        async fn enqueue_cache_keepalive(
+            &self,
+            _request: CacheKeepaliveEnqueueRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.events.lock().expect("events lock").push("enqueue");
+            Ok(())
+        }
+
+        async fn cancel_cache_keepalive(
+            &self,
+            _request: CacheKeepaliveCancelRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            self.events.lock().expect("events lock").push("cancel");
+            Ok(())
+        }
+
+        async fn record_cache_keepalive_not_tracked(
+            &self,
+            _request: CacheKeepaliveNotTrackedRequest,
+        ) -> Result<(), CacheKeepaliveEnqueueError> {
+            Ok(())
+        }
+    }
+
+    let state = TestState::default();
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[principal_with_keepalive()],
+        std::collections::HashMap::new(),
+    ));
+    let authn = TestAuthn::with_principal_view(state, principal_view);
+    let dispatch: Arc<dyn UpstreamDispatch> = Arc::new(SequenceDispatch {
+        calls: AtomicUsize::new(0),
+    });
+    let enqueuer = Arc::new(SlowEnqueueEnqueuer::default());
+    let lifecycle = lifecycle_with_parts(authn, dispatch, LifecycleConfig::default())
+        .with_cache_keepalive_enqueuer(Arc::clone(&enqueuer) as Arc<dyn CacheKeepaliveEnqueuer>);
+
+    for _ in 0..2 {
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/messages")
+            .header("x-api-key", managed_api_key())
+            .header("x-session-id", "session-ordered")
+            .header("anthropic-version", "2023-06-01")
+            .body(standard_keepalive_request())
+            .expect("test request builds");
+        let auth = lifecycle
+            .authenticate(request.headers())
+            .await
+            .expect("test request authenticates");
+        let response = lifecycle
+            .handle(request, &auth)
+            .await
+            .expect("lifecycle handles response");
+        let _ = collect_body(response).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let events = enqueuer.events.lock().expect("events lock").clone();
+    assert_eq!(events.last().copied(), Some("cancel"));
+}
+
 #[derive(Default)]
 struct RecordingEnqueuer {
     enqueued: Mutex<Vec<CacheKeepaliveEnqueueRequest>>,

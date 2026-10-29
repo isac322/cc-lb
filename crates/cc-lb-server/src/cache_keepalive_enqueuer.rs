@@ -165,14 +165,25 @@ impl CacheKeepaliveEnqueuer for ServerCacheKeepaliveEnqueuer {
         &self,
         request: CacheKeepaliveCancelRequest,
     ) -> Result<(), CacheKeepaliveEnqueueError> {
-        CacheKeepaliveSessionStore::mark_latest_cache_keepalive_terminal(
+        let now_unix_secs = unix_secs(self.clock.now());
+        if let Some(check) = CacheKeepaliveSessionStore::check_cache_keepalive_generation(
             self.storage.as_ref(),
             &request.session_key_hash,
-            terminal_reason_from_cancel(request.reason),
-            unix_secs(self.clock.now()),
         )
         .await
-        .map_err(cache_keepalive_enqueue_error)?;
+        .map_err(cache_keepalive_enqueue_error)?
+            && check.status == cc_lb_storage_api::CacheKeepaliveSessionStatus::Active
+        {
+            CacheKeepaliveSessionStore::mark_cache_keepalive_terminal(
+                self.storage.as_ref(),
+                &request.session_key_hash,
+                check.generation,
+                terminal_reason_from_cancel(request.reason),
+                now_unix_secs,
+            )
+            .await
+            .map_err(cache_keepalive_enqueue_error)?;
+        }
         Ok(())
     }
 
