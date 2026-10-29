@@ -153,7 +153,8 @@ export function CacheKeepaliveSettingsDrawer({
           max_refreshes_per_session: maxRenewals,
           max_total_duration_secs: maxDuration,
           snapshot_max_bytes: snapshotBytes,
-          min_cache_tokens: principal.cache_keepalive?.min_cache_tokens ?? 10_000,
+          min_cache_tokens:
+            principal.cache_keepalive?.min_cache_tokens ?? 10_000,
           classifier: {
             extra_wait_for_user_tools: extraTools,
             treat_end_turn_as_ambiguous: treatAmbiguous,
